@@ -1,15 +1,15 @@
 /****************************************************************************
- * Copyright (c) 2018-2023 by the Cabana authors                            *
+ * Copyright (c) 2018-2023 by the Canopy authors                            *
  * All rights reserved.                                                     *
  *                                                                          *
- * This file is part of the Cabana library. Cabana is distributed under a   *
+ * This file is part of the Canopy library. Canopy is distributed under a   *
  * BSD 3-clause license. For the licensing terms see the LICENSE file in    *
  * the top-level directory.                                                 *
  *                                                                          *
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Cabana_Core.hpp>
+#include <Canopy_Core.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -19,11 +19,11 @@
 #include <string>
 #include <vector>
 
-#ifdef Cabana_ENABLE_MPI
+#ifdef Canopy_ENABLE_MPI
 #include <mpi.h>
 #endif
 
-namespace Cabana
+namespace Canopy
 {
 namespace Benchmark
 {
@@ -119,7 +119,7 @@ void outputResults( std::ostream& stream, const std::string& data_point_name,
 // Write timer results on rank 0. Provide the values of the data points so
 // they can be injected into the table. This function does collective
 // communication.
-#ifdef Cabana_ENABLE_MPI
+#ifdef Canopy_ENABLE_MPI
 template <class Scalar>
 void outputResults( std::ostream& stream, const std::string& data_point_name,
                     const std::vector<Scalar>& data_point_vals,
@@ -181,6 +181,6 @@ void outputResults( std::ostream& stream, const std::string& data_point_name,
 //---------------------------------------------------------------------------//
 
 } // end namespace Benchmark
-} // end namespace Cabana
+} // end namespace Canopy
 
 //---------------------------------------------------------------------------//

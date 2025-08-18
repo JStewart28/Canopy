@@ -1,20 +1,20 @@
 /****************************************************************************
- * Copyright (c) 2018-2023 by the Cabana authors                            *
+ * Copyright (c) 2018-2023 by the Canopy authors                            *
  * All rights reserved.                                                     *
  *                                                                          *
- * This file is part of the Cabana library. Cabana is distributed under a   *
+ * This file is part of the Canopy library. Canopy is distributed under a   *
  * BSD 3-clause license. For the licensing terms see the LICENSE file in    *
  * the top-level directory.                                                 *
  *                                                                          *
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Cabana_BenchmarkUtils.hpp>
-#include <Cabana_Grid.hpp>
-#include <Cabana_ParticleInit.hpp>
+#include <Canopy_BenchmarkUtils.hpp>
+#include <Canopy_Grid.hpp>
+#include <Canopy_ParticleInit.hpp>
 
 #include <Kokkos_Core.hpp>
-#include <Cabana_Core.hpp>
+#include <Canopy_Core.hpp>
 
 #include <Octree.hpp>
 
@@ -87,8 +87,8 @@ public:
         // We only care about positions right now, the first tuple
         int dof = _dof[0];
 
-        auto slice0 = Cabana::slice<0>(data); // double[3] pos
-        auto slice1 = Cabana::slice<1>(data); // double[2] vort
+        auto slice0 = Canopy::slice<0>(data); // double[3] pos
+        auto slice1 = Canopy::slice<1>(data); // double[2] vort
 
         Triple<double> sum;
 
@@ -105,10 +105,10 @@ public:
         sum.y /= static_cast<double>(data_size);
         sum.z /= static_cast<double>(data_size);
 
-        Cabana::Tuple<member_types> tp;
-        Cabana::get<0>( tp, 0 ) = sum.x;
-        Cabana::get<0>( tp, 1 ) = sum.y;
-        Cabana::get<0>( tp, 2 ) = sum.z;
+        Canopy::Tuple<member_types> tp;
+        Canopy::get<0>( tp, 0 ) = sum.x;
+        Canopy::get<0>( tp, 1 ) = sum.y;
+        Canopy::get<0>( tp, 2 ) = sum.z;
 
         _avgs.setTuple(0, tp);
 
@@ -283,14 +283,14 @@ void octreeExperiments( std::string view_size )
     num_particles = ni * nj;
     
     // Distribute points to the correct 3D rank of owwnership
-    // Step 1: Move data from 2D Kokkos views to Cabana AoSoAs
-    using particle_tuple_type = Cabana::MemberTypes<double[3], // xyz position
+    // Step 1: Move data from 2D Kokkos views to Canopy AoSoAs
+    using particle_tuple_type = Canopy::MemberTypes<double[3], // xyz position
                                                     double[2], // vorticity
                                                     >;
-    using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, memory_space, 4>;
+    using particle_aosoa_type = Canopy::AoSoA<particle_tuple_type, memory_space, 4>;
     particle_aosoa_type particle_aosoa("particle_aosoa", num_particles);
-    auto pos_slice = Cabana::slice<0>(particle_aosoa);
-    auto vort_slice = Cabana::slice<1>(particle_aosoa);
+    auto pos_slice = Canopy::slice<0>(particle_aosoa);
+    auto vort_slice = Canopy::slice<1>(particle_aosoa);
 
     // Adjust start/end for ghost values from read-in views.
     Kokkos::parallel_for("populate_particles", Kokkos::RangePolicy<execution_space>(0, num_particles),
@@ -307,7 +307,7 @@ void octreeExperiments( std::string view_size )
 
     printf("R%d: num_particles: %d\n", rank, num_particles);
     
-    using entity_type = Cabana::Grid::Cell;
+    using entity_type = Canopy::Grid::Cell;
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 4; // Why does this not compile when != 4
     // The slice that us used to determine which cell the particle belongs in
@@ -327,11 +327,11 @@ void octreeExperiments( std::string view_size )
     //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf) -> R%d\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2), owner3D(i));
     // }
 
-    Cabana::Distributor<MemorySpace> distributor(MPI_COMM_WORLD, owner3D);
-    Cabana::migrate( distributor, particle_aosoa );
+    Canopy::Distributor<MemorySpace> distributor(MPI_COMM_WORLD, owner3D);
+    Canopy::migrate( distributor, particle_aosoa );
     num_particles = particle_aosoa.size();
-    pos_slice = Cabana::slice<0>(particle_aosoa);
-    // vort_slice = Cabana::slice<1>(particle_aosoa);
+    pos_slice = Canopy::slice<0>(particle_aosoa);
+    // vort_slice = Canopy::slice<1>(particle_aosoa);
     // for (size_t i = 0; i < particle_aosoa.size(); i++)
     // {
     //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf)\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2));
@@ -372,7 +372,7 @@ int main( int argc, char* argv[] )
     MPI_Init( &argc, &argv );
     Kokkos::initialize( argc, argv );
 
-    // sparseExperiments<memory_space, exec_space>(Cabana::Grid::Cell());
+    // sparseExperiments<memory_space, exec_space>(Canopy::Grid::Cell());
 
     octreeExperiments<memory_space, exec_space>(mesh_size);
 

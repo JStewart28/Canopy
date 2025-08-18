@@ -360,10 +360,10 @@ void printView(l2g_type local_L2G, int rank, View z, int option, int DEBUG_X, in
         rmin[d] = local_L2G.local_own_min[d];
         rmax[d] = local_L2G.local_own_max[d];
     }
-    Cabana::Grid::IndexSpace<2> remote_space(rmin, rmax);
+    Canopy::Grid::IndexSpace<2> remote_space(rmin, rmax);
 
     Kokkos::parallel_for("print views",
-        Cabana::Grid::createExecutionPolicy(remote_space, Kokkos::DefaultHostExecutionSpace()),
+        Canopy::Grid::createExecutionPolicy(remote_space, Kokkos::DefaultHostExecutionSpace()),
         KOKKOS_LAMBDA(int i, int j) {
         
         int local_li[2] = {i, j};
