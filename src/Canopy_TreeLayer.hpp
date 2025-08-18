@@ -1,8 +1,8 @@
-#ifndef OCTREE_HPP
-#define OCTREE_HPP
+#ifndef CANOPY_TREELAYER_HPP
+#define CANOPY_TREELAYER_HPP
 
-
-#include <Canopy_Grid.hpp>
+#include <Cabana_Core.hpp>
+#include <Cabana_Grid.hpp>
 #include <Kokkos_Core.hpp>
 #include <Kokkos_Sort.hpp>
 
@@ -11,6 +11,9 @@
 #include <mpi.h>
 
 #include <limits>
+
+namespace Canopy
+{
 
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
@@ -30,7 +33,7 @@ class TreeLayer
 
     using get_functor_type = typename TreeType::get_functor_type;
 
-    //! DataTypes Data types (Canopy::MemberTypes).
+    //! DataTypes Data types (Cabana::MemberTypes).
     using member_types = typename TreeType::member_types;
 
     using entity_type = typename TreeType::entity_type;
@@ -41,12 +44,12 @@ class TreeLayer
 
     static constexpr std::size_t cell_per_tile_dim = CellPerTileDim;
 
-    using sparse_map_type = Canopy::Grid::SparseMap<memory_space, cell_per_tile_dim>;
+    using sparse_map_type = Cabana::Grid::SparseMap<memory_space, cell_per_tile_dim>;
 
     using sparse_layout_type =
-        Canopy::Grid::Experimental::SparseArrayLayout<member_types, entity_type, mesh_type, sparse_map_type>;
+        Cabana::Grid::Experimental::SparseArrayLayout<member_types, entity_type, mesh_type, sparse_map_type>;
 
-    using sparse_array_type = Canopy::Grid::Experimental::SparseArray<member_types, memory_space, entity_type,
+    using sparse_array_type = Cabana::Grid::Experimental::SparseArray<member_types, memory_space, entity_type,
                                           mesh_type, sparse_map_type>;
 
     //! AoSoA type
@@ -125,28 +128,28 @@ class TreeLayer
         initializeRecPartition(x_partition, y_partition, z_partition);
 
         // mesh/grid related initialization
-        auto global_mesh = Canopy::Grid::createSparseGlobalMesh(
+        auto global_mesh = Cabana::Grid::createSparseGlobalMesh(
             global_low_corner, global_high_corner, global_num_cell );
         
         std::array<bool, 3> is_dim_periodic = { false, false, false };
         auto& partitioner_ref = *_partitioner_ptr;
-        auto global_grid = Canopy::Grid::createGlobalGrid( _comm, global_mesh,
+        auto global_grid = Cabana::Grid::createGlobalGrid( _comm, global_mesh,
                                             is_dim_periodic, partitioner_ref );
         auto local_grid =
-            Canopy::Grid::Experimental::createSparseLocalGrid( global_grid, _halo_width, cell_per_tile_dim );
+            Cabana::Grid::Experimental::createSparseLocalGrid( global_grid, _halo_width, cell_per_tile_dim );
         sparse_map_type sparse_map =
-            Canopy::Grid::createSparseMap<memory_space>( global_mesh, 1.2 );
+            Cabana::Grid::createSparseMap<memory_space>( global_mesh, 1.2 );
         // Save sparse map as shared pointer
         _map_ptr = std::make_shared<sparse_map_type>(sparse_map);
 
-        // printf("R%d: global num cell x/y/z: %d, %d, %d\n", _rank, global_mesh->globalNumCell( Canopy::Grid::Dim::I ),
-        //   global_mesh->globalNumCell( Canopy::Grid::Dim::J ),
-        //   global_mesh->globalNumCell( Canopy::Grid::Dim::K ));
+        // printf("R%d: global num cell x/y/z: %d, %d, %d\n", _rank, global_mesh->globalNumCell( Cabana::Grid::Dim::I ),
+        //   global_mesh->globalNumCell( Cabana::Grid::Dim::J ),
+        //   global_mesh->globalNumCell( Cabana::Grid::Dim::K ));
         
         // initializeRecPartition(sparse_map);
         _layout_ptr =
-            Canopy::Grid::Experimental::createSparseArrayLayout<member_types>( local_grid, *_map_ptr, entity_type() );
-        _cells_ptr = Canopy::Grid::Experimental::createSparseArray<memory_space>(
+            Cabana::Grid::Experimental::createSparseArrayLayout<member_types>( local_grid, *_map_ptr, entity_type() );
+        _cells_ptr = Cabana::Grid::Experimental::createSparseArray<memory_space>(
             std::string( "cell_array" ), *_layout_ptr );
 
             // Where do you store the persistent gathers and scatters? 
@@ -383,10 +386,10 @@ class TreeLayer
 
         // Create an aosoa of the data we want to aggregate
         int view_size = end - start;
-        auto cglid_slice = Canopy::slice<0>(data_map);
-        auto tid_slice = Canopy::slice<1>(data_map);
-        auto clid_slice = Canopy::slice<2>(data_map);
-        auto plid_slice = Canopy::slice<3>(data_map);
+        auto cglid_slice = Cabana::slice<0>(data_map);
+        auto tid_slice = Cabana::slice<1>(data_map);
+        auto clid_slice = Cabana::slice<2>(data_map);
+        auto plid_slice = Cabana::slice<3>(data_map);
         data_aosoa_type cell_data("cell_data", end-start);
 
         // Save the cell ID
@@ -419,7 +422,7 @@ class TreeLayer
         // Aggregate cell data
         agg_functor(cell_data);
         auto vals = agg_functor.vals();
-        auto pslice = Canopy::slice<0>(vals);
+        auto pslice = Cabana::slice<0>(vals);
         // if (rank == 0)
         // for (size_t i = 0; i < vals.size(); i++)
         // {
@@ -474,7 +477,7 @@ class TreeLayer
         _cid_tid_map.clear();
         _cid_tid_map.rehash(num_particles);
 
-        auto positions = Canopy::slice<cell_slice_id>(data_aosoa);
+        auto positions = Cabana::slice<cell_slice_id>(data_aosoa);
 
         auto map = *_map_ptr;
         auto cid_tid_map = _cid_tid_map;
@@ -500,14 +503,14 @@ class TreeLayer
         // 1. tile id
         // 2. cell local id (unique per tile)
         // 3. particle local id (unique per process but not globally)
-        using map_tuple_type = Canopy::MemberTypes<int, int, int, int>; 
-        using map_aosoa_type = Canopy::AoSoA<map_tuple_type, memory_space, cell_per_tile_dim>;
+        using map_tuple_type = Cabana::MemberTypes<int, int, int, int>; 
+        using map_aosoa_type = Cabana::AoSoA<map_tuple_type, memory_space, cell_per_tile_dim>;
         map_aosoa_type cell_id_particle_id_map("cell_id_particle_id_map", num_particles);
 
-        auto cglid_slice = Canopy::slice<0>(cell_id_particle_id_map);
-        auto tid_slice = Canopy::slice<1>(cell_id_particle_id_map);
-        auto clid_slice = Canopy::slice<2>(cell_id_particle_id_map);
-        auto plid_slice = Canopy::slice<3>(cell_id_particle_id_map);
+        auto cglid_slice = Cabana::slice<0>(cell_id_particle_id_map);
+        auto tid_slice = Cabana::slice<1>(cell_id_particle_id_map);
+        auto clid_slice = Cabana::slice<2>(cell_id_particle_id_map);
+        auto plid_slice = Cabana::slice<3>(cell_id_particle_id_map);
         Kokkos::parallel_for(
             "registerSparseMap",
             Kokkos::RangePolicy<execution_space>( 0, num_particles ),
@@ -560,15 +563,15 @@ class TreeLayer
         // printf("R%d: array capacity: %d, size: %d\n", rank, array->capacity(), array->size());
         
         // Sort the cell_id_particle_id_map array and by increasing cell_id
-        auto sort_data = Canopy::sortByKey( cglid_slice );
-        Canopy::permute( sort_data, cell_id_particle_id_map );
+        auto sort_data = Cabana::sortByKey( cglid_slice );
+        Cabana::permute( sort_data, cell_id_particle_id_map );
 
         // Aggregate and insert data into the mesh
-        using host_aosoa_type = Canopy::AoSoA<map_tuple_type, Kokkos::HostSpace, 4>; // XXX - Set vector size?
+        using host_aosoa_type = Cabana::AoSoA<map_tuple_type, Kokkos::HostSpace, 4>; // XXX - Set vector size?
         host_aosoa_type host_cid_pid_map("host_cid_pid_map", num_particles);
-        Canopy::deep_copy(host_cid_pid_map, cell_id_particle_id_map);
-        auto h_cid_slice = Canopy::slice<0>(host_cid_pid_map);
-        auto h_pid_slice = Canopy::slice<1>(host_cid_pid_map);
+        Cabana::deep_copy(host_cid_pid_map, cell_id_particle_id_map);
+        auto h_cid_slice = Cabana::slice<0>(host_cid_pid_map);
+        auto h_pid_slice = Cabana::slice<1>(host_cid_pid_map);
 
         // if (rank == 0)
         // {
@@ -694,288 +697,6 @@ std::shared_ptr<TreeLayer<TreeType, CellPerTileDim>> makeTreeLayer(const std::ar
             comm);
 }
 
+} // end namespace Canopy
 
-template <class ExecutionSpace, class MemorySpace, class DataTypes, class EntityType,
-          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t CellSliceId,
-          class GetFunctor>
-class Octree
-{
-  public:
-    using execution_space = ExecutionSpace;
-    
-    using memory_space = MemorySpace;
-
-    //! Self type
-    using octree_type = Octree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
-        NumSpaceDim, CellPerTileDim, CellSliceId, GetFunctor>;
-
-    //! Memory space size type
-    using size_type = typename memory_space::size_type;
-    //! Array entity type (node, cell, face, edge).
-    using entity_type = EntityType;
-    //! Dimension number
-    static constexpr std::size_t num_space_dim = NumSpaceDim;
-    //! Mesh type
-    using mesh_type = Canopy::Grid::SparseMesh<double, num_space_dim>;
-
-    static constexpr std::size_t cell_per_tile_dim = CellPerTileDim;
-
-    // The AoSoA slice to use to determine which cell the particle resides in
-    static constexpr std::size_t cell_slice_id = CellSliceId;
-
-    // AoSoA related types
-    //! DataTypes Data types (Canopy::MemberTypes).
-    using member_types = DataTypes;
-    using tuple_type = Canopy::Tuple<member_types>;
-    using data_aosoa_type = Canopy::AoSoA<member_types, memory_space, cell_per_tile_dim>;
-    using get_functor_type = GetFunctor;
-
-    //! Sparse partitioner type
-    using sparse_partitioner_type = Canopy::Grid::SparseDimPartitioner<memory_space, num_space_dim>;
-    
-    Octree( const std::array<double, 3>& global_low_corner,
-            const std::array<double, 3>& global_high_corner,
-            const std::size_t num_particles,
-            const std::size_t tile_reduction_factor,
-            const std::size_t root_tiles_per_dim,
-            const GetFunctor getter,
-            MPI_Comm comm )
-        : _global_low_corner( global_low_corner )
-        , _global_high_corner( global_high_corner )
-        , _next_layer_tiles_per_dim( 0 )
-        , _tile_reduction_factor( tile_reduction_factor )
-        , _root_tiles_per_dim( root_tiles_per_dim )
-        , _num_particles( num_particles )
-        , _getter( getter )
-        , _comm( comm )
-    {
-        MPI_Comm_rank( comm, &_rank );
-        MPI_Comm_size( comm, &_comm_size );
-
-        // Reserve space for 10 layers
-        _tree.reserve(10);
-
-
-        build();
-
-        
-        /*
-        Steps:
-        1. Initially partition based on the 2D partition of the surface.
-        2. Register sparse grid using positions.
-        3. Optimize partitioner.
-        4. Re-register sparse grid.
-        5. Use Distributor to send particles to their rank of ownership in the new partition.
-        6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
-        */
-        }
-    
-    void add_layer(const int tiles_per_dim, const int halo_width)
-    {
-        // printf("R%d: cell_per_tile: %d\n", _rank, cell_per_tile_dim);
-        auto layer = makeTreeLayer<octree_type, cell_per_tile_dim>(
-            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, _getter, _comm);
-        _tree.push_back(layer);
-    }
-
-    void build()
-    {
-        // Assume paricles are evenly distributed across the domain in a 2D plane 
-        // to determine the number of tiles per dimension in the leaf layer.
-        // Load balancing at later steps will correct this assumption, if needed.
-        // Size tiles for ~1 particle for tile, assuming an even distribution.
-        auto _next_layer_tiles_per_dim = static_cast<std::size_t>(sqrt(_num_particles));
-        add_layer(_next_layer_tiles_per_dim, 2);
-
-        // auto leaf_tiles_per_dim = _next_layer_tiles_per_dim;
-
-        // Calculate the depth of the tree
-        int depth = 0;
-        // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, _next_layer_tiles_per_dim);
-        do
-        {
-            depth++;
-            _next_layer_tiles_per_dim = static_cast<std::size_t>(_next_layer_tiles_per_dim / _tile_reduction_factor);
-            add_layer(_next_layer_tiles_per_dim, 2);
-            if (_next_layer_tiles_per_dim == 0) _next_layer_tiles_per_dim++;
-            // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, _next_layer_tiles_per_dim);
-        }
-        while (_next_layer_tiles_per_dim > _root_tiles_per_dim);
-        depth++;
-        // if (_rank == 0) printf("R%d: num_p: %d, reduct fac: %d, input root: %d, leaf_t: %d, root_t: %d, depth: %d\n",
-        //     _rank, _num_particles, _tile_reduction_factor, _root_tiles_per_dim, leaf_tiles_per_dim, _next_layer_tiles_per_dim, depth);
-
-
-    }
-
-    /**
-     * Populate a Kokkos::View that maps to the passed-in AoSoA to the rank
-     * each particle should be migrated to based on its x/y/z position.
-     * Maps particles according to a specific layer of the tree
-     */
-    template <class ViewType, class PositionSliceType>
-    void mapParticles(const PositionSliceType& positions, ViewType& particle_ranks,
-                      const int particle_num, const int layer)
-    {
-        using mem_space = typename ViewType::memory_space;
-        using exec_space = typename ViewType::execution_space;
-
-        // Get all rank domains on host
-        auto tree_layer = _tree[layer];
-        auto domains_host = tree_layer->get_domains();
-        int num_ranks = domains_host.size();
-
-        // Copy domains to device
-        Kokkos::View<double*[6], mem_space> domain_bounds("domain_bounds", num_ranks);
-        auto domain_bounds_host = Kokkos::create_mirror_view(domain_bounds);
-        for (int r = 0; r < num_ranks; ++r)
-            for (int j = 0; j < 6; ++j)
-                domain_bounds_host(r, j) = domains_host[r][j];
-        Kokkos::deep_copy(domain_bounds, domain_bounds_host);
-
-        Kokkos::parallel_for(
-            "mapParticles",
-            Kokkos::RangePolicy<exec_space>(0, particle_num),
-            KOKKOS_LAMBDA(const int i) {
-                double xpos = positions(i, 0);
-                double ypos = positions(i, 1);
-                double zpos = positions(i, 2);
-
-                // Linear search: check each rank domain
-                for (int r = 0; r < num_ranks; ++r)
-                {
-                    double x_lo = domain_bounds(r, 0);
-                    double y_lo = domain_bounds(r, 1);
-                    double z_lo = domain_bounds(r, 2);
-                    double x_hi = domain_bounds(r, 3);
-                    double y_hi = domain_bounds(r, 4);
-                    double z_hi = domain_bounds(r, 5);
-
-                    // Non-inclusive upper bound
-                    if (xpos >= x_lo && xpos < x_hi &&
-                        ypos >= y_lo && ypos < y_hi &&
-                        zpos >= z_lo && zpos < z_hi)
-                    {
-                        particle_ranks(i) = r;
-                        return;
-                    }
-                }
-
-                // If no domain was found, mark as invalid
-                particle_ranks(i) = -1;
-            });
-    }
-
-    /**
-     * Initialize tiles in the leaf layer based on particle locations
-     */
-    template <class PositionSliceType>
-    void initializeLayer(int layer, PositionSliceType position_slice, std::size_t num_particles)
-    {
-        auto array = _tree[layer]->array();
-        array->registerSparseGrid( position_slice, num_particles );
-        array->reserveFromMap( 1.2 );
-        printf("R%d: array size: %d\n", _rank, (int)array->size());
-    }
-
-    template <class PositionSliceType>
-    bool loadBalanceLayer(int layer, PositionSliceType position_slice, std::size_t num_particles)
-    {
-        return _tree[layer]->loadBalance(position_slice, num_particles);
-    }
-
-
-    /**
-     * Assumes all particles in 'data' are owned by this rank; i.e., particles have already been
-     * distributed to their correct owner rank
-     * 
-     * Assumes x/y/z coordinates are the first tuple element in "data"
-     */
-    template <class AggregationFunctor>
-    void aggregateDataUp(data_aosoa_type external_data, AggregationFunctor functor)
-    {
-        // Data comes from externally to populate leaf layer (layer 0)
-        migrateData(external_data, 0);
-        _tree[0]->populateCells(external_data, functor);
-        auto data = _tree[0]->get_data();
-        // for (std::size_t i = 1; i < 2; i++)
-        // {
-        //     migrateData(i-1, i);
-        //     _tree[i]->populateCells(data, functor);
-        // }
-
-
-
-        // Initialize mesh to 0
-        // auto num_particles = data.size();
-        // initializeLayer(0, position_slice, num_particles);
-        // _tree[0]->populateCells(data, functor);
-        // _tree[0]->printOwnedCells();
-        // auto data1 = _tree[0]->get_data();
-        // auto positions = Canopy::slice<cell_slice_id>(data1);
-        // int rank = _rank;
-        // for (size_t i = 0; i < data1.size(); i++)
-        // {
-        //     if (rank == 0) printf("R%d: x/y/z: %0.3lf, %0.3lf, %0.3lf\n", rank, positions(i, 0), positions(i, 1),
-        //         positions(i, 2));
-        // }
-    }
-
-    /**
-     * Migrate AoSoA data to the correct rank of ownership for a given layer.
-     * Use cell_slice_id slice for positions.
-     */
-    void migrateData(data_aosoa_type external_data, int to_layer)
-    {
-        auto positions = Canopy::slice<cell_slice_id>(external_data);
-        Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
-        mapParticles(positions, layer_owner, external_data.size(), to_layer);
-        Canopy::Distributor<MemorySpace> distributor(_comm, layer_owner);
-        Canopy::migrate( distributor, external_data );
-    }
-
-    /**
-     * Migrate AoSoA data to the correct rank of ownership for a given layer.
-     * Use cell_slice_id slice for positions.
-     */
-    void migrateData(int from_layer, int to_layer)
-    {
-        auto data = _tree[from_layer]->get_data();
-        auto positions = Canopy::slice<cell_slice_id>(data);
-        Kokkos::View<int*, memory_space> layer_owner("layer_owner", data.size());
-        mapParticles(positions, layer_owner, data.size(), to_layer);
-        Canopy::Distributor<MemorySpace> distributor(_comm, layer_owner);
-        Canopy::migrate( distributor, data );
-    }
-
-    auto getter() const { return _getter; }
-    int rank() const { return _rank; }
-
-  private:
-    std::array<double, 3> _global_high_corner;
-    std::array<double, 3> _global_low_corner;
-    const MPI_Comm _comm;
-    int _rank, _comm_size;
-
-    GetFunctor _getter;
-
-    // Tree layers.
-    std::vector<std::shared_ptr<TreeLayer<octree_type, cell_per_tile_dim>>> _tree;
-
-    // How many tiles per dimension the next layer of the tree should have.
-    std::size_t _next_layer_tiles_per_dim;
-
-    // Factor for how many tiles the mesh should be reduced by for eafch layer
-    std::size_t _tile_reduction_factor;
-
-    // Maxmimum tiles per dimension at the root layer
-    std::size_t _root_tiles_per_dim;
-
-    // Number of owned particles
-    std::size_t _num_particles;
-};
-
-
-
-
-#endif // OCTREE_HPP
+#endif // CANOPY_TREELAYER_HPP

@@ -9,14 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_BenchmarkUtils.hpp>
-#include <Canopy_Grid.hpp>
-#include <Canopy_ParticleInit.hpp>
-
-#include <Kokkos_Core.hpp>
-#include <Canopy_Core.hpp>
-
-#include <Octree.hpp>
+#include <Canopy_Tree.hpp>
 
 #include <helpers.hpp>
 
@@ -87,8 +80,8 @@ public:
         // We only care about positions right now, the first tuple
         int dof = _dof[0];
 
-        auto slice0 = Canopy::slice<0>(data); // double[3] pos
-        auto slice1 = Canopy::slice<1>(data); // double[2] vort
+        auto slice0 = Cabana::slice<0>(data); // double[3] pos
+        auto slice1 = Cabana::slice<1>(data); // double[2] vort
 
         Triple<double> sum;
 
@@ -105,10 +98,10 @@ public:
         sum.y /= static_cast<double>(data_size);
         sum.z /= static_cast<double>(data_size);
 
-        Canopy::Tuple<member_types> tp;
-        Canopy::get<0>( tp, 0 ) = sum.x;
-        Canopy::get<0>( tp, 1 ) = sum.y;
-        Canopy::get<0>( tp, 2 ) = sum.z;
+        Cabana::Tuple<member_types> tp;
+        Cabana::get<0>( tp, 0 ) = sum.x;
+        Cabana::get<0>( tp, 1 ) = sum.y;
+        Cabana::get<0>( tp, 2 ) = sum.z;
 
         _avgs.setTuple(0, tp);
 
@@ -284,13 +277,13 @@ void octreeExperiments( std::string view_size )
     
     // Distribute points to the correct 3D rank of owwnership
     // Step 1: Move data from 2D Kokkos views to Canopy AoSoAs
-    using particle_tuple_type = Canopy::MemberTypes<double[3], // xyz position
+    using particle_tuple_type = Cabana::MemberTypes<double[3], // xyz position
                                                     double[2], // vorticity
                                                     >;
-    using particle_aosoa_type = Canopy::AoSoA<particle_tuple_type, memory_space, 4>;
+    using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, memory_space, 4>;
     particle_aosoa_type particle_aosoa("particle_aosoa", num_particles);
-    auto pos_slice = Canopy::slice<0>(particle_aosoa);
-    auto vort_slice = Canopy::slice<1>(particle_aosoa);
+    auto pos_slice = Cabana::slice<0>(particle_aosoa);
+    auto vort_slice = Cabana::slice<1>(particle_aosoa);
 
     // Adjust start/end for ghost values from read-in views.
     Kokkos::parallel_for("populate_particles", Kokkos::RangePolicy<execution_space>(0, num_particles),
@@ -307,7 +300,7 @@ void octreeExperiments( std::string view_size )
 
     printf("R%d: num_particles: %d\n", rank, num_particles);
     
-    using entity_type = Canopy::Grid::Cell;
+    using entity_type = Cabana::Grid::Cell;
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 4; // Why does this not compile when != 4
     // The slice that us used to determine which cell the particle belongs in
@@ -315,23 +308,23 @@ void octreeExperiments( std::string view_size )
     static constexpr std::size_t cell_slice_id = 0; 
     std::size_t root_tiles, red_factor;
     root_tiles = 4, red_factor = 2;
-    Octree<execution_space, memory_space, particle_tuple_type, entity_type,
+    Canopy::Tree<execution_space, memory_space, particle_tuple_type, entity_type,
         num_dim, cells_per_tile, cell_slice_id, DataGather>
-            octree(global_low_corner, global_high_corner, num_particles, red_factor, root_tiles, DataGather{}, MPI_COMM_WORLD);
+            tree(global_low_corner, global_high_corner, num_particles, red_factor, root_tiles, DataGather{}, MPI_COMM_WORLD);
 
     
     Kokkos::View<int*, memory_space> owner3D("owner3D", num_particles);
-    octree.mapParticles(pos_slice, owner3D, num_particles, 0);
+    tree.mapParticles(pos_slice, owner3D, num_particles, 0);
     // for (size_t i = 0; i < num_particles; i++)
     // {
     //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf) -> R%d\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2), owner3D(i));
     // }
 
-    Canopy::Distributor<MemorySpace> distributor(MPI_COMM_WORLD, owner3D);
-    Canopy::migrate( distributor, particle_aosoa );
+    Cabana::Distributor<MemorySpace> distributor(MPI_COMM_WORLD, owner3D);
+    Cabana::migrate( distributor, particle_aosoa );
     num_particles = particle_aosoa.size();
-    pos_slice = Canopy::slice<0>(particle_aosoa);
-    // vort_slice = Canopy::slice<1>(particle_aosoa);
+    pos_slice = Cabana::slice<0>(particle_aosoa);
+    // vort_slice = Cabana::slice<1>(particle_aosoa);
     // for (size_t i = 0; i < particle_aosoa.size(); i++)
     // {
     //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf)\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2));
@@ -340,7 +333,7 @@ void octreeExperiments( std::string view_size )
     std::vector<int> dof = {3, 2};
     AverageValueFunctor<memory_space, execution_space, particle_aosoa_type> avg_val_functor(dof);
 
-    octree.aggregateDataUp(particle_aosoa, avg_val_functor);
+    tree.aggregateDataUp(particle_aosoa, avg_val_functor);
 
     
 }
@@ -372,7 +365,7 @@ int main( int argc, char* argv[] )
     MPI_Init( &argc, &argv );
     Kokkos::initialize( argc, argv );
 
-    // sparseExperiments<memory_space, exec_space>(Canopy::Grid::Cell());
+    // sparseExperiments<memory_space, exec_space>(Cabana::Grid::Cell());
 
     octreeExperiments<memory_space, exec_space>(mesh_size);
 

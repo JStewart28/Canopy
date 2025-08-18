@@ -1,0 +1,1 @@
+cmake -DCanopy_ENABLE_TESTING=ON -DCanopy_ENABLE_EXAMPLES=ON ..

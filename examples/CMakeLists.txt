@@ -1,20 +1,12 @@
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+############################################################################
+# Copyright (c) 2018-2023 by the Canopy authors                            #
+# All rights reserved.                                                     #
+#                                                                          #
+# This file is part of the Canopy library. Canopy is distributed under a   #
+# BSD 3-clause license. For the licensing terms see the LICENSE file in    #
+# the top-level directory.                                                 #
+#                                                                          #
+# SPDX-License-Identifier: BSD-3-Clause                                    #
+############################################################################
 
-blt_add_executable( NAME main
-                SOURCES main.cpp 
-                OUTPUT_DIR ${EXAMPLE_OUTPUT_DIRECTORY})
-
-# Tell CMAKE we need to link with these libraries. Our "FindMPI_Advance" script
-# does not define an explicit target, but it does set the variable below.
-# We also need to link with MPI, which is done through the target they provide
-# (It's not C++ MPI, but rather the libraries for a C++ program using MPI)
-target_link_libraries( main PRIVATE ${MPI_Advance_LIBRARY} MPI::MPI_CXX )
-
-# Finally, we also need to tell CMAKE where the library header is. 
-target_include_directories( main PRIVATE ${MPI_Advance_INCLUDE_DIR} )
-
-target_link_libraries( main PRIVATE myproject )
-
-
-install(TARGETS main DESTINATION ${CMAKE_INSTALL_BINDIR})
+add_subdirectory(01_development) # XXX - Remove this later and add a real example.

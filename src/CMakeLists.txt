@@ -27,26 +27,9 @@ set_target_properties(Canopy PROPERTIES INTERFACE_COMPILE_FEATURES cxx_std_17)
 
 target_link_libraries(Canopy INTERFACE Kokkos::kokkos)
 
-if(Canopy_ENABLE_ARBORX)
-  target_link_libraries(Canopy INTERFACE ArborX::ArborX)
-endif()
+target_link_libraries(Canopy INTERFACE MPI::MPI_CXX)
 
-if(Canopy_ENABLE_SILO)
-  target_link_libraries(Canopy INTERFACE SILO::silo)
-endif()
-
-if(Canopy_ENABLE_HDF5)
-  # FIXME: remove when requiring newer CMake
-  if(CMAKE_VERSION VERSION_LESS 3.26)
-    target_link_libraries(Canopy INTERFACE ${HDF5_LIBRARIES})
-  else()
-    target_link_libraries(Canopy INTERFACE HDF5::HDF5)
-  endif()
-endif()
-
-if(Canopy_ENABLE_MPI)
-  target_link_libraries(Canopy INTERFACE MPI::MPI_CXX)
-endif()
+target_link_libraries(Canopy INTERFACE Cabana::Core Cabana::Grid)
 
 target_include_directories(Canopy INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>

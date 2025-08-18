@@ -9,18 +9,16 @@
 # SPDX-License-Identifier: BSD-3-Clause                                    #
 ############################################################################
 
-include(${TEST_HARNESS_DIR}/test_harness.cmake)
-
-# set(SERIAL_TESTS
-#   Add tests here...
-#   )
-
-set(MPI_TESTS
-  UpwardsSweep
-  )
-
-Canopy_add_tests(PACKAGE Canopy NAMES ${SERIAL_TESTS})
-
-if(Canopy_ENABLE_MPI)
-  Canopy_add_tests(MPI PACKAGE Canopy NAMES ${MPI_TESTS})
+# the next for lines are just, so that we can use this as
+# a standalone CMakeLists.txt for testing of the Target export
+cmake_minimum_required(VERSION 3.16)
+project(Canopy_Development)
+if(NOT TARGET Canopy)
+  find_package(Canopy)
 endif()
+
+add_executable(Development development.cpp)
+target_link_libraries(Development Canopy)
+add_test(NAME Canopy_Tutorial_01_development COMMAND ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG}
+${MPIEXEC_MAX_NUMPROCS} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:Development> ${MPIEXEC_POSTFLAGS})
+set_tests_properties(Canopy_Tutorial_01_development PROPERTIES PROCESSORS ${MPIEXEC_MAX_NUMPROCS})
