@@ -59,16 +59,15 @@ class Tree
     
     Tree( const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
-            const std::size_t num_particles,
+            const std::size_t leaf_tiles_per_dim,
             const std::size_t tile_reduction_factor,
             const std::size_t root_tiles_per_dim,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
-        , _next_layer_tiles_per_dim( 0 )
+        , _leaf_tiles_per_dim( leaf_tiles_per_dim )
         , _tile_reduction_factor( tile_reduction_factor )
         , _root_tiles_per_dim( root_tiles_per_dim )
-        , _num_particles( num_particles )
         , _comm( comm )
     {
         MPI_Comm_rank( comm, &_rank );
@@ -77,9 +76,7 @@ class Tree
         // Reserve space for 10 layers
         _tree.reserve(10);
 
-
         build();
-
         
         /*
         Steps:
@@ -95,7 +92,7 @@ class Tree
     void add_layer(const int tiles_per_dim, const int halo_width)
     {
         // printf("R%d: cell_per_tile: %d\n", _rank, cell_per_tile_dim);
-        auto layer = makeTreeLayer<tree_type, cell_per_tile_dim>(
+        auto layer = createTreeLayer<tree_type, cell_per_tile_dim>(
             _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, _comm);
         _tree.push_back(layer);
     }
@@ -106,7 +103,7 @@ class Tree
         // to determine the number of tiles per dimension in the leaf layer.
         // Load balancing at later steps will correct this assumption, if needed.
         // Size tiles for ~1 particle for tile, assuming an even distribution.
-        auto _next_layer_tiles_per_dim = static_cast<std::size_t>(sqrt(_num_particles));
+        auto _next_layer_tiles_per_dim = _leaf_tiles_per_dim;
         add_layer(_next_layer_tiles_per_dim, 2);
 
         // auto leaf_tiles_per_dim = _next_layer_tiles_per_dim;
@@ -120,7 +117,7 @@ class Tree
             _next_layer_tiles_per_dim = static_cast<std::size_t>(_next_layer_tiles_per_dim / _tile_reduction_factor);
             add_layer(_next_layer_tiles_per_dim, 2);
             if (_next_layer_tiles_per_dim == 0) _next_layer_tiles_per_dim++;
-            // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, _next_layer_tiles_per_dim);
+            if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, _next_layer_tiles_per_dim);
         }
         while (_next_layer_tiles_per_dim > _root_tiles_per_dim);
         depth++;
@@ -216,6 +213,10 @@ class Tree
     template <class AggregationFunctor>
     void aggregateDataUp(data_aosoa_type external_data, AggregationFunctor functor)
     {
+        std::size_t local_particles = external_data.size();
+        std::size_t total_particles;
+        MPI_Allreduce(&local_particles, &total_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, _comm);
+
         // Data comes from externally to populate leaf layer (layer 0)
         migrateData(external_data, 0);
         _tree[0]->populateCells(external_data, functor);
@@ -272,6 +273,16 @@ class Tree
 
     int rank() const { return _rank; }
 
+    /**
+     * Get a layer of the tree
+     */
+    auto layer(int layer)
+    {
+        if (layer >= _tree.size())
+            throw std::runtime_error("Canopy::Tree:layer: Requested layer larger than tree depth!\n");
+        return _tree[layer];
+    }
+
   private:
     std::array<double, 3> _global_high_corner;
     std::array<double, 3> _global_low_corner;
@@ -281,18 +292,32 @@ class Tree
     // Tree layers.
     std::vector<std::shared_ptr<TreeLayer<tree_type, cell_per_tile_dim>>> _tree;
 
-    // How many tiles per dimension the next layer of the tree should have.
-    std::size_t _next_layer_tiles_per_dim;
+    // How many tiles per dimension in the leaf layer.
+    std::size_t _leaf_tiles_per_dim;
 
-    // Factor for how many tiles the mesh should be reduced by for eafch layer
+    // Factor for how many tiles the mesh should be reduced by for each layer
     std::size_t _tile_reduction_factor;
 
     // Maxmimum tiles per dimension at the root layer
     std::size_t _root_tiles_per_dim;
-
-    // Number of owned particles
-    std::size_t _num_particles;
 };
+
+template <class ExecutionSpace, class MemorySpace, class DataTypes, class EntityType,
+          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t CellSliceId>
+std::shared_ptr<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
+    NumSpaceDim, CellPerTileDim, CellSliceId>>
+        createTree( const std::array<double, 3>& global_low_corner,
+                    const std::array<double, 3>& global_high_corner,
+                    const std::size_t leaf_tiles_per_dim,
+                    const std::size_t tile_reduction_factor,
+                    const std::size_t root_tiles_per_dim,
+                    MPI_Comm comm)
+{
+    return std::make_shared<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
+        NumSpaceDim, CellPerTileDim, CellSliceId>>(global_low_corner,
+            global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, root_tiles_per_dim,
+            comm);
+}
 
 } // end namespace Canopy
 

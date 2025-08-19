@@ -677,7 +677,7 @@ class TreeLayer
 };
 
 template <class TreeType, std::size_t CellPerTileDim>
-std::shared_ptr<TreeLayer<TreeType, CellPerTileDim>> makeTreeLayer(const std::array<double, 3>& global_low_corner,
+std::shared_ptr<TreeLayer<TreeType, CellPerTileDim>> createTreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int halo_width,
             MPI_Comm comm)
