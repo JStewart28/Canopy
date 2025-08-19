@@ -1,0 +1,26 @@
+############################################################################
+# Copyright (c) 2018-2023 by the Canopy authors                            #
+# All rights reserved.                                                     #
+#                                                                          #
+# This file is part of the Canopy library. Canopy is distributed under a   #
+# BSD 3-clause license. For the licensing terms see the LICENSE file in    #
+# the top-level directory.                                                 #
+#                                                                          #
+# SPDX-License-Identifier: BSD-3-Clause                                    #
+############################################################################
+
+include(${TEST_HARNESS_DIR}/test_harness.cmake)
+
+# set(SERIAL_TESTS
+#   Add tests here...
+#   )
+
+set(MPI_TESTS
+  Tree
+  )
+
+Canopy_add_tests(PACKAGE Canopy NAMES ${SERIAL_TESTS})
+
+if(Canopy_ENABLE_MPI)
+  Canopy_add_tests(MPI PACKAGE Canopy NAMES ${MPI_TESTS})
+endif()
