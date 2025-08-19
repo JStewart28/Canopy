@@ -309,8 +309,8 @@ void octreeExperiments( std::string view_size )
     std::size_t root_tiles, red_factor;
     root_tiles = 4, red_factor = 2;
     Canopy::Tree<execution_space, memory_space, particle_tuple_type, entity_type,
-        num_dim, cells_per_tile, cell_slice_id, DataGather>
-            tree(global_low_corner, global_high_corner, num_particles, red_factor, root_tiles, DataGather{}, MPI_COMM_WORLD);
+        num_dim, cells_per_tile, cell_slice_id>
+            tree(global_low_corner, global_high_corner, num_particles, red_factor, root_tiles, MPI_COMM_WORLD);
 
     
     Kokkos::View<int*, memory_space> owner3D("owner3D", num_particles);

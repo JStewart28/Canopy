@@ -31,8 +31,6 @@ class TreeLayer
 
     using sparse_partitioner_type = typename TreeType::sparse_partitioner_type;
 
-    using get_functor_type = typename TreeType::get_functor_type;
-
     //! DataTypes Data types (Cabana::MemberTypes).
     using member_types = typename TreeType::member_types;
 
@@ -59,14 +57,12 @@ class TreeLayer
     TreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int halo_width,
-            get_functor_type getter,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
         , _tiles_per_dim( tiles_per_dim )
         , _halo_width( halo_width )
         , _cells_per_dim( _tiles_per_dim * cell_per_tile_dim )
-        , _getter( getter )
         , _comm( comm )
     {
         MPI_Comm_rank( comm, &_rank );
@@ -334,13 +330,10 @@ class TreeLayer
 
     /**
      * Return an AoSoA of cell data, indexed by cell id
-     * 
-     * @param getter a functor to transfer data between two aosoas.
      */
     data_aosoa_type get_data()
     {
         int rank = _rank;
-        auto getter = _getter;
 
         data_aosoa_type cell_data("cell_data", _cid_tid_map.size());
 
@@ -673,7 +666,6 @@ class TreeLayer
     std::shared_ptr<sparse_layout_type> _layout_ptr;
     std::shared_ptr<sparse_map_type> _map_ptr;
     std::shared_ptr<sparse_array_type> _cells_ptr;
-    get_functor_type _getter;
 
     // Map to store which cells are activated in the mesh
     // tid, cid pair:
@@ -688,13 +680,11 @@ template <class TreeType, std::size_t CellPerTileDim>
 std::shared_ptr<TreeLayer<TreeType, CellPerTileDim>> makeTreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int halo_width,
-            const typename TreeType::get_functor_type getter,
             MPI_Comm comm)
 {
     return std::make_shared<TreeLayer<TreeType, CellPerTileDim>>(global_low_corner,
             global_high_corner,
-	        tiles_per_dim, halo_width, getter,
-            comm);
+	        tiles_per_dim, halo_width, comm);
 }
 
 } // end namespace Canopy

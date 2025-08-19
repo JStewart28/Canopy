@@ -22,8 +22,7 @@ namespace Canopy
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
 template <class ExecutionSpace, class MemorySpace, class DataTypes, class EntityType,
-          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t CellSliceId,
-          class GetFunctor>
+          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t CellSliceId>
 class Tree
 {
   public:
@@ -33,7 +32,7 @@ class Tree
 
     //! Self type
     using tree_type = Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
-        NumSpaceDim, CellPerTileDim, CellSliceId, GetFunctor>;
+        NumSpaceDim, CellPerTileDim, CellSliceId>;
 
     //! Memory space size type
     using size_type = typename memory_space::size_type;
@@ -54,7 +53,6 @@ class Tree
     using member_types = DataTypes;
     using tuple_type = Cabana::Tuple<member_types>;
     using data_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;
-    using get_functor_type = GetFunctor;
 
     //! Sparse partitioner type
     using sparse_partitioner_type = Cabana::Grid::SparseDimPartitioner<memory_space, num_space_dim>;
@@ -64,7 +62,6 @@ class Tree
             const std::size_t num_particles,
             const std::size_t tile_reduction_factor,
             const std::size_t root_tiles_per_dim,
-            const GetFunctor getter,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
@@ -72,7 +69,6 @@ class Tree
         , _tile_reduction_factor( tile_reduction_factor )
         , _root_tiles_per_dim( root_tiles_per_dim )
         , _num_particles( num_particles )
-        , _getter( getter )
         , _comm( comm )
     {
         MPI_Comm_rank( comm, &_rank );
@@ -100,7 +96,7 @@ class Tree
     {
         // printf("R%d: cell_per_tile: %d\n", _rank, cell_per_tile_dim);
         auto layer = makeTreeLayer<tree_type, cell_per_tile_dim>(
-            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, _getter, _comm);
+            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, _comm);
         _tree.push_back(layer);
     }
 
@@ -274,7 +270,6 @@ class Tree
         Cabana::migrate( distributor, data );
     }
 
-    auto getter() const { return _getter; }
     int rank() const { return _rank; }
 
   private:
@@ -282,8 +277,6 @@ class Tree
     std::array<double, 3> _global_low_corner;
     const MPI_Comm _comm;
     int _rank, _comm_size;
-
-    GetFunctor _getter;
 
     // Tree layers.
     std::vector<std::shared_ptr<TreeLayer<tree_type, cell_per_tile_dim>>> _tree;

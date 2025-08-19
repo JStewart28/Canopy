@@ -16,7 +16,7 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 #   )
 
 set(MPI_TESTS
-  UpwardsSweep
+  Tree
   )
 
 Canopy_add_tests(PACKAGE Canopy NAMES ${SERIAL_TESTS})
