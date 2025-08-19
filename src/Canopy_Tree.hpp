@@ -99,28 +99,27 @@ class Tree
 
     void build()
     {
-        // Assume paricles are evenly distributed across the domain in a 2D plane 
-        // to determine the number of tiles per dimension in the leaf layer.
-        // Load balancing at later steps will correct this assumption, if needed.
-        // Size tiles for ~1 particle for tile, assuming an even distribution.
-        auto _next_layer_tiles_per_dim = _leaf_tiles_per_dim;
-        add_layer(_next_layer_tiles_per_dim, 2);
+        if (_tile_reduction_factor < 2)
+            throw std::runtime_error("Canopy::Tree::build: _tile_reduction_factor must be greater than 1.\n");
+
+        std::size_t next_layer_tiles_per_dim = _leaf_tiles_per_dim;
+        add_layer(next_layer_tiles_per_dim, 2);
 
         // auto leaf_tiles_per_dim = _next_layer_tiles_per_dim;
 
         // Calculate the depth of the tree
         int depth = 0;
-        // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, _next_layer_tiles_per_dim);
-        do
+        // if (_rank == 0) printf("R%d: Layer %d: tiles: %d, root tiles: %d\n", _rank, depth, next_layer_tiles_per_dim, _root_tiles_per_dim);
+        while (next_layer_tiles_per_dim > _root_tiles_per_dim)
         {
+            // printf("R%d: next: %d, root: %d\n", _rank, next_layer_tiles_per_dim, _root_tiles_per_dim);
             depth++;
-            _next_layer_tiles_per_dim = static_cast<std::size_t>(_next_layer_tiles_per_dim / _tile_reduction_factor);
-            add_layer(_next_layer_tiles_per_dim, 2);
-            if (_next_layer_tiles_per_dim == 0) _next_layer_tiles_per_dim++;
-            if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, _next_layer_tiles_per_dim);
+            next_layer_tiles_per_dim = static_cast<std::size_t>(next_layer_tiles_per_dim / _tile_reduction_factor);
+            add_layer(next_layer_tiles_per_dim, 2);
+            if (next_layer_tiles_per_dim == 0) next_layer_tiles_per_dim++;
+            // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, next_layer_tiles_per_dim);
         }
-        while (_next_layer_tiles_per_dim > _root_tiles_per_dim);
-        depth++;
+        // printf("R%d: created tree of depth %d\n", _rank, _tree.size());
         // if (_rank == 0) printf("R%d: num_p: %d, reduct fac: %d, input root: %d, leaf_t: %d, root_t: %d, depth: %d\n",
         //     _rank, _num_particles, _tile_reduction_factor, _root_tiles_per_dim, leaf_tiles_per_dim, _next_layer_tiles_per_dim, depth);
 
@@ -194,7 +193,7 @@ class Tree
         auto array = _tree[layer]->array();
         array->registerSparseGrid( position_slice, num_particles );
         array->reserveFromMap( 1.2 );
-        printf("R%d: array size: %d\n", _rank, (int)array->size());
+        // printf("R%d: array size: %d\n", _rank, (int)array->size());
     }
 
     template <class PositionSliceType>
@@ -213,14 +212,10 @@ class Tree
     template <class AggregationFunctor>
     void aggregateDataUp(data_aosoa_type external_data, AggregationFunctor functor)
     {
-        std::size_t local_particles = external_data.size();
-        std::size_t total_particles;
-        MPI_Allreduce(&local_particles, &total_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, _comm);
-
         // Data comes from externally to populate leaf layer (layer 0)
         migrateData(external_data, 0);
         _tree[0]->populateCells(external_data, functor);
-        auto data = _tree[0]->get_data();
+        // auto data = _tree[0]->get_data();
         // for (std::size_t i = 1; i < 2; i++)
         // {
         //     migrateData(i-1, i);
@@ -248,7 +243,7 @@ class Tree
      * Migrate AoSoA data to the correct rank of ownership for a given layer.
      * Use cell_slice_id slice for positions.
      */
-    void migrateData(data_aosoa_type external_data, int to_layer)
+    void migrateData(data_aosoa_type& external_data, int to_layer)
     {
         auto positions = Cabana::slice<cell_slice_id>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());

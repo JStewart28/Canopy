@@ -44,6 +44,12 @@ class TreeLayer
 
     using sparse_map_type = Cabana::Grid::SparseMap<memory_space, cell_per_tile_dim>;
 
+    static constexpr unsigned long long cell_bits_per_tile =
+        sparse_map_type::cell_bits_per_tile;
+    //! Cell ID mask inside a tile
+    static constexpr unsigned long long cell_mask_per_tile =
+        sparse_map_type::cell_mask_per_tile;
+
     using sparse_layout_type =
         Cabana::Grid::Experimental::SparseArrayLayout<member_types, entity_type, mesh_type, sparse_map_type>;
 
@@ -78,7 +84,7 @@ class TreeLayer
         //     _global_high_corner[1] - _global_low_corner[1],
         //     _global_high_corner[2] - _global_low_corner[2],
         //     _tiles_per_dim);
-        printf("R%d: global_num_cell: %d, %d, %d\n", _rank, global_num_cell[0], global_num_cell[1], global_num_cell[2]);
+        // printf("R%d: global_num_cell: %d, %d, %d\n", _rank, global_num_cell[0], global_num_cell[1], global_num_cell[2]);
                 
         // sparse partitioner
         float max_workload_coeff = 1.5;
@@ -336,11 +342,13 @@ class TreeLayer
         int rank = _rank;
 
         data_aosoa_type cell_data("cell_data", _cid_tid_map.size());
+        Kokkos::View<int, memory_space> idx("idx");
+        Kokkos::deep_copy(idx, 0);
 
-        auto array = *_cells_ptr;
+        auto aosoa = _cells_ptr->aosoa();
         auto cid_tid_map = _cid_tid_map;
 
-        // printf("R%d: amp size: %d, capacity: %d\n", rank, cid_tid_map.size(), cid_tid_map.capacity());
+        // printf("R%d: map size: %d\n", rank, cid_tid_map.size());
 
         // XXX - can this be made more efficient by extracting my SoAs rather than tuples?
         Kokkos::parallel_for(
@@ -350,15 +358,14 @@ class TreeLayer
                 if (cid_tid_map.valid_at(index))
                 {
                     auto ids = cid_tid_map.value_at( index ); // pair(tid, cid)
-                    auto tkey = cid_tid_map.key_at( index ); // cglid
-                    double x = array.template get<0>( ids.first, ids.second, 0 );
-                    double y = array.template get<0>( ids.first, ids.second,  1 );
-                    double z = array.template get<0>( ids.first, ids.second,  2 );
-                    if (rank == 0) printf("R%d: x/y/z: %0.3lf, %0.3lf, %0.3lf\n", rank, x, y, z);
-
-                    // auto tp = array.getTuple(ids.first, ids.second);
-                    // if (rank == 0) printf("R%d: getting at tid, cid: %d, %d\n", rank, ids.first, ids.second);
-                    // cell_data.setTuple(tkey, tp);
+                    // auto cglid = cid_tid_map.key_at( index ); // cglid
+                    auto tp = aosoa.getTuple(( ids.first << cell_bits_per_tile ) |
+                                            ( ids.second & cell_mask_per_tile ) );
+                    int offset = Kokkos::atomic_fetch_add(&idx(), 1);
+                    // printf("R%d: index %d: cell glid: %d\n", rank, index, cglid);
+                    //auto tp = array.getTuple(ids.first, ids.second);
+                    // printf("R%d: setting tp %d...\n", rank, offset);
+                    cell_data.setTuple(offset, tp);
                 }
             }
         );
@@ -383,11 +390,13 @@ class TreeLayer
         auto tid_slice = Cabana::slice<1>(data_map);
         auto clid_slice = Cabana::slice<2>(data_map);
         auto plid_slice = Cabana::slice<3>(data_map);
-        data_aosoa_type cell_data("cell_data", end-start);
+        data_aosoa_type cell_data("cell_data", view_size);
 
         // Save the cell ID
         Kokkos::View<int, memory_space> tid("tid");
         Kokkos::View<int, memory_space> clid("clid");
+
+        printf("R%d: AoSoA data size: %d\n", _rank, aosoa_data.size());
 
         Kokkos::parallel_for(
             "populate_cell_data",
@@ -402,10 +411,10 @@ class TreeLayer
                     tid() = tid_slice(index);
                     clid() = clid_slice(index);
                 }
-                auto data_tuple = aosoa_data.getTuple(pid);
-                cell_data.setTuple(i, data_tuple);
+                printf("R%d: getting tuple %d from index %d\n", rank, pid, index);
+                // auto data_tuple = aosoa_data.getTuple(pid);
+                // cell_data.setTuple(i, data_tuple);
             });
-        
         // int tid_h, clid_h;
         // Kokkos::deep_copy(tid_h, tid);
         // Kokkos::deep_copy(clid_h, clid);
@@ -435,20 +444,34 @@ class TreeLayer
                 array.template get<0>( tid(), clid(), 2 ) = pslice(0, 2);
                 // if (rank == 0) printf("R%d: inserting at tid, cid: %d, %d\n", rank, tid(), clid());
             });
+
+            /*
+            
+            auto ids = cid_tid_map.value_at( index ); // pair(tid, cid)
+                    // auto cglid = cid_tid_map.key_at( index ); // cglid
+                    auto tp = aosoa.getTuple(( ids.first << cell_bits_per_tile ) |
+                                            ( ids.second & cell_mask_per_tile ) );
+                    int offset = Kokkos::atomic_fetch_add(&idx(), 1);
+                    // printf("R%d: index %d: cell glid: %d\n", rank, index, cglid);
+                    //auto tp = array.getTuple(ids.first, ids.second);
+                    // printf("R%d: setting tp %d...\n", rank, offset);
+                    cell_data.setTuple(offset, tp);
+            
+            */
         
         // Test to iterate over call data
-        auto map = *_map_ptr;
-        Kokkos::parallel_for(
-        "iterate cell data",
-        Kokkos::RangePolicy<execution_space>( 0, map.capacity() ),
-        KOKKOS_LAMBDA( const int index ) {
-            if ( map.valid_at( index ) )
-            {
-                auto tid = map.value_at( index );
-                auto tkey = map.key_at( index );
-                // if (rank == 0) printf("R%d: valid tid, key: %d, %d\n", rank, tid, tkey);
-            }
-        } );
+        // auto map = *_map_ptr;
+        // Kokkos::parallel_for(
+        // "iterate cell data",
+        // Kokkos::RangePolicy<execution_space>( 0, map.capacity() ),
+        // KOKKOS_LAMBDA( const int index ) {
+        //     if ( map.valid_at( index ) )
+        //     {
+        //         auto tid = map.value_at( index );
+        //         auto tkey = map.key_at( index );
+        //         // if (rank == 0) printf("R%d: valid tid, key: %d, %d\n", rank, tid, tkey);
+        //     }
+        // } );
     }
     /**
      * Takes an AoSoA of particle data where positions is the first tuple.
@@ -469,6 +492,8 @@ class TreeLayer
         // Initialize _cid_tid_map
         _cid_tid_map.clear();
         _cid_tid_map.rehash(num_particles);
+
+        // printf("R%d: layer cpd: %d, maps size, cap: %d, %d\n", rank, _cells_per_dim, _cid_tid_map.size(), _cid_tid_map.capacity());
 
         auto positions = Cabana::slice<cell_slice_id>(data_aosoa);
 
@@ -547,7 +572,8 @@ class TreeLayer
                 //         vgid_parent, vert_owner, result.success(), hash_key);
                 if (!result.success())
                 {
-                    printf("Error adding key to map\n");
+                    // Getting here means some particles activate the same cell.
+                    // printf("Rank %d: Error adding key to map at cell id %d\n", rank, cell_id);
                 }
             } );
         
@@ -581,7 +607,7 @@ class TreeLayer
         {
             int cid = h_cid_slice(index);
             int start = index;
-            while (cid == h_cid_slice(index))
+            while ((cid == h_cid_slice(index)) && (index < num_particles))
             {
                 index++;
             }
@@ -612,7 +638,7 @@ class TreeLayer
         int rank = _rank;
         auto array = *_cells_ptr;
         auto cid_tid_map = _cid_tid_map;
-        printf("R%d: amp size: %d, capacity: %d\n", rank, cid_tid_map.size(), cid_tid_map.capacity());
+        // printf("R%d: amp size: %d, capacity: %d\n", rank, cid_tid_map.size(), cid_tid_map.capacity());
         Kokkos::parallel_for(
         "iterate cell data",
         Kokkos::RangePolicy<execution_space>( 0, cid_tid_map.capacity() ),
@@ -626,7 +652,7 @@ class TreeLayer
                 double x = array.template get<0>( ids.first, ids.second, 0 );
                 double y = array.template get<0>( ids.first, ids.second,  1 );
                 double z = array.template get<0>( ids.first, ids.second,  2 );
-                if (rank == 0) printf("R%d: x/y/z: %0.3lf, %0.3lf, %0.3lf\n", rank, x, y, z);
+                // if (rank == 0) printf("R%d: x/y/z: %0.3lf, %0.3lf, %0.3lf\n", rank, x, y, z);
             }
         } );
     }

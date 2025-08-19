@@ -38,11 +38,11 @@ struct Triple {
 };
 
 /**
- * Functor that given a dataset of x/y/z positions, calcuates the average 
- * x/y/z position and stores it in _avgs.
+ * Aggregates the first slice (positions) based on average and 
+ * the second slice based on sum.
  */
 template <class MemorySpace, class ExecutionSpace, class AoSoAType>
-struct AverageValueFunctor {
+struct AggregationFunctor {
 public:
 
     using memory_space = MemorySpace;
@@ -50,13 +50,11 @@ public:
     using aosoa_type = AoSoAType;
     using member_types = typename AoSoAType::member_types;
 
-    AverageValueFunctor(std::vector<int>& dof) 
-        : _dof( dof )
+    AggregationFunctor() 
     {
         _avgs = aosoa_type("avgs", 1);
     }
 
-    std::vector<int> _dof; // Vector with the depth of frame of each element in the tuple
     aosoa_type _avgs;
 
     aosoa_type vals() {return _avgs;}
@@ -65,14 +63,11 @@ public:
     {
         std::size_t data_size = data.size();
 
-        // We only care about positions right now, the first tuple
-        int dof = _dof[0];
+        auto slice0 = Cabana::slice<0>(data);
+        auto slice1 = Cabana::slice<1>(data);
 
-        auto slice0 = Cabana::slice<0>(data); // double[3] pos
-        auto slice1 = Cabana::slice<1>(data); // double[2] vort
-
+        // Calculate average position of slice 0
         Triple<double> sum;
-
         Kokkos::parallel_reduce(
             "aggregate_xyz",
             Kokkos::RangePolicy<execution_space>(0, data_size),
@@ -86,22 +81,22 @@ public:
         sum.y /= static_cast<double>(data_size);
         sum.z /= static_cast<double>(data_size);
 
+        // Calculate total sum of slice 1
+        int total;
+        Kokkos::parallel_reduce(
+            "aggregate_xyz",
+            Kokkos::RangePolicy<execution_space>(0, data_size),
+            KOKKOS_LAMBDA(const int i, int& local_total) {
+                local_total += slice1(i);
+            }, total );
+
         Cabana::Tuple<member_types> tp;
         Cabana::get<0>( tp, 0 ) = sum.x;
         Cabana::get<0>( tp, 1 ) = sum.y;
         Cabana::get<0>( tp, 2 ) = sum.z;
+        Cabana::get<1>(tp) = total;
 
         _avgs.setTuple(0, tp);
-
-        // auto avgs = _avgs;
-        // Kokkos::parallel_for("set_avg",
-        //     Kokkos::RangePolicy<execution_space>(0, 1),
-        //     KOKKOS_LAMBDA(const int i) {
-            
-            
-        //     auto tp = avgs.getTuple(i);
-
-        // });
     }
 };
 
@@ -121,8 +116,8 @@ void testOnePerCellLeaf()
     int comm_size;
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
-    // Create the tree
-    using particle_tuple_type = Cabana::MemberTypes<double[3]>;
+    // Create a tree of depth 
+    using particle_tuple_type = Cabana::MemberTypes<double[3], int>;
     using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
     std::array<double, 3> global_low_corner = { -1.5, -1.5, -1.5 };
     std::array<double, 3> global_high_corner = { 1.5, 1.5, 1.5 };
@@ -130,39 +125,53 @@ void testOnePerCellLeaf()
     static constexpr std::size_t cells_per_tile = 4;
     static constexpr std::size_t cell_slice_id = 0; 
     std::size_t leaf_tiles, root_tiles, red_factor;
-    root_tiles = 4, red_factor = 2, leaf_tiles = 16;
+    root_tiles = 1, red_factor = comm_size / 2, leaf_tiles = comm_size * 4;
     auto tree_ptr = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_tuple_type, Cabana::Grid::Cell,
         num_dim, cells_per_tile, cell_slice_id>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, root_tiles, MPI_COMM_WORLD);
 
     // Create the data
     int num_particles = (rank == 0) ? comm_size : 0;
-    particle_aosoa_type particle_aosoa("particle_aosoa", num_particles);
-    auto pos_slice = Cabana::slice<0>(particle_aosoa);
+    Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_particles);
+    auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
 
     // Returns a vector of domains for each rank
     auto domains_vec = tree_ptr->layer(0)->get_domains();
 
-    // Convert vector to view so we can access it in the parallel for
+    // Fill the particles. Each rank gets a particle at the center of its domain
     Kokkos::View<double*[6], Kokkos::HostSpace> domains_host("domains", num_particles);
     for (std::size_t i = 0; i < num_particles; i++)
-        for (std::size_t j = 0; j < 6; j++)
-        {
-            auto darray = domains_vec[i];
-            domains_host(i, j) = darray[j];
-        }
-    auto domains = Kokkos::create_mirror_view_and_copy(TEST_MEMSPACE(), domains_host);
+    {
+        auto darray = domains_vec[i];
+        double x = (darray[0] + darray[3]) / 2.0;
+        double y = (darray[1] + darray[4]) / 2.0;
+        double z = (darray[2] + darray[5]) / 2.0;
+        pos_slice_host(i, 0) = x;
+        pos_slice_host(i, 1) = y;
+        pos_slice_host(i, 2) = z;
+        printf("R%d: domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf), particle pos: (%0.2lf, %0.2lf, %0.2lf)\n",
+                i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5], x, y, z);
+    }
+    
+    // Copy to device
+    auto particle_aosoa =
+        Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
+    
+    // Create the aggregation function
+    std::vector<int> dof = {3, 1};
+    AggregationFunctor<TEST_MEMSPACE, TEST_EXECSPACE,
+         Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>> agg_functor;
+    
+    // Fill the tree
+    tree_ptr->aggregateDataUp(particle_aosoa, agg_functor);
 
-    Kokkos::parallel_for(
-        "raw_data_fill",
-        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_particles ),
-        KOKKOS_LAMBDA( const int p ) {
-            // Only rank 0 will be in this loop
-            // Set a particle at the center of each rank's domain
-            
-            
-        } );
-    Kokkos::fence();
+    // Check the data
+    // auto data = tree_ptr->layer(0)->get_data();
+    // auto data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
+
+    // Each rank should own one particle
+    // EXPECT_EQ(1, data_host.size());
+
 
 
 
