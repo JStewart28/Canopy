@@ -216,10 +216,10 @@ class Tree
         migrateData(external_data, 0);
         _tree[0]->populateCells(external_data, functor);
         // auto data = _tree[0]->data();
-        // for (std::size_t i = 1; i < 2; i++)
-        // {
-        //     migrateAndSetLayer(i-1, i, functor);
-        // }
+        for (std::size_t i = 1; i < _tree.size(); i++)
+        {
+            migrateAndSetLayer(i-1, i, functor);
+        }
 
 
 
