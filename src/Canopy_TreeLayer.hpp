@@ -337,7 +337,7 @@ class TreeLayer
     /**
      * Return an AoSoA of cell data, indexed by cell id
      */
-    data_aosoa_type get_data()
+    data_aosoa_type data()
     {
         int rank = _rank;
 
@@ -365,6 +365,11 @@ class TreeLayer
                     // printf("R%d: index %d: cell glid: %d\n", rank, index, cglid);
                     //auto tp = array.getTuple(ids.first, ids.second);
                     // printf("R%d: setting tp %d...\n", rank, offset);
+                    int r = Cabana::get<1>(tp);
+                    double x = Cabana::get<0>(tp, 0);
+                    double y = Cabana::get<0>(tp, 1);
+                    double z = Cabana::get<0>(tp, 2);
+                    printf("R%d: data: tp val: %d, %0.3lf, %0.3lf, %0.3lf\n", rank, r, x, y, z);
                     cell_data.setTuple(offset, tp);
                 }
             }
@@ -411,10 +416,19 @@ class TreeLayer
                     tid() = tid_slice(index);
                     clid() = clid_slice(index);
                 }
-                printf("R%d: getting tuple %d from index %d\n", rank, pid, index);
-                // auto data_tuple = aosoa_data.getTuple(pid);
-                // cell_data.setTuple(i, data_tuple);
+                // printf("R%d: getting tuple %d from index %d\n", rank, pid, index);
+                auto data_tuple = aosoa_data.getTuple(pid);
+                cell_data.setTuple(i, data_tuple);
+
+                int r = Cabana::get<1>(data_tuple);
+                double x = Cabana::get<0>(data_tuple, 0);
+                double y = Cabana::get<0>(data_tuple, 1);
+                double z = Cabana::get<0>(data_tuple, 2);
+                printf("R%d: agg: tp val: %d, %0.3lf, %0.3lf, %0.3lf\n", rank, r, x, y, z);
+
             });
+            
+        Kokkos::fence();
         // int tid_h, clid_h;
         // Kokkos::deep_copy(tid_h, tid);
         // Kokkos::deep_copy(clid_h, clid);

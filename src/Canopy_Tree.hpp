@@ -215,11 +215,10 @@ class Tree
         // Data comes from externally to populate leaf layer (layer 0)
         migrateData(external_data, 0);
         _tree[0]->populateCells(external_data, functor);
-        // auto data = _tree[0]->get_data();
+        // auto data = _tree[0]->data();
         // for (std::size_t i = 1; i < 2; i++)
         // {
-        //     migrateData(i-1, i);
-        //     _tree[i]->populateCells(data, functor);
+        //     migrateAndSetLayer(i-1, i, functor);
         // }
 
 
@@ -229,7 +228,7 @@ class Tree
         // initializeLayer(0, position_slice, num_particles);
         // _tree[0]->populateCells(data, functor);
         // _tree[0]->printOwnedCells();
-        // auto data1 = _tree[0]->get_data();
+        // auto data1 = _tree[0]->data();
         // auto positions = Cabana::slice<cell_slice_id>(data1);
         // int rank = _rank;
         // for (size_t i = 0; i < data1.size(); i++)
@@ -253,20 +252,23 @@ class Tree
     }
 
     /**
-     * Migrate AoSoA data to the correct rank of ownership for a given layer.
+     * Used to internally migrate and aggregate data from one layer to the next.
      * Use cell_slice_id slice for positions.
      */
-    void migrateData(int from_layer, int to_layer)
+    template <class AggregationFunctor>
+    void migrateAndSetLayer(int from_layer, int to_layer, AggregationFunctor functor)
     {
-        auto data = _tree[from_layer]->get_data();
+        auto data = _tree[from_layer]->data();
         auto positions = Cabana::slice<cell_slice_id>(data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", data.size());
         mapParticles(positions, layer_owner, data.size(), to_layer);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
         Cabana::migrate( distributor, data );
+        _tree[to_layer]->populateCells(data, functor);
     }
 
     int rank() const { return _rank; }
+    std::size_t numLayers() const { return _tree.size(); }
 
     /**
      * Get a layer of the tree
