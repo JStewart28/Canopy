@@ -89,11 +89,11 @@ class Tree
         */
         }
     
-    void add_layer(const int tiles_per_dim, const int halo_width)
+    void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
     {
         // printf("R%d: cell_per_tile: %d\n", _rank, cell_per_tile_dim);
         auto layer = createTreeLayer<tree_type, cell_per_tile_dim>(
-            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, _comm);
+            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, layer_num, _comm);
         _tree.push_back(layer);
     }
 
@@ -102,8 +102,10 @@ class Tree
         if (_tile_reduction_factor < 2)
             throw std::runtime_error("Canopy::Tree::build: _tile_reduction_factor must be greater than 1.\n");
 
+        int layer_num = 0;
+
         std::size_t next_layer_tiles_per_dim = _leaf_tiles_per_dim;
-        add_layer(next_layer_tiles_per_dim, 2);
+        add_layer(next_layer_tiles_per_dim, 2, layer_num++);
 
         // auto leaf_tiles_per_dim = _next_layer_tiles_per_dim;
 
@@ -115,9 +117,10 @@ class Tree
             // printf("R%d: next: %d, root: %d\n", _rank, next_layer_tiles_per_dim, _root_tiles_per_dim);
             depth++;
             next_layer_tiles_per_dim = static_cast<std::size_t>(next_layer_tiles_per_dim / _tile_reduction_factor);
-            add_layer(next_layer_tiles_per_dim, 2);
-            if (next_layer_tiles_per_dim == 0) next_layer_tiles_per_dim++;
-            // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, next_layer_tiles_per_dim);
+            if (next_layer_tiles_per_dim == 0) next_layer_tiles_per_dim = 1;
+            // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, layer_num, next_layer_tiles_per_dim);
+            add_layer(next_layer_tiles_per_dim, 2, layer_num++);
+            
         }
         // printf("R%d: created tree of depth %d\n", _rank, _tree.size());
         // if (_rank == 0) printf("R%d: num_p: %d, reduct fac: %d, input root: %d, leaf_t: %d, root_t: %d, depth: %d\n",
@@ -218,6 +221,7 @@ class Tree
         // auto data = _tree[0]->data();
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
+            // if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i, functor);
         }
 
@@ -269,6 +273,8 @@ class Tree
 
     int rank() const { return _rank; }
     std::size_t numLayers() const { return _tree.size(); }
+    std::array<double, 3> globalLowCorner() const { return _global_low_corner; }
+    std::array<double, 3> globalHighCorner() const { return _global_high_corner; }
 
     /**
      * Get a layer of the tree

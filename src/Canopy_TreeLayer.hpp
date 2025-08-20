@@ -63,11 +63,13 @@ class TreeLayer
     TreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int halo_width,
+            const int layer_number,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
         , _tiles_per_dim( tiles_per_dim )
         , _halo_width( halo_width )
+        , _layer_number( layer_number )
         , _cells_per_dim( _tiles_per_dim * cell_per_tile_dim )
         , _comm( comm )
     {
@@ -153,6 +155,9 @@ class TreeLayer
             Cabana::Grid::Experimental::createSparseArrayLayout<member_types>( local_grid, *_map_ptr, entity_type() );
         _cells_ptr = Cabana::Grid::Experimental::createSparseArray<memory_space>(
             std::string( "cell_array" ), *_layout_ptr );
+        
+        // Store cell size
+        updateCellSize();
 
             // Where do you store the persistent gathers and scatters? 
             // How do you tell a halo to create perssitent gathers and scatters
@@ -165,6 +170,13 @@ class TreeLayer
         5. Use Distributor to send particles to their rank of ownership in the new partition.
         6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
         */
+    }
+
+    void updateCellSize()
+    {
+        auto local_grid = _cells_ptr->layout().localGrid();
+        auto sparse_mesh = local_grid->globalGrid().globalMesh();
+        _cell_size = {sparse_mesh.cellSize( 0 ), sparse_mesh.cellSize( 1 ), sparse_mesh.cellSize( 2 )};
     }
 
     /*!
@@ -351,6 +363,7 @@ class TreeLayer
         // printf("R%d: map size: %d\n", rank, cid_tid_map.size());
 
         // XXX - can this be made more efficient by extracting my SoAs rather than tuples?
+        int layer_number = _layer_number;
         Kokkos::parallel_for(
             "get_data",
             Kokkos::RangePolicy<execution_space>(0, cid_tid_map.capacity()),
@@ -365,11 +378,12 @@ class TreeLayer
                     // printf("R%d: index %d: cell glid: %d\n", rank, index, cglid);
                     //auto tp = array.getTuple(ids.first, ids.second);
                     // printf("R%d: setting tp %d...\n", rank, offset);
-                    // int r = Cabana::get<1>(tp);
-                    // double x = Cabana::get<0>(tp, 0);
-                    // double y = Cabana::get<0>(tp, 1);
-                    // double z = Cabana::get<0>(tp, 2);
-                    // printf("R%d: data: tp val: %d, %0.3lf, %0.3lf, %0.3lf\n", rank, r, x, y, z);
+                    int r = Cabana::get<1>(tp);
+                    double x = Cabana::get<0>(tp, 0);
+                    double y = Cabana::get<0>(tp, 1);
+                    double z = Cabana::get<0>(tp, 2);
+                    if (layer_number == 2) printf("R%d: get_data: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
+                        rank, layer_number, r, x, y, z);
                     cell_data.setTuple(offset, tp);
                 }
             }
@@ -432,11 +446,13 @@ class TreeLayer
         agg_functor(cell_data);
         auto vals = agg_functor.vals();
         auto pslice = Cabana::slice<0>(vals);
-        // if (rank == 0)
-        // for (size_t i = 0; i < vals.size(); i++)
-        // {
-        //     printf("R%d: vals(%d): %0.3lf %0.3lf %0.3lf, cid: %d\n", rank, i, pslice(i, 0), pslice(i, 1), pslice(i, 2), cid_h);
-        // }
+        auto islice = Cabana::slice<1>(vals);
+        if (_layer_number == 2)
+        for (size_t i = 0; i < vals.size(); i++)
+        {
+            printf("R%d: agg_data: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
+                rank, _layer_number, islice(i), pslice(i, 0), pslice(i, 1), pslice(i, 2));
+        }
 
         // Set cell data for cell cid
         auto aosoa = _cells_ptr->aosoa();
@@ -453,7 +469,7 @@ class TreeLayer
                 auto tp = cell_data.getTuple(i);
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( clid() & cell_mask_per_tile ), tp );
-            });      
+            }); 
     }
     /**
      * Takes an AoSoA of particle data where positions is the first tuple.
@@ -468,6 +484,8 @@ class TreeLayer
     void populateCells(const data_aosoa_type data_aosoa, AggregationFunctor functor)
     {
         int rank = _rank;
+
+        updateCellSize();
 
         std::size_t num_particles = data_aosoa.size();
 
@@ -484,18 +502,11 @@ class TreeLayer
 
         auto array = _cells_ptr;
 
-        auto local_grid = array->layout().localGrid();
-        auto sparse_mesh = local_grid->globalGrid().globalMesh();
-        Kokkos::Array<double, 3> cell_size;
-        cell_size[0] = sparse_mesh.cellSize( 0 );
-        cell_size[1] = sparse_mesh.cellSize( 1 );
-        cell_size[2] = sparse_mesh.cellSize( 2 );
-
         auto cells_per_dim = this->cellsPerDim();
         auto tiles_per_dim = this->tilesPerDim();
         Kokkos::Array<double, 3> dx_inv = {
-            (double)1.0 / cell_size[0], (double)1.0 / cell_size[1],
-            (double)1.0 / cell_size[2] };
+            (double)1.0 / _cell_size[0], (double)1.0 / _cell_size[1],
+            (double)1.0 / _cell_size[2] };
 
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         
@@ -522,6 +533,7 @@ class TreeLayer
                     static_cast<int>( std::lround( pos[0] * dx_inv[0] ) ),
                     static_cast<int>( std::lround( pos[1] * dx_inv[1] ) ),
                     static_cast<int>( std::lround( pos[2] * dx_inv[2] ) ) };
+                // printf("R%d: cell activated: %d, %d, %d\n", rank, cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2]);
                 // register grids that will have data transfer with the particle
                 map.insertCell( cell_activated_ijk[0], cell_activated_ijk[1],
                                 cell_activated_ijk[2] );
@@ -555,7 +567,7 @@ class TreeLayer
                 if (!result.success())
                 {
                     // Getting here means some particles activate the same cell.
-                    // printf("Rank %d: Error adding key to map at cell id %d\n", rank, cell_id);
+                    // printf("Rank %d: Particle activates already activated cell at cell id %d\n", rank, cell_id);
                 }
             } );
         
@@ -636,7 +648,8 @@ class TreeLayer
                 double x = array.template get<0>( ids.first, ids.second, 0 );
                 double y = array.template get<0>( ids.first, ids.second,  1 );
                 double z = array.template get<0>( ids.first, ids.second,  2 );
-                printf("R%d: x/y/z: %0.3lf, %0.3lf, %0.3lf\n", rank, x, y, z);
+                int val = array.template get<1>( ids.first, ids.second);
+                printf("R%d: val: %d, x/y/z: %0.3lf, %0.3lf, %0.3lf\n", rank, val, x, y, z);
                 Kokkos::atomic_fetch_add(&valid(), 1);
             }
         } );
@@ -654,12 +667,14 @@ class TreeLayer
     }
 
     int rank() const { return _rank; }
+    int layerNumber() const { return _layer_number; }
 
     std::shared_ptr<sparse_layout_type> layout() {return _layout_ptr;}
     std::shared_ptr<sparse_array_type> array() {return _cells_ptr;}
     std::shared_ptr<sparse_map_type> map() {return _map_ptr;}
-    int cellsPerDim() {return _cells_per_dim;}
-    int tilesPerDim() {return _tiles_per_dim;}
+    int cellsPerDim() const {return _cells_per_dim;}
+    int tilesPerDim() const {return _tiles_per_dim;}
+    Kokkos::Array<double, 3> cellSize() const {return _cell_size;}
     
 
   private:
@@ -668,6 +683,10 @@ class TreeLayer
 	const int _tiles_per_dim;
     const int _halo_width;
     const int _cells_per_dim;
+    const int _layer_number;
+
+    // Cell size in the x, y, and z dimensions.
+    Kokkos::Array<double, 3> _cell_size;
 
     // Partitioner parameters
     int _num_step_rebalance, _max_optimize_iteration;
@@ -694,11 +713,12 @@ template <class TreeType, std::size_t CellPerTileDim>
 std::shared_ptr<TreeLayer<TreeType, CellPerTileDim>> createTreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int halo_width,
+            const int layer_number,
             MPI_Comm comm)
 {
     return std::make_shared<TreeLayer<TreeType, CellPerTileDim>>(global_low_corner,
             global_high_corner,
-	        tiles_per_dim, halo_width, comm);
+	        tiles_per_dim, halo_width, layer_number, comm);
 }
 
 } // end namespace Canopy

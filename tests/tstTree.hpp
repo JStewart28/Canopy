@@ -96,6 +96,8 @@ public:
         Cabana::get<0>( tp, 2 ) = sum.z;
         Cabana::get<1>(tp) = total;
 
+        if (data_size == 2) printf("Total: %d\n", total);
+
         _avgs.setTuple(0, tp);
     }
 };
@@ -136,7 +138,7 @@ void testUpwardsAggregation()
     ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Tree depth must be at least 3.\n";
     
     // Create the data
-    int num_particles = (rank == 0) ? comm_size : 0;
+    int num_particles = (rank == 0) ? (comm_size * 2) : 0;
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_particles);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto rank_slice_host = Cabana::slice<1>(particle_aosoa_host);
@@ -144,18 +146,36 @@ void testUpwardsAggregation()
     // Returns a vector of domains for each rank
     auto domains_vec = tree->layer(0)->get_domains();
 
-    // Fill the particles. Each rank gets a particle at the center of its domain.
-    // Slice 1 contains the rank to should be sent to
-    for (std::size_t i = 0; i < num_particles; i++)
+    // Fill the particles. Each rank gets one particle at the center of its domain
+    // and one particle very close to it. The purpose of the second particle
+    // is for it to be close enough that it shares the same cell in a higher layer
+    // and it aggregated.
+    // Slice 1 contains the rank it should be sent to
+    auto layer_0_cell_size = tree->layer(0)->cellSize();
+    for (std::size_t i = 0; i < num_particles; i += 2)
     {
-        auto darray = domains_vec[i];
+        auto darray = domains_vec[i / 2];
+
+        // First particle: center of the domain
         double x = (darray[0] + darray[3]) / 2.0;
         double y = (darray[1] + darray[4]) / 2.0;
         double z = (darray[2] + darray[5]) / 2.0;
+
         pos_slice_host(i, 0) = x;
         pos_slice_host(i, 1) = y;
         pos_slice_host(i, 2) = z;
-        rank_slice_host(i) = i;
+        rank_slice_host(i) = i / 2;
+
+        // Second particle: exists one cell away in leaf layer
+        double x2 = x + layer_0_cell_size[0] *  1.1;
+        double y2 = y + layer_0_cell_size[1] *  1.1;
+        double z2 = z + layer_0_cell_size[2] *  1.1;
+
+        pos_slice_host(i+1, 0) = x2;
+        pos_slice_host(i+1, 1) = y2;
+        pos_slice_host(i+1, 2) = z2;
+        rank_slice_host(i+1) = i / 2;
+
         // printf("R%d: domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf), particle pos: (%0.2lf, %0.2lf, %0.2lf)\n",
         //         i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5], x, y, z);
         // printf("R%d: rank_slice(%d): %d\n", rank, i, rank_slice_host(i));
@@ -173,7 +193,7 @@ void testUpwardsAggregation()
     // Fill the tree
     tree->aggregateDataUp(particle_aosoa, agg_functor);
 
-    printf("R%d: tree size: %d\n", rank, tree->numLayers());
+    // printf("R%d: tree size: %d\n", rank, tree->numLayers());
 
     /***********************************************
      * Check the data in the leaf layer (layer 0)
@@ -181,57 +201,125 @@ void testUpwardsAggregation()
     auto data = tree->layer(0)->data();
     auto data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
 
-    // Each rank should own one particle
-    EXPECT_EQ(1, data_host.size());
+    // Each rank should own two particles
+    EXPECT_EQ(2, data_host.size());
 
     // Check that the correct rank owns the particle
     rank_slice_host = Cabana::slice<1>(data_host);
     for (std::size_t i = 0; i < data_host.size(); i++)
     {
-        EXPECT_EQ(rank_slice_host(i), rank);
+        EXPECT_EQ(rank_slice_host(i), rank) << "Rank " << rank << std::endl;
     }
 
     /***********************************************
-     * Check the data in layer 1
+     * Check the data in the layer where the
+     * cell size is large enough that the two original
+     * particles have been aggregated.
      **********************************************/
-    // tree->layer(0)->printOwnedCells();
-    tree->layer(1)->printOwnedCells();
-    // tree->layer(2)->printOwnedCells();
+    auto low_corner = tree->globalLowCorner();
 
+    // Find the cells in the previous layer that will activate the
+    // same cell in the next layer.
+    std::size_t layer_num = 0;
+    bool agg = false;
+    while (layer_num < tree->numLayers() - 1)
+    {
+        auto prev_layer = tree->layer(layer_num);
+        auto prev_data = tree->layer(layer_num)->data();
+        auto prev_data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), prev_data );
+        auto next_layer = tree->layer(layer_num + 1);
+        auto next_cell_size = next_layer->cellSize();
+        
+        Kokkos::Array<double, 3> dx_inv = {
+            (double)1.0 / next_cell_size[0], (double)1.0 / next_cell_size[1],
+            (double)1.0 / next_cell_size[2] };
+        
+        auto positions = Cabana::slice<0>(prev_data_host);
+        for (int dim = 0; dim < 3; dim++)
+        {
+            double pos0 = positions( 0, dim );
+            double pos1 = positions( 1, dim );
+            int cell0 = static_cast<int>( std::lround( pos0 * dx_inv[dim] ) );
+            int cell1 = static_cast<int>( std::lround( pos1 * dx_inv[dim] ) );
+            if (cell0 == cell1)
+            {
+                // The next layer is where the particles are aggregated.
+                layer_num++;
+                // printf("R%d: particles agg at layer %d\n", rank, layer_num);
+                agg = true;
+                break;
+            }
+        }
+        if (agg) break;
 
-    // if (rank == 0)
+        // Check the next layer
+        layer_num++;
+    }
+    EXPECT_TRUE(agg) << "Rank " << rank << ": particles never aggregated.\n";
+
+    data = tree->layer(layer_num)->data();
+    data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
+    EXPECT_EQ(1, data_host.size());
+    rank_slice_host = Cabana::slice<1>(data_host);
+    // for (std::size_t i = 0; i < data_host.size(); i++)
     // {
-    //     domains_vec = tree->layer(0)->get_domains();
-    //     for (std::size_t i = 0; i < num_particles; i++)
-    //     {
-    //         auto darray = domains_vec[i];
-    //         double x = (darray[0] + darray[3]) / 2.0;
-    //         double y = (darray[1] + darray[4]) / 2.0;
-    //         double z = (darray[2] + darray[5]) / 2.0;
-    //         printf("R%d: L0 domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
-    //                 i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
-    //     }
-    //     domains_vec = tree->layer(1)->get_domains();
-    //     for (std::size_t i = 0; i < num_particles; i++)
-    //     {
-    //         auto darray = domains_vec[i];
-    //         double x = (darray[0] + darray[3]) / 2.0;
-    //         double y = (darray[1] + darray[4]) / 2.0;
-    //         double z = (darray[2] + darray[5]) / 2.0;
-    //         printf("R%d: L1 domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
-    //                 i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
-    //     }
-    //     domains_vec = tree->layer(tree->numLayers()-1)->get_domains();
-    //     for (std::size_t i = 0; i < num_particles; i++)
-    //     {
-    //         auto darray = domains_vec[i];
-    //         double x = (darray[0] + darray[3]) / 2.0;
-    //         double y = (darray[1] + darray[4]) / 2.0;
-    //         double z = (darray[2] + darray[5]) / 2.0;
-    //         printf("R%d: L%d domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
-    //                 i, tree->numLayers()-1, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
-    //     }
+    //     printf("R%d: L%d: int slice: %d\n", rank, layer_num, rank_slice_host(i));
     // }
+    // EXPECT_EQ(rank_slice_host(0), rank * 2) << "Rank " << rank << std::endl;
+    return;
+     /***********************************************
+     * Check the data in the top layer
+     * There is only one tile per dimension at the
+     * root, so one rank should hold all the data
+     ***********************************************/
+    data = tree->layer(tree->numLayers()-1)->data();
+    data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
+    int local_size = (data_host.size() == 0) ? 0 : 1;
+    int global_size;
+    MPI_Allreduce(&local_size, &global_size, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    EXPECT_EQ(global_size, 1) << "One rank does not own all data at the root level.\n";
+    // condition ? expression_if_true : expression_if_false;
+
+
+
+    // tree->layer(0)->printOwnedCells();
+    // tree->layer(1)->printOwnedCells();
+    // tree->layer(tree->numLayers()-1)->printOwnedCells();
+
+
+    if (rank == 0)
+    {
+        // domains_vec = tree->layer(0)->get_domains();
+        // for (std::size_t i = 0; i < comm_size; i++)
+        // {
+        //     auto darray = domains_vec[i];
+        //     double x = (darray[0] + darray[3]) / 2.0;
+        //     double y = (darray[1] + darray[4]) / 2.0;
+        //     double z = (darray[2] + darray[5]) / 2.0;
+        //     printf("R%d: L0 domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
+        //             i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
+        // }
+        // domains_vec = tree->layer(1)->get_domains();
+        // for (std::size_t i = 0; i < comm_size; i++)
+        // {
+        //     auto darray = domains_vec[i];
+        //     double x = (darray[0] + darray[3]) / 2.0;
+        //     double y = (darray[1] + darray[4]) / 2.0;
+        //     double z = (darray[2] + darray[5]) / 2.0;
+        //     printf("R%d: L1 domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
+        //             i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
+        // }
+        // domains_vec = tree->layer(tree->numLayers()-1)->get_domains();
+        // for (std::size_t i = 0; i < comm_size; i++)
+        // {
+        //     auto darray = domains_vec[i];
+        //     double x = (darray[0] + darray[3]) / 2.0;
+        //     double y = (darray[1] + darray[4]) / 2.0;
+        //     double z = (darray[2] + darray[5]) / 2.0;
+        //     printf("R%d: L%d domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
+        //             i, tree->numLayers()-1, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
+        // }
+    }
     // MPI_Barrier(MPI_COMM_WORLD);
     // printf("Layer 1:\n");
     // tree->layer(1)->printOwnedCells();
