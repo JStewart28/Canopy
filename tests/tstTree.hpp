@@ -96,8 +96,6 @@ public:
         Cabana::get<0>( tp, 2 ) = sum.z;
         Cabana::get<1>(tp) = total;
 
-        if (data_size == 2) printf("Total: %d\n", total);
-
         _avgs.setTuple(0, tp);
     }
 };
@@ -265,9 +263,9 @@ void testUpwardsAggregation()
     // {
     //     printf("R%d: L%d: int slice: %d\n", rank, layer_num, rank_slice_host(i));
     // }
-    // EXPECT_EQ(rank_slice_host(0), rank * 2) << "Rank " << rank << std::endl;
-    return;
-     /***********************************************
+    EXPECT_EQ(rank_slice_host(0), rank * 2) << "Rank " << rank << std::endl;
+
+    /***********************************************
      * Check the data in the top layer
      * There is only one tile per dimension at the
      * root, so one rank should hold all the data
@@ -280,49 +278,14 @@ void testUpwardsAggregation()
     EXPECT_EQ(global_size, 1) << "One rank does not own all data at the root level.\n";
     // condition ? expression_if_true : expression_if_false;
 
-
-
-    // tree->layer(0)->printOwnedCells();
-    // tree->layer(1)->printOwnedCells();
-    // tree->layer(tree->numLayers()-1)->printOwnedCells();
-
-
-    if (rank == 0)
-    {
-        // domains_vec = tree->layer(0)->get_domains();
-        // for (std::size_t i = 0; i < comm_size; i++)
-        // {
-        //     auto darray = domains_vec[i];
-        //     double x = (darray[0] + darray[3]) / 2.0;
-        //     double y = (darray[1] + darray[4]) / 2.0;
-        //     double z = (darray[2] + darray[5]) / 2.0;
-        //     printf("R%d: L0 domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
-        //             i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
-        // }
-        // domains_vec = tree->layer(1)->get_domains();
-        // for (std::size_t i = 0; i < comm_size; i++)
-        // {
-        //     auto darray = domains_vec[i];
-        //     double x = (darray[0] + darray[3]) / 2.0;
-        //     double y = (darray[1] + darray[4]) / 2.0;
-        //     double z = (darray[2] + darray[5]) / 2.0;
-        //     printf("R%d: L1 domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
-        //             i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
-        // }
-        // domains_vec = tree->layer(tree->numLayers()-1)->get_domains();
-        // for (std::size_t i = 0; i < comm_size; i++)
-        // {
-        //     auto darray = domains_vec[i];
-        //     double x = (darray[0] + darray[3]) / 2.0;
-        //     double y = (darray[1] + darray[4]) / 2.0;
-        //     double z = (darray[2] + darray[5]) / 2.0;
-        //     printf("R%d: L%d domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf)\n",
-        //             i, tree->numLayers()-1, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5]);
-        // }
-    }
-    // MPI_Barrier(MPI_COMM_WORLD);
-    // printf("Layer 1:\n");
-    // tree->layer(1)->printOwnedCells();
+    // Check that the sum of all integer data for the rank that owns all the data
+    // is correct.
+    int correct_aggregation = 0;
+    if (local_size) for (int i = 0; i < comm_size; i++) correct_aggregation += (i * 2);
+    int aggregation = 0;
+    rank_slice_host = Cabana::slice<1>(data_host);
+    for (std::size_t i = 0; i < data_host.size(); i++) aggregation += rank_slice_host(i);
+    EXPECT_EQ(correct_aggregation, aggregation) << "Rank " << rank << ": (Data size " << data_host.size() << ")" <<std::endl;
 }
 
 //---------------------------------------------------------------------------//

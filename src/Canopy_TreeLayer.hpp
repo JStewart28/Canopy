@@ -382,8 +382,8 @@ class TreeLayer
                     double x = Cabana::get<0>(tp, 0);
                     double y = Cabana::get<0>(tp, 1);
                     double z = Cabana::get<0>(tp, 2);
-                    if (layer_number == 2) printf("R%d: get_data: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
-                        rank, layer_number, r, x, y, z);
+                    // if (layer_number == 2) printf("R%d: get_data: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
+                    //     rank, layer_number, r, x, y, z);
                     cell_data.setTuple(offset, tp);
                 }
             }
@@ -447,12 +447,14 @@ class TreeLayer
         auto vals = agg_functor.vals();
         auto pslice = Cabana::slice<0>(vals);
         auto islice = Cabana::slice<1>(vals);
-        if (_layer_number == 2)
-        for (size_t i = 0; i < vals.size(); i++)
-        {
-            printf("R%d: agg_data: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
-                rank, _layer_number, islice(i), pslice(i, 0), pslice(i, 1), pslice(i, 2));
-        }
+        int layer_number = _layer_number;
+        // printf("R%d: vals size: %d\n", rank, vals.size());
+        // if (_layer_number == 2)
+        //     for (size_t i = 0; i < vals.size(); i++)
+        //     {
+        //         printf("R%d: agg_data0: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
+        //             rank, _layer_number, islice(i), pslice(i, 0), pslice(i, 1), pslice(i, 2));
+        //     }
 
         // Set cell data for cell cid
         auto aosoa = _cells_ptr->aosoa();
@@ -461,12 +463,15 @@ class TreeLayer
             "set_cell_data",
             Kokkos::RangePolicy<execution_space>( 0, 1 ),
             KOKKOS_LAMBDA( const int i ) {
-                // printf("R%d: Setting tid %d, clid %d...\n", rank, tid(), clid());
-                // array.template get<0>( tid(), clid(), 0 ) = pslice(0, 0);
-                // array.template get<0>( tid(), clid(), 1 ) = pslice(0, 1);
-                // array.template get<0>( tid(), clid(), 2 ) = pslice(0, 2);
-                // if (rank == 0) printf("R%d: inserting at tid, cid: %d, %d\n", rank, tid(), clid());
-                auto tp = cell_data.getTuple(i);
+                auto tp = vals.getTuple(i);
+                // double x, y, z;
+                // int r;
+                // x = Cabana::get<0>(tp, 0);
+                // y = Cabana::get<0>(tp, 1);
+                // z = Cabana::get<0>(tp, 2);
+                // r = Cabana::get<1>(tp);
+                // printf("R%d: agg_data1: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
+                //     rank, layer_number, r, x, y, z);
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( clid() & cell_mask_per_tile ), tp );
             }); 
