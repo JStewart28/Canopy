@@ -21,6 +21,4 @@ set(MPI_TESTS
 
 Canopy_add_tests(PACKAGE Canopy NAMES ${SERIAL_TESTS})
 
-if(Canopy_ENABLE_MPI)
-  Canopy_add_tests(MPI PACKAGE Canopy NAMES ${MPI_TESTS})
-endif()
+Canopy_add_tests(MPI PACKAGE Canopy NAMES ${MPI_TESTS})
