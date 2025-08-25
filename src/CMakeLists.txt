@@ -1,24 +1,14 @@
 configure_file(Canopy_Config.hpp.cmakein Canopy_Config.hpp)
 
 set(HEADERS_PUBLIC
-  Canopy_AoSoA.hpp
+  Canopy_Tree.hpp
+  Canopy_TreeLayer.hpp
   )
 
-
-if(Canopy_ENABLE_SILO)
-  list(APPEND HEADERS_PUBLIC Canopy_SiloParticleOutput.hpp)
-endif()
-
-if(Canopy_ENABLE_HDF5)
-  list(APPEND HEADERS_PUBLIC Canopy_HDF5ParticleOutput.hpp)
-endif()
-
-set(HEADERS_IMPL
-  impl/Canopy_CartesianGrid.hpp
-  impl/Canopy_Index.hpp
-  impl/Canopy_PerformanceTraits.hpp
-  impl/Canopy_TypeTraits.hpp
-  )
+# Currently no impl headers
+# set(HEADERS_IMPL
+#   impl/Canopy_CartesianGrid.hpp
+#   )
 
 add_library(Canopy INTERFACE)
 
