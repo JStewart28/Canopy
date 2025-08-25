@@ -2,7 +2,7 @@
 # Project settings
 #
 # This cmake organization, macros, and setup is copied from the
-# Canopy library: https://github.com/ECP-copa/Canopy/
+# Cabana library: https://github.com/ECP-copa/Cabana/
 #------------------------------------------------------------------------------#
 cmake_minimum_required(VERSION 3.16)
 

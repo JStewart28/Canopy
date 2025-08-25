@@ -1,5 +1,5 @@
 /****************************************************************************
- * Copyright (c) 2018-2023 by the Canopy authors                            *
+ * Copyright (c) 2025 by the Canopy authors                                 *
  * All rights reserved.                                                     *
  *                                                                          *
  * This file is part of the Canopy library. Canopy is distributed under a   *

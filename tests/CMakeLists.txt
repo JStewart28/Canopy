@@ -1,5 +1,5 @@
 ############################################################################
-# Copyright (c) 2018-2023 by the Canopy authors                            #
+# Copyright (c) 2025 by the Canopy authors                                 #
 # All rights reserved.                                                     #
 #                                                                          #
 # This file is part of the Canopy library. Canopy is distributed under a   #
@@ -21,6 +21,4 @@ set(MPI_TESTS
 
 Canopy_add_tests(PACKAGE Canopy NAMES ${SERIAL_TESTS})
 
-if(Canopy_ENABLE_MPI)
-  Canopy_add_tests(MPI PACKAGE Canopy NAMES ${MPI_TESTS})
-endif()
+Canopy_add_tests(MPI PACKAGE Canopy NAMES ${MPI_TESTS})

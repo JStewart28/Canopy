@@ -59,16 +59,15 @@ class Tree
     
     Tree( const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
-            const std::size_t num_particles,
+            const std::size_t leaf_tiles_per_dim,
             const std::size_t tile_reduction_factor,
             const std::size_t root_tiles_per_dim,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
-        , _next_layer_tiles_per_dim( 0 )
+        , _leaf_tiles_per_dim( leaf_tiles_per_dim )
         , _tile_reduction_factor( tile_reduction_factor )
         , _root_tiles_per_dim( root_tiles_per_dim )
-        , _num_particles( num_particles )
         , _comm( comm )
     {
         MPI_Comm_rank( comm, &_rank );
@@ -77,9 +76,7 @@ class Tree
         // Reserve space for 10 layers
         _tree.reserve(10);
 
-
         build();
-
         
         /*
         Steps:
@@ -92,38 +89,40 @@ class Tree
         */
         }
     
-    void add_layer(const int tiles_per_dim, const int halo_width)
+    void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
     {
         // printf("R%d: cell_per_tile: %d\n", _rank, cell_per_tile_dim);
-        auto layer = makeTreeLayer<tree_type, cell_per_tile_dim>(
-            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, _comm);
+        auto layer = createTreeLayer<tree_type, cell_per_tile_dim>(
+            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, layer_num, _comm);
         _tree.push_back(layer);
     }
 
     void build()
     {
-        // Assume paricles are evenly distributed across the domain in a 2D plane 
-        // to determine the number of tiles per dimension in the leaf layer.
-        // Load balancing at later steps will correct this assumption, if needed.
-        // Size tiles for ~1 particle for tile, assuming an even distribution.
-        auto _next_layer_tiles_per_dim = static_cast<std::size_t>(sqrt(_num_particles));
-        add_layer(_next_layer_tiles_per_dim, 2);
+        if (_tile_reduction_factor < 2)
+            throw std::runtime_error("Canopy::Tree::build: _tile_reduction_factor must be greater than 1.\n");
+
+        int layer_num = 0;
+
+        std::size_t next_layer_tiles_per_dim = _leaf_tiles_per_dim;
+        add_layer(next_layer_tiles_per_dim, 2, layer_num++);
 
         // auto leaf_tiles_per_dim = _next_layer_tiles_per_dim;
 
         // Calculate the depth of the tree
         int depth = 0;
-        // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, _next_layer_tiles_per_dim);
-        do
+        // if (_rank == 0) printf("R%d: Layer %d: tiles: %d, root tiles: %d\n", _rank, depth, next_layer_tiles_per_dim, _root_tiles_per_dim);
+        while (next_layer_tiles_per_dim > _root_tiles_per_dim)
         {
+            // printf("R%d: next: %d, root: %d\n", _rank, next_layer_tiles_per_dim, _root_tiles_per_dim);
             depth++;
-            _next_layer_tiles_per_dim = static_cast<std::size_t>(_next_layer_tiles_per_dim / _tile_reduction_factor);
-            add_layer(_next_layer_tiles_per_dim, 2);
-            if (_next_layer_tiles_per_dim == 0) _next_layer_tiles_per_dim++;
-            // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, depth, _next_layer_tiles_per_dim);
+            next_layer_tiles_per_dim = static_cast<std::size_t>(next_layer_tiles_per_dim / _tile_reduction_factor);
+            if (next_layer_tiles_per_dim == 0) next_layer_tiles_per_dim = 1;
+            // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, layer_num, next_layer_tiles_per_dim);
+            add_layer(next_layer_tiles_per_dim, 2, layer_num++);
+            
         }
-        while (_next_layer_tiles_per_dim > _root_tiles_per_dim);
-        depth++;
+        // printf("R%d: created tree of depth %d\n", _rank, _tree.size());
         // if (_rank == 0) printf("R%d: num_p: %d, reduct fac: %d, input root: %d, leaf_t: %d, root_t: %d, depth: %d\n",
         //     _rank, _num_particles, _tile_reduction_factor, _root_tiles_per_dim, leaf_tiles_per_dim, _next_layer_tiles_per_dim, depth);
 
@@ -197,7 +196,7 @@ class Tree
         auto array = _tree[layer]->array();
         array->registerSparseGrid( position_slice, num_particles );
         array->reserveFromMap( 1.2 );
-        printf("R%d: array size: %d\n", _rank, (int)array->size());
+        // printf("R%d: array size: %d\n", _rank, (int)array->size());
     }
 
     template <class PositionSliceType>
@@ -219,12 +218,12 @@ class Tree
         // Data comes from externally to populate leaf layer (layer 0)
         migrateData(external_data, 0);
         _tree[0]->populateCells(external_data, functor);
-        auto data = _tree[0]->get_data();
-        // for (std::size_t i = 1; i < 2; i++)
-        // {
-        //     migrateData(i-1, i);
-        //     _tree[i]->populateCells(data, functor);
-        // }
+        // auto data = _tree[0]->data();
+        for (std::size_t i = 1; i < _tree.size(); i++)
+        {
+            // if (_rank == 0) printf("Starting layer %d...\n", i);
+            migrateAndSetLayer(i-1, i, functor);
+        }
 
 
 
@@ -233,7 +232,7 @@ class Tree
         // initializeLayer(0, position_slice, num_particles);
         // _tree[0]->populateCells(data, functor);
         // _tree[0]->printOwnedCells();
-        // auto data1 = _tree[0]->get_data();
+        // auto data1 = _tree[0]->data();
         // auto positions = Cabana::slice<cell_slice_id>(data1);
         // int rank = _rank;
         // for (size_t i = 0; i < data1.size(); i++)
@@ -247,7 +246,7 @@ class Tree
      * Migrate AoSoA data to the correct rank of ownership for a given layer.
      * Use cell_slice_id slice for positions.
      */
-    void migrateData(data_aosoa_type external_data, int to_layer)
+    void migrateData(data_aosoa_type& external_data, int to_layer)
     {
         auto positions = Cabana::slice<cell_slice_id>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
@@ -257,20 +256,35 @@ class Tree
     }
 
     /**
-     * Migrate AoSoA data to the correct rank of ownership for a given layer.
+     * Used to internally migrate and aggregate data from one layer to the next.
      * Use cell_slice_id slice for positions.
      */
-    void migrateData(int from_layer, int to_layer)
+    template <class AggregationFunctor>
+    void migrateAndSetLayer(int from_layer, int to_layer, AggregationFunctor functor)
     {
-        auto data = _tree[from_layer]->get_data();
+        auto data = _tree[from_layer]->data();
         auto positions = Cabana::slice<cell_slice_id>(data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", data.size());
         mapParticles(positions, layer_owner, data.size(), to_layer);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
         Cabana::migrate( distributor, data );
+        _tree[to_layer]->populateCells(data, functor);
     }
 
     int rank() const { return _rank; }
+    std::size_t numLayers() const { return _tree.size(); }
+    std::array<double, 3> globalLowCorner() const { return _global_low_corner; }
+    std::array<double, 3> globalHighCorner() const { return _global_high_corner; }
+
+    /**
+     * Get a layer of the tree
+     */
+    auto layer(int layer)
+    {
+        if (layer >= _tree.size())
+            throw std::runtime_error("Canopy::Tree:layer: Requested layer larger than tree depth!\n");
+        return _tree[layer];
+    }
 
   private:
     std::array<double, 3> _global_high_corner;
@@ -281,18 +295,32 @@ class Tree
     // Tree layers.
     std::vector<std::shared_ptr<TreeLayer<tree_type, cell_per_tile_dim>>> _tree;
 
-    // How many tiles per dimension the next layer of the tree should have.
-    std::size_t _next_layer_tiles_per_dim;
+    // How many tiles per dimension in the leaf layer.
+    std::size_t _leaf_tiles_per_dim;
 
-    // Factor for how many tiles the mesh should be reduced by for eafch layer
+    // Factor for how many tiles the mesh should be reduced by for each layer
     std::size_t _tile_reduction_factor;
 
     // Maxmimum tiles per dimension at the root layer
     std::size_t _root_tiles_per_dim;
-
-    // Number of owned particles
-    std::size_t _num_particles;
 };
+
+template <class ExecutionSpace, class MemorySpace, class DataTypes, class EntityType,
+          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t CellSliceId>
+std::shared_ptr<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
+    NumSpaceDim, CellPerTileDim, CellSliceId>>
+        createTree( const std::array<double, 3>& global_low_corner,
+                    const std::array<double, 3>& global_high_corner,
+                    const std::size_t leaf_tiles_per_dim,
+                    const std::size_t tile_reduction_factor,
+                    const std::size_t root_tiles_per_dim,
+                    MPI_Comm comm)
+{
+    return std::make_shared<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
+        NumSpaceDim, CellPerTileDim, CellSliceId>>(global_low_corner,
+            global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, root_tiles_per_dim,
+            comm);
+}
 
 } // end namespace Canopy
 
