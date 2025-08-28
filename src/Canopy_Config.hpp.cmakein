@@ -14,7 +14,7 @@
 
 #define Canopy_VERSION_STRING "@PROJECT_VERSION@"
 
-#define Cabana_GIT_COMMIT_HASH "@Cabana_GIT_COMMIT_HASH@"
+#define Canopy_GIT_COMMIT_HASH "@Canopy_GIT_COMMIT_HASH@"
 
 #cmakedefine Canopy_ENABLE_MPI
 
