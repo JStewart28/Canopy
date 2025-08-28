@@ -26,11 +26,6 @@ target_include_directories(Canopy INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   )
-if(Canopy_ENABLE_HDF5)
-  target_include_directories(Canopy INTERFACE
-    ${HDF5_INCLUDE_DIRS} # FIXME: remove when requiring newer CMake
-  )
-endif()
 
 install(TARGETS Canopy
   EXPORT Canopy_Targets
