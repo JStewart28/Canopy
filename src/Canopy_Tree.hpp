@@ -281,9 +281,25 @@ class Tree
      */
     void computeInteractionList()
     {
-        // At the root layer, all cells meet criteria 3).
+        // At the root layer, we assume all cells touch all other cells.
+        // In other words, these cells are all in each other's neighbor
+        // list, not interaction list.
+        
+    }
+    /**
+     * Computes the neighbor list for each cell in the tree.
+     * 
+     * The neighbor list of cell0 is the set of all cells such that:
+     *  1) cell0 and cell_other are on the same layer of the tree.
+     *  2) cell0 and cell_other directly border each other.
+     */
+    void computeNeighborList()
+    {
+        // At the root layer, all cells are neighbors with one another
+
         
     } 
+
 
     int rank() const { return _rank; }
     std::size_t numLayers() const { return _tree.size(); }
