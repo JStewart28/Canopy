@@ -184,7 +184,6 @@ void testUpwardsAggregation()
         Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
     
     // Create the aggregation function
-    std::vector<int> dof = {3, 1};
     AggregationFunctor<TEST_MEMSPACE, TEST_EXECSPACE,
          Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>> agg_functor;
     
