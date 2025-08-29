@@ -271,6 +271,19 @@ class Tree
         _tree[to_layer]->populateCells(data, functor);
     }
 
+    /**
+     * Computes the interaction list for each cell in the tree.
+     * 
+     * The interaction list of cell0 is the set of all cells such that:
+     *  1) cell0 and cell_other are on the same layer of the tree.
+     *  2) cell0 and cell_other do not touch.
+     *  3) The parent cells of cell0 and cell_other do touch.
+     */
+    void computeInteractionList()
+    {
+
+    } 
+
     int rank() const { return _rank; }
     std::size_t numLayers() const { return _tree.size(); }
     std::array<double, 3> globalLowCorner() const { return _global_low_corner; }
