@@ -48,13 +48,12 @@ struct Triple {
     }
 };
 
-
 /**
- * Functor that given a dataset of x/y/z positions, calcuates the average 
- * x/y/z position and stores it in _avgs.
+ * Aggregates the first slice (positions) based on average and 
+ * the second slice based on sum.
  */
 template <class MemorySpace, class ExecutionSpace, class AoSoAType>
-struct AverageValueFunctor {
+struct AggregationFunctor {
 public:
 
     using memory_space = MemorySpace;
@@ -62,13 +61,11 @@ public:
     using aosoa_type = AoSoAType;
     using member_types = typename AoSoAType::member_types;
 
-    AverageValueFunctor(std::vector<int>& dof) 
-        : _dof( dof )
+    AggregationFunctor() 
     {
         _avgs = aosoa_type("avgs", 1);
     }
 
-    std::vector<int> _dof; // Vector with the depth of frame of each element in the tuple
     aosoa_type _avgs;
 
     aosoa_type vals() {return _avgs;}
@@ -77,14 +74,10 @@ public:
     {
         std::size_t data_size = data.size();
 
-        // We only care about positions right now, the first tuple
-        int dof = _dof[0];
+        auto slice0 = Cabana::slice<0>(data);
 
-        auto slice0 = Cabana::slice<0>(data); // double[3] pos
-        auto slice1 = Cabana::slice<1>(data); // double[2] vort
-
+        // Calculate average position of slice 0
         Triple<double> sum;
-
         Kokkos::parallel_reduce(
             "aggregate_xyz",
             Kokkos::RangePolicy<execution_space>(0, data_size),
@@ -104,16 +97,6 @@ public:
         Cabana::get<0>( tp, 2 ) = sum.z;
 
         _avgs.setTuple(0, tp);
-
-        // auto avgs = _avgs;
-        // Kokkos::parallel_for("set_avg",
-        //     Kokkos::RangePolicy<execution_space>(0, 1),
-        //     KOKKOS_LAMBDA(const int i) {
-            
-            
-        //     auto tp = avgs.getTuple(i);
-
-        // });
     }
 };
 
@@ -151,8 +134,8 @@ void octreeExperiments( std::string view_size )
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     std::cout << "view_size: " << view_size << std::endl;
-    std::string z_path = "../view_data/" + view_size + "/" + std::to_string(comm_size) + "/";
-    std::string w_path = "../view_data/" + view_size + "/" + std::to_string(comm_size) + "/";
+    std::string z_path = "../data/" + view_size + "/" + std::to_string(comm_size) + "/";
+    std::string w_path = "../data/" + view_size + "/" + std::to_string(comm_size) + "/";
     int mesh_size = 64;
     if (view_size == "small") mesh_size = 16;
     int periodic_flag = 0;
@@ -306,15 +289,16 @@ void octreeExperiments( std::string view_size )
     // The slice that us used to determine which cell the particle belongs in
     // Here, slice 0 is the x/y/z position.
     static constexpr std::size_t cell_slice_id = 0; 
-    std::size_t root_tiles, red_factor;
-    root_tiles = 4, red_factor = 2;
-    Canopy::Tree<execution_space, memory_space, particle_tuple_type, entity_type,
-        num_dim, cells_per_tile, cell_slice_id>
-            tree(global_low_corner, global_high_corner, num_particles, red_factor, root_tiles, MPI_COMM_WORLD);
+    std::size_t leaf_tiles, root_tiles, red_factor;
+    root_tiles = 1, red_factor = comm_size / 2, leaf_tiles = comm_size * 4;
+    if (red_factor < 2) red_factor = 2;
+    auto tree = Canopy::createTree<execution_space, memory_space, particle_tuple_type, entity_type,
+        num_dim, cells_per_tile, cell_slice_id>(
+            global_low_corner, global_high_corner, leaf_tiles, red_factor, root_tiles, MPI_COMM_WORLD);
 
     
     Kokkos::View<int*, memory_space> owner3D("owner3D", num_particles);
-    tree.mapParticles(pos_slice, owner3D, num_particles, 0);
+    tree->mapParticles(pos_slice, owner3D, num_particles, 0);
     // for (size_t i = 0; i < num_particles; i++)
     // {
     //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf) -> R%d\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2), owner3D(i));
@@ -324,18 +308,15 @@ void octreeExperiments( std::string view_size )
     Cabana::migrate( distributor, particle_aosoa );
     num_particles = particle_aosoa.size();
     pos_slice = Cabana::slice<0>(particle_aosoa);
-    // vort_slice = Cabana::slice<1>(particle_aosoa);
+    vort_slice = Cabana::slice<1>(particle_aosoa);
     // for (size_t i = 0; i < particle_aosoa.size(); i++)
     // {
     //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf)\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2));
     // }
-    
-    std::vector<int> dof = {3, 2};
-    AverageValueFunctor<memory_space, execution_space, particle_aosoa_type> avg_val_functor(dof);
+    AggregationFunctor<memory_space, execution_space,
+         particle_aosoa_type> agg_functor;
 
-    tree.aggregateDataUp(particle_aosoa, avg_val_functor);
-
-    
+    tree->aggregateDataUp(particle_aosoa, agg_functor);    
 }
 
 //---------------------------------------------------------------------------//

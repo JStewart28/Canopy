@@ -378,10 +378,10 @@ class TreeLayer
                     // printf("R%d: index %d: cell glid: %d\n", rank, index, cglid);
                     //auto tp = array.getTuple(ids.first, ids.second);
                     // printf("R%d: setting tp %d...\n", rank, offset);
-                    int r = Cabana::get<1>(tp);
-                    double x = Cabana::get<0>(tp, 0);
-                    double y = Cabana::get<0>(tp, 1);
-                    double z = Cabana::get<0>(tp, 2);
+                    // int r = Cabana::get<1>(tp);
+                    // double x = Cabana::get<0>(tp, 0);
+                    // double y = Cabana::get<0>(tp, 1);
+                    // double z = Cabana::get<0>(tp, 2);
                     // if (layer_number == 2) printf("R%d: get_data: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
                     //     rank, layer_number, r, x, y, z);
                     cell_data.setTuple(offset, tp);
@@ -498,7 +498,7 @@ class TreeLayer
         _cid_tid_map.clear();
         _cid_tid_map.rehash(num_particles);
 
-        // printf("R%d: layer cpd: %d, maps size, cap: %d, %d\n", rank, _cells_per_dim, _cid_tid_map.size(), _cid_tid_map.capacity());
+        printf("R%d: L%d: tpd: %d, cpd: %d\n", rank, _layer_number, _tiles_per_dim, _cells_per_dim);
 
         auto positions = Cabana::slice<cell_slice_id>(data_aosoa);
 
@@ -689,6 +689,7 @@ class TreeLayer
     const int _halo_width;
     const int _cells_per_dim;
     const int _layer_number;
+    int _rank, _comm_size;
 
     // Cell size in the x, y, and z dimensions.
     Kokkos::Array<double, 3> _cell_size;
@@ -710,8 +711,6 @@ class TreeLayer
     //  tid: The local tile id.
     //  cid: The local cell id within a tile.
     Kokkos::UnorderedMap<int, Kokkos::pair<int, int>, memory_space> _cid_tid_map;
-
-    int _rank, _comm_size;
 };
 
 template <class TreeType, std::size_t CellPerTileDim>

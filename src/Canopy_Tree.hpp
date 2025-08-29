@@ -281,7 +281,8 @@ class Tree
      */
     void computeInteractionList()
     {
-
+        // At the root layer, all cells meet criteria 3).
+        
     } 
 
     int rank() const { return _rank; }
