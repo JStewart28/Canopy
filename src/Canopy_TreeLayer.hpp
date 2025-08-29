@@ -498,7 +498,7 @@ class TreeLayer
         _cid_tid_map.clear();
         _cid_tid_map.rehash(num_particles);
 
-        printf("R%d: L%d: tpd: %d, cpd: %d\n", rank, _layer_number, _tiles_per_dim, _cells_per_dim);
+        // printf("R%d: L%d: tpd: %d, cpd: %d\n", rank, _layer_number, _tiles_per_dim, _cells_per_dim);
 
         auto positions = Cabana::slice<cell_slice_id>(data_aosoa);
 
