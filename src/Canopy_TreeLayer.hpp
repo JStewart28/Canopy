@@ -631,6 +631,19 @@ class TreeLayer
         //     });
     }
 
+    /**
+     * Computes the interaction list for each cell in the layer.
+     * 
+     * The interaction list of cell0 is the set of all cells such that:
+     *  1) cell0 and cell_other are on the same layer of the tree.
+     *  2) cell0 and cell_other do not touch.
+     *  3) The parent cells of cell0 and cell_other do touch.
+     */
+    void computeInteractionList(Kokkos::Array<double, 3> parent_cell_size)
+    {
+        
+    }
+
     void printOwnedCells()
     {
         // Test to iterate over call data
@@ -661,14 +674,6 @@ class TreeLayer
         int v;
         Kokkos::deep_copy(v, valid);
         if (v == 0) printf("R%d: No cells to print.\n", rank);
-    }
-
-
-    template <class PositionSliceType>
-    void registerSparseGrid(PositionSliceType& positions, int particle_num,
-                             const int p2g_radius = 1)
-    {
-
     }
 
     int rank() const { return _rank; }

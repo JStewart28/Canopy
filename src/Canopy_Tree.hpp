@@ -296,8 +296,8 @@ class Tree
     void computeNeighborList()
     {
         // At the root layer, all cells are neighbors with one another
-
-        
+        // Otherwise, neighbor cells are cells that are +-1 in each
+        // dimension in cell_ijk locations.
     } 
 
 
