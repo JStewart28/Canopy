@@ -676,6 +676,23 @@ class TreeLayer
         if (v == 0) printf("R%d: No cells to print.\n", rank);
     }
 
+    /**
+     * Return the center of a cell given its ijk location
+     */
+    KOKKOS_INLINE_FUNCTION
+    template <class Scalar>
+    static Kokkos::Array<Scalar, 3>
+    cellCenter(int i, int j, int k,
+               const std::array<Scalar, 3>& global_low_corner,
+               const Kokkos::Array<Scalar, 3>& cell_size)
+    {
+        Kokkos::Array<Scalar, 3> center;
+        center[0] = global_low_corner[0] + ((Scalar)i + 0.5) * cell_size[0];
+        center[1] = global_low_corner[1] + ((Scalar)j + 0.5) * cell_size[1];
+        center[2] = global_low_corner[2] + ((Scalar)k + 0.5) * cell_size[2];
+        return center;
+    }
+
     int rank() const { return _rank; }
     int layerNumber() const { return _layer_number; }
 
