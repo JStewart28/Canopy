@@ -22,7 +22,7 @@ namespace Canopy
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
 template <class ExecutionSpace, class MemorySpace, class DataTypes, class EntityType,
-          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t CellSliceId>
+          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t PositionSliceId>
 class Tree
 {
   public:
@@ -32,7 +32,7 @@ class Tree
 
     //! Self type
     using tree_type = Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
-        NumSpaceDim, CellPerTileDim, CellSliceId>;
+        NumSpaceDim, CellPerTileDim, PositionSliceId>;
 
     //! Memory space size type
     using size_type = typename memory_space::size_type;
@@ -46,7 +46,7 @@ class Tree
     static constexpr std::size_t cell_per_tile_dim = CellPerTileDim;
 
     // The AoSoA slice to use to determine which cell the particle resides in
-    static constexpr std::size_t cell_slice_id = CellSliceId;
+    static constexpr std::size_t position_slice_id = PositionSliceId;
 
     // AoSoA related types
     //! DataTypes Data types (Cabana::MemberTypes).
@@ -233,7 +233,7 @@ class Tree
         // _tree[0]->populateCells(data, functor);
         // _tree[0]->printOwnedCells();
         // auto data1 = _tree[0]->data();
-        // auto positions = Cabana::slice<cell_slice_id>(data1);
+        // auto positions = Cabana::slice<position_slice_id>(data1);
         // int rank = _rank;
         // for (size_t i = 0; i < data1.size(); i++)
         // {
@@ -244,11 +244,11 @@ class Tree
 
     /**
      * Migrate AoSoA data to the correct rank of ownership for a given layer.
-     * Use cell_slice_id slice for positions.
+     * Use position_slice_id slice for positions.
      */
     void migrateData(data_aosoa_type& external_data, int to_layer)
     {
-        auto positions = Cabana::slice<cell_slice_id>(external_data);
+        auto positions = Cabana::slice<position_slice_id>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
         mapParticles(positions, layer_owner, external_data.size(), to_layer);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
@@ -257,13 +257,13 @@ class Tree
 
     /**
      * Used to internally migrate and aggregate data from one layer to the next.
-     * Use cell_slice_id slice for positions.
+     * Use position_slice_id slice for positions.
      */
     template <class AggregationFunctor>
     void migrateAndSetLayer(int from_layer, int to_layer, AggregationFunctor functor)
     {
         auto data = _tree[from_layer]->data();
-        auto positions = Cabana::slice<cell_slice_id>(data);
+        auto positions = Cabana::slice<position_slice_id>(data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", data.size());
         mapParticles(positions, layer_owner, data.size(), to_layer);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
@@ -336,9 +336,9 @@ class Tree
 };
 
 template <class ExecutionSpace, class MemorySpace, class DataTypes, class EntityType,
-          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t CellSliceId>
+          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t PositionSliceId>
 std::shared_ptr<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
-    NumSpaceDim, CellPerTileDim, CellSliceId>>
+    NumSpaceDim, CellPerTileDim, PositionSliceId>>
         createTree( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
                     const std::size_t leaf_tiles_per_dim,
@@ -347,7 +347,7 @@ std::shared_ptr<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
                     MPI_Comm comm)
 {
     return std::make_shared<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
-        NumSpaceDim, CellPerTileDim, CellSliceId>>(global_low_corner,
+        NumSpaceDim, CellPerTileDim, PositionSliceId>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, root_tiles_per_dim,
             comm);
 }

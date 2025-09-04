@@ -38,7 +38,7 @@ class TreeLayer
 
     using mesh_type = typename TreeType::mesh_type;
 
-    static constexpr std::size_t cell_slice_id = TreeType::cell_slice_id;
+    static constexpr std::size_t position_slice_id = TreeType::position_slice_id;
 
     static constexpr std::size_t cell_per_tile_dim = CellPerTileDim;
 
@@ -396,6 +396,90 @@ class TreeLayer
     /*******************************************************************************
      * Set by AoSoA
      ******************************************************************************/
+    /**
+     * Particle to multipole function. Used at the leaf layer to convert 
+     */
+    template <class MapAoSoAType, class AggregationFunctor>
+    void p2m(const data_aosoa_type aosoa_data, const MapAoSoAType data_map, AggregationFunctor agg_functor,
+        int start, int end)
+    {
+        int rank = _rank;
+        // printf("R%d: agg data from [%d, %d)\n", rank, start, end);
+
+        // Create an aosoa of the data we want to aggregate
+        int view_size = end - start;
+        auto cglid_slice = Cabana::slice<0>(data_map);
+        auto tid_slice = Cabana::slice<1>(data_map);
+        auto clid_slice = Cabana::slice<2>(data_map);
+        auto plid_slice = Cabana::slice<3>(data_map);
+        data_aosoa_type cell_data("cell_data", view_size);
+
+        // Save the cell ID
+        Kokkos::View<int, memory_space> tid("tid");
+        Kokkos::View<int, memory_space> clid("clid");
+
+        // printf("R%d: AoSoA data size: %d\n", _rank, aosoa_data.size());
+
+        Kokkos::parallel_for(
+            "populate_cell_data",
+            Kokkos::RangePolicy<execution_space>( 0, view_size ),
+            KOKKOS_LAMBDA( const int i ) {
+
+                int index = i + start;
+                int pid = plid_slice(index);
+                if (i == 0)
+                {
+                    // Same values for all threads
+                    tid() = tid_slice(index);
+                    clid() = clid_slice(index);
+                }
+                // printf("R%d: getting tuple %d from index %d\n", rank, pid, index);
+                auto data_tuple = aosoa_data.getTuple(pid);
+                cell_data.setTuple(i, data_tuple);
+            });
+            
+        Kokkos::fence();
+        // int tid_h, clid_h;
+        // Kokkos::deep_copy(tid_h, tid);
+        // Kokkos::deep_copy(clid_h, clid);
+
+        // printf("R%d: tid: %d, cid: %d\n", rank, tid_h, clid_h);
+        
+        // Aggregate cell data
+        agg_functor(cell_data);
+        auto vals = agg_functor.vals();
+        auto pslice = Cabana::slice<0>(vals);
+        auto islice = Cabana::slice<1>(vals);
+        int layer_number = _layer_number;
+        // printf("R%d: vals size: %d\n", rank, vals.size());
+        // if (_layer_number == 2)
+        //     for (size_t i = 0; i < vals.size(); i++)
+        //     {
+        //         printf("R%d: agg_data0: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
+        //             rank, _layer_number, islice(i), pslice(i, 0), pslice(i, 1), pslice(i, 2));
+        //     }
+
+        // Set cell data for cell cid
+        auto aosoa = _cells_ptr->aosoa();
+        // printf("R%d: #2: array capacity: %d, size: %d\n", rank, array.capacity(), array.size());
+        Kokkos::parallel_for(
+            "set_cell_data",
+            Kokkos::RangePolicy<execution_space>( 0, 1 ),
+            KOKKOS_LAMBDA( const int i ) {
+                auto tp = vals.getTuple(i);
+                // double x, y, z;
+                // int r;
+                // x = Cabana::get<0>(tp, 0);
+                // y = Cabana::get<0>(tp, 1);
+                // z = Cabana::get<0>(tp, 2);
+                // r = Cabana::get<1>(tp);
+                // printf("R%d: agg_data1: L%d: int: %d, pos: %0.3lf, %0.3lf, %0.3lf\n",
+                //     rank, layer_number, r, x, y, z);
+                aosoa.setTuple(( tid() << cell_bits_per_tile ) |
+                               ( clid() & cell_mask_per_tile ), tp );
+            }); 
+    }
+
     template <class MapAoSoAType, class AggregationFunctor>
     void aggregate_and_add_cell_data(const data_aosoa_type aosoa_data, const MapAoSoAType data_map, AggregationFunctor agg_functor,
         int start, int end)
@@ -500,7 +584,7 @@ class TreeLayer
 
         printf("R%d: L%d: tpd: %d, cpd: %d\n", rank, _layer_number, _tiles_per_dim, _cells_per_dim);
 
-        auto positions = Cabana::slice<cell_slice_id>(data_aosoa);
+        auto positions = Cabana::slice<position_slice_id>(data_aosoa);
 
         auto map = *_map_ptr;
         auto cid_tid_map = _cid_tid_map;
