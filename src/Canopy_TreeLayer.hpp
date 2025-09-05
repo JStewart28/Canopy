@@ -399,8 +399,8 @@ class TreeLayer
     /**
      * Particle to multipole function. Used at the leaf layer to convert 
      */
-    template <class MapAoSoAType, class AggregationFunctor>
-    void p2m(const data_aosoa_type aosoa_data, const MapAoSoAType data_map, AggregationFunctor agg_functor,
+    template <class MapAoSoAType, class KernelFunction>
+    void p2m(const data_aosoa_type aosoa_data, const MapAoSoAType data_map, KernelFunction kernel,
         int start, int end)
     {
         int rank = _rank;
@@ -446,8 +446,8 @@ class TreeLayer
         // printf("R%d: tid: %d, cid: %d\n", rank, tid_h, clid_h);
         
         // Aggregate cell data
-        agg_functor(cell_data);
-        auto vals = agg_functor.vals();
+        kernel(cell_data);
+        auto vals = kernel.vals();
         auto pslice = Cabana::slice<0>(vals);
         auto islice = Cabana::slice<1>(vals);
         int layer_number = _layer_number;
@@ -480,8 +480,8 @@ class TreeLayer
             }); 
     }
 
-    template <class MapAoSoAType, class AggregationFunctor>
-    void aggregate_and_add_cell_data(const data_aosoa_type aosoa_data, const MapAoSoAType data_map, AggregationFunctor agg_functor,
+    template <class MapAoSoAType, class KernelFunction>
+    void aggregate_and_add_cell_data(const data_aosoa_type aosoa_data, const MapAoSoAType data_map, KernelFunction kernel,
         int start, int end)
     {
         int rank = _rank;
@@ -527,8 +527,8 @@ class TreeLayer
         // printf("R%d: tid: %d, cid: %d\n", rank, tid_h, clid_h);
         
         // Aggregate cell data
-        agg_functor(cell_data);
-        auto vals = agg_functor.vals();
+        kernel(cell_data);
+        auto vals = kernel.vals();
         auto pslice = Cabana::slice<0>(vals);
         auto islice = Cabana::slice<1>(vals);
         int layer_number = _layer_number;
@@ -566,11 +566,11 @@ class TreeLayer
      *  1.
      *  2. Initialize the correct cells based on particle locations. Track which particles belong
      *      to which cells.
-     *  3. Aggregate the data for each cell using the AggregationFunctor.
+     *  3. Aggregate the data for each cell using the KernelFunction.
      *  4. Inserts the aggregated data into the correct cell on this layer.
      */
-    template <class AggregationFunctor>
-    void populateCells(const data_aosoa_type data_aosoa, AggregationFunctor functor)
+    template <class KernelFunction>
+    void populateCells(const data_aosoa_type data_aosoa, KernelFunction kernel)
     {
         int rank = _rank;
 
@@ -696,7 +696,7 @@ class TreeLayer
             }
             int end = index;
             // printf("R%d: agg data from [%d, %d), cid: %d\n", rank, start, end, cid);
-            aggregate_and_add_cell_data(data_aosoa, cell_id_particle_id_map, functor, start, end);
+            aggregate_and_add_cell_data(data_aosoa, cell_id_particle_id_map, kernel, start, end);
         }
         // printf("R%d: aosoa size: %d\n", _rank, _cells_ptr->size());
 

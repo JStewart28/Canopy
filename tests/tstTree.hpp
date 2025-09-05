@@ -42,7 +42,7 @@ struct Triple {
  * the second slice based on sum.
  */
 template <class MemorySpace, class ExecutionSpace, class AoSoAType>
-struct AggregationFunctor {
+struct KernelFunction {
 public:
 
     using memory_space = MemorySpace;
@@ -50,7 +50,7 @@ public:
     using aosoa_type = AoSoAType;
     using member_types = typename AoSoAType::member_types;
 
-    AggregationFunctor() 
+    KernelFunction() 
     {
         _avgs = aosoa_type("avgs", 1);
     }
@@ -184,11 +184,11 @@ void testUpwardsAggregation()
         Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
     
     // Create the aggregation function
-    AggregationFunctor<TEST_MEMSPACE, TEST_EXECSPACE,
-         Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>> agg_functor;
+    KernelFunction<TEST_MEMSPACE, TEST_EXECSPACE,
+         Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>> kernel;
     
     // Fill the tree
-    tree->aggregateDataUp(particle_aosoa, agg_functor);
+    tree->aggregateDataUp(particle_aosoa, kernel);
 
     // printf("R%d: tree size: %d\n", rank, tree->numLayers());
 

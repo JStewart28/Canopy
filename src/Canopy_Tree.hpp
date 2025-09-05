@@ -212,17 +212,17 @@ class Tree
      * 
      * Assumes x/y/z coordinates are the first tuple element in "data"
      */
-    template <class AggregationFunctor>
-    void aggregateDataUp(data_aosoa_type external_data, AggregationFunctor functor)
+    template <class KernelFunction>
+    void aggregateDataUp(data_aosoa_type external_data, KernelFunction kernel)
     {
         // Data comes from externally to populate leaf layer (layer 0)
         migrateData(external_data, 0);
-        _tree[0]->populateCells(external_data, functor);
+        _tree[0]->populateCells(external_data, kernel);
         // auto data = _tree[0]->data();
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
             // if (_rank == 0) printf("Starting layer %d...\n", i);
-            migrateAndSetLayer(i-1, i, functor);
+            migrateAndSetLayer(i-1, i, kernel);
         }
 
 
@@ -230,7 +230,7 @@ class Tree
         // Initialize mesh to 0
         // auto num_particles = data.size();
         // initializeLayer(0, position_slice, num_particles);
-        // _tree[0]->populateCells(data, functor);
+        // _tree[0]->populateCells(data, kernel);
         // _tree[0]->printOwnedCells();
         // auto data1 = _tree[0]->data();
         // auto positions = Cabana::slice<position_slice_id>(data1);
@@ -259,8 +259,8 @@ class Tree
      * Used to internally migrate and aggregate data from one layer to the next.
      * Use position_slice_id slice for positions.
      */
-    template <class AggregationFunctor>
-    void migrateAndSetLayer(int from_layer, int to_layer, AggregationFunctor functor)
+    template <class KernelFunction>
+    void migrateAndSetLayer(int from_layer, int to_layer, KernelFunction kernel)
     {
         auto data = _tree[from_layer]->data();
         auto positions = Cabana::slice<position_slice_id>(data);
@@ -268,7 +268,7 @@ class Tree
         mapParticles(positions, layer_owner, data.size(), to_layer);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
         Cabana::migrate( distributor, data );
-        _tree[to_layer]->populateCells(data, functor);
+        _tree[to_layer]->populateCells(data, kernel);
     }
 
     /**
