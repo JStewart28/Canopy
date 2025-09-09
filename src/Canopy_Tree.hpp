@@ -21,7 +21,7 @@ namespace Canopy
 
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
-template <class ExecutionSpace, class MemorySpace, class DataTypes, class EntityType,
+template <class ExecutionSpace, class MemorySpace, class MemberType, class EntityType,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t PositionSliceId>
 class Tree
 {
@@ -31,7 +31,7 @@ class Tree
     using memory_space = MemorySpace;
 
     //! Self type
-    using tree_type = Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
+    using tree_type = Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
         NumSpaceDim, CellPerTileDim, PositionSliceId>;
 
     //! Memory space size type
@@ -49,8 +49,8 @@ class Tree
     static constexpr std::size_t position_slice_id = PositionSliceId;
 
     // AoSoA related types
-    //! DataTypes Data types (Cabana::MemberTypes).
-    using member_types = DataTypes;
+    //! MemberType Data types (Cabana::MemberTypes).
+    using member_types = MemberType;
     using tuple_type = Cabana::Tuple<member_types>;
     using data_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;
 
@@ -335,9 +335,9 @@ class Tree
     std::size_t _root_tiles_per_dim;
 };
 
-template <class ExecutionSpace, class MemorySpace, class DataTypes, class EntityType,
+template <class ExecutionSpace, class MemorySpace, class MemberType, class EntityType,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t PositionSliceId>
-std::shared_ptr<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
+std::shared_ptr<Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
     NumSpaceDim, CellPerTileDim, PositionSliceId>>
         createTree( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
@@ -346,7 +346,7 @@ std::shared_ptr<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
                     const std::size_t root_tiles_per_dim,
                     MPI_Comm comm)
 {
-    return std::make_shared<Tree<ExecutionSpace, MemorySpace, DataTypes, EntityType,
+    return std::make_shared<Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
         NumSpaceDim, CellPerTileDim, PositionSliceId>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, root_tiles_per_dim,
             comm);
