@@ -16,6 +16,7 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 #   )
 
 set(MPI_TESTS
+  Kernels
   Tree
   )
 
