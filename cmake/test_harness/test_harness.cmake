@@ -17,6 +17,28 @@ if(VALGRIND_FOUND)
 endif()
 
 ##--------------------------------------------------------------------------##
+## General tests.
+##--------------------------------------------------------------------------##
+macro(Canopy_add_tests_nobackend)
+  cmake_parse_arguments(Canopy_UNIT_TEST "" "PACKAGE" "NAMES" ${ARGN})
+  foreach(_test ${Canopy_UNIT_TEST_NAMES})
+    set(_target ${CANOPY_UNIT_TEST_PACKAGE}_${_test}_test)
+    add_executable(${_target} tst${_test}.cpp ${TEST_HARNESS_DIR}/unit_test_main.cpp)
+    target_link_libraries(${_target} PRIVATE ${Canopy_UNIT_TEST_PACKAGE} ${gtest_target})
+    add_test(NAME ${_target} COMMAND ${NONMPI_PRECOMMAND} $<TARGET_FILE:${_target}> ${gtest_args})
+    set_property(TEST ${_target} PROPERTY ENVIRONMENT OMP_NUM_THREADS=1)
+    if(VALGRIND_FOUND)
+      add_test(NAME ${_target}_valgrind COMMAND ${NONMPI_PRECOMMAND} ${VALGRIND_EXECUTABLE} ${VALGRIND_ARGS} $<TARGET_FILE:${_target}> ${gtest_args})
+      set_property(TEST ${_target}_valgrind PROPERTY ENVIRONMENT OMP_NUM_THREADS=1)
+    endif()
+    if(Canopy_INSTALL_TEST_EXECUTABLES)
+      install(TARGETS ${_target}
+              RUNTIME DESTINATION ${CMAKE_INSTALL_DATADIR}/Canopy/tests)
+    endif()
+  endforeach()
+endmacro()
+
+##--------------------------------------------------------------------------##
 ## On-node tests with and without MPI.
 ##--------------------------------------------------------------------------##
 set(CANOPY_TEST_DEVICES)
@@ -61,9 +83,9 @@ macro(Canopy_add_tests)
         "#include <tst${_test}.hpp>\n"
       )
       if(CANOPY_UNIT_TEST_MPI)
-        set(_target Canopy_${CANOPY_UNIT_TEST_PACKAGE}_Test_${_test}_MPI_${_device})
+        set(_target ${CANOPY_UNIT_TEST_PACKAGE}_Test_${_test}_MPI_${_device})
       else()
-        set(_target Canopy_${CANOPY_UNIT_TEST_PACKAGE}_Test_${_test}_${_device})
+        set(_target ${CANOPY_UNIT_TEST_PACKAGE}_Test_${_test}_${_device})
       endif()
       add_executable(${_target} ${_file} ${CANOPY_UNIT_TEST_MAIN})
       target_include_directories(${_target} PRIVATE ${_dir}
