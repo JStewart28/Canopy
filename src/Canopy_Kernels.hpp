@@ -55,9 +55,11 @@ Kokkos::complex<double> Ynm(int n, int m, double theta, double phi)
 
     double Pnm = std::assoc_legendre(n, mp, x);
 
+    // See equation 3.27, source 4 for including sqrt((2n+1 / 4pi))
     double norm = Kokkos::sqrt( ((2.0*n+1)/(4.0*pi)) *
                                 Kokkos::tgamma(n-mp+1) / Kokkos::tgamma(n+mp+1) );
 
+    // Equation 3.32, source 4
     cdouble y = norm * Pnm * Kokkos::polar(1.0, double(mp) * phi);
 
     if (m < 0)
@@ -133,11 +135,13 @@ public:
             double rho, alpha, beta;
             cart2sph(dx, dy, dz, rho, alpha, beta);
 
+            // Equation 3.36, source 4
             for (int n = 0; n <= p; ++n)
             {
                 for (int m = -n; m <= n; ++m)
                 {
                     int idx = index(n,m);
+                    // Equation 3.37, source 4
                     M(idx) += scalar(i) *
                               Kokkos::pow(rho, n) *
                               Kokkos::conj(Ynm(n, m, alpha, beta));
