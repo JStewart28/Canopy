@@ -35,6 +35,48 @@ namespace Kernel
 {
 
 //---------------------------------------------------------------------------//
+// Factorial double: (2m-1)!!
+KOKKOS_INLINE_FUNCTION
+double double_factorial(int m) {
+    double res = 1.0;
+    for (int k = 1; k <= m; ++k)
+        res *= (2*k - 1);
+    return res;
+}
+
+/**
+ * Implementation of std::assoc_legendre that is callable on the device.
+ * Per equations 3.33 and 3.34 in source 4.
+ */
+KOKKOS_INLINE_FUNCTION
+double assoc_legendre(int n, int m, double x) {
+    if (m < 0 || m > n)
+        return 0.0; // undefined outside this range
+
+    // P_m^m(x)
+    double pmm = double_factorial(m) * std::pow(1.0 - x*x, 0.5*m);
+    if (m % 2 == 1) pmm = -pmm; // (-1)^m factor
+
+    if (n == m)
+        return pmm;
+
+    // P_{m+1}^m(x)
+    double pmmp1 = x * (2*m + 1) * pmm;
+    if (n == m+1)
+        return pmmp1;
+
+    // Upward recurrence
+    double pnm2 = pmm;
+    double pnm1 = pmmp1;
+    double pn = 0.0;
+    for (int l = m+2; l <= n; ++l) {
+        pn = ((2*l - 1) * x * pnm1 - (l + m - 1) * pnm2) / (l - m);
+        pnm2 = pnm1;
+        pnm1 = pn;
+    }
+    return pn;
+}
+
 /**
  * Compute the complex spherical harmonic (complex, condon-shortley phase)
  * Y_(n, m) (theta, phi)
@@ -53,7 +95,7 @@ Kokkos::complex<double> Ynm(int n, int m, double theta, double phi)
     int mp = Kokkos::abs(m);
     double x = Kokkos::cos(theta);
 
-    double Pnm = std::assoc_legendre(n, mp, x);
+    double Pnm = assoc_legendre(n, mp, x);
 
     // See equation 3.27, source 4 for including sqrt((2n+1 / 4pi))
     double norm = Kokkos::sqrt( ((2.0*n+1)/(4.0*pi)) *
@@ -80,7 +122,18 @@ void cart2sph(double x, double y, double z, double &r, double &theta, double &ph
 }
 
 /**
- * Assumes slice 0 of AoSoAType are the cartesian cooridnates of the point.
+ * Compute offset into flattened multipole array
+ * (n,m) ↦ index
+ */
+KOKKOS_INLINE_FUNCTION
+int index(int n, int m) {
+    return n*n + (m + n);
+}
+
+/**
+ * Operator calculates the kernel for scalar-based multipoles
+ * and return the multipole coefficient matrix flattened into a 
+ * 1D vector.
  */
 template <class MemorySpace, class ExecutionSpace>
 struct Scalar {
@@ -94,15 +147,6 @@ public:
     {}
 
     int _p;
-
-    /**
-     * Compute offset into flattened multipole array
-     * (n,m) ↦ index
-     */
-    KOKKOS_INLINE_FUNCTION
-    int index(int n, int m) const {
-        return n*n + (m + n);
-    }
 
     /**
      * Compute multipole coefficients M[n][m]
@@ -125,29 +169,31 @@ public:
         Kokkos::View<cdouble*, memory_space> M("M", (p+1)*(p+1));
         Kokkos::deep_copy(M, cdouble(0.0));
 
-        // Compute coefficients serially for now
-        for (std::size_t i = 0; i < k; ++i)
-        {
-            double dx = pos(i,0) - expansion_center[0];
-            double dy = pos(i,1) - expansion_center[1];
-            double dz = pos(i,2) - expansion_center[2];
+        // Further optimize this code for running on the device
+        Kokkos::parallel_for( "compute multipole coefficients",
+            Kokkos::RangePolicy<execution_space>(0, k),
+            KOKKOS_LAMBDA(const int i) {
+                double dx = pos(i,0) - expansion_center[0];
+                double dy = pos(i,1) - expansion_center[1];
+                double dz = pos(i,2) - expansion_center[2];
 
-            double rho, alpha, beta;
-            cart2sph(dx, dy, dz, rho, alpha, beta);
+                double rho, alpha, beta;
+                cart2sph(dx, dy, dz, rho, alpha, beta);
 
-            // Equation 3.36, source 4
-            for (int n = 0; n <= p; ++n)
-            {
-                for (int m = -n; m <= n; ++m)
+                // Equation 3.36, source 4
+                for (int n = 0; n <= p; ++n)
                 {
-                    int idx = index(n,m);
-                    // Equation 3.37, source 4
-                    M(idx) += scalar(i) *
-                              Kokkos::pow(rho, n) *
-                              Kokkos::conj(Ynm(n, m, alpha, beta));
+                    for (int m = -n; m <= n; ++m)
+                    {
+                        int idx = index(n, m);
+                        // Equation 3.37, source 4
+                        auto val = scalar(i) *
+                                Kokkos::pow(rho, n) *
+                                Kokkos::conj(Ynm(n, m, alpha, beta));
+                        Kokkos::atomic_add(&M(idx), val);
+                    }
                 }
-            }
-        }
+            });
         return M;
     }
 };

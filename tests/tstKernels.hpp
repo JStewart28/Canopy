@@ -85,7 +85,7 @@ void scalarKernel()
         for (int n=0; n<=p; ++n) {
             double pref = 4*pi / double(2*n + 1);
             for (int m=-n; m<=n; ++m) {
-                int idx = kernel.index(n,m);
+                int idx = Canopy::Kernel::index(n,m);
                 phi_multipole += pref * M_host(idx) / Kokkos::pow(r,n+1) *
                                  Canopy::Kernel::Ynm(n,m,theta,phi);
             }
