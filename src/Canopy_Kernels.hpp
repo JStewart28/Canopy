@@ -34,6 +34,19 @@ namespace Canopy
 namespace Kernel
 {
 
+// Cartesian to spherical coorindates: (x, y, z) -> (r,theta,phi)
+KOKKOS_INLINE_FUNCTION
+void cart2sph( double x, double y, double z, double& r, double& theta,
+               double& phi )
+{
+    r = Kokkos::sqrt( x * x + y * y + z * z );
+    theta = ( r == 0.0 ? 0.0 : Kokkos::acos( z / r ) ); // polar angle
+    phi = Kokkos::atan2( y, x );                        // azimuth
+}
+
+namespace Scalar
+{
+
 //---------------------------------------------------------------------------//
 // Factorial double: (2m-1)!!
 KOKKOS_INLINE_FUNCTION
@@ -117,16 +130,6 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
     return y;
 }
 
-// Cartesian to spherical coorindates: (x, y, z) -> (r,theta,phi)
-KOKKOS_INLINE_FUNCTION
-void cart2sph( double x, double y, double z, double& r, double& theta,
-               double& phi )
-{
-    r = Kokkos::sqrt( x * x + y * y + z * z );
-    theta = ( r == 0.0 ? 0.0 : Kokkos::acos( z / r ) ); // polar angle
-    phi = Kokkos::atan2( y, x );                        // azimuth
-}
-
 /**
  * Compute offset into flattened multipole array
  * (n,m) -> index
@@ -140,14 +143,14 @@ int index( int n, int m ) { return n * n + ( m + n ); }
  * 1D vector.
  */
 template <class MemorySpace, class ExecutionSpace>
-struct ScalarP2M
+struct P2M
 {
   public:
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
     using cdouble = Kokkos::complex<double>;
 
-    ScalarP2M( int p )
+    P2M( int p )
         : _p( p )
     {
     }
@@ -202,6 +205,8 @@ struct ScalarP2M
         return M;
     }
 };
+
+} // end namespace Scalar
 
 } // end namespace Kernel
 

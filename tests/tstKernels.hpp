@@ -76,7 +76,7 @@ void scalarP2MKernel()
     // Loop over truncation degree
     for (int p = 1; p <= 5; ++p)
     {
-        Canopy::Kernel::ScalarP2M<TEST_MEMSPACE, TEST_EXECSPACE> kernel(p);
+        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> kernel(p);
 
         // Particle to multipole calcuation performed in operator
         auto M = kernel(cart_coords, q, num_points, expansion_center);
@@ -89,9 +89,9 @@ void scalarP2MKernel()
         for (int n=0; n<=p; ++n) {
             double pref = 4*pi / double(2*n + 1);
             for (int m=-n; m<=n; ++m) {
-                int idx = Canopy::Kernel::index(n,m);
+                int idx = Canopy::Kernel::Scalar::index(n,m);
                 phi_multipole += pref * M_host(idx) / Kokkos::pow(r,n+1) *
-                                 Canopy::Kernel::Ynm(n,m,theta,phi);
+                                 Canopy::Kernel::Scalar::Ynm(n,m,theta,phi);
             }
         }
 
@@ -113,7 +113,7 @@ void scalarP2MKernel()
 //---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
-TEST( Kernel, scalarKernel ) { scalarKernel(); }
+TEST( Kernel, scalarP2MKernel ) { scalarP2MKernel(); }
 
 //---------------------------------------------------------------------------//
 
