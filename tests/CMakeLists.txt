@@ -15,12 +15,11 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 #   Kernels
 #   )
 
-# set(SERIAL_TESTS
-#   Add tests here...
-#   )
+set(SERIAL_TESTS
+  Kernels
+  )
 
 set(MPI_TESTS
-  Kernels
   Tree
   )
 
