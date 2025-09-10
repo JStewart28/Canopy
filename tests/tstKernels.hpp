@@ -23,7 +23,7 @@ namespace Test
 /**
  * Test that scalar kernels are correctly calculated
  */
-void scalarKernel()
+void scalarP2MKernel()
 {
     // Create points and q (scalar value)
     const int num_points = 20;
@@ -76,10 +76,14 @@ void scalarKernel()
     // Loop over truncation degree
     for (int p = 1; p <= 5; ++p)
     {
-        Canopy::Kernel::Scalar<TEST_MEMSPACE, TEST_EXECSPACE> kernel(p);
+        Canopy::Kernel::ScalarP2M<TEST_MEMSPACE, TEST_EXECSPACE> kernel(p);
+
+        // Particle to multipole calcuation performed in operator
         auto M = kernel(cart_coords, q, num_points, expansion_center);
         auto M_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), M);
 
+        // Perform multipole to particle conversation to calculate potential at target
+        // Equation 3.36 in source 4
         using cdouble = Kokkos::complex<double>;
         cdouble phi_multipole = 0.0;
         for (int n=0; n<=p; ++n) {
