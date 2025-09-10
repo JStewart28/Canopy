@@ -58,6 +58,15 @@ double double_factorial( int m )
     return res;
 }
 
+KOKKOS_INLINE_FUNCTION
+double factorial(int k) {
+    if (k < 0) throw std::invalid_argument("Negative factorial");
+    double result = 1.0;
+    for (int i = 2; i <= k; ++i)
+        result *= i;
+    return result;
+}
+
 /**
  * Implementation of std::assoc_legendre that is callable on the device.
  * Per equations 3.33 and 3.34 in source 4.
@@ -203,6 +212,104 @@ struct P2M
                 }
             } );
         return M;
+    }
+};
+
+/**
+ * Equation 3.26, source 4
+ */
+KOKKOS_INLINE_FUNCTION
+double compute_A(int n, int m) {
+    double denom = Kokkos::sqrt(factorial(n - m) * factorial(n + m));
+    double sign = (n % 2 == 0) ? 1.0 : -1.0;  // (-1)^n
+    return sign / denom;
+}
+
+/**
+ * Equation 3.43, source 4
+ */
+KOKKOS_INLINE_FUNCTION
+double compute_J(int n, int m) {
+    if (n * m < 0) {
+        int min_abs = (Kokkos::abs(n) < Kokkos::abs(m)) ? Kokkos::abs(n) : Kokkos::abs(m);
+        return double(min_abs % 2 == 0) ? 1 : -1);  // (-1)^min(|n|,|m|)
+    } else {
+        return 1.0;
+    }
+}
+
+/**
+ * Operator calculates the multipole expansions about the centers of
+ * cells not in the leaf layer using the potential field from its child cells
+ * Per source 4, page 68, step 2.
+ */
+template <class MemorySpace, class ExecutionSpace>
+struct M2M
+{
+  public:
+    using memory_space = MemorySpace;
+    using execution_space = ExecutionSpace;
+    using cdouble = Kokkos::complex<double>;
+
+    M2M( int p )
+        : _p( p )
+    {
+        _M = Kokkos::View<cdouble*, memory_space>( "M", ( p + 1 ) * ( p + 1 ) );
+        Kokkos::deep_copy( M, cdouble( 0.0 ) );
+    }
+
+    int _p;
+    Kokkos::View<cdouble*, memory_space> _M;
+
+    template <class MultipoleVector, class ScalarArray>
+    void operator()( const MultipoleVector& M_child, std::size_t k,
+                     const Kokkos::Array<double, 3>& this_center,
+                     const Kokkos::Array<double, 3>& child_center ) const
+    {
+        int p = _p;
+        auto M = _M;
+
+        // displacement from child center to parent center
+        double dx = this_center[0] - child_center[0];
+        double dy = this_center[1] - child_center[1];
+        double dz = this_center[2] - child_center[2];
+
+        // convert displacement to spherical coordinates
+        double rho, alpha, beta;
+        cart2sph( dx, dy, dz, rho, alpha, beta );
+
+        // loop over parent multipole orders
+        for ( int j = 0; j <= p; ++j )
+        {
+            for ( int k_j = -j; k_j <= j; ++k_j )
+            {
+                Kokkos::complex<double> Mjk( 0.0, 0.0 );
+
+                // sum over child multipole orders
+                // Equations 3.56 and 3.57 in source 4
+                for ( int n = 0; n <= p; ++n )
+                {
+                    for ( int m = -n; m <= n; ++m )
+                    {
+                        // Equation 3.43, source 4
+                        auto J = compute_J( j, k_j, n, m );
+                        // Equation 3.26, source 4
+                        auto A = compute_A( j, k_j, n, m );
+
+                        // child multipole coefficient
+                        auto Mnm = M_child( n * ( n + 1 ) + m );
+
+                        // accumulate contribution
+                        // Equation 3.57, source 4
+                        Mjk += J * A * std::pow( rho, n ) * Mnm *
+                               Ynm_conj( n, m, theta, phi );
+                    }
+                }
+
+                // add to parent multipole
+                M( j * ( j + 1 ) + k_j ) += Mjk;
+            }
+        }
     }
 };
 
