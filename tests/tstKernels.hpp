@@ -21,6 +21,63 @@ namespace Test
 //---------------------------------------------------------------------------//
 
 /**
+ * Fill a view with random (x, y, z) coordinates within the specified bounds,
+ * where bounds is (x_min, y_min, z_min, x_max, y_max, z_max)
+ */
+template <class PosView>
+void fillRandomCoordinates(PosView& cart_coords, Kokkos::Array<double, 6> bounds)
+{
+    using RandomPool = Kokkos::Random_XorShift64_Pool<TEST_EXECSPACE>;
+    RandomPool rand_pool( 12345 ); // Seed the random number generator
+    Kokkos::parallel_for(
+        "populate_cart_coords",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, cart_coords.extent(0) ),
+        KOKKOS_LAMBDA( const int i ) {
+            auto rand_gen = rand_pool.get_state();
+            
+            // X-coordinate
+            double min_x = bounds[0];
+            double max_x = bounds[3];
+            cart_coords( i, 0 ) = (max_x - min_x) * rand_gen.drand() + min_x;
+
+            // Y-coordinate
+            double min_y = bounds[1];
+            double max_y = bounds[4];
+            cart_coords( i, 1 ) = (max_y - min_y) * rand_gen.drand() + min_y;
+            
+            // Z-coordinate
+            double min_z = bounds[2];
+            double max_z = bounds[5];
+            cart_coords( i, 2 ) = (max_z - min_z) * rand_gen.drand() + min_z;
+            
+            rand_pool.free_state( rand_gen );
+        } );
+    Kokkos::fence();
+}
+
+/**
+ * Fill a view with random scalar values within the specified (min, max) bound.
+ */
+template <class View>
+void fillRandomScalar(View& q, Kokkos::Array<double, 2> bounds)
+{
+    using RandomPool = Kokkos::Random_XorShift64_Pool<TEST_EXECSPACE>;
+    RandomPool rand_pool( 12345 ); // Seed the random number generator
+    Kokkos::parallel_for(
+        "populate_cart_coords",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, q.extent(0) ),
+        KOKKOS_LAMBDA( const int i ) {
+            auto rand_gen = rand_pool.get_state();
+            // X-coordinate
+            double min = bounds[0];
+            double max = bounds[1];
+            q( i ) = (max - min) * rand_gen.drand() + min;
+            rand_pool.free_state( rand_gen );
+        } );
+    Kokkos::fence();
+}
+
+/**
  * Test that scalar kernels are correctly calculated
  */
 void scalarP2MKernel()
@@ -30,21 +87,12 @@ void scalarP2MKernel()
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
+    
+    Kokkos::Array<double, 6> coord_bounds = {-1.0, -1.0, -1.0, 1.0, 1.0, 1.0};
+    fillRandomCoordinates(cart_coords, coord_bounds);
 
-    using RandomPool = Kokkos::Random_XorShift64_Pool<TEST_EXECSPACE>;
-    RandomPool rand_pool( 12345 ); // Seed the random number generator
-    Kokkos::parallel_for(
-        "populate_cart_coords",
-        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_points ),
-        KOKKOS_LAMBDA( const int i ) {
-            auto rand_gen = rand_pool.get_state();
-            cart_coords( i, 0 ) = rand_gen.drand() * 2.0 - 1.0;
-            cart_coords( i, 1 ) = rand_gen.drand() * 2.0 - 1.0;
-            cart_coords( i, 2 ) = rand_gen.drand() * 2.0 - 1.0;
-            q( i ) = cart_coords( i, 0 ) * 1.5;
-            rand_pool.free_state( rand_gen );
-        } );
-    Kokkos::fence();
+    Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
+    fillRandomScalar(q, charge_bounds);
 
     // Expansion center
     Kokkos::Array<double, 3> expansion_center = { 0.1, -0.6, 0.3 };
@@ -86,7 +134,8 @@ void scalarP2MKernel()
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> kernel( p );
 
         // Particle to multipole calcuation performed in operator
-        auto M = kernel( cart_coords, q, num_points, expansion_center );
+        kernel( cart_coords, q, num_points, expansion_center );
+        auto M = kernel.coefficients();
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
 
