@@ -50,23 +50,19 @@ Kokkos::complex<double> Ynm(int n, int m, double theta, double phi)
     using cdouble = Kokkos::complex<double>;
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
-    // Work with |m|
     int mp = Kokkos::abs(m);
     double x = Kokkos::cos(theta);
 
-    // Associated Legendre polynomial P_n^m(cosθ)
     double Pnm = std::assoc_legendre(n, mp, x);
 
-    // Normalization factor
     double norm = Kokkos::sqrt( ((2.0*n+1)/(4.0*pi)) *
                                 Kokkos::tgamma(n-mp+1) / Kokkos::tgamma(n+mp+1) );
 
-    // Base Y_n^m for m >= 0
     cdouble y = norm * Pnm * Kokkos::polar(1.0, double(mp) * phi);
 
     if (m < 0)
     {
-        // Relation: Y_n^{-m} = (-1)^m * conj(Y_n^m)
+        // Y_n^{-m} = (-1)^{|m|} conj(Y_n^{|m|})
         return Kokkos::pow(-1.0, mp) * Kokkos::conj(y);
     }
     return y;
@@ -127,8 +123,7 @@ public:
         Kokkos::View<cdouble*, memory_space> M("M", (p+1)*(p+1));
         Kokkos::deep_copy(M, cdouble(0.0));
 
-        // Compute coefficients on host (serial) for now
-        // (can parallelize if needed)
+        // Compute coefficients serially for now
         for (std::size_t i = 0; i < k; ++i)
         {
             double dx = pos(i,0) - expansion_center[0];
