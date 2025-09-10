@@ -173,6 +173,14 @@ struct P2M
     auto coefficients() {return _M;}
 
     /**
+     * Clear coefficents
+     */
+    void clear()
+    {
+        Kokkos::deep_copy( _M, cdouble( 0.0 ) );
+    }
+
+    /**
      * Compute multipole coefficients M[n][m]
      * up to order p around expansion_center.
      *
