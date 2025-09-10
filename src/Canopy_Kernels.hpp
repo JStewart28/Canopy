@@ -23,8 +23,8 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_Sort.hpp>
 
-#include <memory>
 #include <cmath>
+#include <memory>
 
 #include <limits>
 
@@ -37,10 +37,11 @@ namespace Kernel
 //---------------------------------------------------------------------------//
 // Factorial double: (2m-1)!!
 KOKKOS_INLINE_FUNCTION
-double double_factorial(int m) {
+double double_factorial( int m )
+{
     double res = 1.0;
-    for (int k = 1; k <= m; ++k)
-        res *= (2*k - 1);
+    for ( int k = 1; k <= m; ++k )
+        res *= ( 2 * k - 1 );
     return res;
 }
 
@@ -49,28 +50,31 @@ double double_factorial(int m) {
  * Per equations 3.33 and 3.34 in source 4.
  */
 KOKKOS_INLINE_FUNCTION
-double assoc_legendre(int n, int m, double x) {
-    if (m < 0 || m > n)
+double assoc_legendre( int n, int m, double x )
+{
+    if ( m < 0 || m > n )
         return 0.0; // undefined outside this range
 
     // P_m^m(x)
-    double pmm = double_factorial(m) * std::pow(1.0 - x*x, 0.5*m);
-    if (m % 2 == 1) pmm = -pmm; // (-1)^m factor
+    double pmm = double_factorial( m ) * std::pow( 1.0 - x * x, 0.5 * m );
+    if ( m % 2 == 1 )
+        pmm = -pmm; // (-1)^m factor
 
-    if (n == m)
+    if ( n == m )
         return pmm;
 
     // P_{m+1}^m(x)
-    double pmmp1 = x * (2*m + 1) * pmm;
-    if (n == m+1)
+    double pmmp1 = x * ( 2 * m + 1 ) * pmm;
+    if ( n == m + 1 )
         return pmmp1;
 
     // Upward recurrence
     double pnm2 = pmm;
     double pnm1 = pmmp1;
     double pn = 0.0;
-    for (int l = m+2; l <= n; ++l) {
-        pn = ((2*l - 1) * x * pnm1 - (l + m - 1) * pnm2) / (l - m);
+    for ( int l = m + 2; l <= n; ++l )
+    {
+        pn = ( ( 2 * l - 1 ) * x * pnm1 - ( l + m - 1 ) * pnm2 ) / ( l - m );
         pnm2 = pnm1;
         pnm1 = pn;
     }
@@ -81,44 +85,46 @@ double assoc_legendre(int n, int m, double x) {
  * Compute the complex spherical harmonic (complex, condon-shortley phase)
  * Y_(n, m) (theta, phi)
  * Where:
- *  theta is the polar angle 
+ *  theta is the polar angle
  *  phi is the azimuthal angle
  * in spherical coorindates
  * Per equation 3.32 in source 4.
  */
 KOKKOS_INLINE_FUNCTION
-Kokkos::complex<double> Ynm(int n, int m, double theta, double phi)
+Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
 {
     using cdouble = Kokkos::complex<double>;
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
-    int mp = Kokkos::abs(m);
-    double x = Kokkos::cos(theta);
+    int mp = Kokkos::abs( m );
+    double x = Kokkos::cos( theta );
 
-    double Pnm = assoc_legendre(n, mp, x);
+    double Pnm = assoc_legendre( n, mp, x );
 
     // See equation 3.27, source 4 for including sqrt((2n+1 / 4pi))
-    double norm = Kokkos::sqrt( ((2.0*n+1)/(4.0*pi)) *
-                                Kokkos::tgamma(n-mp+1) / Kokkos::tgamma(n+mp+1) );
+    double norm = Kokkos::sqrt( ( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ) *
+                                Kokkos::tgamma( n - mp + 1 ) /
+                                Kokkos::tgamma( n + mp + 1 ) );
 
     // Equation 3.32, source 4
-    cdouble y = norm * Pnm * Kokkos::polar(1.0, double(mp) * phi);
+    cdouble y = norm * Pnm * Kokkos::polar( 1.0, double( mp ) * phi );
 
-    if (m < 0)
+    if ( m < 0 )
     {
         // Y_n^{-m} = (-1)^{|m|} conj(Y_n^{|m|})
-        return Kokkos::pow(-1.0, mp) * Kokkos::conj(y);
+        return Kokkos::pow( -1.0, mp ) * Kokkos::conj( y );
     }
     return y;
 }
 
 // Cartesian to spherical coorindates: (x, y, z) -> (r,theta,phi)
 KOKKOS_INLINE_FUNCTION
-void cart2sph(double x, double y, double z, double &r, double &theta, double &phi)
+void cart2sph( double x, double y, double z, double& r, double& theta,
+               double& phi )
 {
-    r = Kokkos::sqrt(x*x + y*y + z*z);
-    theta = (r==0.0 ? 0.0 : Kokkos::acos(z/r)); // polar angle
-    phi = Kokkos::atan2(y, x); // azimuth
+    r = Kokkos::sqrt( x * x + y * y + z * z );
+    theta = ( r == 0.0 ? 0.0 : Kokkos::acos( z / r ) ); // polar angle
+    phi = Kokkos::atan2( y, x );                        // azimuth
 }
 
 /**
@@ -126,25 +132,25 @@ void cart2sph(double x, double y, double z, double &r, double &theta, double &ph
  * (n,m) ↦ index
  */
 KOKKOS_INLINE_FUNCTION
-int index(int n, int m) {
-    return n*n + (m + n);
-}
+int index( int n, int m ) { return n * n + ( m + n ); }
 
 /**
  * Operator calculates the kernel for scalar-based multipoles
- * and return the multipole coefficient matrix flattened into a 
+ * and return the multipole coefficient matrix flattened into a
  * 1D vector.
  */
 template <class MemorySpace, class ExecutionSpace>
-struct Scalar {
-public:
-    using memory_space   = MemorySpace;
+struct Scalar
+{
+  public:
+    using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
-    using cdouble        = Kokkos::complex<double>;
+    using cdouble = Kokkos::complex<double>;
 
-    Scalar(int p)
-        : _p(p)
-    {}
+    Scalar( int p )
+        : _p( p )
+    {
+    }
 
     int _p;
 
@@ -160,46 +166,42 @@ public:
      */
     template <class PositionArray, class ScalarArray>
     Kokkos::View<cdouble*, memory_space>
-    operator()(const PositionArray& pos,
-               const ScalarArray& scalar,
-               std::size_t k,
-               const Kokkos::Array<double, 3>& expansion_center) const
+    operator()( const PositionArray& pos, const ScalarArray& scalar,
+                std::size_t k,
+                const Kokkos::Array<double, 3>& expansion_center ) const
     {
         int p = _p;
-        Kokkos::View<cdouble*, memory_space> M("M", (p+1)*(p+1));
-        Kokkos::deep_copy(M, cdouble(0.0));
+        Kokkos::View<cdouble*, memory_space> M( "M", ( p + 1 ) * ( p + 1 ) );
+        Kokkos::deep_copy( M, cdouble( 0.0 ) );
 
         // Further optimize this code for running on the device
-        Kokkos::parallel_for( "compute multipole coefficients",
-            Kokkos::RangePolicy<execution_space>(0, k),
-            KOKKOS_LAMBDA(const int i) {
-                double dx = pos(i,0) - expansion_center[0];
-                double dy = pos(i,1) - expansion_center[1];
-                double dz = pos(i,2) - expansion_center[2];
+        Kokkos::parallel_for(
+            "compute multipole coefficients",
+            Kokkos::RangePolicy<execution_space>( 0, k ),
+            KOKKOS_LAMBDA( const int i ) {
+                double dx = pos( i, 0 ) - expansion_center[0];
+                double dy = pos( i, 1 ) - expansion_center[1];
+                double dz = pos( i, 2 ) - expansion_center[2];
 
                 double rho, alpha, beta;
-                cart2sph(dx, dy, dz, rho, alpha, beta);
+                cart2sph( dx, dy, dz, rho, alpha, beta );
 
                 // Equation 3.36, source 4
-                for (int n = 0; n <= p; ++n)
+                for ( int n = 0; n <= p; ++n )
                 {
-                    for (int m = -n; m <= n; ++m)
+                    for ( int m = -n; m <= n; ++m )
                     {
-                        int idx = index(n, m);
+                        int idx = index( n, m );
                         // Equation 3.37, source 4
-                        auto val = scalar(i) *
-                                Kokkos::pow(rho, n) *
-                                Kokkos::conj(Ynm(n, m, alpha, beta));
-                        Kokkos::atomic_add(&M(idx), val);
+                        auto val = scalar( i ) * Kokkos::pow( rho, n ) *
+                                   Kokkos::conj( Ynm( n, m, alpha, beta ) );
+                        Kokkos::atomic_add( &M( idx ), val );
                     }
                 }
-            });
+            } );
         return M;
     }
 };
-
-
-
 
 } // end namespace Kernel
 
