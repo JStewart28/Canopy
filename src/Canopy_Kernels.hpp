@@ -216,6 +216,8 @@ struct P2M
                         auto val = scalar( i ) * Kokkos::pow( rho, n ) *
                                    Kokkos::conj( Ynm( n, -m, alpha, beta ) );
                         Kokkos::atomic_add( &M( idx ), val );
+                        printf("k%d, n%d, m%d setting index: %d\n",
+                            k, n, m, idx);
                     }
                 }
             } );
@@ -316,9 +318,9 @@ struct M2M
         // general case
         for (int j = 0; j <= p; ++j)
         {
-            for (int k_j = -j; k_j <= j; ++k_j)
+            for (int k = -j; k <= j; ++k)
             {
-                cdouble Mjk(0.0, 0.0); // accumulator for M_j^{k_j}
+                cdouble Mjk(0.0, 0.0); // accumulator for M_j^{k}
 
                 for (int n = 0; n <= j; ++n)
                 {
@@ -326,32 +328,33 @@ struct M2M
 
                     for (int m = -n; m <= n; ++m)
                     {
-                        int k_m = k_j - m; // child order used
+                        int k_m = k - m; // child order used
 
                         // validity check: order must satisfy |k_m| <= j_n
-                        if ( std::abs(k_m) > j_n ) continue;
+                        // if ( std::abs(k_m) > j_n ) continue;
 
                         // child index: offset = j_n*j_n, pos = (k_m + j_n)
-                        int child_idx = j_n * j_n + (k_m + j_n);
-                        cdouble O = M_child( child_idx );
+                        printf("j%d, k%d, n%d, m%d: Getting index %d\n",
+                            j, k, n, m, index(j_n, k_m));
+                        cdouble O = M_child( index(j_n, k_m) );
 
                         // translation coefficients (use child degree/order where appropriate)
-                        const double J = compute_J( j_n, k_m );   // J_{j-n}^{k-j}? -- use child degree/order
+                        const double J = compute_J( m, k_m );   // J_{j-n}^{k-j}? -- use child degree/order
                         const double A0 = compute_A( n, m );      // A_n^m
                         const double A1 = compute_A( j_n, k_m );  // A_{j-n}^{k_j-m}
-                        const double A_kj = compute_A( j, k_j );  // A_j^{k_j} (denominator)
+                        const double A_kj = compute_A( j, k );  // A_j^{k_j} (denominator)
 
                         double rho_n = Kokkos::pow( rho, n );
 
                         // Y_n^{-m}(alpha,beta) --- use -m inside Ynm and conjugate
-                        const cdouble Y = Kokkos::conj(Ynm( n, m, alpha, beta ));
+                        const cdouble Y = Kokkos::conj(Ynm( n, -m, alpha, beta ));
 
                         // contribution (matches structure of Eq. 3.57)
                         Mjk += ( O * J * A0 * A1 * rho_n * Y ) / A_kj;
                     }
                 }
 
-                int parent_idx = j*j + (k_j + j);
+                int parent_idx = j*j + (k + j);
                 M( parent_idx ) += Mjk;
             }
         }
