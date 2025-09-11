@@ -162,7 +162,7 @@ struct P2M
         : _p( p )
     {
         _M = Kokkos::View<cdouble*, memory_space>( "M", ( p + 1 ) * ( p + 1 ) );
-        Kokkos::deep_copy( _M, cdouble( 0.0 ) );
+        clear();
     }
 
   private:
@@ -227,8 +227,6 @@ struct P2M
     }
 };
 
-} // end namespace Scalar
-
 /**
  * Equation 3.26, source 4
  */
@@ -269,7 +267,7 @@ struct M2M
         : _p( p )
     {
         _M = Kokkos::View<cdouble*, memory_space>( "M", ( p + 1 ) * ( p + 1 ) );
-        Kokkos::deep_copy( _M, cdouble( 0.0 ) );
+        clear();
     }
 
   private:
@@ -279,57 +277,79 @@ struct M2M
   public:
     auto coefficients() {return _M;}
 
-    template <class MultipoleVector, class ScalarArray>
-    void operator()( const MultipoleVector& M_child, std::size_t k,
-                     const Kokkos::Array<double, 3>& this_center,
-                     const Kokkos::Array<double, 3>& child_center ) const
+    /**
+     * Clear coefficents
+     */
+    void clear()
+    {
+        Kokkos::deep_copy( _M, cdouble( 0.0 ) );
+    }
+
+    template <class MultipoleVector>
+    void operator()( const MultipoleVector& M_child,
+                    const Kokkos::Array<double, 3>& this_center,
+                    const Kokkos::Array<double, 3>& child_center ) const
     {
         int p = _p;
         auto M = _M;
+
+        // Child center in spherical coordinates (not needed for translation power)
+        double crho, calpha, cbeta;
+        cart2sph( child_center[0], child_center[1], child_center[2], crho, calpha, cbeta );
 
         // displacement from child center to parent center
         double dx = this_center[0] - child_center[0];
         double dy = this_center[1] - child_center[1];
         double dz = this_center[2] - child_center[2];
 
-        // convert displacement to spherical coordinates
+        // convert displacement to spherical coordinates (rho = |R|)
         double rho, alpha, beta;
         cart2sph( dx, dy, dz, rho, alpha, beta );
 
-        // loop over parent multipole orders
-        // for ( int j = 0; j <= p; ++j )
-        // {
-        //     for ( int k_j = -j; k_j <= j; ++k_j )
-        //     {
-        //         Kokkos::complex<double> Mjk( 0.0, 0.0 );
+        for (int j = 0; j <= p; ++j)
+        {
+            for (int k_j = -j; k_j <= j; ++k_j)
+            {
+                // accumulate the parent coefficient M_j^{k_j}
+                Kokkos::complex<double> Mjk(0.0, 0.0);
 
-        //         // sum over child multipole orders
-        //         // Equations 3.56 and 3.57 in source 4
-        //         for ( int n = 0; n <= p; ++n )
-        //         {
-        //             for ( int m = -n; m <= n; ++m )
-        //             {
-        //                 // Equation 3.43, source 4
-        //                 auto J = compute_J( j, k_j, n, m );
-        //                 // Equation 3.26, source 4
-        //                 auto A = compute_A( j, k_j, n, m );
+                // n goes 0..j
+                for (int n = 0; n <= j; ++n)
+                {
+                    for (int m = -n; m <= n; ++m)
+                    {
+                        int j_n = j - n;      // degree of the child coefficient used
+                        int k_m = k_j - m;    // order of the child coefficient used
 
-        //                 // child multipole coefficient
-        //                 auto Mnm = M_child( n * ( n + 1 ) + m );
+                        // child multipole coefficient O_{j-n}^{k_j-m}
+                        const Kokkos::complex<double> O = M_child( index( j_n, k_m ) );
 
-        //                 // accumulate contribution
-        //                 // Equation 3.57, source 4
-        //                 Mjk += J * A * std::pow( rho, n ) * Mnm *
-        //                        Ynm_conj( n, m, theta, phi );
-        //             }
-        //         }
+                        // J and A values from your helpers
+                        const double J = compute_J(m, k_m);         // your compute_J takes (n,m) style; check sign convention
+                        const double A0 = compute_A(n, m);          // A_n^m
+                        const double A1 = compute_A(j_n, k_m);      // A_{j-n}^{k_j-m}
+                        const double A_kj = compute_A(j, k_j);      // denominator A_j^{k_j}
 
-        //         // add to parent multipole
-        //         M( j * ( j + 1 ) + k_j ) += Mjk;
-        //     }
-        // }
+                        // rho^n (use displacement rho, not child radius)
+                        const double rho_n = Kokkos::pow( rho, n );
+
+                        // spherical harmonic factor: Y_n^{-m}(alpha,beta) conjugate if needed
+                        const Kokkos::complex<double> Y = Kokkos::conj( Ynm( n, -m, alpha, beta ) );
+
+                        // contribution (follow eqn 3.57 structure)
+                        Mjk += ( O * J * A0 * A1 * rho_n * Y ) / A_kj;
+                    }
+                }
+
+                // accumulate into parent multipole M_j^{k_j}
+                M( index( j, k_j ) ) += Mjk;
+            }
+        }
     }
+
 };
+
+} // end namespace Scalar
 
 } // end namespace Kernel
 
