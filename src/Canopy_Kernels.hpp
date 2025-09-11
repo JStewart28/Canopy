@@ -34,6 +34,8 @@ namespace Canopy
 namespace Kernel
 {
 
+constexpr auto pi = Kokkos::numbers::pi_v<double>;
+
 // Cartesian to spherical coorindates: (x, y, z) -> (r,theta,phi)
 KOKKOS_INLINE_FUNCTION
 void cart2sph( double x, double y, double z, double& r, double& theta,
@@ -115,7 +117,6 @@ KOKKOS_INLINE_FUNCTION
 Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
 {
     using cdouble = Kokkos::complex<double>;
-    constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     int mp = Kokkos::abs( m );
     double x = Kokkos::cos( theta );
@@ -217,7 +218,7 @@ struct P2M
                                    Kokkos::conj( Ynm( n, -m, alpha, beta ) );
                         Kokkos::atomic_add( &M( idx ), val );
                         printf("k%d, n%d, m%d setting index: %d\n",
-                            k, n, m, idx);
+                            i, n, m, idx);
                     }
                 }
             } );
@@ -300,22 +301,6 @@ struct M2M
         double rho, alpha, beta;
         cart2sph(dx, dy, dz, rho, alpha, beta);
 
-        // quick identity case: if centers coincide, just add the child's coeffs directly.
-        // if ( std::abs(rho) < 1e-15 )
-        // {
-        //     for (int j = 0; j <= p; ++j)
-        //     {
-        //         for (int k_j = -j; k_j <= j; ++k_j)
-        //         {
-        //             int parent_idx = j*j + (k_j + j);
-        //             int child_idx  = parent_idx; // same (no shift)
-        //             M(parent_idx) += M_child(child_idx);
-        //         }
-        //     }
-        //     return;
-        // }
-
-        // general case
         for (int j = 0; j <= p; ++j)
         {
             for (int k = -j; k <= j; ++k)
@@ -331,11 +316,11 @@ struct M2M
                         int k_m = k - m; // child order used
 
                         // validity check: order must satisfy |k_m| <= j_n
-                        // if ( std::abs(k_m) > j_n ) continue;
+                        if ( std::abs(k_m) > j_n ) continue;
 
                         // child index: offset = j_n*j_n, pos = (k_m + j_n)
-                        printf("j%d, k%d, n%d, m%d: Getting index %d\n",
-                            j, k, n, m, index(j_n, k_m));
+                        // printf("j%d, k%d, n%d, m%d, j_n: %d, k_m: %d: Getting index %d\n",
+                        //     j, k, n, m, j_n, k_m, index(j_n, k_m));
                         cdouble O = M_child( index(j_n, k_m) );
 
                         // translation coefficients (use child degree/order where appropriate)
@@ -346,15 +331,26 @@ struct M2M
 
                         double rho_n = Kokkos::pow( rho, n );
 
-                        // Y_n^{-m}(alpha,beta) --- use -m inside Ynm and conjugate
-                        const cdouble Y = Kokkos::conj(Ynm( n, -m, alpha, beta ));
+                        // Use assoc_legendre directly (no normalization) because M_child
+                        // has already been normalized.
+                        int mp = Kokkos::abs(m);                     // |m|
+                        double Pnm = assoc_legendre(n, mp, Kokkos::cos(alpha)); // unnormalized P_n^{|m|}(cos theta)
 
-                        // contribution (matches structure of Eq. 3.57)
-                        Mjk += ( O * J * A0 * A1 * rho_n * Y ) / A_kj;
+                        // conj(Ynm(n,-m,alpha,beta)) / norm  ==> unnormalized factor:
+                        //   Pnm * exp(-i * |m| * beta)
+                        cdouble Y_un = Kokkos::polar(1.0, -double(mp) * beta) * Pnm;
+
+                        // then use Y_un in the accumulation
+                        Mjk += ( O * J * A0 * A1 * rho_n * Y_un ) / A_kj;
+
+                        // printf("j%d, k%d, n%d, m%d: M_child(%d): %0.3lf, J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_kj: %0.3lf, Mjk: %0.3lf\n",
+                        //     j, k, n, m, index(j_n, k_m), O.real(), J, A0, A1, A_kj, Mjk.real());
                     }
                 }
 
                 int parent_idx = j*j + (k + j);
+                // printf("j%d, k%d, updating M(%d) += %0.4lf\n", j, k, parent_idx,
+                //     Mjk.real());
                 M( parent_idx ) += Mjk;
             }
         }

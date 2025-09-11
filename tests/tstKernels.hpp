@@ -194,7 +194,7 @@ void testM2MKernel()
     Kokkos::Array<double, 3> center0 = { 0.0, 0.0, 0.0 };
 
     // Aggregated expansion center
-    Kokkos::Array<double, 3> expansion_center = { 0.0, 0.0, 0.0 };
+    Kokkos::Array<double, 3> expansion_center = { 4.0, 0.0, 0.0 };
 
     // Target point
     double Px = 10.0, Py = 0.0, Pz = 0.0;
@@ -232,7 +232,7 @@ void testM2MKernel()
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 1; p <= 1; ++p )
+    for ( int p = 5; p <= 5; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
@@ -257,10 +257,10 @@ void testM2MKernel()
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
         
-        // for (int i = 0; i < M_host.extent(0); i++)
-        // {
-        //     printf("M2M-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
-        // }
+        for (int i = 0; i < M_host.extent(0); i++)
+        {
+            printf("M2M-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
+        }
         
         // Perform multipole to particle conversion to calculate potential at
         // target. Equation 3.36 in source 4
@@ -284,9 +284,9 @@ void testM2MKernel()
         // Check that the error is within 10*bound, which accounts
         // for imprecision due to imtermediate rounding.
         // EXPECT_NEAR( phi_multipole.real(), phi_direct, 10 * bound )
-        // std::cout    << "p=" << p << " multipole=" << phi_multipole.real()
-        //     << " direct=" << phi_direct << " error=" << error << " bound~"
-        //     << bound << std::endl;
+        std::cout    << "p=" << p << " multipole=" << phi_multipole.real()
+            << " direct=" << phi_direct << " error=" << error << " bound~"
+            << bound << std::endl;
     }
 }
 
