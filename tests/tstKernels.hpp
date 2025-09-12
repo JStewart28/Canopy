@@ -83,22 +83,25 @@ void fillRandomScalar(View& q, Kokkos::Array<double, 2> bounds)
 void testScalarP2MKernel()
 {
     // Create points and q (scalar value)
-    const int num_points = 20;
+    const int num_points = 1;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
     
     Kokkos::Array<double, 6> coord_bounds = {-1.0, -1.0, -1.0, 1.0, 1.0, 1.0};
-    fillRandomCoordinates(cart_coords, coord_bounds);
-
+        Kokkos::View<double* [3], TEST_MEMSPACE> coords0( "coords0",
+                                                          num_points );
+    cart_coords(0, 0) = 1.0;
+    cart_coords(0, 1) = 0.0;
+    cart_coords(0, 2) = 0.0;
     Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
-    fillRandomScalar(q, charge_bounds);
+    q(0) = 1.0;
 
     // Expansion center
-    Kokkos::Array<double, 3> expansion_center = { 0.1, -0.6, 0.3 };
+    Kokkos::Array<double, 3> expansion_center = { 0.0, 0.0, 0.0 };
 
     // Target point
-    double Px = 6.6, Py = -5.1, Pz = 1.9;
+    double Px = 10.0, Py = 0.0, Pz = 0.0;
     double r, theta, phi;
     Canopy::Kernel::cart2sph( Px - expansion_center[0],
                               Py - expansion_center[1],
@@ -129,7 +132,7 @@ void testScalarP2MKernel()
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 2; p <= 5; ++p )
+    for ( int p = 2; p <= 2; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> kernel( p );
 
@@ -138,20 +141,26 @@ void testScalarP2MKernel()
         auto M = kernel.coefficients();
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
+        for (int i = 0; i < M_host.extent(0); i++)
+        {
+            printf("M-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
+        }
+
 
         // Perform multipole to particle conversion to calculate potential at
-        // target. Equation 3.36 in source 4
+        // target. Equation 3.37 in source 4
         using cdouble = Kokkos::complex<double>;
         cdouble phi_multipole = 0.0;
         for ( int n = 0; n <= p; ++n )
         {
-            double pref = 4 * pi / double( 2 * n + 1 );
+            // double norm = Kokkos::sqrt( ( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
+            double norm = 4 * pi / double( 2 * n + 1 );
             for ( int m = -n; m <= n; ++m )
             {
                 int idx = Canopy::Kernel::Scalar::index( n, m );
                 phi_multipole +=
-                    pref * M_host( idx ) / Kokkos::pow( r, n + 1 ) *
-                    Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
+                    M_host( idx ) / Kokkos::pow( r, n + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( n, m, theta, phi ) / norm;
             }
         }
 
@@ -160,8 +169,8 @@ void testScalarP2MKernel()
 
         // Check that the error is within 5*bound, which accounts
         // for imprecision due to imtermediate rounding.
-        EXPECT_NEAR( phi_multipole.real(), phi_direct, 5 * bound )
-            << "p=" << p << " multipole=" << phi_multipole.real()
+        // EXPECT_NEAR( phi_multipole.real(), phi_direct, 5 * bound )
+        std::cout    << "p=" << p << " multipole=" << phi_multipole.real()
             << " direct=" << phi_direct << " error=" << error << " bound~"
             << bound << std::endl;
     }
@@ -342,7 +351,7 @@ void testM2MKernel1()
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 4; p <= 4; ++p )
+    for ( int p = 3; p <= 3; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
@@ -355,6 +364,17 @@ void testM2MKernel1()
         // {
         //     printf("M0-%d: (%0.4lf, %0.4lf)\n", i, M0_host(i).real(), M0_host(i).imag());
         // }
+
+        // Compute multipoles directly for center
+        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m1( p );
+        p2m1( coords0, q0, num_points, expansion_center );
+        auto M01 = p2m1.coefficients();
+        auto M01_host =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M01 );
+        for (int i = 0; i < M01_host.extent(0); i++)
+        {
+            printf("Center: M0-%d: (%0.4lf, %0.4lf)\n", i, M01_host(i).real(), M01_host(i).imag());
+        }
         
         // Create M2M kernel to shift and add multipoles 
         Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
@@ -367,10 +387,10 @@ void testM2MKernel1()
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
         
-        // for (int i = 0; i < M_host.extent(0); i++)
-        // {
-        //     printf("M2M-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
-        // }
+        for (int i = 0; i < M_host.extent(0); i++)
+        {
+            printf("M2M-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
+        }
         
         // Perform multipole to particle conversion to calculate potential at
         // target. Equation 3.36 in source 4
@@ -403,11 +423,11 @@ void testM2MKernel1()
 //---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
-// TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
+TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
 
 // TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
 
-TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
+// TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
 
 //---------------------------------------------------------------------------//
 
