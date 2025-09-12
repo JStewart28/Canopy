@@ -168,33 +168,26 @@ void testScalarP2MKernel()
 }
 
 /**
- * Tests multipole-to-multipole calculations, specifically:
- *  - Translation of multipole expansions
- *  - Addition of multipole expansions
- * Creates two multipole expansions around centers with charges
- * disjunct, well-seperated domains. Translations these expansions
- * to center around a new center and then adds these expansions together.
- * Converts the aggregated multipole expansions back to potentials at
- * a target point and compares the result to the directly calculated potential
- * at the target point.
+ * "Base case":
+ * Tests multipole-to-multipole base case where neither translation
+ * nor addition of coefficients is performed.
  */
-void testM2MKernel()
+void testM2MKernel0()
 {
-    const int num_points = 1;
+    const int num_points = 20;
 
     // Domain 0
     Kokkos::View<double* [3], TEST_MEMSPACE> coords0( "coords0",
                                                           num_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q0( "q0", num_points );
-    Kokkos::Array<double, 6> bounds0 = {-1.0, -1.0, -1.0, 1.0, 1.0, 1.0};
-    coords0(0, 0) = 1.0;
-    coords0(0, 1) = 0.0;
-    coords0(0, 2) = 0.0;
-    q0(0) = 1.0;
-    Kokkos::Array<double, 3> center0 = { 0.0, 0.0, 0.0 };
+    Kokkos::View<double*, TEST_MEMSPACE> q0( "q", num_points );
+    Kokkos::Array<double, 6> bounds0 = {-2.0, -2.0, -2.0, 1.0, 2.0, 1.0};
+    fillRandomCoordinates(coords0, bounds0);
+    Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
+    fillRandomScalar(q0, qbounds0);
+    Kokkos::Array<double, 3> center0 = { -1.0, 0.5, 0.5 };
 
-    // Aggregated expansion center
-    Kokkos::Array<double, 3> expansion_center = { 4.0, 0.0, 0.0 };
+    // Aggregated expansion center - same as domain 0 center
+    Kokkos::Array<double, 3> expansion_center = { -1.0, 0.5, 0.5 };
 
     // Target point
     double Px = 10.0, Py = 0.0, Pz = 0.0;
@@ -232,7 +225,7 @@ void testM2MKernel()
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 5; p <= 5; ++p )
+    for ( int p = 1; p <= 5; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
@@ -241,10 +234,127 @@ void testM2MKernel()
         auto M0 = p2m.coefficients();
         auto M0_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M0 );
-        for (int i = 0; i < M0_host.extent(0); i++)
+        
+        // Create M2M kernel to shift and add multipoles 
+        Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
+
+        // Add M0
+        m2m(M0, expansion_center, center0);
+
+        // Get new multipole coefficients
+        auto M = m2m.coefficients();
+        auto M_host =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
+        
+        // Perform multipole to particle conversion to calculate potential at
+        // target. Equation 3.36 in source 4
+        using cdouble = Kokkos::complex<double>;
+        cdouble phi_multipole = 0.0;
+        for ( int n = 0; n <= p; ++n )
         {
-            printf("M0-%d: (%0.4lf, %0.4lf)\n", i, M0_host(i).real(), M0_host(i).imag());
+            double pref = 4 * pi / double( 2 * n + 1 );
+            for ( int m = -n; m <= n; ++m )
+            {
+                int idx = Canopy::Kernel::Scalar::index( n, m );
+                phi_multipole +=
+                    pref * M_host( idx ) / Kokkos::pow( r, n + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
+            }
         }
+
+        double error = std::abs( phi_multipole.real() - phi_direct );
+        double bound = std::pow( max_rho / r, p + 1 ) * std::abs( phi_direct );
+
+        // Check that the error is within 5*bound, which accounts
+        // for imprecision due to imtermediate rounding.
+        EXPECT_NEAR( phi_multipole.real(), phi_direct, 5 * bound )
+            << "p=" << p << " multipole=" << phi_multipole.real()
+            << " direct=" << phi_direct << " error=" << error << " bound~"
+            << bound << std::endl;
+    }
+}
+
+/**
+ * Tests multipole-to-multipole calculations, specifically:
+ *  - Translation of multipole expansions
+ *  - Addition of multipole expansions
+ * Creates two multipole expansions around centers with charges
+ * disjunct, well-seperated domains. Translations these expansions
+ * to center around a new center and then adds these expansions together.
+ * Converts the aggregated multipole expansions back to potentials at
+ * a target point and compares the result to the directly calculated potential
+ * at the target point.
+ */
+void testM2MKernel1()
+{
+    const int num_points = 1;
+
+    // Domain 0
+    Kokkos::View<double* [3], TEST_MEMSPACE> coords0( "coords0",
+                                                          num_points );
+    Kokkos::View<double*, TEST_MEMSPACE> q0( "q", num_points );
+    // Kokkos::Array<double, 6> bounds0 = {-1.0, -1.0, -1.0, -3.0, -3.0, -3.0};
+    // fillRandomCoordinates(coords0, bounds0);
+    // Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
+    // fillRandomScalar(q0, qbounds0);
+    Kokkos::Array<double, 3> center0 = { 0.0, 1.0, 0.0 };
+    coords0(0, 0) = 1.0;
+    coords0(0, 1) = 0.0;
+    coords0(0, 2) = 0.0;
+    q0(0) = 1.0;
+
+    // Aggregated expansion center
+    Kokkos::Array<double, 3> expansion_center = { 0.0, -10.0, 0.0 };
+
+    // Target point
+    double Px = 10.0, Py = 0.0, Pz = 0.0;
+    double r, theta, phi;
+    Canopy::Kernel::cart2sph( Px - expansion_center[0],
+                              Py - expansion_center[1],
+                              Pz - expansion_center[2], r, theta, phi );
+
+    // Direct potential
+    auto coords0_host =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), coords0 );
+    auto q0_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q0 );
+    double phi_direct = 0.0;
+    double max_rho = 0.0; // for error bound
+    for ( int i = 0; i < num_points; ++i )
+    {
+        double dx, dy, dz, dist;
+        double ddx, ddy, ddz, rho;
+
+        // Domain 0
+        dx = Px - coords0_host( i, 0 );
+        dy = Py - coords0_host( i, 1 );
+        dz = Pz - coords0_host( i, 2 );
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        phi_direct += q0_host( i ) / dist;
+
+        // distance from expansion center for error estimate
+        ddx = coords0_host( i, 0 ) - expansion_center[0];
+        ddy = coords0_host( i, 1 ) - expansion_center[1];
+        ddz = coords0_host( i, 2 ) - expansion_center[2];
+        rho = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
+        max_rho = std::max( max_rho, rho );
+    }
+
+    constexpr auto pi = Kokkos::numbers::pi_v<double>;
+
+    // Loop over truncation degree
+    for ( int p = 4; p <= 4; ++p )
+    {
+        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+
+        // Compute multipoles for domain 0
+        p2m( coords0, q0, num_points, center0 );
+        auto M0 = p2m.coefficients();
+        auto M0_host =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M0 );
+        // for (int i = 0; i < M0_host.extent(0); i++)
+        // {
+        //     printf("M0-%d: (%0.4lf, %0.4lf)\n", i, M0_host(i).real(), M0_host(i).imag());
+        // }
         
         // Create M2M kernel to shift and add multipoles 
         Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
@@ -257,10 +367,10 @@ void testM2MKernel()
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
         
-        for (int i = 0; i < M_host.extent(0); i++)
-        {
-            printf("M2M-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
-        }
+        // for (int i = 0; i < M_host.extent(0); i++)
+        // {
+        //     printf("M2M-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
+        // }
         
         // Perform multipole to particle conversion to calculate potential at
         // target. Equation 3.36 in source 4
@@ -295,7 +405,9 @@ void testM2MKernel()
 //---------------------------------------------------------------------------//
 // TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
 
-TEST( Kernel, testM2MKernel ) { testM2MKernel(); }
+// TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
+
+TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
 
 //---------------------------------------------------------------------------//
 
