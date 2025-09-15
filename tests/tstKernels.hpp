@@ -295,7 +295,8 @@ void testM2MKernel0()
  *  - Translation of multipole expansions
  *  - Addition of multipole expansions
  * Creates a multipole expansions around one center and translates
- * it to another center. Tests against 
+ * it to another center. Tests against the exact calculation 
+ * for potential at the translated center.
  */
 void testM2MKernel1()
 {
@@ -429,24 +430,18 @@ void testM2MKernel1()
     }
 }
 
-//---------------------------------------------------------------------------//
-// RUN TESTS
-//---------------------------------------------------------------------------//
-TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
-
-TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
-
-TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
-
-//---------------------------------------------------------------------------//
-
-} // end namespace Test
-
-
-/*
-void testM2MKernel()
+/**
+ * Tests addition and translation of multipole coefficients.
+ * Creates two multipole expansions around centers with charges
+ * disjunct, well-seperated domains. Translations these expansions
+ * to center around a new center and then adds these expansions together.
+ * Converts the aggregated multipole expansions back to potentials at
+ * a target point and compares the result to the directly calculated potential
+ * at the target point.
+ */
+void testM2MKernel2()
 {
-    const int num_points = 20;
+    const int num_points = 100;
 
     // Domain 0
     Kokkos::View<double* [3], TEST_MEMSPACE> coords0( "coords0",
@@ -472,7 +467,7 @@ void testM2MKernel()
     Kokkos::Array<double, 3> expansion_center = { 0.1, -0.6, 0.3 };
 
     // Target point
-    double Px = 13.6, Py = -7.1, Pz = 10.0;
+    double Px = 23.6, Py = -27.1, Pz = 20.0;
     double r, theta, phi;
     Canopy::Kernel::cart2sph( Px - expansion_center[0],
                               Py - expansion_center[1],
@@ -524,7 +519,7 @@ void testM2MKernel()
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 2; p <= 2; ++p )
+    for ( int p = 1; p <= 5; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
@@ -553,10 +548,10 @@ void testM2MKernel()
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
         
-        for (int i = 0; i < M_host.extent(0); i++)
-        {
-            printf("M%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
-        }
+        // for (int i = 0; i < M_host.extent(0); i++)
+        // {
+        //     printf("M%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
+        // }
         
 
         // Perform multipole to particle conversion to calculate potential at
@@ -565,12 +560,13 @@ void testM2MKernel()
         cdouble phi_multipole = 0.0;
         for ( int n = 0; n <= p; ++n )
         {
-            double pref = 4 * pi / double( 2 * n + 1 );
+            // double norm = 4 * pi / double( 2 * n + 1 );
+            // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
             for ( int m = -n; m <= n; ++m )
             {
                 int idx = Canopy::Kernel::Scalar::index( n, m );
                 phi_multipole +=
-                    pref * M_host( idx ) / Kokkos::pow( r, n + 1 ) *
+                    M_host( idx ) / Kokkos::pow( r, n + 1 ) *
                     Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
             }
         }
@@ -586,4 +582,23 @@ void testM2MKernel()
             << bound << std::endl;
     }
 }
+
+//---------------------------------------------------------------------------//
+// RUN TESTS
+//---------------------------------------------------------------------------//
+TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
+
+TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
+
+TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
+
+TEST( Kernel, testM2MKernel2 ) { testM2MKernel2(); }
+
+//---------------------------------------------------------------------------//
+
+} // end namespace Test
+
+
+/*
+
 */

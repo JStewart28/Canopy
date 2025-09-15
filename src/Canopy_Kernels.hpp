@@ -48,20 +48,21 @@ void cart2sph( double x, double y, double z, double& r, double& theta,
 
 // Factorial double: (2m-1)!!
 KOKKOS_INLINE_FUNCTION
-double double_factorial( int m )
+double factorial(int k)
 {
-    double res = 1.0;
-    for ( int k = 1; k <= m; ++k )
-        res *= ( 2 * k - 1 );
-    return res;
+    // Γ(k+1) = k!
+    return Kokkos::tgamma(static_cast<double>(k) + 1.0);
 }
 
 KOKKOS_INLINE_FUNCTION
-double factorial(int k) {
-    double result = 1.0;
-    for (int i = 2; i <= k; ++i)
-        result *= i;
-    return result;
+double double_factorial(int m)
+{
+    // (2m − 1)!! = (2m)! / (2^m m!)
+    // use gamma functions to avoid integer overflow
+    const double two_m = static_cast<double>(2 * m);
+    const double m_d   = static_cast<double>(m);
+    return Kokkos::tgamma(two_m + 1.0) /
+           (Kokkos::pow(2.0, m_d) * Kokkos::tgamma(m_d + 1.0));
 }
 
 namespace Scalar
