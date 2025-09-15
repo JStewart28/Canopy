@@ -322,10 +322,10 @@ struct M2M
                         if ( std::abs(k_m) > j_n ) continue;
 
 
-                        // child index: offset = j_n*j_n, pos = (k_m + j_n)
+                        int child_index = index(j_n, k_m);
                         // printf("j%d, k%d, n%d, m%d, j_n: %d, k_m: %d: Getting index %d\n",
                         //     j, k, n, m, j_n, k_m, index(j_n, k_m));
-                        cdouble O = M_child( index(j_n, k_m) );
+                        cdouble O = M_child( child_index );
 
                         // translation coefficients (use child degree/order where appropriate)
                         const double J = compute_J( m, k_m );   // J_{j-n}^{k-j}? -- use child degree/order
@@ -340,9 +340,9 @@ struct M2M
                         auto inv_norm = 1.0 / Kokkos::sqrt( ( 2.0 * n + 1 ) / ( 4.0 * pi ) );
                         auto Y_nm = Ynm(n, -m, alpha, beta) * inv_norm;
 
-                        // printf("j%d, k%d, n%d, m%d: J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_jk: %0.3lf, rho_n: %0.3lf, Y_nm: (%0.3lf, %0.3lf), O: (%0.3lf, %0.3lf)\n",
-                        //     j, k, n, m, J, A0, A1, A_jk, rho_n,
-                        //     Y_nm.real(), Y_nm.imag(), O.real(), O.imag());
+                        printf("j%d, k%d, n%d, m%d: +M(%d): J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_jk: %0.3lf, rho_n: %0.3lf, Y_nm: (%0.3lf, %0.3lf), O(%d): (%0.3lf, %0.3lf)\n",
+                            j, k, n, m, index(j, k), J, A0, A1, A_jk, rho_n,
+                            Y_nm.real(), Y_nm.imag(), child_index, O.real(), O.imag());
 
                         // then use Y_un in the accumulation
                         Mjk += ( O * J * A0 * A1 * rho_n * Y_nm ) / A_jk;

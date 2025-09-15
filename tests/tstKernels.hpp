@@ -311,14 +311,14 @@ void testM2MKernel1()
     // fillRandomCoordinates(coords0, bounds0);
     // Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
     // fillRandomScalar(q0, qbounds0);
-    Kokkos::Array<double, 3> center0 = { 0.0, 1.0, 0.0 };
+    Kokkos::Array<double, 3> center0 = { 0.0, 0.0, 0.0 };
     coords0(0, 0) = 1.0;
     coords0(0, 1) = 0.0;
     coords0(0, 2) = 0.0;
     q0(0) = 1.0;
 
     // Aggregated expansion center
-    Kokkos::Array<double, 3> expansion_center = { 0.0, -10.0, 0.0 };
+    Kokkos::Array<double, 3> expansion_center = { 0.0, 1.0, 0.0 };
 
     // Target point
     double Px = 10.0, Py = 0.0, Pz = 0.0;
@@ -356,15 +356,25 @@ void testM2MKernel1()
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 4; p <= 4; ++p )
+    for ( int p = 1; p <= 1; ++p )
     {
+        // Calculate the multipole coefficeints driectly at the expansion center to debug
+        // Known to be correct
+        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m_center( p );
+        p2m_center( coords0, q0, num_points, expansion_center );
+        auto O_center = p2m_center.coefficients();
+        auto O_center_host =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), O_center );
+
+
+
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
         // Compute multipoles for domain 0
         p2m( coords0, q0, num_points, center0 );
-        auto M0 = p2m.coefficients();
-        auto M0_host =
-            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M0 );
+        auto O = p2m.coefficients();
+        auto O_host =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), O );
         // for (int i = 0; i < M0_host.extent(0); i++)
         // {
         //     printf("M0-%d: (%0.4lf, %0.4lf)\n", i, M0_host(i).real(), M0_host(i).imag());
@@ -374,12 +384,18 @@ void testM2MKernel1()
         Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
 
         // Add M0 and M1
-        m2m(M0, expansion_center, center0);
+        m2m(O, expansion_center, center0);
 
         // Get new multipole coefficients
         auto M = m2m.coefficients();
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
+        for (int i = 0; i < M_host.extent(0); i++)
+        {
+            printf("M-%d: (%0.4lf, %0.4lf), O_c-%d: (%0.4lf, %0.4lf), O-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(),
+                M_host(i).imag(), i, O_center_host(i).real(), O_center_host(i).imag(), i, O_host(i).real(), O_host(i).imag());
+        }
+
         
         // for (int i = 0; i < M_host.extent(0); i++)
         // {
@@ -390,15 +406,15 @@ void testM2MKernel1()
         // target. Equation 3.36 in source 4
         using cdouble = Kokkos::complex<double>;
         cdouble phi_multipole = 0.0;
-        for ( int n = 0; n <= p; ++n )
+        for ( int j = 0; j <= p; ++j )
         {
-            double pref = 4 * pi / double( 2 * n + 1 );
-            for ( int m = -n; m <= n; ++m )
+            double norm = 4 * pi / double( 2 * j + 1 );
+            for ( int k = -j; k <= j; ++k )
             {
-                int idx = Canopy::Kernel::Scalar::index( n, m );
+                int idx = Canopy::Kernel::Scalar::index( j, k );
                 phi_multipole +=
-                    pref * M_host( idx ) / Kokkos::pow( r, n + 1 ) *
-                    Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
+                    norm * M_host( idx ) / Kokkos::pow( r, j + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
             }
         }
 
@@ -421,7 +437,7 @@ TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
 
 TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
 
-// TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
+TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
 
 //---------------------------------------------------------------------------//
 
