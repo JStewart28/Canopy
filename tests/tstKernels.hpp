@@ -174,25 +174,25 @@ void testScalarP2MKernel()
  */
 void testM2MKernel0()
 {
-    const int num_points = 1;
+    const int num_points = 20;
 
     // Domain 0
     Kokkos::View<double* [3], TEST_MEMSPACE> coords0( "coords0",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q0( "q", num_points );
-    // Kokkos::Array<double, 6> bounds0 = {-2.0, -2.0, -2.0, 1.0, 2.0, 1.0};
-    // fillRandomCoordinates(coords0, bounds0);
-    // Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
-    // fillRandomScalar(q0, qbounds0);
+    Kokkos::Array<double, 6> bounds0 = {-2.0, -2.0, -2.0, 1.0, 2.0, 1.0};
+    fillRandomCoordinates(coords0, bounds0);
+    Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
+    fillRandomScalar(q0, qbounds0);
     // { -1.0, 0.5, 0.5 };
     // { 0.0, 0.0, 0.0 };
-    coords0(0, 0) = 1.0;
-    coords0(0, 1) = 0.0;
-    coords0(0, 2) = 0.0;
-    q0(0) = 1.0;
+    // coords0(0, 0) = 1.0;
+    // coords0(0, 1) = 0.0;
+    // coords0(0, 2) = 0.0;
+    // q0(0) = 1.0;
 
     // Aggregated expansion center - same as domain 0 center
-    Kokkos::Array<double, 3> expansion_center = { 0.0, 0.0, 0.0 };
+    Kokkos::Array<double, 3> expansion_center = { -4.0, 0.3, 2.2 };
 
     // Target point
     double Px = 10.0, Py = 0.0, Pz = 0.0;
@@ -230,7 +230,7 @@ void testM2MKernel0()
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 2; p <= 2; ++p )
+    for ( int p = 0; p <= 4; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
@@ -254,11 +254,11 @@ void testM2MKernel0()
         auto M = m2m.coefficients();
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
-        for (int i = 0; i < M_host.extent(0); i++)
-        {
-            printf("M-%d: (%0.4lf, %0.4lf), O-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(),
-                M_host(i).imag(), i, M0_host(i).real(), M0_host(i).imag());
-        }
+        // for (int i = 0; i < M_host.extent(0); i++)
+        // {
+        //     printf("M-%d: (%0.4lf, %0.4lf), O-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(),
+        //         M_host(i).imag(), i, M0_host(i).real(), M0_host(i).imag());
+        // }
         
         // Perform multipole to particle conversion to calculate potential at
         // target. Equation 3.36 in source 4
@@ -281,8 +281,8 @@ void testM2MKernel0()
 
         // Check that the error is within 5*bound, which accounts
         // for imprecision due to imtermediate rounding.
-        // EXPECT_NEAR( phi_multipole.real(), phi_direct, 5 * bound )
-        std::cout    << "p=" << p << " multipole=" << phi_multipole.real()
+        EXPECT_NEAR( phi_multipole.real(), phi_direct, 5 * bound )
+            << "p=" << p << " multipole=" << phi_multipole.real()
             << " direct=" << phi_direct << " error=" << error << " bound~"
             << bound << std::endl;
     }

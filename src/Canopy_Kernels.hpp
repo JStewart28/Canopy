@@ -334,17 +334,15 @@ struct M2M
                         const double A_jk = compute_A( j, k );  // A_j^{k_j} (denominator)
 
                         double rho_n = Kokkos::pow( rho, n );
+                        
+                        // M_child already has its Y_nm nrormalized. The Ynm function performs normalization
+                        // internally, so we need to un-normalize it after calling Ynm to avoid double normalization.
+                        auto inv_norm = 1.0 / Kokkos::sqrt( ( 2.0 * n + 1 ) / ( 4.0 * pi ) );
+                        auto Y_nm = Ynm(n, -m, alpha, beta) * inv_norm;
 
-                        auto Y_nm = Ynm(n, -m, alpha, beta);
-
-                        // Use assoc_legendre directly (no normalization) because M_child
-                        // has already been normalized.
-                        // int mp = Kokkos::abs(m);                     // |m|
-                        // double Pnm = Pnm_impl(n, mp, Kokkos::cos(alpha)); // unnormalized P_n^{|m|}(cos theta)
-
-                        // conj(Ynm(n,-m,alpha,beta)) / norm  ==> unnormalized factor:
-                        //   Pnm * exp(-i * |m| * beta)
-                        // cdouble Y_un = Kokkos::polar(1.0, -double(m) * beta) * Pnm;
+                        // printf("j%d, k%d, n%d, m%d: J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_jk: %0.3lf, rho_n: %0.3lf, Y_nm: (%0.3lf, %0.3lf), O: (%0.3lf, %0.3lf)\n",
+                        //     j, k, n, m, J, A0, A1, A_jk, rho_n,
+                        //     Y_nm.real(), Y_nm.imag(), O.real(), O.imag());
 
                         // then use Y_un in the accumulation
                         Mjk += ( O * J * A0 * A1 * rho_n * Y_nm ) / A_jk;
