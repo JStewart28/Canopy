@@ -126,7 +126,7 @@ void testScalarP2MKernel()
         max_rho = std::max( max_rho, rho );
     }
 
-    constexpr auto pi = Kokkos::numbers::pi_v<double>;
+    // constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
     for ( int p = 2; p <= 5; ++p )
@@ -228,7 +228,7 @@ void testM2MKernel0()
         max_rho = std::max( max_rho, rho );
     }
 
-    constexpr auto pi = Kokkos::numbers::pi_v<double>;
+    // constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
     for ( int p = 0; p <= 4; ++p )
@@ -300,21 +300,21 @@ void testM2MKernel0()
  */
 void testM2MKernel1()
 {
-    const int num_points = 1;
+    const int num_points = 20;
 
     // Domain 0
     Kokkos::View<double* [3], TEST_MEMSPACE> coords0( "coords0",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q0( "q", num_points );
-    // Kokkos::Array<double, 6> bounds0 = {-1.0, -1.0, -1.0, -3.0, -3.0, -3.0};
-    // fillRandomCoordinates(coords0, bounds0);
-    // Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
-    // fillRandomScalar(q0, qbounds0);
+    Kokkos::Array<double, 6> bounds0 = {-1.0, -1.0, -1.0, -3.0, -3.0, -3.0};
+    fillRandomCoordinates(coords0, bounds0);
+    Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
+    fillRandomScalar(q0, qbounds0);
     Kokkos::Array<double, 3> center0 = { 0.0, 0.0, 0.0 };
-    coords0(0, 0) = 1.0;
-    coords0(0, 1) = 0.0;
-    coords0(0, 2) = 0.0;
-    q0(0) = 1.0;
+    // coords0(0, 0) = 1.0;
+    // coords0(0, 1) = 0.0;
+    // coords0(0, 2) = 0.0;
+    // q0(0) = 1.0;
 
     // Aggregated expansion center
     Kokkos::Array<double, 3> expansion_center = { 0.0, 1.0, 0.0 };
@@ -352,7 +352,7 @@ void testM2MKernel1()
         max_rho = std::max( max_rho, rho );
     }
 
-    constexpr auto pi = Kokkos::numbers::pi_v<double>;
+    // constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
     for ( int p = 1; p <= 5; ++p )
@@ -444,143 +444,127 @@ void testM2MKernel2()
     const int num_points = 100;
 
     // Domain 0
-    Kokkos::View<double* [3], TEST_MEMSPACE> coords0( "coords0",
-                                                          num_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q0( "q", num_points );
+    Kokkos::View<double* [3], TEST_MEMSPACE> coords( "coords0",
+                                                          num_points * 2 );
+    Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points * 2 );
     Kokkos::Array<double, 6> bounds0 = {-5.0, -4.0, -4.0, -4.0, -3.0, -3.0};
-    fillRandomCoordinates(coords0, bounds0);
+    auto csub = Kokkos::subview(coords, Kokkos::make_pair(0, num_points), Kokkos::ALL);
+    fillRandomCoordinates(csub, bounds0);
     Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
-    fillRandomScalar(q0, qbounds0);
+    auto qsub = Kokkos::subview(q, Kokkos::make_pair(0, num_points));
+    fillRandomScalar(qsub, qbounds0);
     Kokkos::Array<double, 3> center0 = { -4.5, -3.6, 3.7 };
 
-
     // Domain 1
-    Kokkos::View<double* [3], TEST_MEMSPACE> coords1( "coords1", num_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q1( "q", num_points );
     Kokkos::Array<double, 6> bounds1 = {-1.0, 3.0, 1.0, 1.0, 5.0, 2.0};
-    fillRandomCoordinates(coords1, bounds1);
+    csub = Kokkos::subview(coords, Kokkos::make_pair(num_points, num_points*2), Kokkos::ALL);
+    fillRandomCoordinates(coords, bounds1);
     Kokkos::Array<double, 2> qbounds1 = {-10.0, 10.0};
-    fillRandomScalar(q1, qbounds1);
+    qsub = Kokkos::subview(q, Kokkos::make_pair(num_points, num_points*2));
+    fillRandomScalar(qsub, qbounds1);
     Kokkos::Array<double, 3> center1 = { 0.2, 4.2, 1.5 };
 
     // Aggregated expansion center
     Kokkos::Array<double, 3> expansion_center = { 0.1, -0.6, 0.3 };
 
     // Target point
-    double Px = 23.6, Py = -27.1, Pz = 20.0;
+    double Px = 13.6, Py = -7.1, Pz = 10.0;
     double r, theta, phi;
     Canopy::Kernel::cart2sph( Px - expansion_center[0],
                               Py - expansion_center[1],
                               Pz - expansion_center[2], r, theta, phi );
 
     // Direct potential
-    auto coords0_host =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), coords0 );
-    auto coords1_host =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), coords1 );
-    auto q0_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q0 );
-    auto q1_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q1 );
+    auto coords_host =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), coords );
+    auto q_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q );
     double phi_direct = 0.0;
     double max_rho = 0.0; // for error bound
-    for ( int i = 0; i < num_points; ++i )
+    for ( int i = 0; i < num_points * 2; ++i )
     {
         double dx, dy, dz, dist;
         double ddx, ddy, ddz, rho;
 
         // Domain 0
-        dx = Px - coords0_host( i, 0 );
-        dy = Py - coords0_host( i, 1 );
-        dz = Pz - coords0_host( i, 2 );
+        dx = Px - coords_host( i, 0 );
+        dy = Py - coords_host( i, 1 );
+        dz = Pz - coords_host( i, 2 );
         dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        phi_direct += q0_host( i ) / dist;
+        phi_direct += q_host( i ) / dist;
 
         // distance from expansion center for error estimate
-        ddx = coords0_host( i, 0 ) - expansion_center[0];
-        ddy = coords0_host( i, 1 ) - expansion_center[1];
-        ddz = coords0_host( i, 2 ) - expansion_center[2];
-        rho = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
-        max_rho = std::max( max_rho, rho );
-
-         // Domain 1
-        dx = Px - coords1_host( i, 0 );
-        dy = Py - coords1_host( i, 1 );
-        dz = Pz - coords1_host( i, 2 );
-        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        phi_direct += q1_host( i ) / dist;
-
-        // distance from expansion center for error estimate
-        ddx = coords1_host( i, 0 ) - expansion_center[0];
-        ddy = coords1_host( i, 1 ) - expansion_center[1];
-        ddz = coords1_host( i, 2 ) - expansion_center[2];
+        ddx = coords_host( i, 0 ) - expansion_center[0];
+        ddy = coords_host( i, 1 ) - expansion_center[1];
+        ddz = coords_host( i, 2 ) - expansion_center[2];
         rho = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
         max_rho = std::max( max_rho, rho );
     }
 
-    constexpr auto pi = Kokkos::numbers::pi_v<double>;
+    // constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 1; p <= 5; ++p )
-    {
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+    // for ( int p = 1; p <= 5; ++p )
+    // {
+    //     Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
-        // Compute multipoles for domain 0
-        p2m( coords0, q0, num_points, center0 );
-        auto M0 = p2m.coefficients();
-        auto M0_host =
-            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M0 );
+    //     // Compute multipoles for domain 0
+    //     p2m( coords0, q0, num_points, center0 );
+    //     auto M0 = p2m.coefficients();
+    //     auto M0_host =
+    //         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M0 );
         
-        // Compute multipoles for domain 1
-        p2m.clear();
-        p2m( coords1, q1, num_points, center1 );
-        auto M1 = p2m.coefficients();
-        auto M1_host =
-            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M1 );
+    //     // Compute multipoles for domain 1
+    //     p2m.clear();
+    //     p2m( coords1, q1, num_points, center1 );
+    //     auto M1 = p2m.coefficients();
+    //     auto M1_host =
+    //         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M1 );
 
-        // Create M2M kernel to shift and add multipoles 
-        Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
+    //     // Create M2M kernel to shift and add multipoles 
+    //     Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
 
-        // Add M0 and M1
-        m2m(M0, expansion_center, center0);
-        m2m(M1, expansion_center, center1);
+    //     // Add M0 and M1
+    //     m2m(M0, expansion_center, center0);
+    //     m2m(M1, expansion_center, center1);
 
-        // Get new multipole coefficients
-        auto M = m2m.coefficients();
-        auto M_host =
-            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
+    //     // Get new multipole coefficients
+    //     auto M = m2m.coefficients();
+    //     auto M_host =
+    //         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
         
-        // for (int i = 0; i < M_host.extent(0); i++)
-        // {
-        //     printf("M%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
-        // }
+    //     // for (int i = 0; i < M_host.extent(0); i++)
+    //     // {
+    //     //     printf("M%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(), M_host(i).imag());
+    //     // }
         
 
-        // Perform multipole to particle conversion to calculate potential at
-        // target. Equation 3.36 in source 4
-        using cdouble = Kokkos::complex<double>;
-        cdouble phi_multipole = 0.0;
-        for ( int n = 0; n <= p; ++n )
-        {
-            // double norm = 4 * pi / double( 2 * n + 1 );
-            // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
-            for ( int m = -n; m <= n; ++m )
-            {
-                int idx = Canopy::Kernel::Scalar::index( n, m );
-                phi_multipole +=
-                    M_host( idx ) / Kokkos::pow( r, n + 1 ) *
-                    Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
-            }
-        }
+    //     // Perform multipole to particle conversion to calculate potential at
+    //     // target. Equation 3.36 in source 4
+    //     using cdouble = Kokkos::complex<double>;
+    //     cdouble phi_multipole = 0.0;
+    //     for ( int n = 0; n <= p; ++n )
+    //     {
+    //         // double norm = 4 * pi / double( 2 * n + 1 );
+    //         // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
+    //         for ( int m = -n; m <= n; ++m )
+    //         {
+    //             int idx = Canopy::Kernel::Scalar::index( n, m );
+    //             phi_multipole +=
+    //                 M_host( idx ) / Kokkos::pow( r, n + 1 ) *
+    //                 Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
+    //         }
+    //     }
 
-        double error = std::abs( phi_multipole.real() - phi_direct );
-        double bound = std::pow( max_rho / r, p + 1 ) * std::abs( phi_direct );
+    //     double error = std::abs( phi_multipole.real() - phi_direct );
+    //     double bound = std::pow( max_rho / r, p + 1 ) * std::abs( phi_direct );
 
-        // Check that the error is within 10*bound, which accounts
-        // for imprecision due to imtermediate rounding.
-        // EXPECT_NEAR( phi_multipole.real(), phi_direct, 10 * bound )
-        std::cout    << "p=" << p << " multipole=" << phi_multipole.real()
-            << " direct=" << phi_direct << " error=" << error << " bound~"
-            << bound << std::endl;
-    }
+    //     // Check that the error is within 10*bound, which accounts
+    //     // for imprecision due to imtermediate rounding.
+    //     // EXPECT_NEAR( phi_multipole.real(), phi_direct, 10 * bound )
+    //     std::cout    << "p=" << p << " multipole=" << phi_multipole.real()
+    //         << " direct=" << phi_direct << " error=" << error << " bound~"
+    //         << bound << std::endl;
+    // }
 }
 
 //---------------------------------------------------------------------------//
