@@ -145,12 +145,12 @@ void testScalarP2MKernel()
         cdouble phi_multipole = 0.0;
         for ( int n = 0; n <= p; ++n )
         {
-            double pref = 4 * pi / double( 2 * n + 1 );
+            double norm = 4 * pi / double( 2 * n + 1 );
             for ( int m = -n; m <= n; ++m )
             {
                 int idx = Canopy::Kernel::Scalar::index( n, m );
                 phi_multipole +=
-                    pref * M_host( idx ) / Kokkos::pow( r, n + 1 ) *
+                    norm * M_host( idx ) / Kokkos::pow( r, n + 1 ) *
                     Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
             }
         }
@@ -403,11 +403,11 @@ void testM2MKernel1()
 //---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
-// TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
+TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
 
-// TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
+TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
 
-TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
+// TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
 
 //---------------------------------------------------------------------------//
 

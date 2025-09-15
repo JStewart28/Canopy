@@ -69,6 +69,59 @@ namespace Scalar
 //---------------------------------------------------------------------------//
 
 /**
+ * Compute Associated Legendre P_n^m(x)
+ * Per equations 3.33 and 3.34 in source 4.
+ * Handles |m| <= n, m >= 0; negative m handled via standard (-1)^m (n-m)!/(n+m)! factor
+ */
+KOKKOS_INLINE_FUNCTION
+double Pnm_impl(int n, int m, double x)
+{
+    // Work with positive m for the upward recurrence
+    int abs_m = m < 0 ? -m : m;
+
+    // P_m^m(x) = (-1)^m (2m-1)!! (1-x^2)^{m/2}
+    double p_mm = 1.0;
+    if (abs_m > 0) {
+        double fact = 1.0;
+        double sqrt_term = sqrt(1.0 - x * x);
+        for (int i = 1; i <= abs_m; ++i) {
+            p_mm *= -(fact) * sqrt_term;
+            fact += 2.0;
+        }
+    }
+
+    if (n == abs_m)
+        return (m >= 0) ? p_mm
+                        : ((m % 2 == 0 ? 1.0 : -1.0) *
+                           factorial(n - abs_m) / factorial(n + abs_m) * p_mm);
+
+    // P_{m+1}^m(x) = x (2m+1) P_m^m(x)
+    double p_m1m = x * (2.0 * abs_m + 1.0) * p_mm;
+    if (n == abs_m + 1)
+        return (m >= 0) ? p_m1m
+                        : ((m % 2 == 0 ? 1.0 : -1.0) *
+                           factorial(n - abs_m) / factorial(n + abs_m) * p_m1m);
+
+    // Upward recurrence
+    double p_nm2 = p_mm;
+    double p_nm1 = p_m1m;
+    double p_nk = 0.0;
+    for (int k = abs_m + 2; k <= n; ++k) {
+        p_nk = ((2.0 * k - 1.0) * x * p_nm1 - (k + abs_m - 1.0) * p_nm2) / (k - abs_m);
+        p_nm2 = p_nm1;
+        p_nm1 = p_nk;
+    }
+
+    double result = p_nk;
+    if (m < 0) {
+        // Standard Condon–Shortley phase relation
+        result *= (m % 2 == 0 ? 1.0 : -1.0) *
+                  factorial(n - abs_m) / factorial(n + abs_m);
+    }
+    return result;
+}
+
+/**
  * Implementation of std::assoc_legendre that is callable on the device.
  * Per equations 3.33 and 3.34 in source 4.
  */
@@ -123,13 +176,16 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
 
     double Pnm = assoc_legendre( n, mp, x );
 
+    // double Pnm_new = Pnm_impl(n, mp, x);
+    // printf("n%d, mp%d, x: %0.4lf: assoc: %0.9lf, impl: %0.9lf\n", n, mp, x, Pnm, Pnm_new);
+
     // See equation 3.27, source 4 for including sqrt((2n+1 / 4pi))
     double norm = Kokkos::sqrt( ( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ) *
                                 Kokkos::tgamma( n - mp + 1 ) /
                                 Kokkos::tgamma( n + mp + 1 ) );
 
     // Equation 3.32, source 4
-    cdouble y = norm * Pnm * Kokkos::polar( 1.0, double( mp ) * phi );
+    cdouble y = norm * Pnm * Kokkos::polar( 1.0, double( m ) * phi );
 
     return y;
 }
@@ -215,7 +271,7 @@ struct P2M
                         int idx = index( n, m );
                         // Equation 3.37, source 4
                         auto val = scalar( i ) * Kokkos::pow( rho, n ) *
-                                   Kokkos::conj( Ynm( n, -m, alpha, beta ) );
+                                   Ynm( n, -m, alpha, beta );
                         Kokkos::atomic_add( &M( idx ), val );
                         // printf("k%d, n%d, m%d setting index: %d\n",
                         //     i, n, m, idx);
@@ -344,9 +400,9 @@ struct M2M
                         // then use Y_un in the accumulation
                         Mjk += ( O * J * A0 * A1 * rho_n * Y_un ) / A_kj;
                         
-                        printf("TERM j=%d k=%d n=%d m=%d idx=%d O=(%g,%g) J=%g A0=%g A1=%g A_kj=%g rho_n=%g Pnm=%g phase=%g contrib=(%g,%g)\n",
-       j,k,n,m, index(j_n,k_m), (double)real(O),(double)imag(O), J,A0,A1,A_kj,rho_n,Pnm, -double(m)*beta,
-       (double)Kokkos::real(Mjk),(double)Kokkos::imag(Mjk));
+    //                     printf("TERM j=%d k=%d n=%d m=%d idx=%d O=(%g,%g) J=%g A0=%g A1=%g A_kj=%g rho_n=%g Pnm=%g phase=%g contrib=(%g,%g)\n",
+    //    j,k,n,m, index(j_n,k_m), (double)real(O),(double)imag(O), J,A0,A1,A_kj,rho_n,Pnm, -double(m)*beta,
+    //    (double)Kokkos::real(Mjk),(double)Kokkos::imag(Mjk));
 
                         // if (rho == 0.0) {
                         //     if (n!=j || m!=k)
