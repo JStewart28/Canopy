@@ -331,43 +331,27 @@ struct M2M
                         const double J = compute_J( m, k_m );   // J_{j-n}^{k-j}? -- use child degree/order
                         const double A0 = compute_A( n, m );      // A_n^m
                         const double A1 = compute_A( j_n, k_m );  // A_{j-n}^{k_j-m}
-                        const double A_kj = compute_A( j, k );  // A_j^{k_j} (denominator)
+                        const double A_jk = compute_A( j, k );  // A_j^{k_j} (denominator)
 
                         double rho_n = Kokkos::pow( rho, n );
 
+                        auto Y_nm = Ynm(n, -m, alpha, beta);
+
                         // Use assoc_legendre directly (no normalization) because M_child
                         // has already been normalized.
-                        int mp = Kokkos::abs(m);                     // |m|
-                        double Pnm = Pnm_impl(n, mp, Kokkos::cos(alpha)); // unnormalized P_n^{|m|}(cos theta)
+                        // int mp = Kokkos::abs(m);                     // |m|
+                        // double Pnm = Pnm_impl(n, mp, Kokkos::cos(alpha)); // unnormalized P_n^{|m|}(cos theta)
 
                         // conj(Ynm(n,-m,alpha,beta)) / norm  ==> unnormalized factor:
                         //   Pnm * exp(-i * |m| * beta)
-                        cdouble Y_un = Kokkos::polar(1.0, -double(m) * beta) * Pnm;
+                        // cdouble Y_un = Kokkos::polar(1.0, -double(m) * beta) * Pnm;
 
                         // then use Y_un in the accumulation
-                        Mjk += ( O * J * A0 * A1 * rho_n * Y_un ) / A_kj;
-                        
-    //                     printf("TERM j=%d k=%d n=%d m=%d idx=%d O=(%g,%g) J=%g A0=%g A1=%g A_kj=%g rho_n=%g Pnm=%g phase=%g contrib=(%g,%g)\n",
-    //    j,k,n,m, index(j_n,k_m), (double)real(O),(double)imag(O), J,A0,A1,A_kj,rho_n,Pnm, -double(m)*beta,
-    //    (double)Kokkos::real(Mjk),(double)Kokkos::imag(Mjk));
-
-                        // if (rho == 0.0) {
-                        //     if (n!=j || m!=k)
-                        //     printf("j=%d k=%d n=%d m=%d J=%g Y=%g child_idx=%d\n",
-                        //         j,k,n,m, J, Kokkos::abs(Y_un), index(j_n, k_m));
-                        // }
-
-                        // if (j == 2 && k == 0) {
-                        //     printf("DEBUG j2k0: n=%d m=%d child_idx=%d O=%0.6f+%0.6fi rho_n=%0.6f Pnm=%0.6f phase=%0.6f Mjk_contrib=%0.6f\n",
-                        //         n, m, index(j_n,k_m), (double)O.real(), (double)O.imag(), rho_n, Pnm, -double(m)*beta, (double)((O * J * A0 * A1 * rho_n * Y_un) / A_kj).real());
-                        // }
-
-                        // printf("j%d, k%d, n%d, m%d: M_child(%d): %0.3lf, J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_kj: %0.3lf, Mjk: %0.3lf\n",
-                        //     j, k, n, m, index(j_n, k_m), O.real(), J, A0, A1, A_kj, Mjk.real());
+                        Mjk += ( O * J * A0 * A1 * rho_n * Y_nm ) / A_jk;
                     }
                 }
 
-                int parent_idx = j*j + (k + j);
+                int parent_idx = index(j, k);
                 // printf("j%d, k%d, updating M(%d) += %0.4lf\n", j, k, parent_idx,
                 //     Mjk.real());
                 M( parent_idx ) += Mjk;
