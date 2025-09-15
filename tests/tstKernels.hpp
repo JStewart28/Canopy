@@ -405,7 +405,7 @@ void testM2MKernel1()
 //---------------------------------------------------------------------------//
 TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
 
-TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
+// TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
 
 // TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
 

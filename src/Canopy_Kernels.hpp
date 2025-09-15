@@ -69,64 +69,11 @@ namespace Scalar
 //---------------------------------------------------------------------------//
 
 /**
- * Compute Associated Legendre P_n^m(x)
- * Per equations 3.33 and 3.34 in source 4.
- * Handles |m| <= n, m >= 0; negative m handled via standard (-1)^m (n-m)!/(n+m)! factor
- */
-KOKKOS_INLINE_FUNCTION
-double Pnm_impl(int n, int m, double x)
-{
-    // Work with positive m for the upward recurrence
-    int abs_m = m < 0 ? -m : m;
-
-    // P_m^m(x) = (-1)^m (2m-1)!! (1-x^2)^{m/2}
-    double p_mm = 1.0;
-    if (abs_m > 0) {
-        double fact = 1.0;
-        double sqrt_term = sqrt(1.0 - x * x);
-        for (int i = 1; i <= abs_m; ++i) {
-            p_mm *= -(fact) * sqrt_term;
-            fact += 2.0;
-        }
-    }
-
-    if (n == abs_m)
-        return (m >= 0) ? p_mm
-                        : ((m % 2 == 0 ? 1.0 : -1.0) *
-                           factorial(n - abs_m) / factorial(n + abs_m) * p_mm);
-
-    // P_{m+1}^m(x) = x (2m+1) P_m^m(x)
-    double p_m1m = x * (2.0 * abs_m + 1.0) * p_mm;
-    if (n == abs_m + 1)
-        return (m >= 0) ? p_m1m
-                        : ((m % 2 == 0 ? 1.0 : -1.0) *
-                           factorial(n - abs_m) / factorial(n + abs_m) * p_m1m);
-
-    // Upward recurrence
-    double p_nm2 = p_mm;
-    double p_nm1 = p_m1m;
-    double p_nk = 0.0;
-    for (int k = abs_m + 2; k <= n; ++k) {
-        p_nk = ((2.0 * k - 1.0) * x * p_nm1 - (k + abs_m - 1.0) * p_nm2) / (k - abs_m);
-        p_nm2 = p_nm1;
-        p_nm1 = p_nk;
-    }
-
-    double result = p_nk;
-    if (m < 0) {
-        // Standard Condon–Shortley phase relation
-        result *= (m % 2 == 0 ? 1.0 : -1.0) *
-                  factorial(n - abs_m) / factorial(n + abs_m);
-    }
-    return result;
-}
-
-/**
  * Implementation of std::assoc_legendre that is callable on the device.
  * Per equations 3.33 and 3.34 in source 4.
  */
 KOKKOS_INLINE_FUNCTION
-double assoc_legendre( int n, int m, double x )
+double Pnm_impl( int n, int m, double x )
 {
     if ( m < 0 || m > n )
         return 0.0; // undefined outside this range
@@ -174,7 +121,7 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
     int mp = Kokkos::abs( m );
     double x = Kokkos::cos( theta );
 
-    double Pnm = assoc_legendre( n, mp, x );
+    double Pnm = Pnm_impl( n, mp, x );
 
     // double Pnm_new = Pnm_impl(n, mp, x);
     // printf("n%d, mp%d, x: %0.4lf: assoc: %0.9lf, impl: %0.9lf\n", n, mp, x, Pnm, Pnm_new);
@@ -391,7 +338,7 @@ struct M2M
                         // Use assoc_legendre directly (no normalization) because M_child
                         // has already been normalized.
                         int mp = Kokkos::abs(m);                     // |m|
-                        double Pnm = assoc_legendre(n, mp, Kokkos::cos(alpha)); // unnormalized P_n^{|m|}(cos theta)
+                        double Pnm = Pnm_impl(n, mp, Kokkos::cos(alpha)); // unnormalized P_n^{|m|}(cos theta)
 
                         // conj(Ynm(n,-m,alpha,beta)) / norm  ==> unnormalized factor:
                         //   Pnm * exp(-i * |m| * beta)
