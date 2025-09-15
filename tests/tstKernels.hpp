@@ -291,15 +291,11 @@ void testM2MKernel0()
 }
 
 /**
- * Tests multipole-to-multipole calculations, specifically:
+ * Tests translation of multipole coefficients
  *  - Translation of multipole expansions
  *  - Addition of multipole expansions
- * Creates two multipole expansions around centers with charges
- * disjunct, well-seperated domains. Translations these expansions
- * to center around a new center and then adds these expansions together.
- * Converts the aggregated multipole expansions back to potentials at
- * a target point and compares the result to the directly calculated potential
- * at the target point.
+ * Creates a multipole expansions around one center and translates
+ * it to another center. Tests against 
  */
 void testM2MKernel1()
 {
@@ -358,7 +354,7 @@ void testM2MKernel1()
     constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 1; p <= 1; ++p )
+    for ( int p = 1; p <= 5; ++p )
     {
         // Calculate the multipole coefficeints driectly at the expansion center to debug
         // Known to be correct
@@ -392,11 +388,11 @@ void testM2MKernel1()
         auto M = m2m.coefficients();
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
-        for (int i = 0; i < M_host.extent(0); i++)
-        {
-            printf("M-%d: (%0.4lf, %0.4lf), O_c-%d: (%0.4lf, %0.4lf), O-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(),
-                M_host(i).imag(), i, O_center_host(i).real(), O_center_host(i).imag(), i, O_host(i).real(), O_host(i).imag());
-        }
+        // for (int i = 0; i < M_host.extent(0); i++)
+        // {
+        //     printf("M-%d: (%0.4lf, %0.4lf), O_c-%d: (%0.4lf, %0.4lf), O-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(),
+        //         M_host(i).imag(), i, O_center_host(i).real(), O_center_host(i).imag(), i, O_host(i).real(), O_host(i).imag());
+        // }
 
         
         // for (int i = 0; i < M_host.extent(0); i++)
@@ -426,8 +422,8 @@ void testM2MKernel1()
 
         // Check that the error is within 10*bound, which accounts
         // for imprecision due to imtermediate rounding.
-        // EXPECT_NEAR( phi_multipole.real(), phi_direct, 10 * bound )
-        std::cout    << "p=" << p << " multipole=" << phi_multipole.real()
+        EXPECT_NEAR( phi_multipole.real(), phi_direct, 10 * bound )
+            << "p=" << p << " multipole=" << phi_multipole.real()
             << " direct=" << phi_direct << " error=" << error << " bound~"
             << bound << std::endl;
     }
