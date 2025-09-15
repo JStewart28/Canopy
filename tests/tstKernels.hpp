@@ -145,12 +145,13 @@ void testScalarP2MKernel()
         cdouble phi_multipole = 0.0;
         for ( int n = 0; n <= p; ++n )
         {
-            double norm = 4 * pi / double( 2 * n + 1 );
+            // double norm = 4 * pi / double( 2 * n + 1 );
+            // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
             for ( int m = -n; m <= n; ++m )
             {
                 int idx = Canopy::Kernel::Scalar::index( n, m );
                 phi_multipole +=
-                    norm * M_host( idx ) / Kokkos::pow( r, n + 1 ) *
+                    M_host( idx ) / Kokkos::pow( r, n + 1 ) *
                     Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
             }
         }
@@ -264,15 +265,16 @@ void testM2MKernel0()
         // target. Equation 3.36 in source 4
         using cdouble = Kokkos::complex<double>;
         cdouble phi_multipole = 0.0;
-        for ( int j = 0; j <= p; ++j )
+        for ( int n = 0; n <= p; ++n )
         {
-            double norm = 4 * pi / double( 2 * j + 1 );
-            for ( int k = -j; k <= j; ++k )
+            // double norm = 4 * pi / double( 2 * n + 1 );
+            // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
+            for ( int m = -n; m <= n; ++m )
             {
-                int idx = Canopy::Kernel::Scalar::index( j, k );
+                int idx = Canopy::Kernel::Scalar::index( n, m );
                 phi_multipole +=
-                    norm * M_host( idx ) / Kokkos::pow( r, j + 1 ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                    M_host( idx ) / Kokkos::pow( r, n + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
             }
         }
 
@@ -406,15 +408,16 @@ void testM2MKernel1()
         // target. Equation 3.36 in source 4
         using cdouble = Kokkos::complex<double>;
         cdouble phi_multipole = 0.0;
-        for ( int j = 0; j <= p; ++j )
+        for ( int n = 0; n <= p; ++n )
         {
-            double norm = 4 * pi / double( 2 * j + 1 );
-            for ( int k = -j; k <= j; ++k )
+            // double norm = 4 * pi / double( 2 * n + 1 );
+            // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
+            for ( int m = -n; m <= n; ++m )
             {
-                int idx = Canopy::Kernel::Scalar::index( j, k );
+                int idx = Canopy::Kernel::Scalar::index( n, m );
                 phi_multipole +=
-                    norm * M_host( idx ) / Kokkos::pow( r, j + 1 ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                    M_host( idx ) / Kokkos::pow( r, n + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
             }
         }
 

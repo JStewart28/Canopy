@@ -127,8 +127,7 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
     // printf("n%d, mp%d, x: %0.4lf: assoc: %0.9lf, impl: %0.9lf\n", n, mp, x, Pnm, Pnm_new);
 
     // See equation 3.27, source 4 for including sqrt((2n+1 / 4pi))
-    double norm = Kokkos::sqrt( ( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ) *
-                                Kokkos::tgamma( n - mp + 1 ) /
+    double norm = Kokkos::sqrt( Kokkos::tgamma( n - mp + 1 ) /
                                 Kokkos::tgamma( n + mp + 1 ) );
 
     // Equation 3.32, source 4
@@ -217,8 +216,9 @@ struct P2M
                     {
                         int idx = index( n, m );
                         // Equation 3.37, source 4
+                        // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
                         auto val = scalar( i ) * Kokkos::pow( rho, n ) *
-                                   Ynm( n, -m, alpha, beta );
+                                   Ynm( n, -m, alpha, beta ); // / norm;
                         Kokkos::atomic_add( &M( idx ), val );
                         // printf("k%d, n%d, m%d setting index: %d\n",
                         //     i, n, m, idx);
@@ -337,12 +337,12 @@ struct M2M
                         
                         // M_child already has its Y_nm nrormalized. The Ynm function performs normalization
                         // internally, so we need to un-normalize it after calling Ynm to avoid double normalization.
-                        auto inv_norm = 1.0 / Kokkos::sqrt( ( 2.0 * n + 1 ) / ( 4.0 * pi ) );
-                        auto Y_nm = Ynm(n, -m, alpha, beta) * inv_norm;
+                        // auto inv_norm = 1.0 / Kokkos::sqrt( ( 2.0 * n + 1 ) / ( 4.0 * pi ) );
+                        auto Y_nm = Ynm(n, -m, alpha, beta); // * inv_norm;
 
-                        printf("j%d, k%d, n%d, m%d: +M(%d): J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_jk: %0.3lf, rho_n: %0.3lf, Y_nm: (%0.3lf, %0.3lf), O(%d): (%0.3lf, %0.3lf)\n",
-                            j, k, n, m, index(j, k), J, A0, A1, A_jk, rho_n,
-                            Y_nm.real(), Y_nm.imag(), child_index, O.real(), O.imag());
+                        // printf("j%d, k%d, n%d, m%d: +M(%d): J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_jk: %0.3lf, rho_n: %0.3lf, Y_nm: (%0.3lf, %0.3lf), O(%d): (%0.3lf, %0.3lf)\n",
+                        //     j, k, n, m, index(j, k), J, A0, A1, A_jk, rho_n,
+                        //     Y_nm.real(), Y_nm.imag(), child_index, O.real(), O.imag());
 
                         // then use Y_un in the accumulation
                         Mjk += ( O * J * A0 * A1 * rho_n * Y_nm ) / A_jk;
