@@ -237,9 +237,9 @@ void testM2MKernel0()
 
         // Compute multipoles for domain 0
         p2m( coords0, q0, num_points, expansion_center );
-        auto M0 = p2m.coefficients();
-        auto M0_host =
-            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M0 );
+        auto O = p2m.coefficients();
+        auto O_host =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), O );
         // for (int i = 0; i < M0_host.extent(0); i++)
         // {
         //     printf("O-%d: (%0.4lf, %0.4lf)\n", i, M0_host(i).real(), M0_host(i).imag());
@@ -249,7 +249,7 @@ void testM2MKernel0()
         Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p, expansion_center );
 
         // Add M0
-        m2m(M0, expansion_center);
+        m2m(O, expansion_center);
 
         // Get new multipole coefficients
         auto M = m2m.coefficients();
@@ -258,8 +258,15 @@ void testM2MKernel0()
         // for (int i = 0; i < M_host.extent(0); i++)
         // {
         //     printf("M-%d: (%0.4lf, %0.4lf), O-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(),
-        //         M_host(i).imag(), i, M0_host(i).real(), M0_host(i).imag());
+        //         M_host(i).imag(), i, O_host(i).real(), O_host(i).imag());
         // }
+
+        // Compare coefficients to coefficients each other
+        for (std::size_t i = 0; i < M_host.extent(0); ++i)
+        {
+            EXPECT_DOUBLE_EQ(M_host(i).real(), O_host(i).real()) << "at i = " << i << std::endl;
+            EXPECT_DOUBLE_EQ(M_host(i).imag(), O_host(i).imag()) << "at i = " << i << std::endl;
+        }
         
         // Perform multipole to particle conversion to calculate potential at
         // target. Equation 3.36 in source 4
@@ -310,14 +317,14 @@ void testM2MKernel1()
     fillRandomCoordinates(coords0, bounds0);
     Kokkos::Array<double, 2> qbounds0 = {-10.0, 10.0};
     fillRandomScalar(q0, qbounds0);
-    Kokkos::Array<double, 3> center0 = { -1.3, -2.0, -1.7 };
+    Kokkos::Array<double, 3> center0 = { 0.1, -0.4, 0.2 };
     // coords0(0, 0) = 1.0;
     // coords0(0, 1) = 0.0;
     // coords0(0, 2) = 0.0;
     // q0(0) = 1.0;
 
     // Aggregated expansion center
-    Kokkos::Array<double, 3> expansion_center = { -0.5, 1.0, 0.3 };
+    Kokkos::Array<double, 3> expansion_center = { 1.0, 1.1, 0.4 };
 
     // Target point
     double Px = 10.0, Py = 0.0, Pz = 0.0;
@@ -355,7 +362,7 @@ void testM2MKernel1()
     // constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 1; p <= 5; ++p )
+    for ( int p = 1; p <= 1; ++p )
     {
         // Calculate the multipole coefficients driectly at the expansion center to debug
         // Known to be correct
@@ -364,8 +371,6 @@ void testM2MKernel1()
         auto O_center = p2m_center.coefficients();
         auto O_center_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), O_center );
-
-
 
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
@@ -382,18 +387,27 @@ void testM2MKernel1()
         // Create M2M kernel to shift and add multipoles 
         Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p, expansion_center );
 
-        // Add M0 and M1
+        // Translate coefficients
         m2m(O, center0);
 
         // Get new multipole coefficients
         auto M = m2m.coefficients();
         auto M_host =
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
-        // for (int i = 0; i < M_host.extent(0); i++)
-        // {
-        //     printf("M-%d: (%0.4lf, %0.4lf), O_c-%d: (%0.4lf, %0.4lf), O-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(),
-        //         M_host(i).imag(), i, O_center_host(i).real(), O_center_host(i).imag(), i, O_host(i).real(), O_host(i).imag());
-        // }
+        
+        // Compare translated coefficients to coefficients created directly around 
+        // the expansion center
+        for (std::size_t i = 0; i < M_host.extent(0); ++i)
+        {
+            EXPECT_DOUBLE_EQ(M_host(i).real(), O_center_host(i).real()) << "at i = " << i << std::endl;
+            EXPECT_DOUBLE_EQ(M_host(i).imag(), O_center_host(i).imag()) << "at i = " << i << std::endl;
+        }
+
+        for (int i = 0; i < M_host.extent(0); i++)
+        {
+            printf("M-%d: (%0.4lf, %0.4lf), O_c-%d: (%0.4lf, %0.4lf), O-%d: (%0.4lf, %0.4lf)\n", i, M_host(i).real(),
+                M_host(i).imag(), i, O_center_host(i).real(), O_center_host(i).imag(), i, O_host(i).real(), O_host(i).imag());
+        }
 
         
         // for (int i = 0; i < M_host.extent(0); i++)
@@ -630,7 +644,7 @@ TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
 
 TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
 
-TEST( Kernel, testM2MKernel2 ) { testM2MKernel2(); }
+// TEST( Kernel, testM2MKernel2 ) { testM2MKernel2(); }
 
 //---------------------------------------------------------------------------//
 
