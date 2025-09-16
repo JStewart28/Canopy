@@ -176,7 +176,7 @@ struct P2M
      */
     void clear()
     {
-        Kokkos::deep_copy( _M, cdouble( 0.0 ) );
+        Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) );
     }
 
     /**
@@ -265,8 +265,10 @@ struct M2M
     using execution_space = ExecutionSpace;
     using cdouble = Kokkos::complex<double>;
 
-    M2M( int p )
+    M2M( int p, const Kokkos::Array<double, 3>& expansion_center )
         : _p( p )
+        , _expansion_center( expansion_center)
+
     {
         _M = Kokkos::View<cdouble*, memory_space>( "M", ( p + 1 ) * ( p + 1 ) );
         clear();
@@ -274,6 +276,7 @@ struct M2M
 
   private:
     int _p;
+    Kokkos::Array<double, 3> _expansion_center;
     Kokkos::View<cdouble*, memory_space> _M;
   
   public:
@@ -284,12 +287,11 @@ struct M2M
      */
     void clear()
     {
-        Kokkos::deep_copy( _M, cdouble( 0.0 ) );
+        Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) );
     }
 
     template <class MultipoleVector>
     void operator()( const MultipoleVector& M_child,
-                    const Kokkos::Array<double, 3>& this_center,
                     const Kokkos::Array<double, 3>& child_center ) const
     {
         using cdouble = Kokkos::complex<double>;
@@ -297,9 +299,9 @@ struct M2M
         auto M = _M;
 
         // displacement child -> parent
-        double dx = this_center[0] - child_center[0];
-        double dy = this_center[1] - child_center[1];
-        double dz = this_center[2] - child_center[2];
+        double dx = _expansion_center[0] - child_center[0];
+        double dy = _expansion_center[1] - child_center[1];
+        double dz = _expansion_center[2] - child_center[2];
 
         // spherical coords for the displacement
         double rho, alpha, beta;
