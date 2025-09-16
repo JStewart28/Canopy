@@ -346,8 +346,7 @@ struct M2M
                         // auto inv_norm = 1.0 / Kokkos::sqrt( ( 2.0 * n + 1 ) / ( 4.0 * pi ) );
                         // Not sure why Y_nm needs to be conjugated, but if it doesn't the
                         // imaginary parts are the wrong sign.
-                        auto Y_nm = Kokkos::conj(Ynm(n, -m, alpha, beta)); // * inv_norm;
-                        Y_nm = cdouble(Kokkos::pow(-1.0, m) * Y_nm.real(), Y_nm.imag());
+                        auto Y_nm = Ynm(n, -m, alpha, beta); // * inv_norm;
 
                         // printf("j%d, k%d, n%d, m%d: +M(%d): J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_jk: %0.3lf, rho_n: %0.3lf, Y_nm: (%0.3lf, %0.3lf), O(%d): (%0.3lf, %0.3lf)\n",
                         //     j, k, n, m, index(j, k), J, A0, A1, A_jk, rho_n,
