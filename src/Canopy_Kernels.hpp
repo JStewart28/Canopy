@@ -391,21 +391,21 @@ struct M2L
     Kokkos::View<cdouble*, memory_space> _L;
 
   public:
-    auto coefficients() {return _M;}
+    auto coefficients() {return _L;}
 
     /**
      * Clear coefficents
      */
     void clear()
     {
-        Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) );
+        Kokkos::deep_copy( _L, cdouble( 0.0, 0.0 ) );
     }
 
     /**
      * Compute local coefficients L[n][m]
      * up to order p around expansion_center.
      */
-    template <class PositionArray, class ScalarArray>
+    template <class MultipoleVector>
     void
     operator()( const MultipoleVector& O,
                 const Kokkos::Array<double, 3>& O_center ) const
