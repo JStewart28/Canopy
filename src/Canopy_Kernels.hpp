@@ -367,6 +367,88 @@ struct M2M
 
 };
 
+/**
+ * Convert multipole expansions into local expansions using
+ * Theorem 3.5.5 in source 4.
+ */
+template <class MemorySpace, class ExecutionSpace>
+struct M2L
+{
+  public:
+    using memory_space = MemorySpace;
+    using execution_space = ExecutionSpace;
+    using cdouble = Kokkos::complex<double>;
+
+    M2L( int p )
+        : _p( p )
+    {
+        _L = Kokkos::View<cdouble*, memory_space>( "M", ( p + 1 ) * ( p + 1 ) );
+        clear();
+    }
+
+  private:
+    int _p;
+    Kokkos::View<cdouble*, memory_space> _L;
+
+  public:
+    auto coefficients() {return _M;}
+
+    /**
+     * Clear coefficents
+     */
+    void clear()
+    {
+        Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) );
+    }
+
+    /**
+     * Compute local coefficients L[n][m]
+     * up to order p around expansion_center.
+     */
+    template <class PositionArray, class ScalarArray>
+    void
+    operator()( const MultipoleVector& O,
+                const Kokkos::Array<double, 3>& O_center ) const
+    {
+        int p = _p;
+        auto L = _L;
+
+        //Spherical coords of O_center
+        double rho, alpha, beta;
+        cart2sph(O_center[0], O_center[1], O_center[2], rho, alpha, beta);
+
+        // Optimize this code for running on the device
+        for (int j = 0; j <= p; ++j)
+        {
+            for (int k = -j; k <= j; ++k)
+            {
+
+                cdouble Ljk(0.0, 0.0);
+
+                for (int n = 0; n <= p; ++n)
+                {
+                    for (int m = -n; m <= n; ++m)
+                    {
+                        // Numerator of eq 3.60
+                        cdouble O_nm = O(index(n, m));
+                        auto J_km = compute_J(k, m);
+                        auto A_nm = compute_A(n, m);
+                        auto A_jk = compute_A(j, k);
+                        auto Y_jn_mk = Ynm(j+n, m-k, alpha, beta);
+
+                        // Demoninator of eq 3.60
+                        auto A_jn_mk = compute_A(j+n, m-k);
+                        auto rho_jn = Kokkos::pow(rho, j+n+1);
+
+                        Ljk += (O_nm * J_km * A_nm * A_jk * Y_jn_mk) / (A_jn_mk * rho_jn);
+                    }
+                }
+                L(index(j, k)) = Ljk;
+            }
+        }
+    }
+};
+
 } // end namespace Scalar
 
 } // end namespace Kernel
