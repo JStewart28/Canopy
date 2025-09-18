@@ -48,21 +48,21 @@ void cart2sph( double x, double y, double z, double& r, double& theta,
 
 // Factorial double: (2m-1)!!
 KOKKOS_INLINE_FUNCTION
-double factorial(int k)
+double factorial( int k )
 {
     // Γ(k+1) = k!
-    return Kokkos::tgamma(static_cast<double>(k) + 1.0);
+    return Kokkos::tgamma( static_cast<double>( k ) + 1.0 );
 }
 
 KOKKOS_INLINE_FUNCTION
-double double_factorial(int m)
+double double_factorial( int m )
 {
     // (2m − 1)!! = (2m)! / (2^m m!)
     // use gamma functions to avoid integer overflow
-    const double two_m = static_cast<double>(2 * m);
-    const double m_d   = static_cast<double>(m);
-    return Kokkos::tgamma(two_m + 1.0) /
-           (Kokkos::pow(2.0, m_d) * Kokkos::tgamma(m_d + 1.0));
+    const double two_m = static_cast<double>( 2 * m );
+    const double m_d = static_cast<double>( m );
+    return Kokkos::tgamma( two_m + 1.0 ) /
+           ( Kokkos::pow( 2.0, m_d ) * Kokkos::tgamma( m_d + 1.0 ) );
 }
 
 namespace Scalar
@@ -125,7 +125,8 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
     double Pnm = Pnm_impl( n, mp, x );
 
     // double Pnm_new = Pnm_impl(n, mp, x);
-    // printf("n%d, mp%d, x: %0.4lf: assoc: %0.9lf, impl: %0.9lf\n", n, mp, x, Pnm, Pnm_new);
+    // printf("n%d, mp%d, x: %0.4lf: assoc: %0.9lf, impl: %0.9lf\n", n, mp, x,
+    // Pnm, Pnm_new);
 
     // See equation 3.27, source 4 for including sqrt((2n+1 / 4pi))
     double norm = Kokkos::sqrt( Kokkos::tgamma( n - mp + 1 ) /
@@ -134,8 +135,8 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
     // Equation 3.32, source 4
     cdouble y = norm * Pnm * Kokkos::polar( 1.0, double( m ) * phi );
 
-    double phase = (m >= 0 ? ( (m % 2) ? -1.0 : 1.0 )   // (-1)^m
-                            : ( ((-m) % 2) ? -1.0 : 1.0 ));
+    double phase = ( m >= 0 ? ( ( m % 2 ) ? -1.0 : 1.0 ) // (-1)^m
+                            : ( ( ( -m ) % 2 ) ? -1.0 : 1.0 ) );
 
     return y * phase;
 }
@@ -172,15 +173,12 @@ struct P2M
     Kokkos::View<cdouble*, memory_space> _M;
 
   public:
-    auto coefficients() {return _M;}
+    auto coefficients() { return _M; }
 
     /**
      * Clear coefficents
      */
-    void clear()
-    {
-        Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) );
-    }
+    void clear() { Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) ); }
 
     /**
      * Compute multipole coefficients M[n][m]
@@ -193,10 +191,9 @@ struct P2M
      * relative to expansion_center.
      */
     template <class PositionArray, class ScalarArray>
-    void
-    operator()( const PositionArray& pos, const ScalarArray& scalar,
-                std::size_t k,
-                const Kokkos::Array<double, 3>& expansion_center ) const
+    void operator()( const PositionArray& pos, const ScalarArray& scalar,
+                     std::size_t k,
+                     const Kokkos::Array<double, 3>& expansion_center ) const
     {
         int p = _p;
         auto M = _M;
@@ -220,7 +217,8 @@ struct P2M
                     {
                         int idx = index( n, m );
                         // Equation 3.37, source 4
-                        // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
+                        // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 *
+                        // pi ) ));
                         auto val = scalar( i ) * Kokkos::pow( rho, n ) *
                                    Ynm( n, -m, alpha, beta ); // / norm;
                         Kokkos::atomic_add( &M( idx ), val );
@@ -236,9 +234,10 @@ struct P2M
  * Equation 3.26, source 4
  */
 KOKKOS_INLINE_FUNCTION
-double compute_A(int n, int m) {
-    double denom = Kokkos::sqrt(factorial(n - m) * factorial(n + m));
-    double sign = (n % 2 == 0) ? 1.0 : -1.0;  // (-1)^n
+double compute_A( int n, int m )
+{
+    double denom = Kokkos::sqrt( factorial( n - m ) * factorial( n + m ) );
+    double sign = ( n % 2 == 0 ) ? 1.0 : -1.0; // (-1)^n
     return sign / denom;
 }
 
@@ -246,11 +245,17 @@ double compute_A(int n, int m) {
  * Equation 3.43, source 4
  */
 KOKKOS_INLINE_FUNCTION
-double compute_J(int n, int m) {
-    if (n * m < 0) {
-        int min_abs = (Kokkos::abs(n) < Kokkos::abs(m)) ? Kokkos::abs(n) : Kokkos::abs(m);
-        return double((min_abs % 2 == 0) ? 1 : -1);  // (-1)^min(|n|,|m|)
-    } else {
+double compute_J( int n, int m )
+{
+    if ( n * m < 0 )
+    {
+        int min_abs = ( Kokkos::abs( n ) < Kokkos::abs( m ) )
+                          ? Kokkos::abs( n )
+                          : Kokkos::abs( m );
+        return double( ( min_abs % 2 == 0 ) ? 1 : -1 ); // (-1)^min(|n|,|m|)
+    }
+    else
+    {
         return 1.0;
     }
 }
@@ -278,21 +283,18 @@ struct M2M
   private:
     int _p;
     Kokkos::View<cdouble*, memory_space> _M;
-  
+
   public:
-    auto coefficients() {return _M;}
+    auto coefficients() { return _M; }
 
     /**
      * Clear coefficents
      */
-    void clear()
-    {
-        Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) );
-    }
+    void clear() { Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) ); }
 
     template <class MultipoleVector>
     void operator()( const MultipoleVector& M_orig,
-                    const Kokkos::Array<double, 3>& center_orig ) const
+                     const Kokkos::Array<double, 3>& center_orig ) const
     {
         using cdouble = Kokkos::complex<double>;
         const int p = _p;
@@ -300,63 +302,51 @@ struct M2M
 
         // spherical coords for the displacement
         double rho, alpha, beta;
-        cart2sph(center_orig[0], center_orig[1], center_orig[2], rho, alpha, beta);
+        cart2sph( center_orig[0], center_orig[1], center_orig[2], rho, alpha,
+                  beta );
 
-        for (int j = 0; j <= p; ++j)
+        for ( int j = 0; j <= p; ++j )
         {
-            for (int k = -j; k <= j; ++k)
+            for ( int k = -j; k <= j; ++k )
             {
-                cdouble Mjk(0.0, 0.0); // accumulator for M_j^{k}
+                cdouble Mjk( 0.0, 0.0 );
 
-                for (int n = 0; n <= j; ++n)
+                for ( int n = 0; n <= j; ++n )
                 {
-                    int j_n = j - n; // child degree used
+                    int j_n = j - n;
 
-                    for (int m = -n; m <= n; ++m)
+                    for ( int m = -n; m <= n; ++m )
                     {
-                        int k_m = k - m; // child order used
+                        int k_m = k - m;
 
-                        // validity check: order must satisfy |k_m| <= j_n
-                        if ( std::abs(k_m) > j_n ) continue;
+                        // Must satisfy |k_m| <= j_n
+                        // to avoid negative values passed to compute_A.
+                        if ( std::abs( k_m ) > j_n )
+                            continue;
 
-
-                        int orig_index = index(j_n, k_m);
-                        // printf("j%d, k%d, n%d, m%d, j_n: %d, k_m: %d: Getting index %d\n",
-                        //     j, k, n, m, j_n, k_m, index(j_n, k_m));
+                        int orig_index = index( j_n, k_m );
                         cdouble O = M_orig( orig_index );
 
-                        // translation coefficients (use child degree/order where appropriate)
-                        const double J = compute_J( m, k_m );   // J_{j-n}^{k-j}? -- use child degree/order
-                        const double A0 = compute_A( n, m );      // A_n^m
-                        const double A1 = compute_A( j_n, k_m );  // A_{j-n}^{k_j-m}
-                        const double A_jk = compute_A( j, k );  // A_j^{k_j} (denominator)
-
+                        // Values for eq 3.57
+                        const double J = compute_J( m, k_m );
+                        const double A_nm = compute_A( n, m );
+                        const double A_jn_km = compute_A( j_n, k_m );
+                        const double A_jk = compute_A( j, k );
                         double rho_n = Kokkos::pow( rho, n );
-                        
-                        // M_child already has its Y_nm normalized. The Ynm function performs normalization
-                        // internally, so we need to un-normalize it after calling Ynm to avoid double normalization.
-                        // auto inv_norm = 1.0 / Kokkos::sqrt( ( 2.0 * n + 1 ) / ( 4.0 * pi ) );
-                        // Not sure why Y_nm needs to be conjugated, but if it doesn't the
-                        // imaginary parts are the wrong sign.
-                        auto Y_nm = Ynm(n, -m, alpha, beta); // * inv_norm;
 
-                        // printf("j%d, k%d, n%d, m%d: +M(%d): J: %0.3lf, A0: %0.3lf, A1: %0.3lf, A_jk: %0.3lf, rho_n: %0.3lf, Y_nm: (%0.3lf, %0.3lf), O(%d): (%0.3lf, %0.3lf)\n",
-                        //     j, k, n, m, index(j, k), J, A0, A1, A_jk, rho_n,
-                        //     Y_nm.real(), Y_nm.imag(), child_index, O.real(), O.imag());
-
-                        // then use Y_un in the accumulation
-                        Mjk += ( O * J * A0 * A1 * rho_n * Y_nm ) / A_jk;
+                        // M_child already has its Y_nm normalized. The Ynm
+                        // function performs normalization internally, so we
+                        // need to un-normalize it after calling Ynm to avoid
+                        // double normalization.
+                        auto Y_nm = Ynm( n, -m, alpha, beta );
+                        Mjk += ( O * J * A_nm * A_jn_km * rho_n * Y_nm ) / A_jk;
                     }
                 }
-
-                int parent_idx = index(j, k);
-                // printf("j%d, k%d, updating M(%d) += %0.4lf\n", j, k, parent_idx,
-                //     Mjk.real());
+                int parent_idx = index( j, k );
                 M( parent_idx ) += Mjk;
             }
         }
     }
-
 };
 
 /**
@@ -383,59 +373,55 @@ struct M2L
     Kokkos::View<cdouble*, memory_space> _L;
 
   public:
-    auto coefficients() {return _L;}
+    auto coefficients() { return _L; }
 
     /**
      * Clear coefficents
      */
-    void clear()
-    {
-        Kokkos::deep_copy( _L, cdouble( 0.0, 0.0 ) );
-    }
+    void clear() { Kokkos::deep_copy( _L, cdouble( 0.0, 0.0 ) ); }
 
     /**
      * Compute local coefficients L[n][m]
      * up to order p around expansion_center.
      */
     template <class MultipoleVector>
-    void
-    operator()( const MultipoleVector& O,
-                const Kokkos::Array<double, 3>& O_center ) const
+    void operator()( const MultipoleVector& O,
+                     const Kokkos::Array<double, 3>& O_center ) const
     {
         int p = _p;
         auto L = _L;
 
-        //Spherical coords of O_center
+        // Spherical coords of O_center
         double rho, alpha, beta;
-        cart2sph(O_center[0], O_center[1], O_center[2], rho, alpha, beta);
+        cart2sph( O_center[0], O_center[1], O_center[2], rho, alpha, beta );
 
         // Optimize this code for running on the device
-        for (int j = 0; j <= p; ++j)
+        for ( int j = 0; j <= p; ++j )
         {
-            for (int k = -j; k <= j; ++k)
+            for ( int k = -j; k <= j; ++k )
             {
+                cdouble Ljk( 0.0, 0.0 );
 
-                cdouble Ljk(0.0, 0.0);
-
-                for (int n = 0; n <= p; ++n)
+                for ( int n = 0; n <= p; ++n )
                 {
-                    for (int m = -n; m <= n; ++m)
+                    for ( int m = -n; m <= n; ++m )
                     {
                         // Numerator of eq 3.60
-                        cdouble O_nm = O(index(n, m));
-                        auto J_km = compute_J(k, m);
-                        auto A_nm = compute_A(n, m);
-                        auto A_jk = compute_A(j, k);
-                        auto Y_jn_mk = Ynm(j+n, m-k, alpha, beta);
+                        cdouble O_nm = O( index( n, m ) );
+                        auto J_km = compute_J( k, m );
+                        auto A_nm = compute_A( n, m );
+                        auto A_jk = compute_A( j, k );
+                        auto Y_jn_mk = Ynm( j + n, m - k, alpha, beta );
 
                         // Demoninator of eq 3.60
-                        auto A_jn_mk = compute_A(j+n, m-k);
-                        auto rho_jn = Kokkos::pow(rho, j+n+1);
+                        auto A_jn_mk = compute_A( j + n, m - k );
+                        auto rho_jn = Kokkos::pow( rho, j + n + 1 );
 
-                        Ljk += (O_nm * J_km * A_nm * A_jk * Y_jn_mk) / (A_jn_mk * rho_jn);
+                        Ljk += ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
+                               ( A_jn_mk * rho_jn );
                     }
                 }
-                L(index(j, k)) = Ljk;
+                L( index( j, k ) ) = Ljk;
             }
         }
     }
