@@ -268,10 +268,8 @@ struct M2M
     using execution_space = ExecutionSpace;
     using cdouble = Kokkos::complex<double>;
 
-    M2M( int p, const Kokkos::Array<double, 3>& expansion_center )
+    M2M( int p )
         : _p( p )
-        , _expansion_center( expansion_center)
-
     {
         _M = Kokkos::View<cdouble*, memory_space>( "M", ( p + 1 ) * ( p + 1 ) );
         clear();
@@ -279,7 +277,6 @@ struct M2M
 
   private:
     int _p;
-    Kokkos::Array<double, 3> _expansion_center;
     Kokkos::View<cdouble*, memory_space> _M;
   
   public:
@@ -294,21 +291,16 @@ struct M2M
     }
 
     template <class MultipoleVector>
-    void operator()( const MultipoleVector& M_child,
-                    const Kokkos::Array<double, 3>& child_center ) const
+    void operator()( const MultipoleVector& M_orig,
+                    const Kokkos::Array<double, 3>& center_orig ) const
     {
         using cdouble = Kokkos::complex<double>;
         const int p = _p;
         auto M = _M;
 
-        // displacement child -> parent
-        double dx = _expansion_center[0] - child_center[0];
-        double dy = _expansion_center[1] - child_center[1];
-        double dz = _expansion_center[2] - child_center[2];
-
         // spherical coords for the displacement
         double rho, alpha, beta;
-        cart2sph(dx, dy, dz, rho, alpha, beta);
+        cart2sph(center_orig[0], center_orig[1], center_orig[2], rho, alpha, beta);
 
         for (int j = 0; j <= p; ++j)
         {
@@ -328,10 +320,10 @@ struct M2M
                         if ( std::abs(k_m) > j_n ) continue;
 
 
-                        int child_index = index(j_n, k_m);
+                        int orig_index = index(j_n, k_m);
                         // printf("j%d, k%d, n%d, m%d, j_n: %d, k_m: %d: Getting index %d\n",
                         //     j, k, n, m, j_n, k_m, index(j_n, k_m));
-                        cdouble O = M_child( child_index );
+                        cdouble O = M_orig( orig_index );
 
                         // translation coefficients (use child degree/order where appropriate)
                         const double J = compute_J( m, k_m );   // J_{j-n}^{k-j}? -- use child degree/order
