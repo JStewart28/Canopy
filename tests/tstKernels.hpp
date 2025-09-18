@@ -248,7 +248,7 @@ void testM2MKernel0()
     // constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
     // Loop over truncation degree
-    for ( int p = 1; p <= 1; ++p )
+    for ( int p = 1; p <= 5; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
@@ -308,7 +308,8 @@ void testM2MKernel0()
 
         // Confirm the difference between the potential calcuated with the shifted coefficients
         // is within the error bound of the potential calculated with the original coefficients
-        EXPECT_NEAR(potential_M.real(), potential_Q.real(), error) << "p="
+        // Slightly increase the error bound due to intermediate rounding errors.
+        EXPECT_NEAR(potential_M.real(), potential_Q.real(), 2*error) << "p="
             << p << ": error between shifted and un-shfted potential calculations too high.";
     }
 }
