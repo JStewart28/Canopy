@@ -273,7 +273,6 @@ void testM2MKernel0()
                     Canopy::Kernel::Scalar::Ynm( n, m, theta_p, phi_p );
             }
         }
-        printf("p=%d, p_Q = %0.5lf\n", p, potential_Q.real());
 
         // Compute M_kj coefficients
         Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
@@ -300,12 +299,17 @@ void testM2MKernel0()
                     Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
             }
         }
-        printf("p=%d, p_M = %0.5lf\n", p, potential_M.real());
 
         // Check the error bounds from eq. 3.58
         auto bound = Kokkos::abs((total_q / (r - (a + rho))) * Kokkos::pow((a + rho)/r, p + 1));
         auto error = Kokkos::abs(potential_direct - potential_M);
-        EXPECT_LE(error, bound) << "p=" << p << ": error too high.";
+        EXPECT_LE(error, bound) << "p="
+            << p << ": error between shifted and direct potentials too high.";
+
+        // Confirm the difference between the potential calcuated with the shifted coefficients
+        // is within the error bound of the potential calculated with the original coefficients
+        EXPECT_NEAR(potential_M.real(), potential_Q.real(), error) << "p="
+            << p << ": error between shifted and un-shfted potential calculations too high.";
     }
 }
 
