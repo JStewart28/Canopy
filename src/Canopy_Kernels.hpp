@@ -261,6 +261,31 @@ double compute_J( int n, int m )
 }
 
 /**
+ * Equation 3.54, source 4
+ */
+KOKKOS_INLINE_FUNCTION
+double compute_J( int n, int m, int m_p )
+{
+    auto minus_one_pow = []( int k ) -> double {
+        return ( k % 2 == 0 ) ? 1.0 : -1.0;
+    };
+
+    if ( m * m_p < 0 )
+    {
+        return minus_one_pow( n ) * minus_one_pow( m );
+    }
+    else if ( m * m_p > 0 && std::abs( m_p ) < std::abs( m ) )
+    {
+        return minus_one_pow( n ) * minus_one_pow( m_p - m );
+    }
+    else
+    {
+        return minus_one_pow( n );
+    }
+}
+
+
+/**
  * Operator calculates the multipole expansions about the centers of
  * cells not in the leaf layer using the potential field from its child cells
  * Per source 4, page 68, step 2.
@@ -296,7 +321,6 @@ struct M2M
     void operator()( const MultipoleVector& M_orig,
                      const Kokkos::Array<double, 3>& center_orig ) const
     {
-        using cdouble = Kokkos::complex<double>;
         const int p = _p;
         auto M = _M;
 
@@ -364,7 +388,7 @@ struct M2L
     M2L( int p )
         : _p( p )
     {
-        _L = Kokkos::View<cdouble*, memory_space>( "M", ( p + 1 ) * ( p + 1 ) );
+        _L = Kokkos::View<cdouble*, memory_space>( "L", ( p + 1 ) * ( p + 1 ) );
         clear();
     }
 
@@ -381,8 +405,10 @@ struct M2L
     void clear() { Kokkos::deep_copy( _L, cdouble( 0.0, 0.0 ) ); }
 
     /**
-     * Compute local coefficients L[n][m]
-     * up to order p around expansion_center.
+     * Compute local coefficients L[n][m] up to order p
+     * 
+     * @param O multipole coefficients centered around O_center.
+     * @param O_center the ceneter of multipole coefficients O.
      */
     template <class MultipoleVector>
     void operator()( const MultipoleVector& O,
@@ -419,6 +445,83 @@ struct M2L
 
                         Ljk += ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
                                ( A_jn_mk * rho_jn );
+                    }
+                }
+                L( index( j, k ) ) = Ljk;
+            }
+        }
+    }
+};
+
+/**
+ * Translate local expansions.
+ * Theorem 3.5.6 in source 4.
+ */
+template <class MemorySpace, class ExecutionSpace>
+struct L2L
+{
+  public:
+    using memory_space = MemorySpace;
+    using execution_space = ExecutionSpace;
+    using cdouble = Kokkos::complex<double>;
+
+    L2L( int p )
+        : _p( p )
+    {
+        _L = Kokkos::View<cdouble*, memory_space>( "L", ( p + 1 ) * ( p + 1 ) );
+        clear();
+    }
+
+  private:
+    int _p;
+    Kokkos::View<cdouble*, memory_space> _L;
+
+  public:
+    auto coefficients() { return _L; }
+
+    /**
+     * Clear coefficents
+     */
+    void clear() { Kokkos::deep_copy( _L, cdouble( 0.0, 0.0 ) ); }
+
+    /**
+     * Compute local coefficients L[n][m] up to order p
+     * 
+     * @param O multipole coefficients centered around O_center.
+     * @param O_center the ceneter of multipole coefficients O.
+     */
+    template <class LocalVector>
+    void operator()( const LocalVector& O,
+                     const Kokkos::Array<double, 3>& O_center ) const
+    {
+        int p = _p;
+        auto L = _L;
+
+        // Spherical coords of O_center
+        double rho, alpha, beta;
+        cart2sph( O_center[0], O_center[1], O_center[2], rho, alpha, beta );
+
+        // Optimize this code for running on the device
+        for ( int j = 0; j <= p; ++j )
+        {
+            for ( int k = -j; k <= j; ++k )
+            {
+                cdouble Ljk( 0.0, 0.0 );
+
+                for ( int n = j; n <= p; ++n )
+                {
+                    for ( int m = -n; m <= n; ++m )
+                    {
+                        // Numerator of eq 3.60
+                        cdouble O_nm = O( index( n, m ) );
+                        auto J = compute_J( n-j, m-k, m );
+                        auto A_nj_mk = compute_A( n-j, m-k );
+                        auto A_jk = compute_A( j, k );
+                        auto Y_nj_mk = Ynm( n - j, m - k, alpha, beta );
+                        auto rho_nj = Kokkos::pow(rho, n-j);
+
+                        Ljk += ( O_nm * J * A_nj_mk * A_jk * Y_jn_mk * rho_nj ) /
+                               A_jk;
                     }
                 }
                 L( index( j, k ) ) = Ljk;

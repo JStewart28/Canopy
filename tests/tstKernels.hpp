@@ -227,7 +227,7 @@ void testM2MKernel0()
         potential_direct += q0_host( i ) / dist;
 
         // Add total charge for error bound
-        total_q += q0_host(i);
+        total_q += Kokkos::abs(q0_host(i));
 
         // Get max distance from center for error estimate.
         ddx = coords0_host( i, 0 ) - q_center[0];
@@ -273,7 +273,7 @@ void testM2MKernel0()
         }
 
         // Check the error bounds from eq. 3.58
-        auto bound = Kokkos::abs((total_q / (r - (a + rho))) * Kokkos::pow((a + rho)/r, p + 1));
+        auto bound = (total_q / (r - (a + rho))) * Kokkos::pow((a + rho)/r, p + 1);
         auto error = Kokkos::abs(potential_direct - potential_M);
         EXPECT_LE(error, bound) << "p="
             << p << ": error between shifted and direct potentials too high.";
@@ -428,113 +428,94 @@ void testM2MKernel1()
 void testM2LKernel0()
 {
     // Create points and q (scalar value)
-    const int num_points = 20;
+    const int num_points = 50;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
     
-    Kokkos::Array<double, 6> coord_bounds = {-4.0, -4.0, -4.0, -3.0, -3.0, -3.0};
+    Kokkos::Array<double, 6> coord_bounds = {-5.0, -5.0, -5.0, -4.0, -4.0, -4.0};
     fillRandomCoordinates(cart_coords, coord_bounds);
 
     Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
     fillRandomScalar(q, charge_bounds);
 
     // Expansion center
-    Kokkos::Array<double, 3> multipole_center = { -3.1, -3.6, -3.7 };
-    Kokkos::Array<double, 3> local_center = { 0.1, -0.6, 0.3 };
+    Kokkos::Array<double, 3> center = { -4.5, -4.4, -4.3 };
+    double rho, alpha, beta;
+    Canopy::Kernel::cart2sph( center[0], center[1], center[2], rho, alpha, beta );
 
-    // Target point near local center
-    double Px = 0.2, Py = -0.7, Pz = 0.4;
+    // Target point near origin (within radius 'a' of origin)
+    double Px = 0.2, Py = -0.2, Pz = 0.4;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px - local_center[0],
-                              Py - local_center[1],
-                              Pz - local_center[2], r, theta, phi );
+    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
     
-    // radius of smallest sphere that encloses all sources
+    // Compute a and total charge for error bound. (See figure 3.3)
+    // Also compute direct potential
     auto cart_coords_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
+    auto q_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
+    double q_total = 0.0;
     double a = 0.0;
-    for (int i = 0; i < num_points; ++i) {
-        double dx = cart_coords_host(i,0) - multipole_center[0];
-        double dy = cart_coords_host(i,1) - multipole_center[1];
-        double dz = cart_coords_host(i,2) - multipole_center[2];
-        double dist_src = std::sqrt(dx*dx + dy*dy + dz*dz);
-        a = std::max(a, dist_src);                     // <-- sphere radius a
-    }
+    double potential_direct = 0.0;
+    for (int i = 0; i < num_points; ++i)
+    {
+        double dx, dy, dz, dist;
 
-    // compute rho = distance between multipole_center and local_center
-    double ddx = multipole_center[0] - local_center[0];
-    double ddy = multipole_center[1] - local_center[1];
-    double ddz = multipole_center[2] - local_center[2];
-    double rho = std::sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
+        // Radius a
+        dx = cart_coords_host(i,0) - center[0];
+        dy = cart_coords_host(i,1) - center[1];
+        dz = cart_coords_host(i,2) - center[2];
+        dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+        a = std::max(a, dist);
+
+        // Total sum
+        q_total += std::abs(q_host(i));
+
+        // Direct potential
+        dx = Px - cart_coords_host( i, 0 );
+        dy = Py - cart_coords_host( i, 1 );
+        dz = Pz - cart_coords_host( i, 2 );
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        potential_direct += q_host( i ) / dist;
+    }
     
-    double c = rho / a;   // theorem requires c > 1
+    // Theorem 3.5.5 requires c > 1 and rho > (c+1)*a
+    double c = (rho / a) - 1;
     EXPECT_GT(c, 1.0) << "Error: c is not greater than 1.0" << std::endl;
 
-    // Total charge
-     auto q_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
-    double q_sum = 0.0;
-    for (int i = 0; i < num_points; ++i)
-        q_sum += std::abs(q_host(i));
-    
-   
-
-    // Direct potential
-    // auto cart_coords_host =
-    //     Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), cart_coords );
-    // auto q_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q );
-    double phi_direct = 0.0;
-    for ( int i = 0; i < num_points; ++i )
-    {
-        double dx = Px - cart_coords_host( i, 0 );
-        double dy = Py - cart_coords_host( i, 1 );
-        double dz = Pz - cart_coords_host( i, 2 );
-        double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        phi_direct += q_host( i ) / dist;
-    }
-
-    // constexpr auto pi = Kokkos::numbers::pi_v<double>;
+    printf("a=%0.1lf, c=%0.1lf, rho=%0.1lf, (c+1)a=%0.1lf\n", a, c, rho, (c+1)*a);
 
     // Loop over truncation degree
-    for ( int p = 2; p <= 2; ++p )
+    for ( int p = 1; p <= 3; ++p )
     {
-        double bound = ( q_sum / ( c * a - a ) ) * std::pow( 1.0 / c, p + 1 );
-
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
-        p2m( cart_coords, q, num_points, multipole_center );
-        auto M = p2m.coefficients();
-        auto M_host =
-            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
+        p2m( cart_coords, q, num_points, center );
 
         // Convert multipoles to locals
         Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
-        m2l( M, local_center );
+        m2l( p2m.coefficients(), center );
         auto L_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), m2l.coefficients() );
 
         // Perform local to potential conversion to calculate potential at
         // target. Equation 3.59 in source 4
         using cdouble = Kokkos::complex<double>;
-        cdouble phi_multipole = 0.0;
+        cdouble potential_L = 0.0;
         for ( int j = 0; j <= p; ++j )
         {
-            // double norm = 4 * pi / double( 2 * n + 1 );
-            // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
             for ( int k = -j; k <= j; ++k )
             {
                 int idx = Canopy::Kernel::Scalar::index( j, k );
-                phi_multipole +=
+                potential_L +=
                     L_host( idx ) * Kokkos::pow( r, j ) *
                     Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
             }
         }
 
-        double error = std::abs( phi_multipole.real() - phi_direct );
-
-        // Check that the error is within 5*bound, which accounts
-        // for imprecision due to imtermediate rounding.
-        // EXPECT_NEAR( phi_multipole.real(), phi_direct, 5 * bound )
-        std::cout    << "p=" << p << " multipole=" << phi_multipole.real()
-            << " direct=" << phi_direct << " error=" << error << " bound~"
-            << bound << std::endl;
+        // Check the error bounds from eq. 3.61
+        // double bound = ( q_total / ( c * a - a ) ) * std::pow( 1.0 / c, p + 1 );
+        // double error = std::abs( potential_L.real() - potential_direct );
+        // EXPECT_LE(error, bound) << "p="
+        //     << p << ": error between local and direct potentials too high.";
+        printf("Direct: %0.7lf, local: %0.7lf\n", potential_direct, potential_L.real());
     }
 }
 
@@ -547,7 +528,7 @@ TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
 
 TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
 
-// TEST( Kernel, testM2LKernel0 ) { testM2LKernel0(); }
+TEST( Kernel, testM2LKernel0 ) { testM2LKernel0(); }
 
 //---------------------------------------------------------------------------//
 
