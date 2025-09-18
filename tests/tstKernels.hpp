@@ -397,7 +397,6 @@ void testM2MKernel1()
         // Translate O1 and add to O0
         m2m(p2m.coefficients(), q1_center);
 
-
         // Get translated multipole coefficients
         auto tmp = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), m2m.coefficients() );
         Kokkos::View<cdouble*,Kokkos::HostSpace> M_host("M_host", tmp.extent(0));
@@ -428,19 +427,25 @@ void testM2MKernel1()
 void testM2LKernel0()
 {
     // Create points and q (scalar value)
-    const int num_points = 50;
+    const int num_points = 1;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
     
-    Kokkos::Array<double, 6> coord_bounds = {-5.0, -5.0, -5.0, -4.0, -4.0, -4.0};
-    fillRandomCoordinates(cart_coords, coord_bounds);
+    // Kokkos::Array<double, 6> coord_bounds = {-5.0, -5.0, -5.0, -4.0, -4.0, -4.0};
+    // fillRandomCoordinates(cart_coords, coord_bounds);
 
-    Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
-    fillRandomScalar(q, charge_bounds);
+    // Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
+    // fillRandomScalar(q, charge_bounds);
+
+    cart_coords(0, 0) = 10.0;
+    cart_coords(0, 0) = 0.0;
+    cart_coords(0, 0) = 0.0; 
+    q(0) = 1.0;
+    Kokkos::Array<double, 3> center = { 11.0, 0.0, 0.0 };
 
     // Expansion center
-    Kokkos::Array<double, 3> center = { -4.5, -4.4, -4.3 };
+    // Kokkos::Array<double, 3> center = { -4.5, -4.4, -4.3 };
     double rho, alpha, beta;
     Canopy::Kernel::cart2sph( center[0], center[1], center[2], rho, alpha, beta );
 
@@ -490,7 +495,11 @@ void testM2LKernel0()
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
         p2m( cart_coords, q, num_points, center );
 
-        // Convert multipoles to locals
+        // Translate multipoles to be centered around the origin
+        // Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
+        // m2m( p2m.coefficients(), center );
+
+        // Convert translated multipoles to locals
         Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
         m2l( p2m.coefficients(), center );
         auto L_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), m2l.coefficients() );

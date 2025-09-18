@@ -520,7 +520,7 @@ struct L2L
                         auto Y_nj_mk = Ynm( n - j, m - k, alpha, beta );
                         auto rho_nj = Kokkos::pow(rho, n-j);
 
-                        Ljk += ( O_nm * J * A_nj_mk * A_jk * Y_jn_mk * rho_nj ) /
+                        Ljk += ( O_nm * J * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
                                A_jk;
                     }
                 }
