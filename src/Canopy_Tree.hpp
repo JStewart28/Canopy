@@ -62,12 +62,14 @@ class Tree
             const std::size_t leaf_tiles_per_dim,
             const std::size_t tile_reduction_factor,
             const std::size_t root_tiles_per_dim,
+            const int p,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
         , _leaf_tiles_per_dim( leaf_tiles_per_dim )
         , _tile_reduction_factor( tile_reduction_factor )
         , _root_tiles_per_dim( root_tiles_per_dim )
+        , _p( p )
         , _comm( comm )
     {
         MPI_Comm_rank( comm, &_rank );
@@ -93,7 +95,7 @@ class Tree
     {
         // printf("R%d: cell_per_tile: %d\n", _rank, cell_per_tile_dim);
         auto layer = createTreeLayer<tree_type, cell_per_tile_dim>(
-            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, layer_num, _comm);
+            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, layer_num, _p, _comm);
         _tree.push_back(layer);
     }
 
@@ -333,6 +335,9 @@ class Tree
 
     // Maxmimum tiles per dimension at the root layer
     std::size_t _root_tiles_per_dim;
+
+    // Multipole coefficient truncation value
+    const int _p;
 };
 
 template <class ExecutionSpace, class MemorySpace, class MemberType, class EntityType,
@@ -344,11 +349,12 @@ std::shared_ptr<Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
                     const std::size_t leaf_tiles_per_dim,
                     const std::size_t tile_reduction_factor,
                     const std::size_t root_tiles_per_dim,
+                    const int p,
                     MPI_Comm comm)
 {
     return std::make_shared<Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
         NumSpaceDim, CellPerTileDim, PositionSliceId>>(global_low_corner,
-            global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, root_tiles_per_dim,
+            global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, root_tiles_per_dim, p,
             comm);
 }
 
