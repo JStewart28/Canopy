@@ -21,8 +21,8 @@ namespace Canopy
 
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
-template <class ExecutionSpace, class MemorySpace, class MemberType, class EntityType,
-          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t PositionSliceId>
+template <class ExecutionSpace, class MemorySpace, class EntityType,
+          std::size_t NumSpaceDim, std::size_t CellPerTileDim>
 class Tree
 {
   public:
@@ -31,8 +31,8 @@ class Tree
     using memory_space = MemorySpace;
 
     //! Self type
-    using tree_type = Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
-        NumSpaceDim, CellPerTileDim, PositionSliceId>;
+    using tree_type = Tree<ExecutionSpace, MemorySpace, EntityType,
+        NumSpaceDim, CellPerTileDim>;
 
     //! Memory space size type
     using size_type = typename memory_space::size_type;
@@ -45,12 +45,12 @@ class Tree
 
     static constexpr std::size_t cell_per_tile_dim = CellPerTileDim;
 
-    // The AoSoA slice to use to determine which cell the particle resides in
-    static constexpr std::size_t position_slice_id = PositionSliceId;
-
-    // AoSoA related types
-    //! MemberType Data types (Cabana::MemberTypes).
-    using member_types = MemberType;
+    //! AoSoA related types
+    //! MemberType Data types
+    //! Indices into _M and _L where the multipole and local coefficients
+    //! for this cell start.
+    using member_types = Cabana::MemberTypes<std::size_t, std::size_t>
+    //! AoSoA Tuple type
     using tuple_type = Cabana::Tuple<member_types>;
     using data_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;
 
@@ -214,18 +214,18 @@ class Tree
      * 
      * Assumes x/y/z coordinates are the first tuple element in "data"
      */
-    template <class KernelFunction>
-    void aggregateDataUp(data_aosoa_type external_data, KernelFunction kernel)
+    template <class ParticleAoSoA>
+    void create_multipoles(ParticleAoSoA external_data)
     {
         // Data comes from externally to populate leaf layer (layer 0)
-        migrateData(external_data, 0);
-        _tree[0]->populateCells(external_data, kernel);
+        migrateParticleData(external_data);
+        _tree[0]->populateLeafCells(external_data);
         // auto data = _tree[0]->data();
-        for (std::size_t i = 1; i < _tree.size(); i++)
-        {
-            // if (_rank == 0) printf("Starting layer %d...\n", i);
-            migrateAndSetLayer(i-1, i, kernel);
-        }
+        // for (std::size_t i = 1; i < _tree.size(); i++)
+        // {
+        //     // if (_rank == 0) printf("Starting layer %d...\n", i);
+        //     migrateAndSetLayer(i-1, i, kernel);
+        // }
 
 
 
@@ -245,14 +245,15 @@ class Tree
     }
 
     /**
-     * Migrate AoSoA data to the correct rank of ownership for a given layer.
-     * Use position_slice_id slice for positions.
+     * Migrate particle data to the rank that owns them at the leaf layer.
+     * Positions must be the first AoSoA slice.
      */
-    void migrateData(data_aosoa_type& external_data, int to_layer)
+    template <class ParticleAoSoA>
+    void migrateParticleData(ParticleAoSoA& external_data)
     {
-        auto positions = Cabana::slice<position_slice_id>(external_data);
+        auto positions = Cabana::slice<0>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
-        mapParticles(positions, layer_owner, external_data.size(), to_layer);
+        mapParticles(positions, layer_owner, external_data.size(), 0);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
         Cabana::migrate( distributor, external_data );
     }
@@ -261,9 +262,9 @@ class Tree
      * Used to internally migrate and aggregate data from one layer to the next.
      * Use position_slice_id slice for positions.
      */
-    template <class KernelFunction>
-    void migrateAndSetLayer(int from_layer, int to_layer, KernelFunction kernel)
+    void migrateAndSetLayer(int from_layer, int to_layer)
     {
+        printf("TODO: migrateAndSetLayer\n");
         auto data = _tree[from_layer]->data();
         auto positions = Cabana::slice<position_slice_id>(data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", data.size());
