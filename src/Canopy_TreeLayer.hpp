@@ -64,6 +64,7 @@ class TreeLayer
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int halo_width,
             const int layer_number,
+            const int p,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
@@ -71,6 +72,7 @@ class TreeLayer
         , _halo_width( halo_width )
         , _layer_number( layer_number )
         , _cells_per_dim( _tiles_per_dim * cell_per_tile_dim )
+        , _p( p )
         , _comm( comm )
     {
         MPI_Comm_rank( comm, &_rank );
@@ -668,6 +670,9 @@ class TreeLayer
         auto sort_data = Cabana::sortByKey( cglid_slice );
         Cabana::permute( sort_data, cell_id_particle_id_map );
 
+        // Allocate multipole coefficients view
+        _M = Kokkos::View<int*, memory_space>("M", cid_tid_map.size() * ( _p + 1 ) * ( _p + 1 ))
+
         // Aggregate and insert data into the mesh
         using host_aosoa_type = Cabana::AoSoA<map_tuple_type, Kokkos::HostSpace, 4>; // XXX - Set vector size?
         host_aosoa_type host_cid_pid_map("host_cid_pid_map", num_particles);
@@ -817,6 +822,10 @@ class TreeLayer
     //  tid: The local tile id.
     //  cid: The local cell id within a tile.
     Kokkos::UnorderedMap<int, Kokkos::pair<int, int>, memory_space> _cid_tid_map;
+
+    // Store multipole coefficients
+    const int _p;
+    Kokkos::View<int*, memory_space> _M;
 };
 
 template <class TreeType, std::size_t CellPerTileDim>
