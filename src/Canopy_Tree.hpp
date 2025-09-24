@@ -47,9 +47,11 @@ class Tree
 
     //! AoSoA related types
     //! MemberType Data types
-    //! Indices into _M and _L where the multipole and local coefficients
+    //! Cell x/y/z center
+    //! Contiguous cell ID
+    //! Indices into _M where the multipole coefficients
     //! for this cell start.
-    using member_types = Cabana::MemberTypes<std::size_t, std::size_t>
+    using member_types = Cabana::MemberTypes<double[3], std::size_t, std::size_t>
     //! AoSoA Tuple type
     using tuple_type = Cabana::Tuple<member_types>;
     using data_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;

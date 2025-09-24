@@ -17,7 +17,7 @@
 ### Workflow for upwards sweep:
 1. Get raw particle x/y/z and scalar data in AoSoA format.
 2. Fill leaf layer:
-    1. Iterate over particles. Activate the appropriate cells in the leaf layer based on particle positions.
+    1. Iterate over particles. Activate the appropriate cells in the leaf layer based on particle positions. Count the number of cells activated.
     2. Get AoSoA of particles + scalar data that reside within the cell.
     3. Convert particles into "num_M" multipoles.
     4. Store multipoles in _M, indexed by unique, per-process, contiguous cell ids, called ccell_id. Cell with id "ccell_id" has mutlipoles at _M[num_M*ccell_id, (num_M+1) * ccell_id).

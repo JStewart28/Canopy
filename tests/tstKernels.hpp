@@ -307,8 +307,8 @@ void testM2MKernel1()
     
     Kokkos::Array<double, 6> cbounds0 = {-3.0, -3.0, -3.0, -2.0, -2.0, -2.0};
     Kokkos::Array<double, 6> cbounds1 = {1.0, 1.0, 1.0, 2.0, 2.0, 2.0};
-    Kokkos::Array<double, 3> q0_center = { 0.1, 0.0, 0.0 };
-    Kokkos::Array<double, 3> q1_center = { 0.0, 0.0, 0.0 };
+    Kokkos::Array<double, 3> q0_center = { -2.5, -2.6, -2.7 };
+    Kokkos::Array<double, 3> q1_center = { 2.7, 2.4, 2.3 };
     Kokkos::Array<double, 2> qbounds = {-10.0, 10.0};
 
     fillRandomCoordinates(c0, cbounds0);
