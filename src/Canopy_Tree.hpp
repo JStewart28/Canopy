@@ -49,9 +49,7 @@ class Tree
     //! MemberType Data types
     //! Cell x/y/z center
     //! Contiguous cell ID
-    //! Indices into _M where the multipole coefficients
-    //! for this cell start.
-    using member_types = Cabana::MemberTypes<double[3], std::size_t, std::size_t>
+    using member_types = Cabana::MemberTypes<double[3], std::size_t>;
     //! AoSoA Tuple type
     using tuple_type = Cabana::Tuple<member_types>;
     using data_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;
@@ -267,13 +265,13 @@ class Tree
     void migrateAndSetLayer(int from_layer, int to_layer)
     {
         printf("TODO: migrateAndSetLayer\n");
-        auto data = _tree[from_layer]->data();
-        auto positions = Cabana::slice<position_slice_id>(data);
-        Kokkos::View<int*, memory_space> layer_owner("layer_owner", data.size());
-        mapParticles(positions, layer_owner, data.size(), to_layer);
-        Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
-        Cabana::migrate( distributor, data );
-        _tree[to_layer]->populateCells(data, kernel);
+        // auto data = _tree[from_layer]->data();
+        // auto positions = Cabana::slice<0>(data);
+        // Kokkos::View<int*, memory_space> layer_owner("layer_owner", data.size());
+        // mapParticles(positions, layer_owner, data.size(), to_layer);
+        // Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
+        // Cabana::migrate( distributor, data );
+        // _tree[to_layer]->populateCells(data);
     }
 
     /**
@@ -343,10 +341,10 @@ class Tree
     const int _p;
 };
 
-template <class ExecutionSpace, class MemorySpace, class MemberType, class EntityType,
-          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t PositionSliceId>
-std::shared_ptr<Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
-    NumSpaceDim, CellPerTileDim, PositionSliceId>>
+template <class ExecutionSpace, class MemorySpace, class EntityType,
+          std::size_t NumSpaceDim, std::size_t CellPerTileDim>
+std::shared_ptr<Tree<ExecutionSpace, MemorySpace, EntityType,
+    NumSpaceDim, CellPerTileDim>>
         createTree( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
                     const std::size_t leaf_tiles_per_dim,
@@ -355,8 +353,8 @@ std::shared_ptr<Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
                     const int p,
                     MPI_Comm comm)
 {
-    return std::make_shared<Tree<ExecutionSpace, MemorySpace, MemberType, EntityType,
-        NumSpaceDim, CellPerTileDim, PositionSliceId>>(global_low_corner,
+    return std::make_shared<Tree<ExecutionSpace, MemorySpace, EntityType,
+        NumSpaceDim, CellPerTileDim>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, root_tiles_per_dim, p,
             comm);
 }

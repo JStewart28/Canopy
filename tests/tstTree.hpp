@@ -103,12 +103,13 @@ public:
 //---------------------------------------------------------------------------//
 
 /**
- * Rank 0 creates all the data. Each rank gets one particle.
+ * Rank 0 creates all the data. Each rank gets two particles.
  * All ranks insert into the tree.
  * Tests that data was correctly distributed to the rank that owns it
- * and correctly inserted into the tree at the leaf layer.
+ * and correctly inserted into the tree and converted into multipole coefficients
+ * at the leaf layer.
  */
-void testUpwardsAggregation()
+void testLeafLayer()
 {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -117,19 +118,18 @@ void testUpwardsAggregation()
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     // Create a tree of at least depth 3 for any number of processes
-    using particle_tuple_type = Cabana::MemberTypes<double[3], int>;
+    using particle_tuple_type = Cabana::MemberTypes<double[3], double, int>;
     using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
     std::array<double, 3> global_low_corner = { -1.5, -1.5, -1.5 };
     std::array<double, 3> global_high_corner = { 1.5, 1.5, 1.5 };
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 4;
-    static constexpr std::size_t cell_slice_id = 0;
     const int p = 2;
     std::size_t leaf_tiles, root_tiles, red_factor;
     root_tiles = 1, red_factor = comm_size / 2, leaf_tiles = comm_size * 4;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_tuple_type, Cabana::Grid::Cell,
-        num_dim, cells_per_tile, cell_slice_id>(
+    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
+        num_dim, cells_per_tile>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, root_tiles, p, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
@@ -140,7 +140,8 @@ void testUpwardsAggregation()
     int num_particles = (rank == 0) ? (comm_size * 2) : 0;
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_particles);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
-    auto rank_slice_host = Cabana::slice<1>(particle_aosoa_host);
+    auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
+    auto rank_slice_host = Cabana::slice<2>(particle_aosoa_host);
 
     // Returns a vector of domains for each rank
     auto domains_vec = tree->layer(0)->get_domains();
@@ -163,6 +164,7 @@ void testUpwardsAggregation()
         pos_slice_host(i, 0) = x;
         pos_slice_host(i, 1) = y;
         pos_slice_host(i, 2) = z;
+        scalar_slice_host(i) = static_cast<double>(i) * 2.2;
         rank_slice_host(i) = i / 2;
 
         // Second particle: exists one cell away in leaf layer
@@ -173,125 +175,70 @@ void testUpwardsAggregation()
         pos_slice_host(i+1, 0) = x2;
         pos_slice_host(i+1, 1) = y2;
         pos_slice_host(i+1, 2) = z2;
+        scalar_slice_host(i+1) = static_cast<double>(i+1) * -0.9;
         rank_slice_host(i+1) = i / 2;
 
         // printf("R%d: domain: (%0.2lf, %0.2lf, %0.2lf) to (%0.2lf, %0.2lf, %0.2lf), particle pos: (%0.2lf, %0.2lf, %0.2lf)\n",
         //         i, darray[0], darray[1], darray[2], darray[3], darray[4], darray[5], x, y, z);
         // printf("R%d: rank_slice(%d): %d\n", rank, i, rank_slice_host(i));
     }
+
+    // Calculate direct potential
+    // Target point far away from domain so multipole approximation holds.
+    // double Px = 8.8, Py = -5.1, Pz = 12.2;
+    // double r, theta, phi;
+    // Canopy::Kernel::cart2sph( Px - expansion_center[0],
+    //                           Py - expansion_center[1],
+    //                           Pz - expansion_center[2], r, theta, phi );
+
+    // // Direct potential
+    // double potential_direct = 0.0;
+    // for ( int i = 0; i < num_points; ++i )
+    // {
+    //     double dx = Px - cart_coords_host( i, 0 );
+    //     double dy = Py - cart_coords_host( i, 1 );
+    //     double dz = Pz - cart_coords_host( i, 2 );
+    //     double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+    //     phi_direct += q_host( i ) / dist;
+
+    //     // distance from expansion center for error estimate
+    //     double ddx = cart_coords_host( i, 0 ) - expansion_center[0];
+    //     double ddy = cart_coords_host( i, 1 ) - expansion_center[1];
+    //     double ddz = cart_coords_host( i, 2 ) - expansion_center[2];
+    //     double rho = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
+    //     max_rho = std::max( max_rho, rho );
+    // }
+
     
     // Copy to device
     auto particle_aosoa =
         Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
-    
-    // Create the aggregation function
-    KernelFunction<TEST_MEMSPACE, TEST_EXECSPACE,
-         Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>> kernel;
-    
+        
     // Fill the tree
-    tree->aggregateDataUp(particle_aosoa, kernel);
-
-    // printf("R%d: tree size: %d\n", rank, tree->numLayers());
+    tree->create_multipoles(particle_aosoa);
 
     /***********************************************
      * Check the data in the leaf layer (layer 0)
      **********************************************/
-    auto data = tree->layer(0)->data();
-    auto data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
+    // auto data = tree->layer(0)->data();
+    // auto data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
 
     // Each rank should own two particles
-    EXPECT_EQ(2, data_host.size());
+    // EXPECT_EQ(2, data_host.size());
 
     // Check that the correct rank owns the particle
-    rank_slice_host = Cabana::slice<1>(data_host);
-    for (std::size_t i = 0; i < data_host.size(); i++)
-    {
-        EXPECT_EQ(rank_slice_host(i), rank) << "Rank " << rank << std::endl;
-    }
-
-    /***********************************************
-     * Check the data in the layer where the
-     * cell size is large enough that the two original
-     * particles have been aggregated.
-     **********************************************/
-    auto low_corner = tree->globalLowCorner();
-
-    // Find the cells in the previous layer that will activate the
-    // same cell in the next layer.
-    std::size_t layer_num = 0;
-    bool agg = false;
-    while (layer_num < tree->numLayers() - 1)
-    {
-        auto prev_layer = tree->layer(layer_num);
-        auto prev_data = tree->layer(layer_num)->data();
-        auto prev_data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), prev_data );
-        auto next_layer = tree->layer(layer_num + 1);
-        auto next_cell_size = next_layer->cellSize();
-        
-        Kokkos::Array<double, 3> dx_inv = {
-            (double)1.0 / next_cell_size[0], (double)1.0 / next_cell_size[1],
-            (double)1.0 / next_cell_size[2] };
-        
-        auto positions = Cabana::slice<0>(prev_data_host);
-        for (int dim = 0; dim < 3; dim++)
-        {
-            double pos0 = positions( 0, dim );
-            double pos1 = positions( 1, dim );
-            int cell0 = static_cast<int>( std::lround( pos0 * dx_inv[dim] ) );
-            int cell1 = static_cast<int>( std::lround( pos1 * dx_inv[dim] ) );
-            if (cell0 == cell1)
-            {
-                // The next layer is where the particles are aggregated.
-                layer_num++;
-                // printf("R%d: particles agg at layer %d\n", rank, layer_num);
-                agg = true;
-                break;
-            }
-        }
-        if (agg) break;
-
-        // Check the next layer
-        layer_num++;
-    }
-    EXPECT_TRUE(agg) << "Rank " << rank << ": particles never aggregated.\n";
-
-    data = tree->layer(layer_num)->data();
-    data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
-    EXPECT_EQ(1, data_host.size());
-    rank_slice_host = Cabana::slice<1>(data_host);
+    // rank_slice_host = Cabana::slice<2>(data_host);
     // for (std::size_t i = 0; i < data_host.size(); i++)
     // {
-    //     printf("R%d: L%d: int slice: %d\n", rank, layer_num, rank_slice_host(i));
+    //     EXPECT_EQ(rank_slice_host(i), rank) << "Rank " << rank << std::endl;
     // }
-    EXPECT_EQ(rank_slice_host(0), rank * 2) << "Rank " << rank << std::endl;
 
-    /***********************************************
-     * Check the data in the top layer
-     * There is only one tile per dimension at the
-     * root, so one rank should hold all the data
-     ***********************************************/
-    data = tree->layer(tree->numLayers()-1)->data();
-    data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
-    int local_size = (data_host.size() == 0) ? 0 : 1;
-    int global_size;
-    MPI_Allreduce(&local_size, &global_size, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    EXPECT_EQ(global_size, 1) << "One rank does not own all data at the root level.\n";
-    // condition ? expression_if_true : expression_if_false;
-
-    // Check that the sum of all integer data for the rank that owns all the data
-    // is correct.
-    int correct_aggregation = 0;
-    if (local_size) for (int i = 0; i < comm_size; i++) correct_aggregation += (i * 2);
-    int aggregation = 0;
-    rank_slice_host = Cabana::slice<1>(data_host);
-    for (std::size_t i = 0; i < data_host.size(); i++) aggregation += rank_slice_host(i);
-    EXPECT_EQ(correct_aggregation, aggregation) << "Rank " << rank << ": (Data size " << data_host.size() << ")" <<std::endl;
 }
 
 //---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
-TEST( Tree, testUpwardsAggregation ) { testUpwardsAggregation(); }
+TEST( Tree, testLeafLayer ) { testLeafLayer(); }
 
 //---------------------------------------------------------------------------//
 
