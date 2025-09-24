@@ -397,7 +397,7 @@ class TreeLayer
      */
     data_aosoa_type data()
     {
-        int rank = _rank;
+        // int rank = _rank;
 
         data_aosoa_type cell_data("cell_data", _cell_ids_map.size());
         Kokkos::View<int, memory_space> idx("idx");
@@ -409,7 +409,7 @@ class TreeLayer
         // printf("R%d: map size: %d\n", rank, cell_ids_map.size());
 
         // XXX - can this be made more efficient by extracting my SoAs rather than tuples?
-        int layer_number = _layer_number;
+        // int layer_number = _layer_number;
         Kokkos::parallel_for(
             "get_data",
             Kokkos::RangePolicy<execution_space>(0, cell_ids_map.capacity()),
@@ -577,7 +577,7 @@ class TreeLayer
         _cell_ids_map.clear();
         _cell_ids_map.rehash(num_particles);
 
-        printf("R%d: L%d: tpd: %d, cpd: %d\n", rank, _layer_number, _tiles_per_dim, _cells_per_dim);
+        // printf("R%d: L%d: tpd: %d, cpd: %d\n", rank, _layer_number, _tiles_per_dim, _cells_per_dim);
 
         auto positions = Cabana::slice<0>(particle_aosoa);
 
@@ -601,7 +601,7 @@ class TreeLayer
         map_aosoa_type cell_id_particle_id_map("cell_id_particle_id_map", num_particles);
 
         // Counter to assign each cell a unique local ID that is contiguous
-        Kokkos::View<std::size_t> counter("counter");
+        Kokkos::View<std::size_t, memory_space> counter("counter");
         Kokkos::deep_copy(counter, 0);
 
         auto ccell_id_slice = Cabana::slice<0>(cell_id_particle_id_map);
@@ -692,7 +692,7 @@ class TreeLayer
                 index++;
             }
             int end = index;
-            // printf("R%d: agg data from [%d, %d), cid: %d\n", rank, start, end, cid);
+            printf("R%d: agg data from [%d, %d), cid: %d\n", rank, start, end, cid);
             initializeLeafCell(particle_aosoa, cell_id_particle_id_map, start, end);
         }
         // printf("R%d: aosoa size: %d\n", _rank, _cells_ptr->size());
