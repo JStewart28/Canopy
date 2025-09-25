@@ -124,13 +124,13 @@ void testLeafLayer()
     std::array<double, 3> global_high_corner = { 1.5, 1.5, 1.5 };
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 4;
-    const int p = 3;
-    std::size_t leaf_tiles, root_tiles, red_factor;
-    root_tiles = 1, red_factor = comm_size / 2, leaf_tiles = comm_size * 4;
+    static constexpr std::size_t p = 3;
+    std::size_t leaf_tiles, red_factor;
+    red_factor = comm_size / 2, leaf_tiles = comm_size * 4;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
-        num_dim, cells_per_tile>(
-            global_low_corner, global_high_corner, leaf_tiles, red_factor, p, MPI_COMM_WORLD);
+        num_dim, cells_per_tile, p>(
+            global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
