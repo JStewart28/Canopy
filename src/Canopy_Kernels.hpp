@@ -246,7 +246,7 @@ double compute_A( int n, int m )
  * Equation 3.43, source 4
  */
 KOKKOS_INLINE_FUNCTION
-double compute_J( int n, int m )
+double compute_J_3_43( int n, int m )
 {
     if ( n * m < 0 )
     {
@@ -262,10 +262,29 @@ double compute_J( int n, int m )
 }
 
 /**
+ * Equation 3.43, source 4
+ */
+KOKKOS_INLINE_FUNCTION
+double compute_J_3_49( int n, int m )
+{
+    if ( n * m > 0 )
+    {
+        int min_abs = ( Kokkos::abs( n ) < Kokkos::abs( m ) )
+                          ? Kokkos::abs( n )
+                          : Kokkos::abs( m );
+        return  Kokkos::pow(-1, m) * double( ( min_abs % 2 == 0 ) ? 1 : -1 ); // (-1)^(m)*(-1)^min(|n|,|m|)
+    }
+    else
+    {
+        return Kokkos::pow(-1, m);
+    }
+}
+
+/**
  * Equation 3.54, source 4
  */
 KOKKOS_INLINE_FUNCTION
-double compute_J( int n, int m, int m_p )
+double compute_J_3_54( int n, int m, int m_p )
 {
     auto minus_one_pow = []( int k ) -> double {
         return ( k % 2 == 0 ) ? 1.0 : -1.0;
@@ -353,7 +372,7 @@ struct M2M
                         cdouble O = M_orig( orig_index );
 
                         // Values for eq 3.57
-                        const double J = compute_J( m, k_m );
+                        const double J = compute_J_3_43( m, k_m );
                         const double A_nm = compute_A( n, m );
                         const double A_jn_km = compute_A( j_n, k_m );
                         const double A_jk = compute_A( j, k );
@@ -435,7 +454,7 @@ struct M2L
                     {
                         // Numerator of eq 3.60
                         cdouble O_nm = O( index( n, m ) );
-                        auto J_km = compute_J( k, m );
+                        auto J_km = compute_J_3_49( k, m );
                         auto A_nm = compute_A( n, m );
                         auto A_jk = compute_A( j, k );
                         auto Y_jn_mk = Ynm( j + n, m - k, alpha, beta );
@@ -443,9 +462,12 @@ struct M2L
                         // Demoninator of eq 3.60
                         auto A_jn_mk = compute_A( j + n, m - k );
                         auto rho_jn = Kokkos::pow( rho, j + n + 1 );
-
+                        // auto val = ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
+                        //        ( A_jn_mk * rho_jn );
                         Ljk += ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
                                ( A_jn_mk * rho_jn );
+                        // if (j == 0 && k == 0) printf("    O_nm: %0.4lf, Ljk+= (%0.4lf, %0.4lf), Ljk= (%0.4lf, %0.4lf)\n",
+                        // O_nm.real(), val.real(), val.imag(), Ljk.real(), Ljk.imag());
                     }
                 }
                 L( index( j, k ) ) = Ljk;
@@ -515,7 +537,7 @@ struct L2L
                     {
                         // Numerator of eq 3.60
                         cdouble O_nm = O( index( n, m ) );
-                        auto J = compute_J( n-j, m-k, m );
+                        auto J = compute_J_3_54( n-j, m-k, m );
                         auto A_nj_mk = compute_A( n-j, m-k );
                         auto A_jk = compute_A( j, k );
                         auto Y_nj_mk = Ynm( n - j, m - k, alpha, beta );

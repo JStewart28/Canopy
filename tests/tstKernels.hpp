@@ -319,11 +319,11 @@ void testM2MKernel1()
 
     // Expansion center of Q0 in polar coordinates - rho0, alpha0, beta0
     double rho0, alpha0, beta0;
-    Canopy::Kernel::cart2sph( q0_center[0], q0_center[1], q0_center[2], rho0, alpha0, beta0 );
+    Canopy::Kernel::cart2sph( -q0_center[0], -q0_center[1], -q0_center[2], rho0, alpha0, beta0 );
 
     // Expansion center of Q1 in polar coordinates - rho1, alpha1, beta1
     double rho1, alpha1, beta1;
-    Canopy::Kernel::cart2sph( q1_center[0], q1_center[1], q1_center[2], rho1, alpha1, beta1 );
+    Canopy::Kernel::cart2sph( -q1_center[0], -q1_center[1], -q1_center[2], rho1, alpha1, beta1 );
 
     // Target point - rho0, theta, phi
     double Px = 15.0, Py = -10.0, Pz = 7.0;
@@ -357,18 +357,18 @@ void testM2MKernel1()
         if (i < points_per_section)
         {
             // Use q0_center
-            ddx = coords_host( i, 0 ) - q0_center[0];
-            ddy = coords_host( i, 1 ) - q0_center[1];
-            ddz = coords_host( i, 2 ) - q0_center[2];
+            ddx = coords_host( i, 0 ) + q0_center[0];
+            ddy = coords_host( i, 1 ) + q0_center[1];
+            ddz = coords_host( i, 2 ) + q0_center[2];
             rho_tmp = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
             a0 = std::max( a0, rho_tmp );
         }
         else 
         {
             // Use q1_center
-            ddx = coords_host( i, 0 ) - q1_center[0];
-            ddy = coords_host( i, 1 ) - q1_center[1];
-            ddz = coords_host( i, 2 ) - q1_center[2];
+            ddx = coords_host( i, 0 ) + q1_center[0];
+            ddy = coords_host( i, 1 ) + q1_center[1];
+            ddz = coords_host( i, 2 ) + q1_center[2];
             rho_tmp = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
             a1 = std::max( a1, rho_tmp );
         }
@@ -430,30 +430,58 @@ void testM2MKernel1()
 void testM2LKernel0()
 {
     // Create points and q (scalar value)
-    const int num_points = 1;
+    const int num_points = 500;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
     
-    Kokkos::Array<double, 6> coord_bounds = {-5.0, -5.0, -5.0, -4.0, -4.0, -4.0};
+    Kokkos::Array<double, 6> coord_bounds = {-7.0, -7.0, -7.0, -4.0, -4.0, -4.0};
     fillRandomCoordinates(cart_coords, coord_bounds);
 
-    Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
+    Kokkos::Array<double, 2> charge_bounds = {0.0, 2.0};
     fillRandomScalar(q, charge_bounds);
 
-    // cart_coords(0, 0) = 10.0;
-    // cart_coords(0, 0) = 0.0;
-    // cart_coords(0, 0) = 0.0; 
+    // cart_coords(0, 0) = 2.0;
+    // cart_coords(0, 1) = 6.0;
+    // cart_coords(0, 2) = 1.0;
     // q(0) = 1.0;
-    // Kokkos::Array<double, 3> center = { 11.0, 0.0, 0.0 };
+    Kokkos::Array<double, 3> center = { -5.4, -6.1, -4.9 };
+    // double rho_c = std::sqrt(center[0]*center[0] + center[1]*center[1]);
+    // double r_c   = std::sqrt(rho_c*rho_c + center[2]*center[2]);
+    // double cos_theta = center[2] / r_c;   // target polar angle
 
+    // for (int i = 0; i < num_points; ++i)
+    // {
+    //     double x = cart_coords(i,0);
+    //     double y = cart_coords(i,1);
+    //     double rho = std::sqrt(x*x + y*y);
+
+    //     // pick a different z for this point (any value, as long as sign is consistent)
+    //     // e.g. random between -6 and -3
+    //     double z_new = -7.0 + (std::rand()/(double)RAND_MAX) * 3.0;
+
+    //     // horizontal distance needed for same θ with this z_new
+    //     double rho_new = std::abs(z_new) * std::sqrt(1.0/(cos_theta*cos_theta) - 1.0);
+
+    //     double scale = rho_new / (rho + 1e-12);
+    //     cart_coords(i,0) = x * scale;
+    //     cart_coords(i,1) = y * scale;
+    //     cart_coords(i,2) = z_new;   // all different from center[2]
+    // }
+
+
+
+    // for (int i = 0; i < num_points; ++i)
+    // {
+    //     cart_coords(i, 2) = -4.9;
+    // }
     // Expansion center
-    Kokkos::Array<double, 3> center = { -4.5, -4.4, -4.3 };
+    // Kokkos::Array<double, 3> center = { -4.5, -4.4, -4.3 };
     double rho, alpha, beta;
     Canopy::Kernel::cart2sph( center[0], center[1], center[2], rho, alpha, beta );
 
     // Target point near origin (within radius 'a' of origin)
-    double Px = 0.1, Py = 0.0, Pz = 0.0;
+    double Px = 1.1, Py = -0.9, Pz = -1.3;
     double r, theta, phi, r_d, theta_d, phi_d;
     Canopy::Kernel::cart2sph( Px - center[0], Py- center[1], Pz - center[2], r_d, theta_d, phi_d );
     Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi);
@@ -491,12 +519,15 @@ void testM2LKernel0()
     // Solve for c, getting c < (rho - a) / a for a > 0.
     EXPECT_GT(a, 0.0);
     double c = (rho - a) / a;
-    EXPECT_GT(c, 1.0) << "Error: rho must be greater than (c+1)*a for theory to be valid." << std::endl;
+    EXPECT_GT(c, 1.0) << "Error: rho must be greater than (c+1)*a for theory to be valid.";
+
+    // Target point must be within radius a of origin
+    EXPECT_LT(r, a) << "Error: Target point must be within distance 'a' from origin for theory to be valid.";
 
     printf("a=%0.1lf, c=%0.1lf, rho=%0.1lf, (c+1)a=%0.1lf\n", a, c, rho, (c+1)*a);
 
     // Loop over truncation degree
-    for ( int p = 1; p <= 7; ++p )
+    for ( int p = 1; p <= 15; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
         p2m( cart_coords, q, num_points, center );
@@ -521,9 +552,12 @@ void testM2LKernel0()
             for ( int k = -j; k <= j; ++k )
             {
                 int idx = Canopy::Kernel::Scalar::index( j, k );
+
+                // Eq. 3.59
                 potential_L +=
                     L_host( idx ) * Kokkos::pow( r, j ) *
                     Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                // Eq. 3.36
                 potential_O +=
                     O_host( idx ) / Kokkos::pow( r_d, j + 1) *
                     Canopy::Kernel::Scalar::Ynm( j, k, theta_d, phi_d );
@@ -535,8 +569,8 @@ void testM2LKernel0()
         double error = std::abs( potential_L.real() - potential_direct );
         // EXPECT_LE(error, bound) << "p="
         //     << p << ": error between local and direct potentials too high.";
-        printf("p=%d: Direct: %0.7lf, local: %0.7lf, multi: %0.7lf\n", p,
-            potential_direct, potential_L.real(), potential_O.real());
+        printf("p=%d: D: %0.7lf, L: %0.7lf, M: %0.7lf, b: %0.7lf e: %0.7lf\n", p,
+            potential_direct, potential_L.real(), potential_O.real(), bound, error);
     }
 }
 
