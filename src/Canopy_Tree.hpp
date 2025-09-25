@@ -49,7 +49,8 @@ class Tree
     //! MemberType Data types
     //! Cell x/y/z center
     //! Contiguous cell ID
-    using member_types = Cabana::MemberTypes<double[3], std::size_t>;
+    //! Rank
+    using member_types = Cabana::MemberTypes<double[3], std::size_t, int>;
     //! AoSoA Tuple type
     using tuple_type = Cabana::Tuple<member_types>;
     using data_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;
@@ -61,14 +62,13 @@ class Tree
             const std::array<double, 3>& global_high_corner,
             const std::size_t leaf_tiles_per_dim,
             const std::size_t tile_reduction_factor,
-            const std::size_t root_tiles_per_dim,
             const int p,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
         , _leaf_tiles_per_dim( leaf_tiles_per_dim )
         , _tile_reduction_factor( tile_reduction_factor )
-        , _root_tiles_per_dim( root_tiles_per_dim )
+        , _root_tiles_per_dim( 1 )
         , _p( p )
         , _comm( comm )
     {
@@ -219,13 +219,21 @@ class Tree
     {
         // Data comes from externally to populate leaf layer (layer 0)
         migrateParticleData(external_data);
-        _tree[0]->populateLeafCells(external_data);
+        _tree[0]->populateCells(external_data);
         // auto data = _tree[0]->data();
-        // for (std::size_t i = 1; i < _tree.size(); i++)
+        // auto pos_s = Cabana::slice<0>(data);
+        // auto id_s = Cabana::slice<1>(data);
+        // auto r_s = Cabana::slice<2>(data);
+        // for (std::size_t i = 0; i < data.size(); i++)
         // {
-        //     // if (_rank == 0) printf("Starting layer %d...\n", i);
-        //     migrateAndSetLayer(i-1, i, kernel);
+        //     printf("R%d: (%0.3lf, %0.3lf, %0.3lf), id %d, r%d\n", _rank,
+        //         pos_s(i, 0), pos_s(i, 1), pos_s(i, 2), id_s(i), r_s(i));
         // }
+        for (std::size_t i = 1; i < 2; i++)
+        {
+            if (_rank == 0) printf("Starting layer %d...\n", i);
+            migrateAndSetLayer(i-1, i);
+        }
 
 
 
@@ -264,13 +272,34 @@ class Tree
      */
     void migrateAndSetLayer(int from_layer, int to_layer)
     {
-        printf("TODO: migrateAndSetLayer\n");
-        // auto data = _tree[from_layer]->data();
-        // auto positions = Cabana::slice<0>(data);
-        // Kokkos::View<int*, memory_space> layer_owner("layer_owner", data.size());
-        // mapParticles(positions, layer_owner, data.size(), to_layer);
-        // Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
-        // Cabana::migrate( distributor, data );
+        // Communicate cell data
+        auto data = _tree[from_layer]->data();
+        auto positions = Cabana::slice<0>(data);
+        Kokkos::View<int*, memory_space> to_layer_owner("to_layer_owner", data.size());
+        mapParticles(positions, to_layer_owner, data.size(), to_layer);
+        Cabana::Distributor<memory_space> distributor(_comm, to_layer_owner);
+        
+        // Communicate multipole data.
+        // We know how many coefficient each cell has.
+        auto num_coefficients = _tree[from_layer]->num_coefficients();
+
+        // We know where the coefficients for each cell start
+        // and who we are sending to.
+        std::size_t 
+        auto from_M = _tree[from_layer]->multipole_coefficients();
+
+
+        // Don't migrate data until here because migrate modifies
+        // data in-place, and we need it above.
+        Cabana::migrate( distributor, data );
+        // auto pos_s = Cabana::slice<0>(data);
+        // auto id_s = Cabana::slice<1>(data);
+        // auto r_s = Cabana::slice<2>(data);
+        // for (std::size_t i = 0; i < data.size(); i++)
+        // {
+        //     printf("After, to L%d R%d: (%0.3lf, %0.3lf, %0.3lf), id %d, r%d\n", to_layer, _rank,
+        //         pos_s(i, 0), pos_s(i, 1), pos_s(i, 2), id_s(i), r_s(i));
+        // }
         // _tree[to_layer]->populateCells(data);
     }
 
@@ -349,13 +378,12 @@ std::shared_ptr<Tree<ExecutionSpace, MemorySpace, EntityType,
                     const std::array<double, 3>& global_high_corner,
                     const std::size_t leaf_tiles_per_dim,
                     const std::size_t tile_reduction_factor,
-                    const std::size_t root_tiles_per_dim,
                     const int p,
                     MPI_Comm comm)
 {
     return std::make_shared<Tree<ExecutionSpace, MemorySpace, EntityType,
         NumSpaceDim, CellPerTileDim>>(global_low_corner,
-            global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, root_tiles_per_dim, p,
+            global_high_corner, leaf_tiles_per_dim, tile_reduction_factor, p,
             comm);
 }
 

@@ -130,7 +130,7 @@ void testLeafLayer()
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
         num_dim, cells_per_tile>(
-            global_low_corner, global_high_corner, leaf_tiles, red_factor, root_tiles, p, MPI_COMM_WORLD);
+            global_low_corner, global_high_corner, leaf_tiles, red_factor, p, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
@@ -183,6 +183,20 @@ void testLeafLayer()
         // printf("R%d: rank_slice(%d): %d\n", rank, i, rank_slice_host(i));
     }
 
+    // Calculate direct potential.
+    // Target point far away from domain so multipole approximation holds.
+    double Px = 8.8, Py = -5.1, Pz = 12.2;
+    double r, theta, phi;
+    double potential_direct = 0.0;
+    for (std::size_t i = 0; i < num_particles; ++i)
+    {
+        double dx = Px - pos_slice_host( i, 0 );
+        double dy = Py - pos_slice_host( i, 1 );
+        double dz = Pz - pos_slice_host( i, 2 );
+        double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        potential_direct += scalar_slice_host( i ) / dist;
+    }
+
     // Copy to device
     auto particle_aosoa =
         Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
@@ -191,59 +205,10 @@ void testLeafLayer()
     tree->create_multipoles(particle_aosoa);
 
     /***********************************************
-     * Check the data in the leaf layer (layer 0)
+     * Check the data in the root layer
      **********************************************/
-    auto data = tree->layer(0)->data();
-    auto data_host = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), data );
-    auto cell_center = Cabana::slice<0>(data_host);
-    auto ccell_id_slice = Cabana::slice<1>(data_host);
-
-    // Calculate direct potential using cell centers
-    // Target point far away from domain so multipole approximation holds.
-    double Px = 8.8, Py = -5.1, Pz = 12.2;
-    double r, theta, phi;
-    double potential_direct = 0.0;
-    for (std::size_t i = 0; i < data_host.size(); ++i)
-    {
-        Kokkos::Array<double, 3> expansion_center = { cell_center(i, 0), cell_center(i, 1), cell_center(i, 2) };
-        Canopy::Kernel::cart2sph( Px - expansion_center[0],
-                              Py - expansion_center[1],
-                              Pz - expansion_center[2], r, theta, phi );
-        double dx = Px - cart_coords_host( i, 0 );
-        double dy = Py - cart_coords_host( i, 1 );
-        double dz = Pz - cart_coords_host( i, 2 );
-        double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        phi_direct += q_host( i ) / dist;
-    }
-
-
-
-    // Target point
-    double Px = 6.6, Py = -5.1, Pz = 1.9;
-    double r, theta, phi;
     
-
-    // Direct potential
-    auto cart_coords_host =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), cart_coords );
-    auto q_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q );
-    double phi_direct = 0.0;
-    double max_rho = 0.0; // for error bound
-    for ( int i = 0; i < num_points; ++i )
-    {
-        double dx = Px - cart_coords_host( i, 0 );
-        double dy = Py - cart_coords_host( i, 1 );
-        double dz = Pz - cart_coords_host( i, 2 );
-        double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        phi_direct += q_host( i ) / dist;
-
-        // distance from expansion center for error estimate
-        double ddx = cart_coords_host( i, 0 ) - expansion_center[0];
-        double ddy = cart_coords_host( i, 1 ) - expansion_center[1];
-        double ddz = cart_coords_host( i, 2 ) - expansion_center[2];
-        double rho = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
-        max_rho = std::max( max_rho, rho );
-    }
+    
 
     // Each rank should own two particles
     // EXPECT_EQ(2, data_host.size());

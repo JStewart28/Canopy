@@ -438,10 +438,6 @@ class TreeLayer
         return cell_data;
     }
 
-
-    /*******************************************************************************
-     * Set by AoSoA
-     ******************************************************************************/
     /**
      * Initialize the leaf layer. This requires different initialization than other layers
      * because data must be converted to multipole coefficients. For all other layers,
@@ -453,7 +449,7 @@ class TreeLayer
     {
         assert(_layer_number == 0);
 
-        // int rank = _rank;
+        int rank = _rank;
         // printf("R%d: agg data from [%d, %d)\n", rank, start, end);
 
         int view_size = end - start;
@@ -550,11 +546,136 @@ class TreeLayer
                     Cabana::get<0>(tp, j) = cell_center(j);
                 // Contiguous cell id
                 Cabana::get<1>(tp) = ccell_id();
+                // Rank
+                Cabana::get<2>(tp) = rank;
 
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( ctid() & cell_mask_per_tile ), tp );
             }); 
     }
+
+    /**
+     * xxx
+     */
+    template <class ParticleAoSoA, class MapAoSoAType>
+    void initializeCell(const data_aosoa_type incoming_cell_data, const MapAoSoAType data_map,
+        int start, int end)
+    {
+        assert(_layer_number > 0);
+
+        int rank = _rank;
+        // printf("R%d: agg data from [%d, %d)\n", rank, start, end);
+
+        std::size_t view_size = end - start;
+        auto ccell_id_slice = Cabana::slice<0>(data_map);
+        auto tid_slice = Cabana::slice<1>(data_map);
+        auto ctid_slice = Cabana::slice<2>(data_map);
+        auto plid_slice = Cabana::slice<3>(data_map);
+        data_aosoa_type cell_data("cell_data", view_size);
+
+        // Save the tile ID, the cell ID within the tile, and the contiguous cell local ID
+        Kokkos::View<std::size_t, memory_space> tid("tid");
+        Kokkos::View<std::size_t, memory_space> ctid("ctid");
+        Kokkos::View<std::size_t, memory_space> ccell_id("ccell_id");
+        Kokkos::View<double[3], memory_space> cell_center("cell_center");
+
+        // Save cell centers for multipole translations
+        Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", view_size);
+
+
+        // printf("R%d: AoSoA data size: %d\n", _rank, aosoa_data.size());
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        auto cell_size = _cell_size;
+
+        Kokkos::parallel_for(
+            "populate_cell_data",
+            Kokkos::RangePolicy<execution_space>( 0, view_size ),
+            KOKKOS_LAMBDA( const std::size_t i ) {
+
+                std::size_t index = i + start;
+                std::size_t pid = plid_slice(index);
+                // printf("R%d: getting tuple %d from index %d\n", rank, pid, index);
+                auto data_tuple = incoming_cell_data.getTuple(pid);
+                cell_data.setTuple(i, data_tuple);
+
+                if (i == 0)
+                {
+                    // Same values for all threads
+                    tid() = tid_slice(index);
+                    ctid() = ctid_slice(index);
+                    ccell_id() = ccell_id_slice(index);
+                }
+
+                // Unlike leaf cells, each incoming cell data is from a different cell
+                // which have different centers.
+                double xcenter = Cabana::get<0>(data_tuple, 0);
+                double ycenter = Cabana::get<0>(data_tuple, 1);
+                double zcenter = Cabana::get<0>(data_tuple, 2);
+                std::size_t offset = i * 3;
+                incoming_cell_centers(offset) = xcenter;
+                incoming_cell_centers(offset+1) = ycenter;
+                incoming_cell_centers(offset+2) = zcenter;
+                
+            });
+            
+        Kokkos::fence();
+
+        // Copy ccell_id to host
+        std::size_t ccell_id_h;
+        Kokkos::deep_copy(ccell_id_h, ccell_id);
+
+        // Copy cell centers to host
+        auto cell_center_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_center);
+        auto incoming_cell_centers_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), incoming_cell_centers);
+
+        // Translate multipole data
+
+        // Create vector pointing from child cell center to parent cell center
+        Kokkos::Array<double, 3> vector_to_center;
+        for (std::size_t i = 0; i < 3; ++i)
+            cell_center_array[i] = cell_center_h(i);
+
+        // Aggregate cell data
+        Kernel::Scalar::P2M<memory_space, execution_space> p2m( _p );
+        auto positions = Cabana::slice<0>(cell_data);
+        auto scalars = Cabana::slice<1>(cell_data);
+        p2m(positions, scalars, view_size, cell_center_array);
+        auto M_coefficients = p2m.coefficients();
+
+        // Set _M
+        _num_M = M_coefficients.extent(0);
+        auto num_M = _num_M;
+        auto M = _M;
+        Kokkos::parallel_for(
+            "set _M",
+            Kokkos::RangePolicy<execution_space>( 0, num_M ),
+            KOKKOS_LAMBDA( const std::size_t i ) {
+                std::size_t index = ccell_id() * num_M;
+                M(index + i) = M_coefficients(i);
+            }); 
+
+        // Set cell data for cell cid
+        auto aosoa = _cells_ptr->aosoa();
+        Kokkos::parallel_for(
+            "set_cell_data",
+            Kokkos::RangePolicy<execution_space>( 0, 1 ),
+            KOKKOS_LAMBDA( const int i ) {
+
+                tuple_type tp;
+
+                // Cell center
+                for (std::size_t j = 0; j < 3; ++j)
+                    Cabana::get<0>(tp, j) = cell_center(j);
+                // Contiguous cell id
+                Cabana::get<1>(tp) = ccell_id();
+                // Rank
+                Cabana::get<2>(tp) = rank;
+
+                aosoa.setTuple(( tid() << cell_bits_per_tile ) |
+                               ( ctid() & cell_mask_per_tile ), tp );
+            }); 
+    }
+
     /**
      * Takes an AoSoA of particle data where positions is the first tuple.
      * Saves the cell each particle falls in into cell_map
@@ -563,15 +684,19 @@ class TreeLayer
      *      to which cells.
      *  3. Aggregate the data for each cell using the KernelFunction.
      *  4. Inserts the aggregated data into the correct cell on this layer.
+     * 
+     *  @param data_aosoa: either an AoSoA of particles (for layer 0), or
+     *  an AoSoA of cell data (layers > 0). Either way, the first tuple element
+     *  must be the position.
      */
     template <class ParticleAoSoA>
-    void populateLeafCells(const ParticleAoSoA particle_aosoa)
+    void populateCells(const ParticleAoSoA data_aosoa)
     {
         int rank = _rank;
 
         updateCellSize();
 
-        std::size_t num_particles = particle_aosoa.size();
+        std::size_t num_particles = data_aosoa.size();
 
         // Initialize _cell_ids_map
         _cell_ids_map.clear();
@@ -579,7 +704,7 @@ class TreeLayer
 
         // printf("R%d: L%d: tpd: %d, cpd: %d\n", rank, _layer_number, _tiles_per_dim, _cells_per_dim);
 
-        auto positions = Cabana::slice<0>(particle_aosoa);
+        auto positions = Cabana::slice<0>(data_aosoa);
 
         auto map = *_map_ptr;
         auto cell_ids_map = _cell_ids_map;
@@ -587,8 +712,8 @@ class TreeLayer
         auto array = _cells_ptr;
         auto cell_size = _cell_size;
 
-        auto cells_per_dim = this->cellsPerDim();
-        auto tiles_per_dim = this->tilesPerDim();
+        // auto cells_per_dim = this->cellsPerDim();
+        // auto tiles_per_dim = this->tilesPerDim();
 
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         
@@ -693,7 +818,8 @@ class TreeLayer
             }
             int end = index;
             printf("R%d: agg data from [%d, %d), cid: %d\n", rank, start, end, cid);
-            initializeLeafCell(particle_aosoa, cell_id_particle_id_map, start, end);
+            if (_layer_number == 0) initializeLeafCell(data_aosoa, cell_id_particle_id_map, start, end);
+            else initializeCell(data_aosoa, cell_id_particle_id_map, start, end);
         }
         // printf("R%d: aosoa size: %d\n", _rank, _cells_ptr->size());
 
@@ -766,6 +892,8 @@ class TreeLayer
     int cellsPerDim() const {return _cells_per_dim;}
     int tilesPerDim() const {return _tiles_per_dim;}
     Kokkos::Array<double, 3> cellSize() const {return _cell_size;}
+    auto multipole_coefficients() {return _M;}
+    auto num_coefficients() {return (( _p + 1 ) * ( _p + 1 ));}
     
 
   private:
