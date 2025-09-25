@@ -652,6 +652,36 @@ class TreeLayer
 
         }
 
+        auto M_coefficients = m2m.coefficients();
+
+        // Set cell data for cell cid
+        auto aosoa = _cells_ptr->aosoa();
+        Kokkos::parallel_for(
+            "set_cell_data",
+            Kokkos::RangePolicy<execution_space>( 0, 1 ),
+            KOKKOS_LAMBDA( const int i ) {
+
+                tuple_type tp;
+
+                // Multipole coefficients
+                for (std::size_t j = 0; j < ((p+1)*(p+1)); ++j)
+                {
+                    Cabana::get<0>(tp, j, 0) = M_coefficients(j).real();
+                    Cabana::get<0>(tp, j, 1) = M_coefficients(j).imag();
+                }
+
+                // Cell center
+                for (std::size_t j = 0; j < 3; ++j)
+                    Cabana::get<1>(tp, j) = cell_center(j);
+                // Contiguous cell id
+                Cabana::get<2>(tp) = ccell_id();
+                // Rank
+                Cabana::get<3>(tp) = rank;
+
+                aosoa.setTuple(( tid() << cell_bits_per_tile ) |
+                               ( ctid() & cell_mask_per_tile ), tp );
+            }); 
+
         // Create vector pointing from child cell center to parent cell center
         // Kokkos::Array<double, 3> vector_to_center;
         // for (std::size_t i = 0; i < 3; ++i)
@@ -676,26 +706,7 @@ class TreeLayer
         //         M(index + i) = M_coefficients(i);
         //     }); 
 
-        // // Set cell data for cell cid
-        // auto aosoa = _cells_ptr->aosoa();
-        // Kokkos::parallel_for(
-        //     "set_cell_data",
-        //     Kokkos::RangePolicy<execution_space>( 0, 1 ),
-        //     KOKKOS_LAMBDA( const int i ) {
-
-        //         tuple_type tp;
-
-        //         // Cell center
-        //         for (std::size_t j = 0; j < 3; ++j)
-        //             Cabana::get<0>(tp, j) = cell_center(j);
-        //         // Contiguous cell id
-        //         Cabana::get<1>(tp) = ccell_id();
-        //         // Rank
-        //         Cabana::get<2>(tp) = rank;
-
-        //         aosoa.setTuple(( tid() << cell_bits_per_tile ) |
-        //                        ( ctid() & cell_mask_per_tile ), tp );
-        //     }); 
+        
     }
 
     /**
