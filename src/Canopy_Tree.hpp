@@ -80,6 +80,9 @@ class Tree
         // Reserve space for 10 layers
         _tree.reserve(10);
 
+        // Reserve space for root layer
+        _M_root = Kokkos::View<cdouble*, memory_space>("_M_root", (p+1) * (p+1));
+
         build();
         
         /*
@@ -209,6 +212,86 @@ class Tree
         return _tree[layer]->loadBalance(position_slice, num_particles);
     }
 
+    /*
+     Set the root layer. At (root layer - 1) there one tile per dimension,
+     but since there are still multiple cells per tile, there must be one
+     final aggregation step to translate and add multipoles into a single
+     set of coefficients at the root. Since the root layer is a single set of
+     multipole coefficients that is not distributed, store the root layer data
+     in this object instyead of a TreeLayer.
+    */
+    void initializeRootLayer()
+    {
+        // Rank 0 holds all the data in the layer below the root because
+        // there is only one tile per dimensions and therefore no
+        // distributed partitioning.
+        assert(!_tree.empty());
+
+        // if (_rank == 0)
+        // {
+            auto top_layer = _tree.back();
+
+            auto map = *top_layer->map();
+            auto array = top_layer->array();
+
+            Kokkos::View<cdouble*, memory_space> top_M("top_M",
+                (p+1) * (p+1) * map.size());
+            
+                printf("R%d: map size: %d\n", _rank, map.size());
+
+            // Iterate over all activiated cells
+            Kokkos::parallel_for(
+            "iterate_top_layer",
+            Kokkos::RangePolicy<execution_space>( 0, map.capacity() ),
+            KOKKOS_LAMBDA( const int index ) {
+                if ( map.valid_at( index ) )
+                {
+                    auto tid = map.value_at( index );
+                    auto tkey = map.key_at( index );
+                    int ti, tj, tk;
+                    map.key2ijk( tkey, ti, tj, tk );
+
+                    // for ( int ci = 0; ci < cell_per_tile_dim; ci++ )
+                    //     for ( int cj = 0; cj < cell_per_tile_dim; cj++ )
+                    //         for ( int ck = 0; ck < cell_per_tile_dim; ck++ )
+                    //         {
+                    //             // indices
+                    //             int cid = map.cell_local_id( ci, cj, ck );
+                    //             Kokkos::Array<int, 3> cell_ijk(
+                    //                 { ti * cell_per_tile_dim + ci,
+                    //                 tj * cell_per_tile_dim + cj,
+                    //                 tk * cell_per_tile_dim + ck } );
+                    //             Kokkos::Array<int, 3> tile_ijk( { ti, tj, tk } );
+                    //             Kokkos::Array<int, 3> local_cell_ijk(
+                    //                 { ci, cj, ck } );
+
+                    //             // access: cell ijk (- channel id)
+                    //             array.template get<0>( cell_ijk, 1 ) = tj;
+                    //             array.template get<0>( cell_ijk, 0 ) = ti;
+                    //             array.template get<0>( cell_ijk, 2 ) = tk;
+
+                    //             // access: tile ijk - cell ijk (- channel id)
+                    //             array.template get<1>( tile_ijk, local_cell_ijk,
+                    //                                 0 ) = ci * 0.1;
+                    //             array.template get<1>( tile_ijk, local_cell_ijk,
+                    //                                 1 ) = cj * 0.1;
+                    //             // access: tile id - cell ijk (- channel id)
+                    //             array.template get<1>( tid, local_cell_ijk, 2 ) =
+                    //                 ck * 0.1;
+
+                    //             // access: tile id - cell id (- channel id)
+                    //             array.template get<2>( tid, cid, 0 ) = (int)tkey;
+                    //             array.template get<2>( tid, cid, 1 ) = (int)tid;
+
+                    //             // record info
+                    //             info( ti, tj, tk, 0 ) = (int)tid;
+                    //             info( ti, tj, tk, 1 ) = (int)tkey;
+                    //         }
+                }
+            } );
+        // }
+    }
+
 
     /**
      * Assumes all particles in 'data' are owned by this rank; i.e., particles have already been
@@ -231,11 +314,15 @@ class Tree
         //     printf("R%d: (%0.3lf, %0.3lf, %0.3lf), id %d, r%d\n", _rank,
         //         pos_s(i, 0), pos_s(i, 1), pos_s(i, 2), id_s(i), r_s(i));
         // }
-        for (std::size_t i = 1; i < 2; i++)
+        for (std::size_t i = 1; i < _tree.size(); i++)
         {
             if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i);
         }
+        initializeRootLayer();
+
+        
+        
 
 
 
@@ -360,8 +447,12 @@ class Tree
     // Factor for how many tiles the mesh should be reduced by for each layer
     std::size_t _tile_reduction_factor;
 
-    // Maxmimum tiles per dimension at the root layer
+    // Maxmimum tiles per dimension at the (root layer -1) layer
     std::size_t _root_tiles_per_dim;
+
+    // Root data
+    Kokkos::View<cdouble*, memory_space> _M_root;
+
 };
 
 template <class ExecutionSpace, class MemorySpace, class EntityType,

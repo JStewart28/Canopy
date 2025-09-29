@@ -634,11 +634,11 @@ class TreeLayer
             std::size_t M_size = (p+1)*(p+1);
             Kokkos::View<cdouble*, memory_space> M("M", M_size);
             Kokkos::parallel_for("set M",
-            Kokkos::RangePolicy<execution_space>( 0, M_size ),
-            KOKKOS_LAMBDA( const std::size_t j ) {
-                double real_part = M_slice(j, 0);
-                double imag_part = M_slice(j, 1);
-                M(i) = cdouble(real_part, imag_part);
+                Kokkos::RangePolicy<execution_space>( 0, M_size ),
+                KOKKOS_LAMBDA( const std::size_t j ) {
+                    double real_part = M_slice(j, 0);
+                    double imag_part = M_slice(j, 1);
+                    M(i) = cdouble(real_part, imag_part);
             });
 
             // Create vector pointing from child cell center to cell center
@@ -681,32 +681,6 @@ class TreeLayer
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( ctid() & cell_mask_per_tile ), tp );
             }); 
-
-        // Create vector pointing from child cell center to parent cell center
-        // Kokkos::Array<double, 3> vector_to_center;
-        // for (std::size_t i = 0; i < 3; ++i)
-        //     cell_center_array[i] = cell_center_h(i);
-
-        // // Aggregate cell data
-        // Kernel::Scalar::P2M<memory_space, execution_space> p2m( _p );
-        // auto positions = Cabana::slice<0>(cell_data);
-        // auto scalars = Cabana::slice<1>(cell_data);
-        // p2m(positions, scalars, view_size, cell_center_array);
-        // auto M_coefficients = p2m.coefficients();
-
-        // // Set _M
-        // _num_M = M_coefficients.extent(0);
-        // auto num_M = _num_M;
-        // auto M = _M;
-        // Kokkos::parallel_for(
-        //     "set _M",
-        //     Kokkos::RangePolicy<execution_space>( 0, num_M ),
-        //     KOKKOS_LAMBDA( const std::size_t i ) {
-        //         std::size_t index = ccell_id() * num_M;
-        //         M(index + i) = M_coefficients(i);
-        //     }); 
-
-        
     }
 
     /**
