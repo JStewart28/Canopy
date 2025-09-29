@@ -260,53 +260,13 @@ class Tree
             // printf("R%d: checking index %d\n", rank, index);
             if ( map.valid_at( index ) )
             {
-                auto tid = map.value_at( index );
-                auto tkey = map.key_at( index );
-                int ti, tj, tk;
-                map.key2ijk( tkey, ti, tj, tk );
+                // auto tid = map.value_at( index );
+                // auto tkey = map.key_at( index );
+                // int ti, tj, tk;
+                // map.key2ijk( tkey, ti, tj, tk );
                 // printf("R%d: active tile at %d, %d, %d\n", rank, ti, tj, tk);
 
-                for ( int ci = 0; ci < cell_per_tile_dim; ci++ )
-                    for ( int cj = 0; cj < cell_per_tile_dim; cj++ )
-                        for ( int ck = 0; ck < cell_per_tile_dim; ck++ )
-                        {
-                            // indices
-                            // int cid = map.cell_local_id( ci, cj, ck );
-                            // Kokkos::Array<int, 3> cell_ijk(
-                            //     { ti * cell_per_tile_dim + ci,
-                            //     tj * cell_per_tile_dim + cj,
-                            //     tk * cell_per_tile_dim + ck } );
-                            // Kokkos::Array<int, 3> tile_ijk( { ti, tj, tk } );
-                            // Kokkos::Array<int, 3> local_cell_ijk(
-                            //     { ci, cj, ck } );
-
-                            // access: cell ijk (-M vals)
-                            // printf("")
-                            // array.template get<0>( cell_ijk, 1 ) = tj;
-                            // array.template get<0>( cell_ijk, 0 ) = ti;
-                            // array.template get<0>( cell_ijk, 2 ) = tk;
-
-                            // auto x0 = array.template get<1>( cell_ijk, 0 );
-                            // auto y0 = array.template get<1>( cell_ijk, 1 );
-                            // auto z0 = array.template get<1>( cell_ijk, 2 );
-                            // auto ccellid = array.template get<2>( cell_ijk );
-
-                            // access: cell ijk (- cell center)
-                            // printf("ijk: %d, %d, %d: center: %0.3lf, %0.3lf, %0.3lf, ccellid: %d\n",
-                            //     ci, cj, ck, x0, y0, z0, ccellid);
-                            // array.template get<1>( tile_ijk, local_cell_ijk,
-                            //                     0 ) = ci * 0.1;
-                            // array.template get<1>( tile_ijk, local_cell_ijk,
-                            //                     1 ) = cj * 0.1;
-                            // access:cell ijk (- ccell id)
-                            // array.template get<1>( tid, local_cell_ijk, 2 ) =
-                            //     ck * 0.1;
-
-                            // access: tile id - cell id (- channel id)
-                            // array.template get<2>( tid, cid, 0 ) = (int)tkey;
-                            // array.template get<2>( tid, cid, 1 ) = (int)tid;
-                            // info( ti, tj, tk, 1 ) = (int)tkey;
-                        }
+               
             }
         } );
     }
@@ -333,12 +293,12 @@ class Tree
         //     printf("R%d: (%0.3lf, %0.3lf, %0.3lf), id %d, r%d\n", _rank,
         //         pos_s(i, 0), pos_s(i, 1), pos_s(i, 2), id_s(i), r_s(i));
         // }
-        for (std::size_t i = 1; i < 2; i++)
+        for (std::size_t i = 1; i < _tree.size(); i++)
         {
-            if (_rank == 0) printf("Starting layer %d...\n", i);
+            // if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i);
         }
-        // initializeRootLayer();
+        initializeRootLayer();
 
         
         

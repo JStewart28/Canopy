@@ -187,7 +187,7 @@ class TreeLayer
         auto local_grid =
             Cabana::Grid::Experimental::createSparseLocalGrid( global_grid, _halo_width, cell_per_tile_dim );
         sparse_map_type sparse_map =
-            Cabana::Grid::createSparseMap<memory_space>( global_mesh, 1.2 );
+            Cabana::Grid::createSparseMap<memory_space, double, cell_per_tile_dim>( global_mesh, 1.2 );
         // Save sparse map as shared pointer
         _map_ptr = std::make_shared<sparse_map_type>(sparse_map);
 
@@ -546,10 +546,10 @@ class TreeLayer
 
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( ctid() & cell_mask_per_tile ), tp );
-                printf("R%d: setting leaf cell ccellid %d, tuple %d, c(%0.3lf, %0.3lf, %0.3lf)\n",
-                    rank, ccell_id(),
-                    ( tid() << cell_bits_per_tile ) | ( ctid() & cell_mask_per_tile ),
-                    cell_center(0), cell_center(1), cell_center(2));
+                // printf("R%d: setting leaf cell ccellid %d, tuple %d, c(%0.3lf, %0.3lf, %0.3lf)\n",
+                //     rank, ccell_id(),
+                //     ( tid() << cell_bits_per_tile ) | ( ctid() & cell_mask_per_tile ),
+                //     cell_center(0), cell_center(1), cell_center(2));
             }); 
     }
 
@@ -598,14 +598,6 @@ class TreeLayer
                 auto data_tuple = incoming_cell_data.getTuple(pid);
                 cell_data.setTuple(i, data_tuple);
 
-                if (i == 0)
-                {
-                    // Same values for all threads
-                    tid() = tid_slice(index);
-                    ctid() = ctid_slice(index);
-                    ccell_id() = ccell_id_slice(index);
-                }
-
                 // Unlike leaf cells, each incoming cell data is from a different cell
                 // which have different centers.
                 // Positions is second tuple elememnt in incoming cell data
@@ -616,8 +608,26 @@ class TreeLayer
                 incoming_cell_centers(i, 0) = xcenter;
                 incoming_cell_centers(i, 1) = ycenter;
                 incoming_cell_centers(i, 2) = zcenter;
-                printf("L%d: R%d: in_c(%0.3lf, %0.3lf, %0.3lf)\n", layer_number, rank,
-                    xcenter, ycenter, zcenter);
+                
+                if (i == 0)
+                {
+                    // Same values for all threads
+                    tid() = tid_slice(index);
+                    ctid() = ctid_slice(index);
+                    ccell_id() = ccell_id_slice(index);
+
+                    // All incoming cells will share the same parent cell center
+                    auto cell_ijk = position2ijk(xcenter, ycenter, zcenter, low_corner, cell_size);
+                    auto cell_center_array = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        low_corner, cell_size);
+                    for (std::size_t j = 0; j < 3; ++j)
+                        cell_center(j) = cell_center_array[j];
+                }
+
+                // printf("L%d: R%d: in_c(%0.3lf, %0.3lf, %0.3lf)\n", layer_number, rank,
+                //     xcenter, ycenter, zcenter);
+                
+               
                 
             });
             
@@ -687,10 +697,10 @@ class TreeLayer
 
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( ctid() & cell_mask_per_tile ), tp );
-                printf("L%d: R%d: setting cell ccellid %d, tuple %d, c(%0.3lf, %0.3lf, %0.3lf)\n",
-                    layer_number, rank, ccell_id(),
-                    ( tid() << cell_bits_per_tile ) | ( ctid() & cell_mask_per_tile ),
-                    cell_center(0), cell_center(1), cell_center(2));
+                // printf("L%d: R%d: setting cell ccellid %d, tuple %d, c(%0.3lf, %0.3lf, %0.3lf)\n",
+                //     layer_number, rank, ccell_id(),
+                //     ( tid() << cell_bits_per_tile ) | ( ctid() & cell_mask_per_tile ),
+                //     cell_center(0), cell_center(1), cell_center(2));
             }); 
     }
 
@@ -800,6 +810,8 @@ class TreeLayer
                 
                 
             } );
+        
+        printf("L%d: R%d: num cells activated: %d\n", _layer_number, _rank, cell_ids_map.size());
         
         // Allocate memory for the AoSoA which stores cell data
         array->reserveFromMap( 1.1 );
