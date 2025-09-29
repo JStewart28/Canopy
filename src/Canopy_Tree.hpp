@@ -151,6 +151,12 @@ class Tree
         // Get all rank domains on host
         auto tree_layer = _tree[layer];
         auto domains_host = tree_layer->get_domains();
+        // for (std::size_t i = 0; i < domains_host.size(); ++i)
+        // {
+        //     if (_rank == 0) printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", layer,
+        //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
+        //         domains_host[i][4], domains_host[i][5]);
+        // }
         int num_ranks = domains_host.size();
 
         // Copy domains to device
@@ -222,74 +228,87 @@ class Tree
     */
     void initializeRootLayer()
     {
-        // Rank 0 holds all the data in the layer below the root because
+        // One rank holds all the data in the layer below the root because
         // there is only one tile per dimensions and therefore no
         // distributed partitioning.
         assert(!_tree.empty());
 
-        // if (_rank == 0)
+        auto top_layer = _tree.back();
+
+        // auto domains = top_layer->get_domains();
+        // for (std::size_t i = 0; i < domains.size(); ++i)
         // {
-            auto top_layer = _tree.back();
-
-            auto map = *top_layer->map();
-            auto array = top_layer->array();
-
-            Kokkos::View<cdouble*, memory_space> top_M("top_M",
-                (p+1) * (p+1) * map.size());
-            
-                printf("R%d: map size: %d\n", _rank, map.size());
-
-            // Iterate over all activiated cells
-            Kokkos::parallel_for(
-            "iterate_top_layer",
-            Kokkos::RangePolicy<execution_space>( 0, map.capacity() ),
-            KOKKOS_LAMBDA( const int index ) {
-                if ( map.valid_at( index ) )
-                {
-                    auto tid = map.value_at( index );
-                    auto tkey = map.key_at( index );
-                    int ti, tj, tk;
-                    map.key2ijk( tkey, ti, tj, tk );
-
-                    // for ( int ci = 0; ci < cell_per_tile_dim; ci++ )
-                    //     for ( int cj = 0; cj < cell_per_tile_dim; cj++ )
-                    //         for ( int ck = 0; ck < cell_per_tile_dim; ck++ )
-                    //         {
-                    //             // indices
-                    //             int cid = map.cell_local_id( ci, cj, ck );
-                    //             Kokkos::Array<int, 3> cell_ijk(
-                    //                 { ti * cell_per_tile_dim + ci,
-                    //                 tj * cell_per_tile_dim + cj,
-                    //                 tk * cell_per_tile_dim + ck } );
-                    //             Kokkos::Array<int, 3> tile_ijk( { ti, tj, tk } );
-                    //             Kokkos::Array<int, 3> local_cell_ijk(
-                    //                 { ci, cj, ck } );
-
-                    //             // access: cell ijk (- channel id)
-                    //             array.template get<0>( cell_ijk, 1 ) = tj;
-                    //             array.template get<0>( cell_ijk, 0 ) = ti;
-                    //             array.template get<0>( cell_ijk, 2 ) = tk;
-
-                    //             // access: tile ijk - cell ijk (- channel id)
-                    //             array.template get<1>( tile_ijk, local_cell_ijk,
-                    //                                 0 ) = ci * 0.1;
-                    //             array.template get<1>( tile_ijk, local_cell_ijk,
-                    //                                 1 ) = cj * 0.1;
-                    //             // access: tile id - cell ijk (- channel id)
-                    //             array.template get<1>( tid, local_cell_ijk, 2 ) =
-                    //                 ck * 0.1;
-
-                    //             // access: tile id - cell id (- channel id)
-                    //             array.template get<2>( tid, cid, 0 ) = (int)tkey;
-                    //             array.template get<2>( tid, cid, 1 ) = (int)tid;
-
-                    //             // record info
-                    //             info( ti, tj, tk, 0 ) = (int)tid;
-                    //             info( ti, tj, tk, 1 ) = (int)tkey;
-                    //         }
-                }
-            } );
+        //     if (_rank == 0) printf("R%d: [%d, %d, %d] to [%d, %d, %d]\n",
+        //         i, domains[i][0], domains[i][1], domains[i][2], domains[i][3],
+        //         domains[i][4], domains[i][5]);
         // }
+
+        auto map = *top_layer->map();
+        auto array = *top_layer->array();
+
+        Kokkos::View<cdouble*, memory_space> top_M("top_M",
+            (p+1) * (p+1) * map.size());
+        
+        printf("R%d: map size: %d\n", _rank, map.size());
+
+        // Iterate over all activiated cells
+        int rank = _rank;
+        Kokkos::parallel_for(
+        "iterate_top_layer",
+        Kokkos::RangePolicy<execution_space>( 0, map.capacity() ),
+        KOKKOS_LAMBDA( const int index ) {
+            // printf("R%d: checking index %d\n", rank, index);
+            if ( map.valid_at( index ) )
+            {
+                auto tid = map.value_at( index );
+                auto tkey = map.key_at( index );
+                int ti, tj, tk;
+                map.key2ijk( tkey, ti, tj, tk );
+                // printf("R%d: active tile at %d, %d, %d\n", rank, ti, tj, tk);
+
+                for ( int ci = 0; ci < cell_per_tile_dim; ci++ )
+                    for ( int cj = 0; cj < cell_per_tile_dim; cj++ )
+                        for ( int ck = 0; ck < cell_per_tile_dim; ck++ )
+                        {
+                            // indices
+                            // int cid = map.cell_local_id( ci, cj, ck );
+                            // Kokkos::Array<int, 3> cell_ijk(
+                            //     { ti * cell_per_tile_dim + ci,
+                            //     tj * cell_per_tile_dim + cj,
+                            //     tk * cell_per_tile_dim + ck } );
+                            // Kokkos::Array<int, 3> tile_ijk( { ti, tj, tk } );
+                            // Kokkos::Array<int, 3> local_cell_ijk(
+                            //     { ci, cj, ck } );
+
+                            // access: cell ijk (-M vals)
+                            // printf("")
+                            // array.template get<0>( cell_ijk, 1 ) = tj;
+                            // array.template get<0>( cell_ijk, 0 ) = ti;
+                            // array.template get<0>( cell_ijk, 2 ) = tk;
+
+                            // auto x0 = array.template get<1>( cell_ijk, 0 );
+                            // auto y0 = array.template get<1>( cell_ijk, 1 );
+                            // auto z0 = array.template get<1>( cell_ijk, 2 );
+                            // auto ccellid = array.template get<2>( cell_ijk );
+
+                            // access: cell ijk (- cell center)
+                            // printf("ijk: %d, %d, %d: center: %0.3lf, %0.3lf, %0.3lf, ccellid: %d\n",
+                            //     ci, cj, ck, x0, y0, z0, ccellid);
+                            // array.template get<1>( tile_ijk, local_cell_ijk,
+                            //                     0 ) = ci * 0.1;
+                            // array.template get<1>( tile_ijk, local_cell_ijk,
+                            //                     1 ) = cj * 0.1;
+                            // access:cell ijk (- ccell id)
+                            // array.template get<1>( tid, local_cell_ijk, 2 ) =
+                            //     ck * 0.1;
+
+                            // access: tile id - cell id (- channel id)
+                            // array.template get<2>( tid, cid, 0 ) = (int)tkey;
+                            // array.template get<2>( tid, cid, 1 ) = (int)tid;
+                            // info( ti, tj, tk, 1 ) = (int)tkey;
+                        }
+            }
+        } );
     }
 
 
@@ -314,12 +333,12 @@ class Tree
         //     printf("R%d: (%0.3lf, %0.3lf, %0.3lf), id %d, r%d\n", _rank,
         //         pos_s(i, 0), pos_s(i, 1), pos_s(i, 2), id_s(i), r_s(i));
         // }
-        for (std::size_t i = 1; i < _tree.size(); i++)
+        for (std::size_t i = 1; i < 2; i++)
         {
             if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i);
         }
-        initializeRootLayer();
+        // initializeRootLayer();
 
         
         
@@ -368,23 +387,7 @@ class Tree
         mapParticles(positions, to_layer_owner, data.size(), to_layer);
         Cabana::Distributor<memory_space> distributor(_comm, to_layer_owner);
         Cabana::migrate( distributor, data );
-
-
-        // We know where the coefficients for each cell start
-        // and who we are sending to.
-
-
-        // Don't migrate data until here because migrate modifies
-        // data in-place, and we need it above.
-        // auto pos_s = Cabana::slice<0>(data);
-        // auto id_s = Cabana::slice<1>(data);
-        // auto r_s = Cabana::slice<2>(data);
-        // for (std::size_t i = 0; i < data.size(); i++)
-        // {
-        //     printf("After, to L%d R%d: (%0.3lf, %0.3lf, %0.3lf), id %d, r%d\n", to_layer, _rank,
-        //         pos_s(i, 0), pos_s(i, 1), pos_s(i, 2), id_s(i), r_s(i));
-        // }
-        // _tree[to_layer]->populateCells(data);
+        _tree[to_layer]->populateCells(data);
     }
 
     /**

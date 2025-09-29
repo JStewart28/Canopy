@@ -449,7 +449,7 @@ class TreeLayer
         assert(_layer_number == 0);
 
         int rank = _rank;
-        // printf("R%d: agg data from [%d, %d)\n", rank, start, end);
+        // printf("R%d: leaf cell data from [%d, %d)\n", rank, start, end);
 
         int view_size = end - start;
         auto ccell_id_slice = Cabana::slice<0>(data_map);
@@ -546,6 +546,10 @@ class TreeLayer
 
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( ctid() & cell_mask_per_tile ), tp );
+                printf("R%d: setting leaf cell ccellid %d, tuple %d, c(%0.3lf, %0.3lf, %0.3lf)\n",
+                    rank, ccell_id(),
+                    ( tid() << cell_bits_per_tile ) | ( ctid() & cell_mask_per_tile ),
+                    cell_center(0), cell_center(1), cell_center(2));
             }); 
     }
 
@@ -559,7 +563,8 @@ class TreeLayer
         assert(_layer_number > 0);
 
         int rank = _rank;
-        // printf("R%d: agg data from [%d, %d)\n", rank, start, end);
+        int layer_number = _layer_number;
+        // printf("R%d: non-leaf data from [%d, %d)\n", rank, start, end);
 
         std::size_t view_size = end - start;
         auto ccell_id_slice = Cabana::slice<0>(data_map);
@@ -607,10 +612,12 @@ class TreeLayer
                 double xcenter = Cabana::get<1>(data_tuple, 0);
                 double ycenter = Cabana::get<1>(data_tuple, 1);
                 double zcenter = Cabana::get<1>(data_tuple, 2);
-                std::size_t offset = i * 3;
-                incoming_cell_centers(offset) = xcenter;
-                incoming_cell_centers(offset+1) = ycenter;
-                incoming_cell_centers(offset+2) = zcenter;
+                // std::size_t offset = i;
+                incoming_cell_centers(i, 0) = xcenter;
+                incoming_cell_centers(i, 1) = ycenter;
+                incoming_cell_centers(i, 2) = zcenter;
+                printf("L%d: R%d: in_c(%0.3lf, %0.3lf, %0.3lf)\n", layer_number, rank,
+                    xcenter, ycenter, zcenter);
                 
             });
             
@@ -636,15 +643,15 @@ class TreeLayer
             Kokkos::parallel_for("set M",
                 Kokkos::RangePolicy<execution_space>( 0, M_size ),
                 KOKKOS_LAMBDA( const std::size_t j ) {
-                    double real_part = M_slice(j, 0);
-                    double imag_part = M_slice(j, 1);
+                    double real_part = M_slice(i, j, 0);
+                    double imag_part = M_slice(i, j, 1);
                     M(i) = cdouble(real_part, imag_part);
             });
 
             // Create vector pointing from child cell center to cell center
             Kokkos::Array<double, 3> vector_to_center;
-            Kokkos::Array<double, 3> child_center = {incoming_cell_centers_h[i*3],
-                incoming_cell_centers_h[i*3+1], incoming_cell_centers_h[i*3+2]};
+            Kokkos::Array<double, 3> child_center = {incoming_cell_centers_h(i, 0),
+                incoming_cell_centers_h(i, 1), incoming_cell_centers_h(i, 2)};
             for (int j = 0; j < 3; ++j)
                 vector_to_center[j] = cell_center_h(j) - child_center[j];
             
@@ -680,6 +687,10 @@ class TreeLayer
 
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( ctid() & cell_mask_per_tile ), tp );
+                printf("L%d: R%d: setting cell ccellid %d, tuple %d, c(%0.3lf, %0.3lf, %0.3lf)\n",
+                    layer_number, rank, ccell_id(),
+                    ( tid() << cell_bits_per_tile ) | ( ctid() & cell_mask_per_tile ),
+                    cell_center(0), cell_center(1), cell_center(2));
             }); 
     }
 
@@ -825,7 +836,7 @@ class TreeLayer
                 index++;
             }
             int end = index;
-            printf("R%d: agg data from [%d, %d), cid: %d\n", rank, start, end, cid);
+            // printf("R%d: agg data from [%d, %d), cid: %d\n", rank, start, end, cid);
             // Leaf data
             if constexpr (position_index == 0) initializeLeafCell(data_aosoa, cell_id_particle_id_map, start, end);
             // Non-leaf data

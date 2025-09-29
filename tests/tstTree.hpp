@@ -186,7 +186,7 @@ void testLeafLayer()
     // Calculate direct potential.
     // Target point far away from domain so multipole approximation holds.
     double Px = 8.8, Py = -5.1, Pz = 12.2;
-    double r, theta, phi;
+    // double r, theta, phi;
     double potential_direct = 0.0;
     for (std::size_t i = 0; i < num_particles; ++i)
     {
