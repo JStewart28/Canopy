@@ -293,11 +293,11 @@ class Tree
         //     printf("R%d: (%0.3lf, %0.3lf, %0.3lf), id %d, r%d\n", _rank,
         //         pos_s(i, 0), pos_s(i, 1), pos_s(i, 2), id_s(i), r_s(i));
         // }
-        for (std::size_t i = 1; i < _tree.size(); i++)
-        {
-            // if (_rank == 0) printf("Starting layer %d...\n", i);
-            migrateAndSetLayer(i-1, i);
-        }
+        // for (std::size_t i = 1; i < _tree.size(); i++)
+        // {
+        //     // if (_rank == 0) printf("Starting layer %d...\n", i);
+        //     migrateAndSetLayer(i-1, i);
+        // }
         //initializeRootLayer();
 
         
@@ -330,14 +330,6 @@ class Tree
         auto positions = Cabana::slice<0>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
         mapParticles(positions, layer_owner, external_data.size(), 0);
-
-        // (-0.469, 0.094, -0.469)
-        for (std::size_t i = 0; i < external_data.size(); ++i)
-        {
-            printf("To L0: R%d: p(%.3lf, %.3lf, %.3lf), to R%d\n", _rank, positions(i, 0),
-                positions(i, 1), positions(i, 2), layer_owner(i));
-        }
-
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
         Cabana::migrate( distributor, external_data );
     }
