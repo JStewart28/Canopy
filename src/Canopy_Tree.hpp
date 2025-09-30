@@ -48,7 +48,7 @@ class Tree
     //! AoSoA related types
     //! MemberType Data types
     //! Cell x/y/z center
-    //! Contiguous cell ID
+    //! cell ID
     //! Rank
     static constexpr std::size_t p = ExpansionCutoff;
     using cdouble = Kokkos::complex<double>;
