@@ -167,6 +167,8 @@ void testLeafLayer()
             pos_slice_host(i, j) = cart_coords_h(i, j);
         }
         scalar_slice_host(i) = q_h(i);
+        printf("R%d: initial cells: p(%0.3lf, %0.3lf, %0.3lf)\n", rank,
+            pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2));
     }
 
     // Calculate direct potential.

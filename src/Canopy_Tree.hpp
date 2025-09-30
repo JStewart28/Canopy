@@ -151,12 +151,12 @@ class Tree
         // Get all rank domains on host
         auto tree_layer = _tree[layer];
         auto domains_host = tree_layer->get_domains();
-        // for (std::size_t i = 0; i < domains_host.size(); ++i)
-        // {
-        //     if (_rank == 0) printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", layer,
-        //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
-        //         domains_host[i][4], domains_host[i][5]);
-        // }
+        for (std::size_t i = 0; i < domains_host.size(); ++i)
+        {
+            if (_rank == 0) printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", layer,
+                i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
+                domains_host[i][4], domains_host[i][5]);
+        }
         int num_ranks = domains_host.size();
 
         // Copy domains to device
@@ -330,6 +330,14 @@ class Tree
         auto positions = Cabana::slice<0>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
         mapParticles(positions, layer_owner, external_data.size(), 0);
+
+        // (-0.469, 0.094, -0.469)
+        for (std::size_t i = 0; i < external_data.size(); ++i)
+        {
+            printf("To L0: R%d: p(%.3lf, %.3lf, %.3lf), to R%d\n", _rank, positions(i, 0),
+                positions(i, 1), positions(i, 2), layer_owner(i));
+        }
+
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
         Cabana::migrate( distributor, external_data );
     }

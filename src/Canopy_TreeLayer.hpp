@@ -449,6 +449,7 @@ class TreeLayer
         assert(_layer_number == 0);
 
         int rank = _rank;
+        int layer_number = _layer_number;
         // printf("R%d: leaf cell data from [%d, %d)\n", rank, start, end);
 
         int view_size = end - start;
@@ -497,6 +498,12 @@ class TreeLayer
                         low_corner, cell_size);
                     for (std::size_t j = 0; j < 3; ++j)
                         cell_center(j) = cell_center_array[j];
+                    
+                    // (-0.469, 0.094, -0.469)
+                    printf("L%d: R%d: cid: %d, c(%0.3lf, %0.3lf, %0.3lf), c_ijk(%d, %d, %d), tid: %d, ctid: %d, in_pos(%0.3lf, %0.3lf, %0.3lf)\n",
+                        layer_number, rank, cid(),
+                        cell_ijk[0], cell_ijk[1], cell_ijk[2], tid(), ctid(),
+                        cell_center(0), cell_center(1), cell_center(2), x, y, z);
                 }
                 
             });
@@ -508,6 +515,8 @@ class TreeLayer
         Kokkos::Array<double, 3> cell_center_array;
         for (std::size_t i = 0; i < 3; ++i)
             cell_center_array[i] = cell_center_h(i);
+        
+        
 
         // Aggregate cell data
         Kernel::Scalar::P2M<memory_space, execution_space> p2m( p );
@@ -632,15 +641,23 @@ class TreeLayer
                         // Set ijk view
                         cell_ijk(j) = cell_ijk_array[j];
                     }
-                        
+                    // if (layer_number == 3)
+                    // printf("L%d: R%d: cid: %d, in_c(%0.3lf, %0.3lf, %0.3lf)\n", layer_number, rank,
+                    //     cid(), xcenter, ycenter, zcenter);              
+                    
                 }
-
                 // if (layer_number == 3)
-                // printf("L%d: R%d: in_c(%0.3lf, %0.3lf, %0.3lf)\n", layer_number, rank,
-                //     xcenter, ycenter, zcenter);
-                
-               
-                
+                // {
+                //     if (cid_slice(index) == 7)
+                //     {
+                //         printf("L%d, R%d: i%d: pid %d: in_c(%0.3lf, %0.3lf, %0.3lf)\n", layer_number, rank, i,
+                //             pid, xcenter, ycenter, zcenter);
+                //     }
+                // }
+                printf("L%d: R%d: cid: %d, i%d, c(%0.3lf, %0.3lf, %0.3lf), in_c(%0.3lf, %0.3lf, %0.3lf)\n",
+                    layer_number, rank, cid(), i,
+                    cell_center(0), cell_center(1), cell_center(2),
+                    xcenter, ycenter, zcenter);
             });
             
         Kokkos::fence();
@@ -675,8 +692,8 @@ class TreeLayer
             Kokkos::Array<double, 3> child_center = {incoming_cell_centers_h(i, 0),
                 incoming_cell_centers_h(i, 1), incoming_cell_centers_h(i, 2)};
             
-            if (_layer_number == 3) printf("i%d: child center: %0.3lf, %0.3lf, %0.3lf\n",
-                i, child_center[0], child_center[1], child_center[2]);
+            // if (_layer_number == 3) printf("i%d: cid: %d, child center: %0.3lf, %0.3lf, %0.3lf\n",
+            //     i, cid(), child_center[0], child_center[1], child_center[2]);
 
             for (int j = 0; j < 3; ++j)
                 vector_to_center[j] = cell_center_h(j) - child_center[j];
@@ -746,6 +763,7 @@ class TreeLayer
     void populateCells(const ParticleAoSoA data_aosoa)
     {
         int rank = _rank;
+        int layer_number = _layer_number;
 
         updateCellSize();
 
@@ -840,10 +858,16 @@ class TreeLayer
                 ctid_slice(pid) = static_cast<std::size_t>(ctid);
                 plid_slice(pid) = static_cast<std::size_t>(pid);
                 
-                
+                if (layer_number == 3)
+                {
+                    
+                    printf("L%d: R%d: pid: %d, pos: (%0.3lf, %0.3lf, %0.3lf)\n", layer_number, rank, pid,
+                        positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
+                    
+                }
             } );
         
-        printf("L%d: R%d: num cells activated: %d\n", _layer_number, _rank, cell_ids_map.size());
+        // printf("L%d: R%d: num cells activated: %d\n", _layer_number, _rank, cell_ids_map.size());
         
         // Allocate memory for the AoSoA which stores cell data
         _cells_ptr->reserveFromMap( 1.1 );
