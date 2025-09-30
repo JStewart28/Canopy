@@ -298,7 +298,7 @@ class Tree
             // if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i);
         }
-        initializeRootLayer();
+        //initializeRootLayer();
 
         
         

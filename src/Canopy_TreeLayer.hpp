@@ -635,6 +635,7 @@ class TreeLayer
                         
                 }
 
+                // if (layer_number == 3)
                 // printf("L%d: R%d: in_c(%0.3lf, %0.3lf, %0.3lf)\n", layer_number, rank,
                 //     xcenter, ycenter, zcenter);
                 
@@ -652,26 +653,36 @@ class TreeLayer
         Canopy::Kernel::Scalar::M2M<memory_space, execution_space> m2m( p );
         // For each cell, get the untranslated coefficients
         auto M_slice = Cabana::slice<0>(cell_data);
+
+        // printf("L%d: R%d: cell_data size: %d, view_size: %d\n", _layer_number, _rank, cell_data.size(), view_size);
+        // if (_layer_number == 3) return;
         for (std::size_t i = 0; i < view_size; ++i)
         {
-            // Fill multipole view
             std::size_t M_size = (p+1)*(p+1);
             Kokkos::View<cdouble*, memory_space> M("M", M_size);
+
+            // Fill multipole view
             Kokkos::parallel_for("set M",
                 Kokkos::RangePolicy<execution_space>( 0, M_size ),
                 KOKKOS_LAMBDA( const std::size_t j ) {
                     double real_part = M_slice(i, j, 0);
                     double imag_part = M_slice(i, j, 1);
-                    M(i) = cdouble(real_part, imag_part);
+                    M(j) = cdouble(real_part, imag_part);
             });
 
             // Create vector pointing from child cell center to cell center
             Kokkos::Array<double, 3> vector_to_center;
             Kokkos::Array<double, 3> child_center = {incoming_cell_centers_h(i, 0),
                 incoming_cell_centers_h(i, 1), incoming_cell_centers_h(i, 2)};
+            
+            if (_layer_number == 3) printf("i%d: child center: %0.3lf, %0.3lf, %0.3lf\n",
+                i, child_center[0], child_center[1], child_center[2]);
+
             for (int j = 0; j < 3; ++j)
                 vector_to_center[j] = cell_center_h(j) - child_center[j];
             
+            // if (_layer_number == 3) printf("L%d: R%d: v to c: %0.3lf, %0.3lf, %0.3lf\n",
+            //     _layer_number, _rank, vector_to_center[0], vector_to_center[1], vector_to_center[2]);
             m2m(M, vector_to_center);
 
         }
@@ -751,6 +762,15 @@ class TreeLayer
         static constexpr std::size_t position_index =
             std::is_same_v<ParticleAoSoA, data_aosoa_type> ? 1 : 0;
         auto positions = Cabana::slice<position_index>(data_aosoa);
+
+        // if (_layer_number == 3)
+        // {
+        //     for (std::size_t i = 0; i < data_aosoa.size(); ++i)
+        //     {
+        //         printf("L%d: R%d: pos: (%0.3lf, %0.3lf, %0.3lf)\n", _layer_number, _rank,
+        //             positions(i, 0), positions(i, 1), positions(i, 2));
+        //     }
+        // }
 
         auto map = *_map_ptr;
         auto cell_ids_map = _cell_ids_map;
