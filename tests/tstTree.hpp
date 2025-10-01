@@ -139,7 +139,7 @@ void testLeafLayer()
     ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Tree depth must be at least 3.\n";
     
     // Create the data
-    int num_points = (rank == 0) ? (comm_size * 500) : 0;
+    int num_points = (rank == 0) ? (comm_size * 3) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );

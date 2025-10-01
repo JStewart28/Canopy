@@ -151,12 +151,12 @@ class Tree
         // Get all rank domains on host
         auto tree_layer = _tree[layer];
         auto domains_host = tree_layer->get_domains();
-        for (std::size_t i = 0; i < domains_host.size(); ++i)
-        {
-            if (_rank == 0) printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", layer,
-                i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
-                domains_host[i][4], domains_host[i][5]);
-        }
+        // for (std::size_t i = 0; i < domains_host.size(); ++i)
+        // {
+        //     if (_rank == 0) printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", layer,
+        //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
+        //         domains_host[i][4], domains_host[i][5]);
+        // }
         int num_ranks = domains_host.size();
 
         // Copy domains to device
@@ -341,13 +341,13 @@ class Tree
     void migrateAndSetLayer(int from_layer, int to_layer)
     {
         // Communicate cell data
-        auto data = _tree[from_layer]->data();
-        auto positions = Cabana::slice<1>(data);
-        Kokkos::View<int*, memory_space> to_layer_owner("to_layer_owner", data.size());
-        mapParticles(positions, to_layer_owner, data.size(), to_layer);
-        Cabana::Distributor<memory_space> distributor(_comm, to_layer_owner);
-        Cabana::migrate( distributor, data );
-        _tree[to_layer]->populateCells(data);
+        // auto data = _tree[from_layer]->data();
+        // auto positions = Cabana::slice<1>(data);
+        // Kokkos::View<int*, memory_space> to_layer_owner("to_layer_owner", data.size());
+        // mapParticles(positions, to_layer_owner, data.size(), to_layer);
+        // Cabana::Distributor<memory_space> distributor(_comm, to_layer_owner);
+        // Cabana::migrate( distributor, data );
+        // _tree[to_layer]->populateCells(data);
     }
 
     /**

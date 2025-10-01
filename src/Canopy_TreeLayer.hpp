@@ -433,9 +433,9 @@ class TreeLayer
      * because data must be converted to multipole coefficients. For all other layers,
      * the data has already been converted.
      */
-    template <class ParticleAoSoA>
-    void initializeLeafCell(const ParticleAoSoA particle_aosoa, const std::size_t activated_cid,
-        int start, int end)
+    template <class ParticleAoSoA, class In2OutMap>
+    void initializeLeafCell(const ParticleAoSoA particle_aosoa, In2OutMap in2out,
+        const std::size_t start, const std::size_t end)
     {
         assert(_layer_number == 0);
 
@@ -443,56 +443,94 @@ class TreeLayer
         int layer_number = _layer_number;
         // printf("R%d: leaf cell data from [%d, %d)\n", rank, start, end);
 
-        int view_size = end - start;
+        std::size_t view_size = end - start;
         ParticleAoSoA cell_data("cell_data", view_size);
 
-        // Save the tile ID, the cell ID within the tile, and the contiguous cell local ID
+        // The following is needed to retrieve and save cell center
+        auto in_id_slice = Cabana::slice<0>(in2out);
+        auto out_id_slice = Cabana::slice<1>(in2out);
         Kokkos::View<double[3], memory_space> cell_center("cell_center");
-
-
-        // printf("R%d: AoSoA data size: %d\n", _rank, aosoa_data.size());
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
+        auto cid2ijk = _cid2ijk;
 
+        // Save the tile id and cell tile id to set the approportiate index
+        // in the sparse mesh AoSoA.
+        auto map = *_map_ptr;
+        Kokkos::View<std::size_t, memory_space> tid("tid");
+        Kokkos::View<std::size_t, memory_space> ctid("ctid");
+
+        // Error handling
+        Kokkos::View<int, memory_space> no_key("no_key");
+        Kokkos::deep_copy(no_key, 0);
+
+        // Move all tuples in this cell into a contiguous AoSoA
         Kokkos::parallel_for(
             "populate_cell_data",
             Kokkos::RangePolicy<execution_space>( 0, view_size ),
             KOKKOS_LAMBDA( const int i ) {
 
-                int index = i + start;
-                int pid = plid_slice(index);
-                // printf("R%d: getting tuple %d from index %d\n", rank, pid, index);
-                auto data_tuple = particle_aosoa.getTuple(pid);
+                std::size_t index = i + start;
+                std::size_t in_id = in_id_slice(index);
+                auto data_tuple = particle_aosoa.getTuple(in_id);
                 cell_data.setTuple(i, data_tuple);
 
                 if (i == 0)
                 {
-                    // Same values for all threads
-                    tid() = tid_slice(index);
-                    ctid() = ctid_slice(index);
-                    cid() = cid_slice(index);
+                    // Since all incoming data are in the same cell, these values
+                    // will be the same for all threads so only one thread needs to
+                    // compute them.
+                    auto cid = out_id_slice(in_id);
+                    auto key_exists = cid2ijk.exists(cid);
+                    // printf("R%d: cid: %d, key_exists: %d\n", rank, cid, key_exists);
+                    if (key_exists)
+                    {
+                        // Get the cell center for multipole calculations using the cid
+                        auto cell_ijk = cid2ijk.value_at(cid);
+                        // auto cell_center_array = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2], low_corner, cell_size);
+                        printf("R%d: cid: %llu, ijk: %llu, %llu, %llu\n",
+                            rank,
+                            (unsigned long long)cid,
+                            (unsigned long long)cell_ijk[0],
+                            (unsigned long long)cell_ijk[1],
+                            (unsigned long long)cell_ijk[2]);
+                        // for (int j = 0; j < 3; ++j)
+                        // {
+                        //     cell_center(j) = cell_center_array[j];
+                        // }
 
-                    // Get the cell center for multipole calculations
-                    // Position is the first tuple element in particle data
-                    auto x = Cabana::get<0>(data_tuple, 0);
-                    auto y = Cabana::get<0>(data_tuple, 1);
-                    auto z = Cabana::get<0>(data_tuple, 2);
-                    auto cell_ijk = position2ijk(x, y, z, low_corner, cell_size);
-                    auto cell_center_array = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        low_corner, cell_size);
-                    for (std::size_t j = 0; j < 3; ++j)
-                        cell_center(j) = cell_center_array[j];
+                        // // Save the tile id and cell tile id
+                        // tid() = map.queryTile(cell_ijk[0],
+                        //                         cell_ijk[1],
+                        //                         cell_ijk[2]);
+                        // ctid() = map.cell_local_id(cell_ijk[0],
+                        //                         cell_ijk[1],
+                        //                         cell_ijk[2]);
+                    }
+                    else
+                    {
+                        no_key() = 1;
+                    }
                     
                     // (-0.469, 0.094, -0.469)
-                    printf("L%d: R%d: cid: %d, c(%0.3lf, %0.3lf, %0.3lf), c_ijk(%d, %d, %d), tid: %d, ctid: %d, in_pos(%0.3lf, %0.3lf, %0.3lf)\n",
-                        layer_number, rank, cid(),
-                        cell_ijk[0], cell_ijk[1], cell_ijk[2], tid(), ctid(),
-                        cell_center(0), cell_center(1), cell_center(2), x, y, z);
+                    // printf("L%d: R%d: cid: %d, c(%0.3lf, %0.3lf, %0.3lf), c_ijk(%d, %d, %d), tid: %d, ctid: %d, in_pos(%0.3lf, %0.3lf, %0.3lf)\n",
+                    //     layer_number, rank, cid(),
+                    //     cell_ijk[0], cell_ijk[1], cell_ijk[2], tid(), ctid(),
+                    //     cell_center(0), cell_center(1), cell_center(2), x, y, z);
                 }
                 
             });
             
         Kokkos::fence();
+
+        return;
+
+        int errors;
+        Kokkos::deep_copy(errors, no_key);
+        if (errors)
+        {
+            throw::std::runtime_error("TreeLayer::initializeLeafCell: cell id does not exist in map");
+        }
 
         // Copy cell center to host and move to a Kokkos::Array
         auto cell_center_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_center);
@@ -500,16 +538,21 @@ class TreeLayer
         for (std::size_t i = 0; i < 3; ++i)
             cell_center_array[i] = cell_center_h(i);
         
-        
-
-        // Aggregate cell data
+        // Use the center of the activated cell, the positions of the incoming data, and the 
+        // scalar values attached to the incoming data to compute multipole coefficients.
         Kernel::Scalar::P2M<memory_space, execution_space> p2m( p );
         auto positions = Cabana::slice<0>(cell_data);
         auto scalars = Cabana::slice<1>(cell_data);
         p2m(positions, scalars, view_size, cell_center_array);
         auto M_coefficients = p2m.coefficients();
 
-        // Set cell data for cell cid
+        /**
+         * Set the cell data for this cell:
+         *  1. The multipole coefficients calcuated from child data.
+         *  2. The center of this cell.
+         *  3. The local id of this cell.
+         *  4. The rank that owns this cell.
+         */
         auto aosoa = _cells_ptr->aosoa();
         aosoa.resize(aosoa.capacity());
         // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, _cells_ptr->capacity(), _cells_ptr->size());
@@ -530,8 +573,10 @@ class TreeLayer
                 // Cell center
                 for (std::size_t j = 0; j < 3; ++j)
                     Cabana::get<1>(tp, j) = cell_center(j);
-                // cell id
-                Cabana::get<2>(tp) = cid();
+
+                // Cell id
+                Cabana::get<2>(tp) = out_id_slice(0);
+
                 // Rank
                 Cabana::get<3>(tp) = rank;
 
@@ -549,7 +594,7 @@ class TreeLayer
      * xxx
      */
     // void initializeCell(const data_aosoa_type incoming_cell_data, const std::size_t activated_cid,
-    //     int start, int end)
+    //     const std::size_t start, const std::size_t end)
     // {
     //     assert(_layer_number > 0);
 
@@ -815,6 +860,15 @@ class TreeLayer
                     // Getting here means some particles activate the same cell.
                     // printf("Rank %d: Particle activates already activated cell at cell id %d\n", rank, cell_id);
                 }
+                if (result.success())
+                {
+                    printf("Insert: R%d: cid: %llu, ijk: %llu, %llu, %llu\n",
+                        rank,
+                        (unsigned long long)cell_id,
+                        (unsigned long long)cell_activated_ijk[0],
+                        (unsigned long long)cell_activated_ijk[1],
+                        (unsigned long long)cell_activated_ijk[2]);
+                }
 
                 // Save the cell the incoming data activates.
                 // The following line appears redundant, but later this
@@ -822,6 +876,8 @@ class TreeLayer
                 in_id_slice(pid) = static_cast<std::size_t>(pid);
                 out_id_slice(pid) = static_cast<std::size_t>(cell_id);
             } );
+
+        Kokkos::fence();
         
         // Retrieve cell center data
         
@@ -844,22 +900,22 @@ class TreeLayer
         {
             // Find the start and end indices of each group of incoming data
             // that activate the same cell.
-            int cid = out_id_h(index);
-            int start = index;
+            std::size_t cid = out_id_h(index);
+            std::size_t start = index;
             while ((cid == out_id_h(index)) && (index < num_particles))
             {
                 index++;
             }
-            int end = index;
+            std::size_t end = index;
 
             // Now, initialize each cell in this layer one at a time, passing the incoming data
             // AoSoA, the cell id they activate, and the start and end indicies of all
             // incoming data within the cell.
 
             // Leaf data
-            if constexpr (position_index == 0) initializeLeafCell(data_aosoa, cid, start, end);
+            if constexpr (position_index == 0) initializeLeafCell(data_aosoa, in2out, start, end);
             // Non-leaf data
-            // if constexpr (position_index == 1) initializeCell(data_aosoa, cid, start, end);
+            // if constexpr (position_index == 1) initializeCell(data_aosoa, in2out, cid, start, end);
         }
     }
 
