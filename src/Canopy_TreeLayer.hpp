@@ -556,6 +556,7 @@ class TreeLayer
                 {
                     Cabana::get<0>(tp, j, 0) = M_coefficients(j).real();
                     Cabana::get<0>(tp, j, 1) = M_coefficients(j).imag();
+                    printf("R%d: P2M(%d): (%0.4lf, %0.4lf)\n", rank, j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
                 }
 
                 // Cell center
@@ -570,10 +571,9 @@ class TreeLayer
 
                 aosoa.setTuple(( tid() << cell_bits_per_tile ) |
                                ( ctid() & cell_mask_per_tile ), tp );
-                // printf("R%d: setting leaf cell ccellid %d, tuple %d, c(%0.3lf, %0.3lf, %0.3lf)\n",
-                //     rank, ccell_id(),
-                //     ( tid() << cell_bits_per_tile ) | ( ctid() & cell_mask_per_tile ),
-                //     cell_center(0), cell_center(1), cell_center(2));
+                printf("R%d: setting leaf cid %d, c(%0.3lf, %0.3lf, %0.3lf)\n",
+                    rank, out_id_slice(0),
+                    cell_center(0), cell_center(1), cell_center(2));
             });
             // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, aosoa.capacity(), aosoa.size());
     }
@@ -875,7 +875,7 @@ class TreeLayer
             // Leaf data
             if constexpr (position_index == 0) initializeLeafCell(data_aosoa, in2out, start, end);
             // Non-leaf data
-            // if constexpr (position_index == 1) initializeCell(data_aosoa, in2out, cid, start, end);
+            if constexpr (position_index == 1) initializeCell(data_aosoa, in2out, start, end);
         }
     }
 

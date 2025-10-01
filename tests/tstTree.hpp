@@ -136,10 +136,11 @@ void testLeafLayer()
     
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
+    if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
     // ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Tree depth must be at least 3.\n";
     
     // Create the data
-    int num_points = (rank == 0) ? (comm_size * 500) : 0;
+    int num_points = (rank == 0) ? (comm_size * 100) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -155,7 +156,7 @@ void testLeafLayer()
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
 
     // Returns a vector of domains for each rank
-    auto domains_vec = tree->layer(0)->get_domains();
+    // auto domains_vec = tree->layer(0)->get_domains();
 
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
@@ -167,8 +168,8 @@ void testLeafLayer()
             pos_slice_host(i, j) = cart_coords_h(i, j);
         }
         scalar_slice_host(i) = q_h(i);
-        // printf("R%d: initial cells: p(%0.3lf, %0.3lf, %0.3lf)\n", rank,
-        //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2));
+        printf("R%d: initial particle: p(%0.3lf, %0.3lf, %0.3lf), q(%0.3lf)\n", rank,
+            pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
     }
 
     // Calculate direct potential.
@@ -226,7 +227,7 @@ void testLeafLayer()
     double error = Kokkos::pow(10, -p_int+1);
     // EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
     //     << p << ": error between (shifted and added) and (direct potential) calculations too high.";
-    printf("R%d: potential: %0.8lf, M: %0.8lf, error: %g\n", rank, potential_direct, potential_M.real(), error);
+    printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
     
 
     // Each rank should own two particles

@@ -236,7 +236,10 @@ class Tree
             throw std::runtime_error("Canopy::Tree::initializeRootLayer: function called with an empty tree.");
         }
 
-        auto top_layer = _tree.back();
+
+        // DEBUG: Set top layer to first layer
+        auto top_layer = _tree[0];
+        // auto top_layer = _tree.back();
 
         // auto domains = top_layer->get_domains();
         // for (std::size_t i = 0; i < domains.size(); ++i)
@@ -266,11 +269,10 @@ class Tree
         Kokkos::deep_copy(idx, 0);
 
         // The center of expansion at the root layer is the center of the domain.
-        Kokkos::Array<double, 3> domain_center =
-            {(_global_high_corner[0] - _global_low_corner[0]) / 2,
-             (_global_high_corner[1] - _global_low_corner[1]) / 2,
-             (_global_high_corner[2] - _global_low_corner[2]) / 2};
-            
+        Kokkos::Array<double, 3> domain_center;
+        for (int d = 0; d < 3; ++d)
+            domain_center[d] = _global_low_corner[d] + 0.5 * (_global_high_corner[d] - _global_low_corner[d]);
+
         // Properties of top layer
         using top_layer_type = typename decltype(top_layer)::element_type;
         static constexpr std::size_t cell_bits_per_tile =
@@ -312,6 +314,7 @@ class Tree
                     double real_part = Cabana::get<0>(tp, j, 0);
                     double imag_part = Cabana::get<0>(tp, j, 1);
                     M_children(offset_M_base + j) = cdouble(real_part, imag_part);
+                    printf("R%d: M_children(%d): (%0.4lf, %0.4lf)\n", rank, j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
                 }
             }
         } );
@@ -337,7 +340,11 @@ class Tree
                 incoming_cell_centers_h(i, 1), incoming_cell_centers_h(i, 2)};
             
             for (int j = 0; j < 3; ++j)
-                vector_to_center[j] = domain_center[j] - child_center[j];
+                vector_to_center[j] = (domain_center[j] - child_center[j])*-1;
+
+            printf("R%d: center: %0.3lf, %0.3lf, %0.3lf, vec to center: %0.3lf, %0.3lf, %0.3lf\n", rank,
+                domain_center[0], domain_center[1], domain_center[2],
+                vector_to_center[0], vector_to_center[1], vector_to_center[2]);
             
             // Translate and add coefficients.
             m2m(sub_M, vector_to_center);
@@ -385,12 +392,14 @@ class Tree
     {
         // Data comes from externally to populate leaf layer (layer 0)
         migrateParticleData(external_data);
+        if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(external_data);
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
-            // if (_rank == 0) printf("Starting layer %d...\n", i);
+            if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i);
         }
+        if (_rank == 0) printf("Starting root layer (%d)...\n", _tree.size());
         initializeRootLayer();
     }
 
@@ -455,7 +464,13 @@ class Tree
 
 
     int rank() const { return _rank; }
-    std::size_t numLayers() const { return _tree.size(); }
+
+    /**
+     * Returns the number of layers with the root layer included in the
+     * count, which is stored outside of the tree.
+     */
+    std::size_t numLayers() const { return _tree.size() + 1; }
+
     Kokkos::View<cdouble*, memory_space>& M_root() {return _M_root;}
     std::array<double, 3> globalLowCorner() const { return _global_low_corner; }
     std::array<double, 3> globalHighCorner() const { return _global_high_corner; }
