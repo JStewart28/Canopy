@@ -250,8 +250,9 @@ class Tree
         auto map = *top_layer->map();
         auto aosoa = top_layer->array()->aosoa();
         auto cells_activated = cid2ijk.size();
+        auto map_size = cid2ijk.size();
         
-        printf("R%d: map size: %d\n", _rank, cid2ijk.size());
+        printf("R%d: map size: %d\n", _rank, map_size);
 
         // Save cell centers for multipole translations
         Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
@@ -344,6 +345,32 @@ class Tree
 
         // Set _M_root
         Kokkos::deep_copy(_M_root, m2m.coefficients());
+
+        // Determine which rank owns the (root layer - 1) tiles
+        std::vector<std::size_t> sendbuf(_comm_size, map_size);
+        std::vector<std::size_t> recvbuf(_comm_size, 0);
+        MPI_Alltoall(sendbuf.data(), 1, MPI_UNSIGNED_LONG_LONG,
+                    recvbuf.data(), 1, MPI_UNSIGNED_LONG_LONG,
+                    _comm);
+
+        // Now recvbuf[r] contains map_size for rank r.
+        // Find the rank with a non-zero value.
+        int root = -1;
+        for (int r = 0; r < _comm_size; ++r)
+        {
+            if (recvbuf[r] != 0)
+            {
+                root = r;
+                break;
+            }
+        }
+        if (root == -1)
+        {
+            throw std::runtime_error("Canopy::Tree::initializeRootLayer: No rank has non-empty map size!");
+        }
+
+        // Now broadcast the data from the root.
+        MPI_Bcast(reinterpret_cast<double*>(_M_root.data()), 2 * num_M, MPI_DOUBLE, root, _comm);
     }
 
 
@@ -429,6 +456,7 @@ class Tree
 
     int rank() const { return _rank; }
     std::size_t numLayers() const { return _tree.size(); }
+    Kokkos::View<cdouble*, memory_space>& M_root() {return _M_root;}
     std::array<double, 3> globalLowCorner() const { return _global_low_corner; }
     std::array<double, 3> globalHighCorner() const { return _global_high_corner; }
 
