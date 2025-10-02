@@ -255,7 +255,7 @@ class Tree
         auto cells_activated = cid2ijk.size();
         auto map_size = cid2ijk.size();
         
-        printf("R%d: map size: %d\n", _rank, map_size);
+        printf("R%d: aosoa size: %d, map size: %d\n", _rank, aosoa.size(), map_size);
 
         // Save cell centers for multipole translations
         Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
@@ -307,6 +307,11 @@ class Tree
                 for (int j = 0; j < 3; ++j)
                     incoming_cell_centers(offset, j) = Cabana::get<1>(tp, j);
                 
+                printf("R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", rank, cid,
+                    tid, ctid,
+                    ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
+                    cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+
                 // Save multipole coefficients
                 auto offset_M_base = offset * num_M;
                 for (std::size_t j = 0; j < num_M; ++j)
@@ -314,7 +319,9 @@ class Tree
                     double real_part = Cabana::get<0>(tp, j, 0);
                     double imag_part = Cabana::get<0>(tp, j, 1);
                     M_children(offset_M_base + j) = cdouble(real_part, imag_part);
-                    printf("R%d: M_children(%d): (%0.4lf, %0.4lf)\n", rank, j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
+                    // printf("R%d: cid: %d, c(%0.3lf, %0.3lf, %0.3lf), M_children(%d): (%0.4lf, %0.4lf)\n",
+                    //     rank, cid, Cabana::get<1>(tp, 0), Cabana::get<1>(tp, 1), Cabana::get<1>(tp, 2),
+                    //     j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
                 }
             }
         } );
