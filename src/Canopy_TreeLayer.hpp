@@ -397,6 +397,7 @@ class TreeLayer
     data_aosoa_type data()
     {
         // int rank = _rank;
+        // int layer_number = _layer_number;
 
         data_aosoa_type cell_data("cell_data", _cid2ijk.size());
         Kokkos::View<int, memory_space> idx("idx");
@@ -427,6 +428,10 @@ class TreeLayer
                                             ( ctid & cell_mask_per_tile ) );
                     int offset = Kokkos::atomic_fetch_add(&idx(), 1);
                     cell_data.setTuple(offset, tp);
+
+                    // if (layer_number == 0)
+                    //     printf("L%d: R%d: extracting c(%.3lf, %.3lf, %.3lf) into i%d\n", layer_number, rank,
+                    //         Cabana::get<1>(tp, 0), Cabana::get<1>(tp, 1), Cabana::get<1>(tp, 2), offset);
                 }
             }
         );
@@ -449,7 +454,7 @@ class TreeLayer
         }
 
         int rank = _rank;
-        int layer_number = _layer_number;
+        // int layer_number = _layer_number;
         // printf("R%d: leaf cell data from [%d, %d)\n", rank, start, end);
 
         std::size_t view_size = end - start;
@@ -491,7 +496,7 @@ class TreeLayer
                     // Get the cell center for multipole calculations using the cid
                     auto cell_ijk = cid2ijk.value_at(index);
                     auto cell_center_array = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2], low_corner, cell_size);
-                    // printf("R%d: cid: %llu, ijk: %llu, %llu, %llu\n",
+                    // printf("L0: R%d: cid: %llu, ijk: %llu, %llu, %llu\n",
                     //     rank,
                     //     (unsigned long long)cid,
                     //     (unsigned long long)cell_ijk[0],
@@ -583,10 +588,8 @@ class TreeLayer
                 aosoa.setTuple(( tid << cell_bits_per_tile ) |
                                ( ctid & cell_mask_per_tile ), tp );
 
-                printf("R%d: setting leaf cid %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n",
-                    rank, out_id_slice(start), tid, ctid,
-                    ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
-                    cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                // printf("R%d: setting leaf c(%.3lf, %.3lf, %.3lf)\n",
+                //     rank, cell_center(0), cell_center(1), cell_center(2));
                 // printf("R%d: setting leaf cid %d, c(%.3lf, %.3lf, %.3lf)\n",
                 //     rank, out_id_slice(start), tid2, ctid2,
                 //     ( tid2 << cell_bits_per_tile ) | ( ctid2 & cell_mask_per_tile ),
@@ -608,7 +611,7 @@ class TreeLayer
         }
 
         int rank = _rank;
-        int layer_number = _layer_number;
+        // int layer_number = _layer_number;
         // printf("R%d: leaf cell data from [%d, %d)\n", rank, start, end);
 
         std::size_t view_size = end - start;
@@ -641,7 +644,9 @@ class TreeLayer
                 auto data_tuple = incoming_data.getTuple(in_id);
                 cell_data.setTuple(i, data_tuple);
 
-                printf("L%d: R%d: getting in tuple %d for cell %d\n", layer_number, rank, in_id, out_id_slice(in_id));
+                // printf("L%d: R%d: getting in cell c(%.3lf, %.3lf, %.3lf)\n",
+                //     layer_number, rank,
+                //     Cabana::get<1>(data_tuple, 0), Cabana::get<1>(data_tuple, 1), Cabana::get<1>(data_tuple, 2));
 
                 // Save incoming positions, which are needed for multipole translation.
                 incoming_cell_centers(i, 0) = Cabana::get<1>(data_tuple, 0);
@@ -766,10 +771,13 @@ class TreeLayer
                 aosoa.setTuple(( tid << cell_bits_per_tile ) |
                                ( ctid & cell_mask_per_tile ), tp );
 
-                printf("L%d: R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", layer_number, rank, cid,
-                    tid, ctid,
-                    ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
-                    cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                // printf("L%d: R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", layer_number, rank, cid,
+                //     tid, ctid,
+                //     ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                // printf("L%d: R%d: setting out cell c(%.3lf, %.3lf, %.3lf)\n",
+                //     layer_number, rank,
+                //     Cabana::get<1>(tp, 0), Cabana::get<1>(tp, 1), Cabana::get<1>(tp, 2));
             });
     }
 
@@ -789,8 +797,8 @@ class TreeLayer
     template <class ParticleAoSoA>
     void populateCells(const ParticleAoSoA data_aosoa)
     {
-        int rank = _rank;
-        int layer_number = _layer_number;
+        // int rank = _rank;
+        // int layer_number = _layer_number;
 
         updateCellSize();
 
@@ -857,7 +865,7 @@ class TreeLayer
                 if (!result.success())
                 {
                     // Getting here means some particles activate the same cell.
-                    printf("Rank %d: incoming tuple %d activates already activated cell at cell id %d\n", rank, pid, cell_id);
+                    // printf("Rank %d: incoming tuple %d activates already activated cell at cell id %d\n", rank, pid, cell_id);
                 }
                 // if (result.success())
                 // {
@@ -878,7 +886,12 @@ class TreeLayer
 
         Kokkos::fence();
         
-        // Retrieve cell center data
+        // if (_layer_number == 1)
+        //     for (int i = 0; i < num_particles; ++i)
+        //     {
+        //         printf("L%d: R%d: num_p: %d, in2out cell: %d -> %d\n", _layer_number, _rank, num_particles,
+        //             in_id_slice(i), out_id_slice(i));
+        //     }
         
 
         // Allocate memory for the AoSoA which stores cell data

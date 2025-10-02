@@ -167,6 +167,12 @@ class Tree
                 domain_bounds_host(r, j) = domains_host[r][j];
         Kokkos::deep_copy(domain_bounds, domain_bounds_host);
 
+        // Flag for cell centers that may be outside of the domain.
+        // This will happen if the domain does not have integer-value
+        // high and low points.
+        Kokkos::View<int, memory_space> is_out_of_bounds("is_out_of_bounds");
+        Kokkos::deep_copy(is_out_of_bounds, 0);
+
         Kokkos::parallel_for(
             "mapParticles",
             Kokkos::RangePolicy<exec_space>(0, particle_num),
@@ -197,7 +203,15 @@ class Tree
 
                 // If no domain was found, mark as invalid
                 particle_ranks(i) = -1;
+                Kokkos::atomic_store(&is_out_of_bounds(), 1);
             });
+
+            int out_of_bounds;
+            Kokkos::deep_copy(out_of_bounds, is_out_of_bounds);
+            if (out_of_bounds)
+            {
+                throw std::runtime_error("Canopy::Tree:MapParticles: particle or cell center is out of bounds.");
+            }
     }
 
     /**
@@ -255,7 +269,7 @@ class Tree
         auto cells_activated = cid2ijk.size();
         auto map_size = cid2ijk.size();
         
-        printf("R%d: aosoa size: %d, map size: %d\n", _rank, aosoa.size(), map_size);
+        // printf("R%d: aosoa size: %d, map size: %d\n", _rank, aosoa.size(), map_size);
 
         // Save cell centers for multipole translations
         Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
@@ -281,7 +295,7 @@ class Tree
             top_layer_type::cell_mask_per_tile;
 
         // Iterate over all activiated cells
-        int rank = _rank;
+        // int rank = _rank;
         Kokkos::parallel_for(
         "iterate_top_layer",
         Kokkos::RangePolicy<execution_space>( 0, cid2ijk.capacity() ),
@@ -306,6 +320,10 @@ class Tree
                 // Save the incoming cell center.
                 for (int j = 0; j < 3; ++j)
                     incoming_cell_centers(offset, j) = Cabana::get<1>(tp, j);
+                
+                // printf("Root: R%d: getting in cell c(%.3lf, %.3lf, %.3lf)\n",
+                //     rank,
+                //     Cabana::get<1>(tp, 0), Cabana::get<1>(tp, 1), Cabana::get<1>(tp, 2));
                 
                 // printf("Root: R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", rank, cid,
                 //     tid, ctid,
@@ -399,14 +417,14 @@ class Tree
     {
         // Data comes from externally to populate leaf layer (layer 0)
         migrateParticleData(external_data);
-        if (_rank == 0) printf("Starting layer 0...\n");
+        // if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(external_data);
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
-            if (_rank == 0) printf("Starting layer %d...\n", i);
+            // if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i);
         }
-        if (_rank == 0) printf("Starting root layer (%d)...\n", _tree.size());
+        // if (_rank == 0) printf("Starting root layer (%d)...\n", _tree.size());
         initializeRootLayer();
     }
 

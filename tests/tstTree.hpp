@@ -111,7 +111,8 @@ public:
  * and correctly inserted into the tree and converted into multipole coefficients
  * at the leaf layer.
  */
-void testLeafLayer()
+template <std::size_t p_val>
+void testUpwardsAggregation()
 {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -122,13 +123,13 @@ void testLeafLayer()
     // Create a tree of at least depth 3 for any number of processes
     using particle_tuple_type = Cabana::MemberTypes<double[3], double>;
     using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
-    std::array<double, 3> global_low_corner = { -1.5, -1.5, -1.5 };
-    std::array<double, 3> global_high_corner = { 1.5, 1.5, 1.5 };
+    std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
+    std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
-    static constexpr std::size_t p = 3;
+    static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size / 2, leaf_tiles = comm_size * 2;
+    red_factor = comm_size / 2, leaf_tiles = comm_size * 4;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
         num_dim, cells_per_tile, p>(
@@ -136,11 +137,11 @@ void testLeafLayer()
     
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
-    if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
+    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
     // ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Tree depth must be at least 3.\n";
     
     // Create the data
-    int num_points = (rank == 0) ? (comm_size * 5) : 0;
+    int num_points = (rank == 0) ? (comm_size * 500) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -168,8 +169,8 @@ void testLeafLayer()
             pos_slice_host(i, j) = cart_coords_h(i, j);
         }
         scalar_slice_host(i) = q_h(i);
-        printf("R%d: initial particle: p(%0.3lf, %0.3lf, %0.3lf), q(%0.3lf)\n", rank,
-            pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
+        // printf("R%d: initial particle: p(%0.3lf, %0.3lf, %0.3lf), q(%0.3lf)\n", rank,
+        //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
     }
 
     // Calculate direct potential.
@@ -225,9 +226,9 @@ void testLeafLayer()
     // so here we just make sure they are close to each other.
     int p_int = p;
     double error = Kokkos::pow(10, -p_int+1);
-    // EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
-    //     << p << ": error between (shifted and added) and (direct potential) calculations too high.";
-    printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
+    EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
+        << p << ": Potentials do not match. Tree depth " << tree->numLayers();
+    // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
     
 
     // Each rank should own two particles
@@ -245,7 +246,13 @@ void testLeafLayer()
 //---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
-TEST( Tree, testLeafLayer ) { testLeafLayer(); }
+
+// Test accuracy with increasing truncation cutoffs of multipole coefficients.
+TEST( Tree, testUpwardsAggregation1 ) { testUpwardsAggregation<1>(); }
+TEST( Tree, testUpwardsAggregation2 ) { testUpwardsAggregation<2>(); }
+TEST( Tree, testUpwardsAggregation3 ) { testUpwardsAggregation<3>(); }
+TEST( Tree, testUpwardsAggregation4 ) { testUpwardsAggregation<4>(); }
+TEST( Tree, testUpwardsAggregation5 ) { testUpwardsAggregation<5>(); }
 
 //---------------------------------------------------------------------------//
 
