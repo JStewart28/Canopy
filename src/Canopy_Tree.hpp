@@ -238,8 +238,8 @@ class Tree
 
 
         // DEBUG: Set top layer to first layer
-        auto top_layer = _tree[0];
-        // auto top_layer = _tree.back();
+        // auto top_layer = _tree[0];
+        auto top_layer = _tree.back();
 
         // auto domains = top_layer->get_domains();
         // for (std::size_t i = 0; i < domains.size(); ++i)
@@ -307,10 +307,10 @@ class Tree
                 for (int j = 0; j < 3; ++j)
                     incoming_cell_centers(offset, j) = Cabana::get<1>(tp, j);
                 
-                printf("R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", rank, cid,
-                    tid, ctid,
-                    ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
-                    cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                // printf("Root: R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", rank, cid,
+                //     tid, ctid,
+                //     ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2]);
 
                 // Save multipole coefficients
                 auto offset_M_base = offset * num_M;
@@ -319,8 +319,8 @@ class Tree
                     double real_part = Cabana::get<0>(tp, j, 0);
                     double imag_part = Cabana::get<0>(tp, j, 1);
                     M_children(offset_M_base + j) = cdouble(real_part, imag_part);
-                    // printf("R%d: cid: %d, c(%0.3lf, %0.3lf, %0.3lf), M_children(%d): (%0.4lf, %0.4lf)\n",
-                    //     rank, cid, Cabana::get<1>(tp, 0), Cabana::get<1>(tp, 1), Cabana::get<1>(tp, 2),
+                    // printf("Root: R%d: cid: %d, M_notrans(%d): (%0.4lf, %0.4lf)\n",
+                    //     rank, cid,
                     //     j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
                 }
             }
@@ -349,9 +349,9 @@ class Tree
             for (int j = 0; j < 3; ++j)
                 vector_to_center[j] = (domain_center[j] - child_center[j])*-1;
 
-            printf("R%d: center: %0.3lf, %0.3lf, %0.3lf, vec to center: %0.3lf, %0.3lf, %0.3lf\n", rank,
-                domain_center[0], domain_center[1], domain_center[2],
-                vector_to_center[0], vector_to_center[1], vector_to_center[2]);
+            // printf("R%d: center: %0.3lf, %0.3lf, %0.3lf, vec to center: %0.3lf, %0.3lf, %0.3lf\n", rank,
+            //     domain_center[0], domain_center[1], domain_center[2],
+            //     vector_to_center[0], vector_to_center[1], vector_to_center[2]);
             
             // Translate and add coefficients.
             m2m(sub_M, vector_to_center);

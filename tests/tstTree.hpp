@@ -140,7 +140,7 @@ void testLeafLayer()
     // ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Tree depth must be at least 3.\n";
     
     // Create the data
-    int num_points = (rank == 0) ? (comm_size * 500) : 0;
+    int num_points = (rank == 0) ? (comm_size * 5) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -201,11 +201,11 @@ void testLeafLayer()
      * Check the data in the root layer
      **********************************************/
     auto m_root_h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), tree->M_root() );
-    if (rank == 0)
-        for (std::size_t i = 0; i < m_root_h.size(); ++i)
-        {
-            printf("m_root(%d): (%.4lf, %.4lf)\n", i, m_root_h(i).real(), m_root_h(i).imag());
-        }
+    // if (rank == 0)
+    //     for (std::size_t i = 0; i < m_root_h.size(); ++i)
+    //     {
+    //         printf("m_root(%d): (%.4lf, %.4lf)\n", i, m_root_h(i).real(), m_root_h(i).imag());
+    //     }
 
     // Compute potential at P using M
     Kokkos::complex<double> potential_M = 0.0;

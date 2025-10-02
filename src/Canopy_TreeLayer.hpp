@@ -570,25 +570,27 @@ class TreeLayer
                 // Rank
                 Cabana::get<3>(tp) = rank;
 
-                
-
                 auto cid = out_id_slice(start);
                 auto index = cid2ijk.find(cid);
                 auto cell_ijk = cid2ijk.value_at(index);
 
-                auto tid2 = map.queryTile(cell_ijk[0],
+                auto tid = map.queryTile(cell_ijk[0],
                                             cell_ijk[1],
                                             cell_ijk[2]);
-                auto ctid2 = map.cell_local_id(cell_ijk[0],
+                auto ctid = map.cell_local_id(cell_ijk[0],
                                             cell_ijk[1],
                                             cell_ijk[2]);
-                aosoa.setTuple(( tid2 << cell_bits_per_tile ) |
-                               ( ctid2 & cell_mask_per_tile ), tp );   
+                aosoa.setTuple(( tid << cell_bits_per_tile ) |
+                               ( ctid & cell_mask_per_tile ), tp );
 
-                printf("R%d: setting leaf cid %d, tid2: %d, ctid2: %d, tuple %d, c_ijk(%d, %d, %d)\n",
-                    rank, out_id_slice(start), tid2, ctid2,
-                    ( tid2 << cell_bits_per_tile ) | ( ctid2 & cell_mask_per_tile ),
+                printf("R%d: setting leaf cid %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n",
+                    rank, out_id_slice(start), tid, ctid,
+                    ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
                     cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                // printf("R%d: setting leaf cid %d, c(%.3lf, %.3lf, %.3lf)\n",
+                //     rank, out_id_slice(start), tid2, ctid2,
+                //     ( tid2 << cell_bits_per_tile ) | ( ctid2 & cell_mask_per_tile ),
+                //     cell_center(0), cell_center(1), cell_center(2));
             });
             // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, aosoa.capacity(), aosoa.size());
     }
@@ -639,6 +641,8 @@ class TreeLayer
                 auto data_tuple = incoming_data.getTuple(in_id);
                 cell_data.setTuple(i, data_tuple);
 
+                printf("L%d: R%d: getting in tuple %d for cell %d\n", layer_number, rank, in_id, out_id_slice(in_id));
+
                 // Save incoming positions, which are needed for multipole translation.
                 incoming_cell_centers(i, 0) = Cabana::get<1>(data_tuple, 0);
                 incoming_cell_centers(i, 1) = Cabana::get<1>(data_tuple, 1);
@@ -668,12 +672,12 @@ class TreeLayer
                     }
 
                     // Save the tile id and cell tile id
-                    tid() = map.queryTile(cell_ijk[0],
-                                            cell_ijk[1],
-                                            cell_ijk[2]);
-                    ctid() = map.cell_local_id(cell_ijk[0],
-                                            cell_ijk[1],
-                                            cell_ijk[2]);             
+                    // tid() = map.queryTile(cell_ijk[0],
+                    //                         cell_ijk[1],
+                    //                         cell_ijk[2]);
+                    // ctid() = map.cell_local_id(cell_ijk[0],
+                    //                         cell_ijk[1],
+                    //                         cell_ijk[2]);
                 }
             });
             
@@ -699,6 +703,9 @@ class TreeLayer
                     double real_part = M_slice(i, j, 0);
                     double imag_part = M_slice(i, j, 1);
                     M(j) = cdouble(real_part, imag_part);
+                    // auto cid = out_id_slice(start);
+                    // printf("L%d: R%d: cid: %d, i%d: M(%d): (%.3lf, %.3lf)\n", layer_number, rank, cid,
+                    //     i, j, real_part, imag_part);
             });
 
             // Create Kokkos:Array of vector pointing from child cell center to cell center.
@@ -707,7 +714,7 @@ class TreeLayer
                 incoming_cell_centers_h(i, 1), incoming_cell_centers_h(i, 2)};
             
             for (int j = 0; j < 3; ++j)
-                vector_to_center[j] = cell_center_h(j) - child_center[j];
+                vector_to_center[j] = (cell_center_h(j) - child_center[j]) * -1;
             
             // Translate and add coefficients.
             m2m(M, vector_to_center);
@@ -732,6 +739,8 @@ class TreeLayer
                 {
                     Cabana::get<0>(tp, j, 0) = M_coefficients(j).real();
                     Cabana::get<0>(tp, j, 1) = M_coefficients(j).imag();
+                    // printf("L%d: R%d: cid: %d, i%d: M(%d): (%.3lf, %.3lf)\n", layer_number, rank, out_id_slice(start),
+                    //     i, j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
                 }
 
                 // Cell center
@@ -739,13 +748,28 @@ class TreeLayer
                     Cabana::get<1>(tp, j) = cell_center(j);
 
                 // Cell id. All incoming data have the same out cell id
-                Cabana::get<2>(tp) = out_id_slice(start);
+                auto cid = out_id_slice(start);
+                Cabana::get<2>(tp) = cid;
 
                 // Rank
                 Cabana::get<3>(tp) = rank;
 
-                aosoa.setTuple(( tid() << cell_bits_per_tile ) |
-                               ( ctid() & cell_mask_per_tile ), tp );
+                auto index = cid2ijk.find(cid);
+                auto cell_ijk = cid2ijk.value_at(index);
+
+                auto tid = map.queryTile(cell_ijk[0],
+                                            cell_ijk[1],
+                                            cell_ijk[2]);
+                auto ctid = map.cell_local_id(cell_ijk[0],
+                                            cell_ijk[1],
+                                            cell_ijk[2]);
+                aosoa.setTuple(( tid << cell_bits_per_tile ) |
+                               ( ctid & cell_mask_per_tile ), tp );
+
+                printf("L%d: R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", layer_number, rank, cid,
+                    tid, ctid,
+                    ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
+                    cell_ijk[0], cell_ijk[1], cell_ijk[2]);
             });
     }
 
@@ -833,7 +857,7 @@ class TreeLayer
                 if (!result.success())
                 {
                     // Getting here means some particles activate the same cell.
-                    // printf("Rank %d: Particle activates already activated cell at cell id %d\n", rank, cell_id);
+                    printf("Rank %d: incoming tuple %d activates already activated cell at cell id %d\n", rank, pid, cell_id);
                 }
                 // if (result.success())
                 // {
