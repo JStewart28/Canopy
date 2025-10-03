@@ -420,7 +420,7 @@ struct M2L
     auto coefficients() { return _L; }
 
     /**
-     * Clear coefficents
+     * Clear coefficients
      */
     void clear() { Kokkos::deep_copy( _L, cdouble( 0.0, 0.0 ) ); }
 
@@ -428,7 +428,7 @@ struct M2L
      * Compute local coefficients L[n][m] up to order p
      * 
      * @param O multipole coefficients centered around O_center.
-     * @param O_center the ceneter of multipole coefficients O.
+     * @param O_center the center of multipole coefficients O.
      */
     template <class MultipoleVector>
     void operator()( const MultipoleVector& O,
@@ -459,7 +459,7 @@ struct M2L
                         auto A_jk = compute_A( j, k );
                         auto Y_jn_mk = Ynm( j + n, m - k, alpha, beta );
 
-                        // Demoninator of eq 3.60
+                        // Denominator of eq 3.60
                         auto A_jn_mk = compute_A( j + n, m - k );
                         auto rho_jn = Kokkos::pow( rho, j + n + 1 );
                         // auto val = ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
