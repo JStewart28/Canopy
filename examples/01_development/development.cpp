@@ -53,7 +53,7 @@ struct Triple {
  * the second slice based on sum.
  */
 template <class MemorySpace, class ExecutionSpace, class AoSoAType>
-struct AggregationFunctor {
+struct KernelFunction {
 public:
 
     using memory_space = MemorySpace;
@@ -61,7 +61,7 @@ public:
     using aosoa_type = AoSoAType;
     using member_types = typename AoSoAType::member_types;
 
-    AggregationFunctor() 
+    KernelFunction() 
     {
         _avgs = aosoa_type("avgs", 1);
     }
@@ -313,10 +313,10 @@ void octreeExperiments( std::string view_size )
     // {
     //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf)\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2));
     // }
-    AggregationFunctor<memory_space, execution_space,
-         particle_aosoa_type> agg_functor;
+    KernelFunction<memory_space, execution_space,
+         particle_aosoa_type> kernel;
 
-    tree->aggregateDataUp(particle_aosoa, agg_functor);    
+    tree->aggregateDataUp(particle_aosoa, kernel);    
 }
 
 //---------------------------------------------------------------------------//

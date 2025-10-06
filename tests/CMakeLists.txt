@@ -11,13 +11,19 @@
 
 include(${TEST_HARNESS_DIR}/test_harness.cmake)
 
-# set(SERIAL_TESTS
-#   Add tests here...
+# set(NOBACKEND_TESTS
+#   Kernels
 #   )
+
+set(SERIAL_TESTS
+  Kernels
+  )
 
 set(MPI_TESTS
   Tree
   )
+
+Canopy_add_tests_nobackend(PACKAGE Canopy NAMES ${NOBACKEND_TESTS})
 
 Canopy_add_tests(PACKAGE Canopy NAMES ${SERIAL_TESTS})
 
