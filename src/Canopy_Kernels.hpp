@@ -71,7 +71,7 @@ namespace Scalar
 
 /**
  * Implementation of std::assoc_legendre that is callable on the device.
- * Per equations 3.33 and 3.34 in source 4.
+ * Per equations 3.33 and 3.34 in Greengard.
  */
 KOKKOS_INLINE_FUNCTION
 double Pnm_impl( int n, int m, double x )
@@ -112,7 +112,7 @@ double Pnm_impl( int n, int m, double x )
  *  theta is the polar angle
  *  phi is the azimuthal angle
  * in spherical coorindates
- * Per equation 3.32 in source 4.
+ * Per equation 3.32 in Greengard.
  */
 KOKKOS_INLINE_FUNCTION
 Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
@@ -128,11 +128,11 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
     // printf("n%d, mp%d, x: %0.4lf: assoc: %0.9lf, impl: %0.9lf\n", n, mp, x,
     // Pnm, Pnm_new);
 
-    // See equation 3.27, source 4 for including sqrt((2n+1 / 4pi))
+    // See equation 3.27, Greengard for including sqrt((2n+1 / 4pi))
     double norm = Kokkos::sqrt( Kokkos::tgamma( n - mp + 1 ) /
                                 Kokkos::tgamma( n + mp + 1 ) );
 
-    // Equation 3.32, source 4
+    // Equation 3.32, Greengard
     cdouble y = norm * Pnm * Kokkos::polar( 1.0, double( m ) * phi );
 
     double phase = ( m >= 0 ? ( ( m % 2 ) ? -1.0 : 1.0 ) // (-1)^m
@@ -211,13 +211,13 @@ struct P2M
                 double rho, alpha, beta;
                 cart2sph( dx, dy, dz, rho, alpha, beta );
 
-                // Equation 3.36, source 4
+                // Equation 3.36, Greengard
                 for ( int n = 0; n <= p; ++n )
                 {
                     for ( int m = -n; m <= n; ++m )
                     {
                         int idx = index( n, m );
-                        // Equation 3.37, source 4
+                        // Equation 3.37, Greengard
                         // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 *
                         // pi ) ));
                         auto val = scalar( i ) * Kokkos::pow( rho, n ) *
@@ -232,7 +232,7 @@ struct P2M
 };
 
 /**
- * Equation 3.26, source 4
+ * Equation 3.26, Greengard
  */
 KOKKOS_INLINE_FUNCTION
 double compute_A( int n, int m )
@@ -243,7 +243,7 @@ double compute_A( int n, int m )
 }
 
 /**
- * Equation 3.43, source 4
+ * Equation 3.43, Greengard
  */
 KOKKOS_INLINE_FUNCTION
 double compute_J_3_43( int n, int m )
@@ -262,7 +262,7 @@ double compute_J_3_43( int n, int m )
 }
 
 /**
- * Equation 3.43, source 4
+ * Equation 3.43, Greengard
  */
 KOKKOS_INLINE_FUNCTION
 double compute_J_3_49( int n, int m )
@@ -281,7 +281,7 @@ double compute_J_3_49( int n, int m )
 }
 
 /**
- * Equation 3.54, source 4
+ * Equation 3.54, Greengard
  */
 KOKKOS_INLINE_FUNCTION
 double compute_J_3_54( int n, int m, int m_p )
@@ -308,7 +308,7 @@ double compute_J_3_54( int n, int m, int m_p )
 /**
  * Operator calculates the multipole expansions about the centers of
  * cells not in the leaf layer using the potential field from its child cells
- * Per source 4, page 68, step 2.
+ * Per Greengard, page 68, step 2.
  */
 template <class MemorySpace, class ExecutionSpace>
 struct M2M
@@ -395,7 +395,7 @@ struct M2M
 
 /**
  * Convert multipole expansions into local expansions using
- * Theorem 3.5.5 in source 4.
+ * Theorem 3.5.5 in Greengard.
  */
 template <class MemorySpace, class ExecutionSpace>
 struct M2L
@@ -420,7 +420,7 @@ struct M2L
     auto coefficients() { return _L; }
 
     /**
-     * Clear coefficents
+     * Clear coefficients
      */
     void clear() { Kokkos::deep_copy( _L, cdouble( 0.0, 0.0 ) ); }
 
@@ -428,7 +428,7 @@ struct M2L
      * Compute local coefficients L[n][m] up to order p
      * 
      * @param O multipole coefficients centered around O_center.
-     * @param O_center the ceneter of multipole coefficients O.
+     * @param O_center the center of multipole coefficients O.
      */
     template <class MultipoleVector>
     void operator()( const MultipoleVector& O,
@@ -452,22 +452,28 @@ struct M2L
                 {
                     for ( int m = -n; m <= n; ++m )
                     {
-                        // Numerator of eq 3.60
+                        // Originally, Greengard eq. 3.60 was used, but there was a bug
+                        // getting the potential calculated from the local expansion to converge
+                        // to the potential calculated directly. Instead, Cheng eq. 17
+                        // is used to compute local expansions.
+
+                        // Numerator
                         cdouble O_nm = O( index( n, m ) );
-                        auto J_km = compute_J_3_49( k, m );
+                        cdouble i_unit(0.0, 1.0);
+                        auto power = Kokkos::abs(k-m)-Kokkos::abs(k)-Kokkos::abs(m);
+                        auto i_term = Kokkos::pow(i_unit, power);
                         auto A_nm = compute_A( n, m );
                         auto A_jk = compute_A( j, k );
                         auto Y_jn_mk = Ynm( j + n, m - k, alpha, beta );
 
-                        // Demoninator of eq 3.60
+                        // Denominator
+                        auto sign = ( n % 2 == 0 ) ? 1.0 : -1.0;
                         auto A_jn_mk = compute_A( j + n, m - k );
                         auto rho_jn = Kokkos::pow( rho, j + n + 1 );
-                        // auto val = ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
-                        //        ( A_jn_mk * rho_jn );
-                        Ljk += ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
-                               ( A_jn_mk * rho_jn );
-                        // if (j == 0 && k == 0) printf("    O_nm: %0.4lf, Ljk+= (%0.4lf, %0.4lf), Ljk= (%0.4lf, %0.4lf)\n",
-                        // O_nm.real(), val.real(), val.imag(), Ljk.real(), Ljk.imag());
+
+                        // Compute L_jk partial term
+                        Ljk += ( O_nm * i_term * A_nm * A_jk * Y_jn_mk ) /
+                               ( sign * A_jn_mk * rho_jn );
                     }
                 }
                 L( index( j, k ) ) = Ljk;
@@ -478,7 +484,7 @@ struct M2L
 
 /**
  * Translate local expansions.
- * Theorem 3.5.6 in source 4.
+ * Theorem 3.5.6 in Greengard.
  */
 template <class MemorySpace, class ExecutionSpace>
 struct L2L

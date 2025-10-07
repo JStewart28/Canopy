@@ -11,6 +11,8 @@
 
 5. [CSCAMM Lecture](https://home.cscamm.umd.edu/programs/fam04/dg_lecture6.pdf)
 
+6. [1999_cheng](https://www.sciencedirect.com/science/article/pii/S0021999199963556)
+
 ### Black Box Methods:
 6. [The black-box fast multipole method](https://mc.stanford.edu/cgi-bin/images/f/fa/Darve_bbfmm_2009.pdf)
 

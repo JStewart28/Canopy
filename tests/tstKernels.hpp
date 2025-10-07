@@ -86,7 +86,7 @@ void testScalarP2MKernel()
             Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
 
         // Perform multipole to particle conversion to calculate potential at
-        // target. Equation 3.36 in source 4
+        // target. Equation 3.36 in Greengard
         using cdouble = Kokkos::complex<double>;
         cdouble potential_multipole = 0.0;
         for ( int n = 0; n <= p; ++n )
@@ -240,7 +240,7 @@ void testM2MKernel1()
 {
     using cdouble = Kokkos::complex<double>;
 
-    const int points_per_section = 20;
+    const int points_per_section = 200;
 
     // 
     Kokkos::View<double* [3], TEST_MEMSPACE> coords( "coords",
@@ -380,64 +380,37 @@ void testM2LKernel0()
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
     
-    Kokkos::Array<double, 6> coord_bounds = {-7.0, -7.0, -7.0, -4.0, -4.0, -4.0};
+    Kokkos::Array<double, 6> coord_bounds = {-8.0, -8.0, -8.0, -5.0, -5.0, -5.0};
     fillRandomCoordinates(cart_coords, coord_bounds);
 
-    Kokkos::Array<double, 2> charge_bounds = {0.0, 2.0};
+    Kokkos::Array<double, 2> charge_bounds = {-3.0, 2.0};
     fillRandomScalar(q, charge_bounds);
 
-    // cart_coords(0, 0) = 2.0;
-    // cart_coords(0, 1) = 6.0;
-    // cart_coords(0, 2) = 1.0;
-    // q(0) = 1.0;
-    Kokkos::Array<double, 3> center = { -5.4, -6.1, -4.9 };
-    // double rho_c = std::sqrt(center[0]*center[0] + center[1]*center[1]);
-    // double r_c   = std::sqrt(rho_c*rho_c + center[2]*center[2]);
-    // double cos_theta = center[2] / r_c;   // target polar angle
-
-    // for (int i = 0; i < num_points; ++i)
-    // {
-    //     double x = cart_coords(i,0);
-    //     double y = cart_coords(i,1);
-    //     double rho = std::sqrt(x*x + y*y);
-
-    //     // pick a different z for this point (any value, as long as sign is consistent)
-    //     // e.g. random between -6 and -3
-    //     double z_new = -7.0 + (std::rand()/(double)RAND_MAX) * 3.0;
-
-    //     // horizontal distance needed for same θ with this z_new
-    //     double rho_new = std::abs(z_new) * std::sqrt(1.0/(cos_theta*cos_theta) - 1.0);
-
-    //     double scale = rho_new / (rho + 1e-12);
-    //     cart_coords(i,0) = x * scale;
-    //     cart_coords(i,1) = y * scale;
-    //     cart_coords(i,2) = z_new;   // all different from center[2]
-    // }
-
-
-
-    // for (int i = 0; i < num_points; ++i)
-    // {
-    //     cart_coords(i, 2) = -4.9;
-    // }
     // Expansion center
-    // Kokkos::Array<double, 3> center = { -4.5, -4.4, -4.3 };
+    Kokkos::Array<double, 3> center = { -5.5, -5.4, -5.3 };
     double rho, alpha, beta;
     Canopy::Kernel::cart2sph( center[0], center[1], center[2], rho, alpha, beta );
 
-    // Target point near origin (within radius 'a' of origin)
-    double Px = 1.1, Py = -0.9, Pz = -1.3;
-    double r, theta, phi, r_d, theta_d, phi_d;
-    Canopy::Kernel::cart2sph( Px - center[0], Py- center[1], Pz - center[2], r_d, theta_d, phi_d );
-    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi);
-    
+    // First target point near origin (within radius 'a' of origin)
+    double Px1 = 0.2, Py1 = -0.1, Pz1 = -0.5;
+    double r1, theta1, phi1, r_d1, theta_d1, phi_d1;
+    Canopy::Kernel::cart2sph( Px1 - center[0], Py1- center[1], Pz1 - center[2], r_d1, theta_d1, phi_d1 );
+    Canopy::Kernel::cart2sph( Px1, Py1, Pz1, r1, theta1, phi1);
+
+    // Second target point near origin (within radius 'a' of origin)
+    double Px2 = -0.4, Py2 = 0.3, Pz2 = -0.2;
+    double r2, theta2, phi2, r_d2, theta_d2, phi_d2;
+    Canopy::Kernel::cart2sph( Px2 - center[0], Py2- center[1], Pz2 - center[2], r_d2, theta_d2, phi_d2 );
+    Canopy::Kernel::cart2sph( Px2, Py2, Pz2, r2, theta2, phi2);
+
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
     auto cart_coords_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
     auto q_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
     double q_total = 0.0;
     double a = 0.0;
-    double potential_direct = 0.0;
+    double potential_direct1 = 0.0;
+    double potential_direct2 = 0.0;
     for (int i = 0; i < num_points; ++i)
     {
         double dx, dy, dz, dist;
@@ -452,70 +425,92 @@ void testM2LKernel0()
         // Total sum
         q_total += std::abs(q_host(i));
 
-        // Direct potential using coordinates relative to origin.
-        dx = Px - cart_coords_host( i, 0 );
-        dy = Py - cart_coords_host( i, 1 );
-        dz = Pz - cart_coords_host( i, 2 );
+        // Direct potential at first target point using coordinates relative to origin.
+        dx = Px1 - cart_coords_host( i, 0 );
+        dy = Py1 - cart_coords_host( i, 1 );
+        dz = Pz1 - cart_coords_host( i, 2 );
         dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        potential_direct += q_host( i ) / dist;
+        potential_direct1 += q_host( i ) / dist;
+
+        // Direct potential at second target point using coordinates relative to origin.
+        dx = Px2 - cart_coords_host( i, 0 );
+        dy = Py2 - cart_coords_host( i, 1 );
+        dz = Pz2 - cart_coords_host( i, 2 );
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        potential_direct2 += q_host( i ) / dist;
     }
     
     // Theorem 3.5.5 requires c > 1 and rho > (c+1)*a.
     // Solve for c, getting c < (rho - a) / a for a > 0.
-    EXPECT_GT(a, 0.0);
+    ASSERT_GT(a, 0.0);
     double c = (rho - a) / a;
-    EXPECT_GT(c, 1.0) << "Error: rho must be greater than (c+1)*a for theory to be valid.";
+    ASSERT_GT(c, 1.0) << "Error: rho must be greater than (c+1)*a for theory to be valid.";
 
-    // Target point must be within radius a of origin
-    EXPECT_LT(r, a) << "Error: Target point must be within distance 'a' from origin for theory to be valid.";
-
-    printf("a=%0.1lf, c=%0.1lf, rho=%0.1lf, (c+1)a=%0.1lf\n", a, c, rho, (c+1)*a);
+    // Target points must be within radius a of origin
+    ASSERT_LT(r1, a) << "Error: Target point 1 must be within distance 'a' from origin for theory to be valid.";
+    ASSERT_LT(r2, a) << "Error: Target point 2 must be within distance 'a' from origin for theory to be valid.";
 
     // Loop over truncation degree
-    for ( int p = 1; p <= 15; ++p )
+    for ( int p = 1; p <= 9; ++p )
     {
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
         p2m( cart_coords, q, num_points, center );
 
-        // Translate multipoles to be centered around the origin
-        // Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
-        // m2m( p2m.coefficients(), center );
-
-        // Convert translated multipoles to locals
+        // Convert multipoles to locals
         Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
         m2l( p2m.coefficients(), center );
+
+        // Copy to host
         auto L_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), m2l.coefficients() );
         auto O_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), p2m.coefficients() );
 
         // Perform local to potential conversion to calculate potential at
-        // target. Equation 3.59 in source 4
+        // target. Equation 3.59 in Greengard
         using cdouble = Kokkos::complex<double>;
-        cdouble potential_L = 0.0;
-        cdouble potential_O = 0.0;
+        cdouble potential_L1 = 0.0;
+        cdouble potential_O1 = 0.0;
+        cdouble potential_L2 = 0.0;
+        cdouble potential_O2 = 0.0;
         for ( int j = 0; j <= p; ++j )
         {
             for ( int k = -j; k <= j; ++k )
             {
                 int idx = Canopy::Kernel::Scalar::index( j, k );
 
-                // Eq. 3.59
-                potential_L +=
-                    L_host( idx ) * Kokkos::pow( r, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
-                // Eq. 3.36
-                potential_O +=
-                    O_host( idx ) / Kokkos::pow( r_d, j + 1) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d, phi_d );
+                /* Target point 1 calculations */
+                // Greengard eq. 3.59
+                potential_L1 +=
+                    L_host( idx ) * Kokkos::pow( r1, j ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta1, phi1 );
+                // Greengard eq. 3.36
+                potential_O1 +=
+                    O_host( idx ) / Kokkos::pow( r_d1, j + 1) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d1, phi_d1 );
+
+                /* Target point 2 calculations */
+                // Greengard eq. 3.59
+                potential_L2 +=
+                    L_host( idx ) * Kokkos::pow( r2, j ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta2, phi2 );
+                // Greengard eq. 3.36
+                potential_O2 +=
+                    O_host( idx ) / Kokkos::pow( r_d2, j + 1) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d2, phi_d2 );
             }
         }
 
         // Check the error bounds from eq. 3.61
         double bound = ( q_total / ( c * a - a ) ) * std::pow( 1.0 / c, p + 1 );
-        double error = std::abs( potential_L.real() - potential_direct );
-        // EXPECT_LE(error, bound) << "p="
-        //     << p << ": error between local and direct potentials too high.";
-        printf("p=%d: D: %0.7lf, L: %0.7lf, M: %0.7lf, b: %0.7lf e: %0.7lf\n", p,
-            potential_direct, potential_L.real(), potential_O.real(), bound, error);
+        double error1 = std::abs( potential_L1.real() - potential_direct1 );
+        double error2 = std::abs( potential_L2.real() - potential_direct2 );
+        EXPECT_LE(error1, bound) << "p="
+            << p << ": error between local and direct potentials at target point 1 too high.";
+        EXPECT_LE(error2, bound) << "p="
+            << p << ": error between local and direct potentials at target point 2 too high.";
+        // printf("p=%d: D1: %0.5lf, L1: %0.5lf, M1: %0.5lf, b1: %0.5lf e1: %0.5lf\n", p,
+        //     potential_direct1, potential_L1.real(), potential_O1.real(), bound, error1);
+        // printf("p=%d: D2: %0.5lf, L2: %0.5lf, M2: %0.5lf, b2: %0.5lf e2: %0.5lf\n", p,
+        //     potential_direct2, potential_L2.real(), potential_O2.real(), bound, error2);
     }
 }
 
