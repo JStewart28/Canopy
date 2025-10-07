@@ -452,20 +452,24 @@ struct M2L
                 {
                     for ( int m = -n; m <= n; ++m )
                     {
-                        // Numerator of eq 3.60
+                        // New source theorem 2.4. Numerator:
                         cdouble O_nm = O( index( n, m ) );
-                        auto J_km = compute_J_3_49( k, m );
+                        cdouble i_unit(0.0, 1.0);
+                        auto power = Kokkos::abs(k-m)-Kokkos::abs(k)-Kokkos::abs(m);
+                        auto i_term = Kokkos::pow(i_unit, power);
                         auto A_nm = compute_A( n, m );
                         auto A_jk = compute_A( j, k );
                         auto Y_jn_mk = Ynm( j + n, m - k, alpha, beta );
 
-                        // Denominator of eq 3.60
+                        // Denominator:
+                        auto factor = Kokkos::pow(-1, n);
                         auto A_jn_mk = compute_A( j + n, m - k );
                         auto rho_jn = Kokkos::pow( rho, j + n + 1 );
                         // auto val = ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
                         //        ( A_jn_mk * rho_jn );
-                        Ljk += ( O_nm * J_km * A_nm * A_jk * Y_jn_mk ) /
-                               ( A_jn_mk * rho_jn );
+
+                        Ljk += ( O_nm * i_term * A_nm * A_jk * Y_jn_mk ) /
+                               ( factor * A_jn_mk * rho_jn );
                         // if (j == 0 && k == 0) printf("    O_nm: %0.4lf, Ljk+= (%0.4lf, %0.4lf), Ljk= (%0.4lf, %0.4lf)\n",
                         // O_nm.real(), val.real(), val.imag(), Ljk.real(), Ljk.imag());
                     }
