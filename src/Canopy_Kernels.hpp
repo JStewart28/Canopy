@@ -272,11 +272,14 @@ double compute_J_3_49( int n, int m )
         int min_abs = ( Kokkos::abs( n ) < Kokkos::abs( m ) )
                           ? Kokkos::abs( n )
                           : Kokkos::abs( m );
-        return  Kokkos::pow(-1, m) * double( ( min_abs % 2 == 0 ) ? 1 : -1 ); // (-1)^(m)*(-1)^min(|n|,|m|)
+        return Kokkos::pow( -1, m ) *
+               double( ( min_abs % 2 == 0 )
+                           ? 1
+                           : -1 ); // (-1)^(m)*(-1)^min(|n|,|m|)
     }
     else
     {
-        return Kokkos::pow(-1, m);
+        return Kokkos::pow( -1, m );
     }
 }
 
@@ -286,9 +289,8 @@ double compute_J_3_49( int n, int m )
 KOKKOS_INLINE_FUNCTION
 double compute_J_3_54( int n, int m, int m_p )
 {
-    auto minus_one_pow = []( int k ) -> double {
-        return ( k % 2 == 0 ) ? 1.0 : -1.0;
-    };
+    auto minus_one_pow = []( int k ) -> double
+    { return ( k % 2 == 0 ) ? 1.0 : -1.0; };
 
     if ( m * m_p < 0 )
     {
@@ -303,7 +305,6 @@ double compute_J_3_54( int n, int m, int m_p )
         return minus_one_pow( n );
     }
 }
-
 
 /**
  * Operator calculates the multipole expansions about the centers of
@@ -426,7 +427,7 @@ struct M2L
 
     /**
      * Compute local coefficients L[n][m] up to order p
-     * 
+     *
      * @param O multipole coefficients centered around O_center.
      * @param O_center the center of multipole coefficients O.
      */
@@ -452,16 +453,18 @@ struct M2L
                 {
                     for ( int m = -n; m <= n; ++m )
                     {
-                        // Originally, Greengard eq. 3.60 was used, but there was a bug
-                        // getting the potential calculated from the local expansion to converge
-                        // to the potential calculated directly. Instead, Cheng eq. 17
-                        // is used to compute local expansions.
+                        // Originally, Greengard eq. 3.60 was used, but there
+                        // was a bug getting the potential calculated from the
+                        // local expansion to converge to the potential
+                        // calculated directly. Instead, Cheng eq. 17 is used to
+                        // compute local expansions.
 
                         // Numerator
                         cdouble O_nm = O( index( n, m ) );
-                        cdouble i_unit(0.0, 1.0);
-                        auto power = Kokkos::abs(k-m)-Kokkos::abs(k)-Kokkos::abs(m);
-                        auto i_term = Kokkos::pow(i_unit, power);
+                        cdouble i_unit( 0.0, 1.0 );
+                        auto power = Kokkos::abs( k - m ) - Kokkos::abs( k ) -
+                                     Kokkos::abs( m );
+                        auto i_term = Kokkos::pow( i_unit, power );
                         auto A_nm = compute_A( n, m );
                         auto A_jk = compute_A( j, k );
                         auto Y_jn_mk = Ynm( j + n, m - k, alpha, beta );
@@ -515,7 +518,7 @@ struct L2L
 
     /**
      * Compute local coefficients L[n][m] up to order p
-     * 
+     *
      * @param O multipole coefficients centered around O_center.
      * @param O_center the ceneter of multipole coefficients O.
      */
@@ -543,14 +546,15 @@ struct L2L
                     {
                         // Numerator of eq 3.60
                         cdouble O_nm = O( index( n, m ) );
-                        auto J = compute_J_3_54( n-j, m-k, m );
-                        auto A_nj_mk = compute_A( n-j, m-k );
+                        auto J = compute_J_3_54( n - j, m - k, m );
+                        auto A_nj_mk = compute_A( n - j, m - k );
                         auto A_jk = compute_A( j, k );
                         auto Y_nj_mk = Ynm( n - j, m - k, alpha, beta );
-                        auto rho_nj = Kokkos::pow(rho, n-j);
+                        auto rho_nj = Kokkos::pow( rho, n - j );
 
-                        Ljk += ( O_nm * J * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
-                               A_jk;
+                        Ljk +=
+                            ( O_nm * J * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
+                            A_jk;
                     }
                 }
                 L( index( j, k ) ) = Ljk;
