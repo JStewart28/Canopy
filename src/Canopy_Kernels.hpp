@@ -334,7 +334,7 @@ struct M2M
     auto coefficients() { return _M; }
 
     /**
-     * Clear coefficents
+     * Clear coefficients.
      */
     void clear() { Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) ); }
 
@@ -345,7 +345,7 @@ struct M2M
         const int p = _p;
         auto M = _M;
 
-        // spherical coords for the displacement
+        // Spherical coords for the displacement
         double rho, alpha, beta;
         cart2sph( center_orig[0], center_orig[1], center_orig[2], rho, alpha,
                   beta );
@@ -396,7 +396,7 @@ struct M2M
 
 /**
  * Convert multipole expansions into local expansions using
- * Theorem 3.5.5 in Greengard.
+ * Theorem 2.4 in Cheng.
  */
 template <class MemorySpace, class ExecutionSpace>
 struct M2L
@@ -487,7 +487,7 @@ struct M2L
 
 /**
  * Translate local expansions.
- * Theorem 3.5.6 in Greengard.
+ * Theorem 5 in Cheng.
  */
 template <class MemorySpace, class ExecutionSpace>
 struct L2L
@@ -512,26 +512,26 @@ struct L2L
     auto coefficients() { return _L; }
 
     /**
-     * Clear coefficents
+     * Clear coefficients.
      */
     void clear() { Kokkos::deep_copy( _L, cdouble( 0.0, 0.0 ) ); }
 
     /**
-     * Compute local coefficients L[n][m] up to order p
+     * Translate local coefficients L[n][m] up to order p
      *
-     * @param O multipole coefficients centered around O_center.
-     * @param O_center the ceneter of multipole coefficients O.
+     * @param L_orig local coefficients centered around O_center.
+     * @param L_center the center to translate L_orig to.
      */
     template <class LocalVector>
-    void operator()( const LocalVector& O,
-                     const Kokkos::Array<double, 3>& O_center ) const
+    void operator()( const LocalVector& L_orig,
+                     const Kokkos::Array<double, 3>& L_center ) const
     {
         int p = _p;
         auto L = _L;
 
-        // Spherical coords of O_center
+        // Spherical coords of L_center
         double rho, alpha, beta;
-        cart2sph( O_center[0], O_center[1], O_center[2], rho, alpha, beta );
+        cart2sph( L_center[0], L_center[1], L_center[2], rho, alpha, beta );
 
         // Optimize this code for running on the device
         for ( int j = 0; j <= p; ++j )
@@ -544,17 +544,23 @@ struct L2L
                 {
                     for ( int m = -n; m <= n; ++m )
                     {
-                        // Numerator of eq 3.60
+                        // Numerator
                         cdouble O_nm = O( index( n, m ) );
-                        auto J = compute_J_3_54( n - j, m - k, m );
-                        auto A_nj_mk = compute_A( n - j, m - k );
+                        cdouble i_unit( 0.0, 1.0 );
+                        auto power = Kokkos::abs(m) - Kokkos::abs(m-k)- Kokkos::abs(k);
+                        auto i_term = Kokkos::pow( i_unit, power );
+                        auto A_nj_mk = compute_A(n-j, m-k);
                         auto A_jk = compute_A( j, k );
-                        auto Y_nj_mk = Ynm( n - j, m - k, alpha, beta );
-                        auto rho_nj = Kokkos::pow( rho, n - j );
+                        auto Y_nj_mk = Ynm( n-j, m - k, alpha, beta );
+                        auto rho_nj = Kokkos::pow(rho, n-j);
 
-                        Ljk +=
-                            ( O_nm * J * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
-                            A_jk;
+                        // Denominator
+                        auto sign = ( (n+j) % 2 == 0 ) ? 1.0 : -1.0;
+                        auto A_nm = compute_A( n, m );
+
+                        // Compute L_jk partial term
+                        Ljk += ( O_nm * i_term * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
+                               ( sign * A_nm );
                     }
                 }
                 L( index( j, k ) ) = Ljk;
