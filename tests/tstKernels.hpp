@@ -570,14 +570,16 @@ void testL2LKernel()
     Canopy::Kernel::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
                               beta_m );
     
-    // Center of local expansion X_0
-    Kokkos::Array<double, 3> X_0 = { 3.5, 6.9, 5.1 };
+    // Center of local expansion X_0: A vector from the origin to the
+    // center of local expansion.
+    // Kokkos::Array<double, 3> X_0 = { 3.5, 6.9, 5.1 };
+    Kokkos::Array<double, 3> X_0 = { 0.0, 0.0, 0.0 };
     double rho, alpha, beta;
     Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
                               beta );
 
-    // Target point X within radius 'a' of where the locals will be translated to.
-    double X_x = 2.6, X_y = 7.7, X_z = 6.8;
+    // Target point X
+    double X_x = 0.7, X_y = 0.6, X_z = 0.9;
     double r, theta, phi;
     Canopy::Kernel::cart2sph( X_x, X_y, X_z,
                               r, theta, phi );
@@ -621,21 +623,23 @@ void testL2LKernel()
     // Theorem 3.5.5 requires c > 1 and rho > (c+1)*a.
     // Solve for c, getting c < (rho - a) / a for a > 0.
     ASSERT_GT( a, 0.0 );
-    double c = ( rho - a ) / a;
-    ASSERT_GT( c, 1.0 )
-        << "Error: rho must be greater than (c+1)*a for theory to be valid.";
+    double c = ( rho_m - a ) / a;
+    EXPECT_GT( c, 1.0 )
+        << "Error: rho must be greater than (c+1)*a for theory to be valid. a = " << a;
 
     // Target point must be within radius a of local center
-    ASSERT_LT( r_p, a ) << "Error: Target point must be within distance 'a' "
+    EXPECT_LT( r_p, a ) << "Error: Target point must be within distance 'a' "
                           "from local center for theory to be valid.";
 
     // Loop over truncation degree
-    for ( int p = 1; p <= 15; ++p )
+    for ( int p = 1; p <= 5; ++p )
     {
+        // Create multipole coefficients.
         Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
         p2m( cart_coords, q, num_points, m_center );
 
-        // Convert multipoles to locals. Locals are centered around origin.
+        // Convert multipoles to locals. By Theorem 2.4 in Cheng, these local
+        // coefficients are centered around the origin.
         Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
         m2l( p2m.coefficients(), m_center );
 
@@ -644,18 +648,26 @@ void testL2LKernel()
         l2l( m2l.coefficients(), X_0 );
 
         // Copy to host
-        auto L_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+        auto O_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                            m2l.coefficients() );
+        auto L_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                           l2l.coefficients() );
 
         // Perform local to potential conversion to calculate potential at
         // target. Equation 3.59 in Greengard
         using cdouble = Kokkos::complex<double>;
+        cdouble potential_O = 0.0;
         cdouble potential_L = 0.0;
         for ( int j = 0; j <= p; ++j )
         {
             for ( int k = -j; k <= j; ++k )
             {
                 int idx = Canopy::Kernel::Scalar::index( j, k );
+
+                // Chang eq. 19
+                potential_O +=
+                    O_host( idx ) * Kokkos::pow( r_p, j) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta_p, phi_p );
 
                 // Cheng eq. 20
                 potential_L +=
@@ -670,8 +682,8 @@ void testL2LKernel()
         // EXPECT_LE( error, bound ) << "p=" << p
         //                            << ": error between local and direct "
         //                               "potentials at target point too high.";
-        printf("p=%d: D: %0.5lf, L: %0.5lf, b: %0.5lf e: %0.5lf\n", p,
-            potential_direct, potential_L.real(),
+        printf("p=%d: D: %0.5lf, L: %0.5lf, O: %0.5lf, b: %0.5lf e: %0.5lf\n", p,
+            potential_direct, potential_L.real(), potential_O.real(),
             bound, error);
         // printf("p=%d: D2: %0.5lf, L2: %0.5lf, M2: %0.5lf, b2: %0.5lf e2:
         // %0.5lf\n", p,

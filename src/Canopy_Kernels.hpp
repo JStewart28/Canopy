@@ -523,7 +523,7 @@ struct L2L
      * @param L_center the center to translate L_orig to.
      */
     template <class LocalVector>
-    void operator()( const LocalVector& L_orig,
+    void operator()( const LocalVector& O,
                      const Kokkos::Array<double, 3>& L_center ) const
     {
         int p = _p;
@@ -544,10 +544,14 @@ struct L2L
                 {
                     for ( int m = -n; m <= n; ++m )
                     {
+                        // Skip regions where Y_nm is invalid.
+                        if (std::abs(m - k) > (n - j))
+                            continue;
+
                         // Numerator
-                        cdouble L_nm = L_orig( index( n, m ) );
+                        cdouble O_nm = O( index( n, m ) );
                         cdouble i_unit( 0.0, 1.0 );
-                        auto power = Kokkos::abs(m) - Kokkos::abs(m-k)- Kokkos::abs(k);
+                        auto power = Kokkos::abs(m) - Kokkos::abs(m-k) - Kokkos::abs(k);
                         auto i_term = Kokkos::pow( i_unit, power );
                         auto A_nj_mk = compute_A(n-j, m-k);
                         auto A_jk = compute_A( j, k );
@@ -559,8 +563,12 @@ struct L2L
                         auto A_nm = compute_A( n, m );
 
                         // Compute L_jk partial term
-                        Ljk += ( L_nm * i_term * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
+                        Ljk += ( O_nm * i_term * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
                                ( sign * A_nm );
+                        // printf("j: %d, k: %d, n: %d, m: %d, Y: (%.3lf, %.3lf), O_nm: (%.3lf, %.3lf), Ljk_piece: (%.3lf, %.3lf)\n",
+                        //     j, k, n, m,
+                        //     Y_nj_mk.real(), Y_nj_mk.imag(),
+                        //     O_nm.real(), O_nm.imag(), Ljk.real(), Ljk.imag());
                     }
                 }
                 L( index( j, k ) ) = Ljk;
