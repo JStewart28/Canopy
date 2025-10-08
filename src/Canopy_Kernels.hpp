@@ -545,7 +545,7 @@ struct L2L
                     for ( int m = -n; m <= n; ++m )
                     {
                         // Numerator
-                        cdouble O_nm = O( index( n, m ) );
+                        cdouble L_nm = L_orig( index( n, m ) );
                         cdouble i_unit( 0.0, 1.0 );
                         auto power = Kokkos::abs(m) - Kokkos::abs(m-k)- Kokkos::abs(k);
                         auto i_term = Kokkos::pow( i_unit, power );
@@ -559,7 +559,7 @@ struct L2L
                         auto A_nm = compute_A( n, m );
 
                         // Compute L_jk partial term
-                        Ljk += ( O_nm * i_term * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
+                        Ljk += ( L_nm * i_term * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
                                ( sign * A_nm );
                     }
                 }
