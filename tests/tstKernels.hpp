@@ -564,30 +564,40 @@ void testL2LKernel()
     Kokkos::Array<double, 2> charge_bounds = { -3.0, 2.0 };
     fillRandomScalar( q, charge_bounds );
 
-    // Multipole expansion center
+    // Multipole expansion center. Coordinates from local center
+    // to multipole center.
     Kokkos::Array<double, 3> m_center = { -5.5, -5.4, -5.3 };
     double rho_m, alpha_m, beta_m;
     Canopy::Kernel::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
                               beta_m );
     
-    // Center of local expansion X_0: A vector from the origin to the
-    // center of local expansion.
-    // Kokkos::Array<double, 3> X_0 = { 3.5, 6.9, 5.1 };
-    Kokkos::Array<double, 3> X_0 = { 0.0, 0.0, 0.0 };
-    double rho, alpha, beta;
-    Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
-                              beta );
+    // Vector from the old local center to the new local center.
+    Kokkos::Array<double, 3> X_0 = { 3.5, 6.9, 5.1 };
+    double rho0, alpha0, beta0;
+    Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho0, alpha0,
+                              beta0 );
+                        
+    // Vector from the new local center to the old local center.
+    Kokkos::Array<double, 3> X_0p = { X_0[0] * -1, X_0[1] * -1, X_0[2] * -1 };
+    double rho1, alpha1, beta1;
+    Canopy::Kernel::cart2sph( X_0p[0], X_0p[1], X_0p[2], rho1, alpha1,
+                              beta1 );
 
-    // Target point X
-    double X_x = 0.7, X_y = 0.6, X_z = 0.9;
+    // Target point X, near new local center
+    double X_x = 3.6, X_y = 7.0, X_z = 5.2;
     double r, theta, phi;
     Canopy::Kernel::cart2sph( X_x, X_y, X_z,
                               r, theta, phi );
     
-    // Vector X - X_0
+    // Vector X - X_0: 
     double r_p, theta_p, phi_p;
     Canopy::Kernel::cart2sph( X_x - X_0[0], X_y - X_0[1], X_z - X_0[2],
                               r_p, theta_p, phi_p );
+    
+    // Vector X - X_0p: 
+    double r_p1, theta_p1, phi_p1;
+    Canopy::Kernel::cart2sph( X_x - X_0p[0], X_y - X_0p[1], X_z - X_0p[2],
+                              r_p1, theta_p1, phi_p1 );
 
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
