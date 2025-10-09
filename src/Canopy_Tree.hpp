@@ -58,9 +58,6 @@ class Tree
     //! AoSoA Tuple type
     using tuple_type = Cabana::Tuple<member_types>;
     using data_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;
-
-    //! Sparse partitioner type
-    using sparse_partitioner_type = Cabana::Grid::SparseDimPartitioner<memory_space, num_space_dim>;
     
     Tree( const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
