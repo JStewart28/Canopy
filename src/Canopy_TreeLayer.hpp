@@ -71,8 +71,11 @@ class TreeLayer
     using execution_space = typename TreeType::execution_space;
     //! Memory space.
     using memory_space = typename TreeType::memory_space;
+    //! Number of dimensions
+    static constexpr std::size_t num_space_dim = TreeType::num_space_dim;
 
-    using sparse_partitioner_type = typename TreeType::sparse_partitioner_type;
+    //! Sparse partitioner type
+    using sparse_partitioner_type = Cabana::Grid::SparseDimPartitioner<memory_space, CellPerTileDim, num_space_dim>;
 
     //! DataTypes Data types (Cabana::MemberTypes).
     using cdouble = typename TreeType::cdouble;
@@ -121,11 +124,11 @@ class TreeLayer
         MPI_Comm_rank( comm, &_rank );
         MPI_Comm_size( comm, &_comm_size );
 
-        std::array<int, 3> global_num_cell({
+        _global_num_cell = {
             _cells_per_dim,
             _cells_per_dim,
             _cells_per_dim
-            });
+            };
         // printf("R%d: high-low: %0.2lf, %0.2lf, %0.2lf, _tiles_per_dim: %d\n", _rank,
         //     _global_high_corner[0] - _global_low_corner[0],
         //     _global_high_corner[1] - _global_low_corner[1],
@@ -135,15 +138,14 @@ class TreeLayer
                 
         // sparse partitioner
         float max_workload_coeff = 1.5;
-        int workload_num = _tiles_per_dim * _tiles_per_dim * _tiles_per_dim;
+        int workload_num = _cells_per_dim * _cells_per_dim * _cells_per_dim;
         _num_step_rebalance = 200;
         _max_optimize_iteration = 10;
         _partitioner_ptr = std::make_shared<sparse_partitioner_type>(
             _comm, max_workload_coeff, workload_num, _num_step_rebalance,
-            global_num_cell, _max_optimize_iteration );
-        
+            _global_num_cell, _max_optimize_iteration );
         auto ranks_per_dim =
-            _partitioner_ptr->ranksPerDimension( comm, global_num_cell );
+            _partitioner_ptr->ranksPerDimension( comm, _global_num_cell );
         // if (_rank == 0) printf("R%d: ranks per dim: %d, %d, %d\n", rank, ranks_per_dim[0], ranks_per_dim[1], ranks_per_dim[2]);
         std::array<int, 3> periodic_dims = { 0, 0, 0 };
 
@@ -174,11 +176,37 @@ class TreeLayer
         std::vector<int> y_partition = compute_partition(_tiles_per_dim, dims[1]);
         std::vector<int> z_partition = compute_partition(_tiles_per_dim, dims[2]);
 
-        initializeRecPartition(x_partition, y_partition, z_partition);
+        /*!
+        \brief From Cabana docs: Initialize the tile partition; partition in each dimension
+        has the form [0, p_1, ..., p_n, total_tile_num], so the partition
+        would be [0, p_1), [p_1, p_2) ... [p_n, total_tile_num]
+        \param rec_partition_i partition array in dimension i
+        \param rec_partition_j partition array in dimension j
+        \param rec_partition_k partition array in dimension k
+        */
+        _partitioner_ptr->initializeRecPartition(x_partition, y_partition, z_partition);
 
+        initialize();
+        /*
+        Steps:
+        1. Initially partition based on the 2D partition of the surface.
+        2. Register sparse grid using positions.
+        3. Optimize partitioner.
+        4. Re-register sparse grid.
+        5. Use Distributor to send particles to their rank of ownership in the new partition.
+        6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
+        */
+    }
+
+    /**
+     * Use the sparse partitioner to initialize the global and local grids, sparse map,
+     * and sparse array objects.
+     */
+    void initialize()
+    {
         // mesh/grid related initialization
         auto global_mesh = Cabana::Grid::createSparseGlobalMesh(
-            global_low_corner, global_high_corner, global_num_cell );
+            _global_low_corner, _global_high_corner, _global_num_cell );
         
         std::array<bool, 3> is_dim_periodic = { false, false, false };
         auto& partitioner_ref = *_partitioner_ptr;
@@ -203,18 +231,6 @@ class TreeLayer
         
         // Store cell size
         updateCellSize();
-
-            // Where do you store the persistent gathers and scatters? 
-            // How do you tell a halo to create perssitent gathers and scatters
-        /*
-        Steps:
-        1. Initially partition based on the 2D partition of the surface.
-        2. Register sparse grid using positions.
-        3. Optimize partitioner.
-        4. Re-register sparse grid.
-        5. Use Distributor to send particles to their rank of ownership in the new partition.
-        6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
-        */
     }
 
     void updateCellSize()
@@ -224,43 +240,15 @@ class TreeLayer
         _cell_size = {sparse_mesh.cellSize( 0 ), sparse_mesh.cellSize( 1 ), sparse_mesh.cellSize( 2 )};
     }
 
-    /*!
-      \brief Initialize the tile partition; partition in each dimension
-      has the form [0, p_1, ..., p_n, total_tile_num], so the partition
-      would be [0, p_1), [p_1, p_2) ... [p_n, total_tile_num]
-      \param rec_partition_i partition array in dimension i
-      \param rec_partition_j partition array in dimension j
-      \param rec_partition_k partition array in dimension k
-    */
-    void initializeRecPartition( std::vector<int>& rec_partition_i,
-                                 std::vector<int>& rec_partition_j,
-                                 std::vector<int>& rec_partition_k )
+    template <class ParticlePositions>
+    void optimizePartition(ParticlePositions positions, std::size_t num_particles)
     {
-        _partitioner_ptr->initializeRecPartition(rec_partition_i, rec_partition_j, rec_partition_k);
-        // auto current_partition = _partitioner_ptr->getCurrentPartition();
-        // if (_rank == 0)
-        // for (std::size_t d = 0; d < 3; ++d)
-        // {
-        //     std::cout << "Dimension " << d << ": ";
-        //     for (std::size_t i = 0; i < current_partition[d].size(); ++i)
-        //     {
-        //         std::cout << current_partition[d][i] << " ";
-        //     }
-        //     std::cout << std::endl;
-        // }
-    }
+        _partitioner_ptr->optimizePartition( positions, num_particles, _global_low_corner,
+            _cell_size[0], _comm);
 
-    /**
-     * Initialize tiles in the layer based on particle locations
-     */
-    // template <class PositionSliceType>
-    // void initializeLayer(int layer, PositionSliceType position_slice, std::size_t num_particles)
-    // {
-    //     auto array = _tree[layer]->array();
-    //     array->registerSparseGrid( position_slice, num_particles );
-    //     array->reserveFromMap( 1.2 );
-    //     printf("R%d: array size: %d\n", _rank, (int)array->size());
-    // }
+        // Reinitialize sparse data structures after updating the partition.
+        initialize();
+    }
 
     /**
      * Get the domain in 3D space that each rank owns with the upper value being non-inclusive
@@ -360,35 +348,6 @@ class TreeLayer
                 // If no domain was found, mark as invalid
                 particle_ranks(i) = -1;
             });
-    }
-
-    template <class PositionSliceType>
-    bool loadBalance(PositionSliceType position_slice, std::size_t num_particles)
-    {
-        // if (_rank == 0) for (size_t i = 0; i < num_particles; i++)
-        // {
-        //     printf("R%d: i%d: %0.3lf, %0.3lf, %0.3lf\n", _rank, i, position_slice(i, 0), position_slice(i, 1), position_slice(i, 2));
-        // }
-        float dx = (_global_high_corner[0] - _global_low_corner[0]) / _cells_per_dim;
-        _partitioner_ptr->optimizePartition( position_slice, num_particles,
-                                            _global_low_corner,
-                                            dx, _cart_comm );
-
-        // compute prefix sum matrix
-        // _partitioner_ptr->computeFullPrefixSum( _cart_comm );
-
-        // // optimization
-        // bool is_changed = false;
-        // for ( int i = 0; i < _max_optimize_iteration; ++i )
-        // {
-        //     _partitioner_ptr->optimizePartition( is_changed,
-        //                                     std::rand() % 3 );
-        //     if ( !is_changed )
-        //         break;
-        // }
-
-        // return is_changed;
-        return false;
     }
 
     /**
@@ -929,6 +888,15 @@ class TreeLayer
             // Non-leaf data
             if constexpr (position_index == 1) initializeCell(data_aosoa, in2out, start, end);
         }
+
+        // Test optimizing the partition after all cells initialized.
+        // printf("R%d: L%d: sparse map size: %d\n", _rank, _layer_number, map.size());
+        // printf("R%d: sparse map size: %d\n", _rank, map.size());
+        // auto imbalance_factor = _partitioner_ptr->computeImbalanceFactor( _cart_comm );
+        // printf("R%d: L%d: imbalance factor: %0.4lf\n", _rank, _layer_number, imbalance_factor);
+        // if (_layer_number == 0) optimizePartition();
+        // auto imbalance_factor = partitioner_ptr->computeImbalanceFactor( _cart_comm );
+        // printf("R%d: L%d: imbalance factor: %0.4lf\n", imbalance_factor);
     }
 
     /**
@@ -990,6 +958,7 @@ class TreeLayer
   private:
     const std::array<double, 3> _global_high_corner;
     const std::array<double, 3> _global_low_corner;
+    std::array<int, 3> _global_num_cell;
 	const int _tiles_per_dim;
     const int _halo_width;
     const int _cells_per_dim;

@@ -21,89 +21,6 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
-// Used to sum positions in the following AverageValueFunctor struct.
-template <class ScalarType>
-struct Triple {
-    ScalarType x, y, z;
-
-    KOKKOS_INLINE_FUNCTION
-    Triple()
-        : x(ScalarType(0)), y(ScalarType(0)), z(ScalarType(0)) {}
-
-    KOKKOS_INLINE_FUNCTION
-    Triple& operator+=(const Triple& rhs) {
-        x += rhs.x;
-        y += rhs.y;
-        z += rhs.z;
-        return *this;
-    }
-};
-
-/**
- * Aggregates the first slice (positions) based on average and 
- * the second slice based on sum.
- */
-template <class MemorySpace, class ExecutionSpace, class AoSoAType>
-struct KernelFunction {
-public:
-
-    using memory_space = MemorySpace;
-    using execution_space = ExecutionSpace;
-    using aosoa_type = AoSoAType;
-    using member_types = typename AoSoAType::member_types;
-
-    KernelFunction() 
-    {
-        _avgs = aosoa_type("avgs", 1);
-    }
-
-    aosoa_type _avgs;
-
-    aosoa_type vals() {return _avgs;}
-
-    void operator()(const aosoa_type& data) const
-    {
-        std::size_t data_size = data.size();
-
-        auto slice0 = Cabana::slice<0>(data);
-        auto slice1 = Cabana::slice<1>(data);
-
-        // Calculate average position of slice 0
-        Triple<double> sum;
-        Kokkos::parallel_reduce(
-            "aggregate_xyz",
-            Kokkos::RangePolicy<execution_space>(0, data_size),
-            KOKKOS_LAMBDA(const int i, Triple<double>& local_sum) {
-                local_sum.x += slice0(i, 0);
-                local_sum.y += slice0(i, 1);
-                local_sum.z += slice0(i, 2);
-            }, sum );
-        
-        sum.x /= static_cast<double>(data_size);
-        sum.y /= static_cast<double>(data_size);
-        sum.z /= static_cast<double>(data_size);
-
-        // Calculate total sum of slice 1
-        int total = 0;
-        Kokkos::parallel_reduce(
-            "aggregate_xyz",
-            Kokkos::RangePolicy<execution_space>(0, data_size),
-            KOKKOS_LAMBDA(const int i, int& local_total) {
-                local_total += slice1(i);
-            }, total );
-
-        Cabana::Tuple<member_types> tp;
-        Cabana::get<0>( tp, 0 ) = sum.x;
-        Cabana::get<0>( tp, 1 ) = sum.y;
-        Cabana::get<0>( tp, 2 ) = sum.z;
-        Cabana::get<1>(tp) = total;
-
-        _avgs.setTuple(0, tp);
-    }
-};
-
-//---------------------------------------------------------------------------//
-
 /**
  * Rank 0 creates all the data. Each rank gets two particles.
  * All ranks insert into the tree.
@@ -112,7 +29,7 @@ public:
  * at the leaf layer.
  */
 template <std::size_t p_val>
-void testUpwardsAggregation()
+void testUpwardsAggregation(bool balanced)
 {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -147,8 +64,13 @@ void testUpwardsAggregation()
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
     
     Kokkos::Array<double, 6> coord_bounds = {-1.5, -1.5, -1.5, 1.5, 1.5, 1.5};
-    fillRandomCoordinates(cart_coords, coord_bounds);
+    // If not balanced, fill domain unevenly
+    if (!balanced)
+    {
+        coord_bounds = {-1.0, 0.3, 0.0, -0.5, 0.5, 1.3};
+    }
 
+    fillRandomCoordinates(cart_coords, coord_bounds);
     Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
     fillRandomScalar(q, charge_bounds);
 
@@ -157,7 +79,13 @@ void testUpwardsAggregation()
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
 
     // Returns a vector of domains for each rank
-    // auto domains_vec = tree->layer(0)->get_domains();
+    auto domains_host = tree->layer(0)->get_domains();
+    // for (std::size_t i = 0; i < domains_host.size(); ++i)
+    // {
+    //     if (rank == 0) printf("Before: L0: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n",
+    //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
+    //         domains_host[i][4], domains_host[i][5]);
+    // }
 
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
@@ -196,7 +124,16 @@ void testUpwardsAggregation()
         Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
         
     // Fill the tree
-    tree->create_multipoles(particle_aosoa);
+    bool run_load_balance = !balanced;
+    tree->create_multipoles(particle_aosoa, run_load_balance);
+
+    domains_host = tree->layer(0)->get_domains();
+    // for (std::size_t i = 0; i < domains_host.size(); ++i)
+    // {
+    //     if (rank == 0) printf("After: L0: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n",
+    //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
+    //         domains_host[i][4], domains_host[i][5]);
+    // }
 
     /***********************************************
      * Check the data in the root layer
@@ -248,11 +185,18 @@ void testUpwardsAggregation()
 //---------------------------------------------------------------------------//
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
-TEST( Tree, testUpwardsAggregation1 ) { testUpwardsAggregation<1>(); }
-TEST( Tree, testUpwardsAggregation2 ) { testUpwardsAggregation<2>(); }
-TEST( Tree, testUpwardsAggregation3 ) { testUpwardsAggregation<3>(); }
-TEST( Tree, testUpwardsAggregation4 ) { testUpwardsAggregation<4>(); }
-TEST( Tree, testUpwardsAggregation5 ) { testUpwardsAggregation<5>(); }
+// Test with a balanced particle distribution.
+TEST( Tree, testUpwardsAggregation1_balanced ) { testUpwardsAggregation<1>(true); }
+TEST( Tree, testUpwardsAggregation2_balanced ) { testUpwardsAggregation<2>(true); }
+TEST( Tree, testUpwardsAggregation3_balanced ) { testUpwardsAggregation<3>(true); }
+TEST( Tree, testUpwardsAggregation4_balanced ) { testUpwardsAggregation<4>(true); }
+TEST( Tree, testUpwardsAggregation5_balanced ) { testUpwardsAggregation<5>(true); }
+
+// Test with an unbalanced particle distribution. We don't need to test as many
+// p-values because this mechanism is unchanged, basically we are testing
+// that the particles are distributed correctly after balancing.
+TEST( Tree, testUpwardsAggregation1_unbalanced ) { testUpwardsAggregation<1>(false); }
+TEST( Tree, testUpwardsAggregation2_unbalanced ) { testUpwardsAggregation<2>(false); }
 
 //---------------------------------------------------------------------------//
 
