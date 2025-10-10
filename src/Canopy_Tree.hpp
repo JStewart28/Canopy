@@ -140,13 +140,19 @@ class Tree
      */
     template <class ViewType, class PositionSliceType>
     void mapParticles(const PositionSliceType& positions, ViewType& particle_ranks,
-                      const int particle_num, const int layer)
+                      const std::size_t particle_num, const int layer, const bool run_load_balance)
     {
         using mem_space = typename ViewType::memory_space;
         using exec_space = typename ViewType::execution_space;
 
-        // Get all rank domains on host
+        // Load balance the partition if requested.
         auto tree_layer = _tree[layer];
+        if (run_load_balance)
+        {
+            tree_layer->optimizePartition(positions, particle_num);
+        }
+
+        // Get all rank domains on host
         auto domains_host = tree_layer->get_domains();
         // for (std::size_t i = 0; i < domains_host.size(); ++i)
         // {
@@ -410,10 +416,10 @@ class Tree
      * Assumes x/y/z coordinates are the first tuple element in "data"
      */
     template <class ParticleAoSoA>
-    void create_multipoles(ParticleAoSoA external_data)
+    void create_multipoles(ParticleAoSoA external_data, bool run_load_balance)
     {
         // Data comes from externally to populate leaf layer (layer 0)
-        migrateParticleData(external_data);
+        migrateParticleData(external_data, run_load_balance);
         // if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(external_data);
         for (std::size_t i = 1; i < _tree.size(); i++)
@@ -430,11 +436,11 @@ class Tree
      * Positions must be the first AoSoA slice.
      */
     template <class ParticleAoSoA>
-    void migrateParticleData(ParticleAoSoA& external_data)
+    void migrateParticleData(ParticleAoSoA& external_data, bool run_load_balance)
     {
         auto positions = Cabana::slice<0>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
-        mapParticles(positions, layer_owner, external_data.size(), 0);
+        mapParticles(positions, layer_owner, external_data.size(), 0, run_load_balance);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
         Cabana::migrate( distributor, external_data );
     }

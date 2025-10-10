@@ -162,7 +162,13 @@ void testUpwardsAggregation(bool balanced)
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
 
     // Returns a vector of domains for each rank
-    // auto domains_vec = tree->layer(0)->get_domains();
+    auto domains_host = tree->layer(0)->get_domains();
+    for (std::size_t i = 0; i < domains_host.size(); ++i)
+    {
+        if (rank == 0) printf("Before: L0: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n",
+            i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
+            domains_host[i][4], domains_host[i][5]);
+    }
 
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
@@ -202,6 +208,14 @@ void testUpwardsAggregation(bool balanced)
         
     // Fill the tree
     tree->create_multipoles(particle_aosoa);
+
+    domains_host = tree->layer(0)->get_domains();
+    for (std::size_t i = 0; i < domains_host.size(); ++i)
+    {
+        if (rank == 0) printf("After: L0: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n",
+            i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
+            domains_host[i][4], domains_host[i][5]);
+    }
 
     /***********************************************
      * Check the data in the root layer

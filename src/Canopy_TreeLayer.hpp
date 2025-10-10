@@ -234,10 +234,12 @@ class TreeLayer
         _cell_size = {sparse_mesh.cellSize( 0 ), sparse_mesh.cellSize( 1 ), sparse_mesh.cellSize( 2 )};
     }
 
-    void optimizePartition()
+    template <class ParticlePositions>
+    void optimizePartition(ParticlePositions positions, std::size_t num_particles)
     {
-        int iterations = _partitioner_ptr->optimizePartition( *_map_ptr, _comm );
-        printf("R%d: optimized after %d iterations.\n", _rank, iterations);
+        _partitioner_ptr->optimizePartition( positions, num_particles, _global_low_corner,
+            _cell_size[0], _comm);
+
     }
 
 
@@ -881,7 +883,17 @@ class TreeLayer
         }
 
         // Test optimizing the partition after all cells initialized.
-        if (_layer_number == 0) optimizePartition();
+        printf("R%d: L%d: sparse map size: %d\n", _rank, _layer_number, map.size());
+        if (_layer_number == 0)
+        {
+            // printf("R%d: sparse map size: %d\n", _rank, map.size());
+            optimizePartition();
+            auto imbalance_factor = _partitioner_ptr->computeImbalanceFactor( _cart_comm );
+            printf("R%d: L%d: imbalance factor: %0.4lf\n", _rank, _layer_number, imbalance_factor);
+        }
+        // if (_layer_number == 0) optimizePartition();
+        // auto imbalance_factor = partitioner_ptr->computeImbalanceFactor( _cart_comm );
+        // printf("R%d: L%d: imbalance factor: %0.4lf\n", imbalance_factor);
     }
 
     /**
