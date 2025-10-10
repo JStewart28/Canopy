@@ -124,11 +124,11 @@ class TreeLayer
         MPI_Comm_rank( comm, &_rank );
         MPI_Comm_size( comm, &_comm_size );
 
-        std::array<int, 3> global_num_cell({
+        _global_num_cell = {
             _cells_per_dim,
             _cells_per_dim,
             _cells_per_dim
-            });
+            };
         // printf("R%d: high-low: %0.2lf, %0.2lf, %0.2lf, _tiles_per_dim: %d\n", _rank,
         //     _global_high_corner[0] - _global_low_corner[0],
         //     _global_high_corner[1] - _global_low_corner[1],
@@ -143,9 +143,9 @@ class TreeLayer
         _max_optimize_iteration = 10;
         _partitioner_ptr = std::make_shared<sparse_partitioner_type>(
             _comm, max_workload_coeff, workload_num, _num_step_rebalance,
-            global_num_cell, _max_optimize_iteration );
+            _global_num_cell, _max_optimize_iteration );
         auto ranks_per_dim =
-            _partitioner_ptr->ranksPerDimension( comm, global_num_cell );
+            _partitioner_ptr->ranksPerDimension( comm, _global_num_cell );
         // if (_rank == 0) printf("R%d: ranks per dim: %d, %d, %d\n", rank, ranks_per_dim[0], ranks_per_dim[1], ranks_per_dim[2]);
         std::array<int, 3> periodic_dims = { 0, 0, 0 };
 
@@ -186,9 +186,27 @@ class TreeLayer
         */
         _partitioner_ptr->initializeRecPartition(x_partition, y_partition, z_partition);
 
+        initialize();
+        /*
+        Steps:
+        1. Initially partition based on the 2D partition of the surface.
+        2. Register sparse grid using positions.
+        3. Optimize partitioner.
+        4. Re-register sparse grid.
+        5. Use Distributor to send particles to their rank of ownership in the new partition.
+        6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
+        */
+    }
+
+    /**
+     * Use the sparse partitioner to initialize the global and local grids, sparse map,
+     * and sparse array objects.
+     */
+    void initialize()
+    {
         // mesh/grid related initialization
         auto global_mesh = Cabana::Grid::createSparseGlobalMesh(
-            global_low_corner, global_high_corner, global_num_cell );
+            _global_low_corner, _global_high_corner, _global_num_cell );
         
         std::array<bool, 3> is_dim_periodic = { false, false, false };
         auto& partitioner_ref = *_partitioner_ptr;
@@ -213,18 +231,6 @@ class TreeLayer
         
         // Store cell size
         updateCellSize();
-
-            // Where do you store the persistent gathers and scatters? 
-            // How do you tell a halo to create perssitent gathers and scatters
-        /*
-        Steps:
-        1. Initially partition based on the 2D partition of the surface.
-        2. Register sparse grid using positions.
-        3. Optimize partitioner.
-        4. Re-register sparse grid.
-        5. Use Distributor to send particles to their rank of ownership in the new partition.
-        6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
-        */
     }
 
     void updateCellSize()
@@ -240,8 +246,9 @@ class TreeLayer
         _partitioner_ptr->optimizePartition( positions, num_particles, _global_low_corner,
             _cell_size[0], _comm);
 
+        // Reinitialize sparse data structures after updating the partition.
+        initialize();
     }
-
 
     /**
      * Get the domain in 3D space that each rank owns with the upper value being non-inclusive
@@ -883,14 +890,10 @@ class TreeLayer
         }
 
         // Test optimizing the partition after all cells initialized.
-        printf("R%d: L%d: sparse map size: %d\n", _rank, _layer_number, map.size());
-        if (_layer_number == 0)
-        {
-            // printf("R%d: sparse map size: %d\n", _rank, map.size());
-            optimizePartition();
-            auto imbalance_factor = _partitioner_ptr->computeImbalanceFactor( _cart_comm );
-            printf("R%d: L%d: imbalance factor: %0.4lf\n", _rank, _layer_number, imbalance_factor);
-        }
+        // printf("R%d: L%d: sparse map size: %d\n", _rank, _layer_number, map.size());
+        // printf("R%d: sparse map size: %d\n", _rank, map.size());
+        // auto imbalance_factor = _partitioner_ptr->computeImbalanceFactor( _cart_comm );
+        // printf("R%d: L%d: imbalance factor: %0.4lf\n", _rank, _layer_number, imbalance_factor);
         // if (_layer_number == 0) optimizePartition();
         // auto imbalance_factor = partitioner_ptr->computeImbalanceFactor( _cart_comm );
         // printf("R%d: L%d: imbalance factor: %0.4lf\n", imbalance_factor);
@@ -955,6 +958,7 @@ class TreeLayer
   private:
     const std::array<double, 3> _global_high_corner;
     const std::array<double, 3> _global_low_corner;
+    std::array<int, 3> _global_num_cell;
 	const int _tiles_per_dim;
     const int _halo_width;
     const int _cells_per_dim;

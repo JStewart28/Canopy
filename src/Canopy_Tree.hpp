@@ -217,24 +217,6 @@ class Tree
             }
     }
 
-    /**
-     * Initialize tiles in the leaf layer based on particle locations
-     */
-    template <class PositionSliceType>
-    void initializeLayer(int layer, PositionSliceType position_slice, std::size_t num_particles)
-    {
-        auto array = _tree[layer]->array();
-        array->registerSparseGrid( position_slice, num_particles );
-        array->reserveFromMap( 1.2 );
-        // printf("R%d: array size: %d\n", _rank, (int)array->size());
-    }
-
-    template <class PositionSliceType>
-    bool loadBalanceLayer(int layer, PositionSliceType position_slice, std::size_t num_particles)
-    {
-        return _tree[layer]->loadBalance(position_slice, num_particles);
-    }
-
     /*
      Set the root layer. At (root layer - 1) there one tile per dimension,
      but since there are still multiple cells per tile, there must be one
@@ -425,7 +407,7 @@ class Tree
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
             // if (_rank == 0) printf("Starting layer %d...\n", i);
-            migrateAndSetLayer(i-1, i);
+            migrateAndSetLayer(i-1, i, run_load_balance);
         }
         // if (_rank == 0) printf("Starting root layer (%d)...\n", _tree.size());
         initializeRootLayer();
@@ -449,13 +431,13 @@ class Tree
      * Used to internally migrate and aggregate data from one layer to the next.
      * Use position_slice_id slice for positions.
      */
-    void migrateAndSetLayer(int from_layer, int to_layer)
+    void migrateAndSetLayer(int from_layer, int to_layer, bool run_load_balance)
     {
         // Communicate cell data
         auto data = _tree[from_layer]->data();
         auto positions = Cabana::slice<1>(data);
         Kokkos::View<int*, memory_space> to_layer_owner("to_layer_owner", data.size());
-        mapParticles(positions, to_layer_owner, data.size(), to_layer);
+        mapParticles(positions, to_layer_owner, data.size(), to_layer, run_load_balance);
         Cabana::Distributor<memory_space> distributor(_comm, to_layer_owner);
         Cabana::migrate( distributor, data );
         _tree[to_layer]->populateCells(data);
