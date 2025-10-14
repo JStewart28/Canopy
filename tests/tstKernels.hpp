@@ -570,21 +570,21 @@ void testL2LKernel()
     Canopy::Kernel::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
                               beta_m );
         
-    // Shifted local center (within radius 'a' of origin): From old local center
-    // to new local center.
+    // Shifted local center (within radius 'a' of origin): From new local center
+    // to old local center.
     Kokkos::Array<double, 3> X_0 = {1.1, -0.8, -1.0};
     double rho, alpha, beta; 
-    Canopy::Kernel::cart2sph( -X_0[0], -X_0[1], -X_0[2], rho, alpha,
+    Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
                               beta );
 
-    // Target point near origin (within radius 'a' of origin)
-    double Px = 0.7, Py = -0.9, Pz = -1.1;
+    // Target point P near origin (within radius 'a' of origin)
+    double Px = 0.7, Py = -1.9, Pz = -1.1;
     double r, theta, phi;
     Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
 
-    // Shifted local center to target point
+    // P + X_0
     double r_p, theta_p, phi_p;
-    Canopy::Kernel::cart2sph( Px - X_0[0], Py- X_0[1], Pz- X_0[2], r_p, theta_p, phi_p );
+    Canopy::Kernel::cart2sph( Px + X_0[0], Py + X_0[1], Pz + X_0[2], r_p, theta_p, phi_p );
 
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
@@ -648,7 +648,7 @@ void testL2LKernel()
         auto L_orig_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                            m2l.coefficients() );
         auto L_shift_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                           m2l.coefficients() );
+                                                           l2l.coefficients() );
 
         // Perform local to potential conversion to calculate potential at
         // target. Equation 3.59 in Greengard
