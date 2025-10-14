@@ -549,7 +549,7 @@ void testM2LKernel()
     }
 }
 
-void testL2LKernel()
+void testL2LKernel0()
 {
     // Create points and q (scalar value)
     const int num_points = 500;
@@ -678,8 +678,158 @@ void testL2LKernel()
         EXPECT_LE( error, bound ) << "p=" << p
                                    << ": error between local and direct "
                                       "potentials at target point 1 too high.";
-        printf("p=%d: D1: %0.5lf, L: %0.5lf, LS: %0.5lf\n", p,
-            potential_direct, potential_L.real(), potential_shift.real());
+        // printf("p=%d: D1: %0.5lf, L: %0.5lf, LS: %0.5lf\n", p,
+        //     potential_direct, potential_L.real(), potential_shift.real());
+        // printf("p=%d: D2: %0.5lf, L2: %0.5lf, M2: %0.5lf, b2: %0.5lf e2:
+        // %0.5lf\n", p,
+        //     potential_direct2, potential_L2.real(), potential_O2.real(),
+        //     bound, error2);
+    }
+}
+
+/**
+ * Mimic FMM usage of locals:
+ * Translate multipoles from a far source to locals centered around a box.
+ * Translate locals to a child box inside of the box.
+ * Test that the direct potential at a target point inside the box matches the
+ * potential calculated with the translated locals.
+ */
+void testL2LKernel1()
+{
+    // Create points and q (scalar value)
+    const int num_points = 500;
+    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
+                                                          num_points );
+    Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
+
+    Kokkos::Array<double, 6> coord_bounds = { -8.0, -8.0, -8.0,
+                                              -5.0, -5.0, -5.0 };
+    fillRandomCoordinates( cart_coords, coord_bounds );
+
+    Kokkos::Array<double, 2> charge_bounds = { -3.0, 2.0 };
+    fillRandomScalar( q, charge_bounds );
+
+    // Expansion center
+    Kokkos::Array<double, 3> m_center = { -5.5, -5.4, -5.3 };
+    double rho_m, alpha_m, beta_m; 
+    Canopy::Kernel::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
+                              beta_m );
+        
+    // Shifted local center (within radius 'a' of origin): From new local center
+    // to old local center.
+    Kokkos::Array<double, 3> X_0 = {1.1, -0.8, -1.0};
+    double rho, alpha, beta; 
+    Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
+                              beta );
+
+    // Target point P near origin (within radius 'a' of origin)
+    double Px = 0.7, Py = -1.9, Pz = -1.1;
+    double r, theta, phi;
+    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
+
+    // P + X_0
+    double r_p, theta_p, phi_p;
+    Canopy::Kernel::cart2sph( Px + X_0[0], Py + X_0[1], Pz + X_0[2], r_p, theta_p, phi_p );
+
+    // Compute a and total charge for error bound. (See figure 3.3)
+    // Also compute direct potential
+    auto cart_coords_host =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), cart_coords );
+    auto q_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q );
+    double q_total = 0.0;
+    double a = 0.0;
+    double potential_direct = 0.0;
+    for ( int i = 0; i < num_points; ++i )
+    {
+        double dx, dy, dz, dist;
+
+        // Radius a
+        dx = cart_coords_host( i, 0 ) - m_center[0];
+        dy = cart_coords_host( i, 1 ) - m_center[1];
+        dz = cart_coords_host( i, 2 ) - m_center[2];
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        a = std::max( a, dist );
+
+        // Total sum
+        q_total += std::abs( q_host( i ) );
+
+        // Direct potential at target point using coordinates relative to
+        // origin.
+        dx = Px - cart_coords_host( i, 0 );
+        dy = Py - cart_coords_host( i, 1 );
+        dz = Pz - cart_coords_host( i, 2 );
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        potential_direct += q_host( i ) / dist;
+    }
+
+    // Theorem 3.5.5 requires c > 1 and rho > (c+1)*a.
+    // Solve for c, getting c < (rho - a) / a for a > 0.
+    ASSERT_GT( a, 0.0 );
+    double c = ( rho_m - a ) / a;
+    ASSERT_GT( c, 1.0 )
+        << "Error: rho must be greater than (c+1)*a for theory to be valid.";
+
+    // Target point and shifted local center must be within radius a of origin.
+    ASSERT_LT( r, a ) << "Error: Target point 1 must be within distance 'a' "
+                          "from local center for theory to be valid.";
+    ASSERT_LT( rho, a ) << "Error: Shifted local center must be within distance 'a' "
+                          "from original local center for theory to be valid.";
+
+    // Loop over truncation degree
+    for ( int p = 1; p <= 9; ++p )
+    {
+        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        p2m( cart_coords, q, num_points, m_center );
+
+        // Convert multipoles to locals
+        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        m2l( p2m.coefficients(), m_center );
+    
+        // Translate locals
+        Canopy::Kernel::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE> l2l( p );
+        l2l( m2l.coefficients(), X_0 );
+
+        // Copy to host
+        auto L_orig_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                           m2l.coefficients() );
+        auto L_shift_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                           l2l.coefficients() );
+
+        // Perform local to potential conversion to calculate potential at
+        // target. Equation 3.59 in Greengard
+        using cdouble = Kokkos::complex<double>;
+        cdouble potential_L = 0.0;
+        cdouble potential_shift = 0.0;
+        for ( int j = 0; j <= p; ++j )
+        {
+            for ( int k = -j; k <= j; ++k )
+            {
+                int idx = Canopy::Kernel::Scalar::index( j, k );
+
+                /* Target point 1 calculations */
+                // Greengard eq. 3.59
+                potential_L +=
+                    L_orig_host( idx ) * Kokkos::pow( r, j ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                potential_shift +=
+                    L_shift_host( idx ) * Kokkos::pow( r_p, j ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta_p, phi_p );
+            }
+        }
+
+        // Check the error bounds from eq. 3.61
+        double bound = ( q_total / ( c * a - a ) ) * std::pow( 1.0 / c, p + 1 );
+        double error = std::abs( potential_shift.real() - potential_direct );
+        EXPECT_LE( error, bound ) << "p=" << p
+                                   << ": error between local and direct "
+                                      "potentials at target point 1 too high.";
+        
+        // Check that potential calculated with translated and original locals
+        // match.
+        EXPECT_DOUBLE_EQ(potential_L.real(), potential_shift.real());
+
+        // printf("p=%d: D1: %0.5lf, L: %0.5lf, LS: %0.5lf\n", p,
+        //     potential_direct, potential_L.real(), potential_shift.real());
         // printf("p=%d: D2: %0.5lf, L2: %0.5lf, M2: %0.5lf, b2: %0.5lf e2:
         // %0.5lf\n", p,
         //     potential_direct2, potential_L2.real(), potential_O2.real(),
@@ -692,13 +842,15 @@ void testL2LKernel()
 //---------------------------------------------------------------------------//
 // TEST( Kernel, testScalarP2MKernel ) { testScalarP2MKernel(); }
 
-// TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
+TEST( Kernel, testM2MKernel0 ) { testM2MKernel0(); }
 
-// TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
+TEST( Kernel, testM2MKernel1 ) { testM2MKernel1(); }
 
-// TEST( Kernel, testM2LKernel ) { testM2LKernel(); }
+TEST( Kernel, testM2LKernel ) { testM2LKernel(); }
 
-TEST( Kernel, testL2LKernel ) { testL2LKernel(); }
+TEST( Kernel, testL2LKernel0 ) { testL2LKernel0(); }
+
+// TEST( Kernel, testL2LKernel1 ) { testL2LKernel1(); }
 
 //---------------------------------------------------------------------------//
 
