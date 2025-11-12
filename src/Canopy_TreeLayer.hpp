@@ -506,7 +506,7 @@ class TreeLayer
          *  4. The rank that owns this cell.
          */
         auto aosoa = _cells_ptr->aosoa();
-        aosoa.resize(aosoa.capacity());
+        // aosoa.resize(aosoa.capacity());
         // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, _cells_ptr->capacity(), _cells_ptr->size());
         Kokkos::parallel_for(
             "set_cell_data",
@@ -689,7 +689,7 @@ class TreeLayer
 
         // Set cell data for this cell
         auto aosoa = _cells_ptr->aosoa();
-        aosoa.resize(aosoa.capacity());
+        // aosoa.resize(aosoa.capacity());
         // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, aosoa.capacity(), _cells_ptr->size());
         Kokkos::parallel_for(
             "set_cell_data",
@@ -855,6 +855,9 @@ class TreeLayer
 
         // Allocate memory for the AoSoA which stores cell data
         _cells_ptr->reserveFromMap( 1.1 );
+
+        // Size the AoSoA based on how many cells have been activated.
+        _cells_ptr->resize( map.sizeCell() );
         
         // Sort the in2out array and by increasing cell_id
         auto sort_data = Cabana::sortByKey( out_id_slice );
