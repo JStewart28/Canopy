@@ -500,11 +500,15 @@ class TreeLayer
 
         /**
          * Set the cell data for this cell:
-         *  1. The multipole coefficients calcuated from child data.
+         *  1. The multipole coefficients calculated from child data.
          *  2. The center of this cell.
          *  3. The local id of this cell.
          *  4. The rank that owns this cell.
+         *  5. Where this cell indexes into the _locals view (via ijk2l map)
          */
+        Kokkos::View<std::size_t, memory_space> local_view_index("local_view_index");
+        Kokkos::deep_copy(local_view_index, 0);
+        auto ijk2l = _ijk2l;
         auto aosoa = _cells_ptr->aosoa();
         // aosoa.resize(aosoa.capacity());
         // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, _cells_ptr->capacity(), _cells_ptr->size());
@@ -546,6 +550,17 @@ class TreeLayer
                                             cell_ijk[2]);
                 aosoa.setTuple(( tid << cell_bits_per_tile ) |
                                ( ctid & cell_mask_per_tile ), tp );
+
+                // Index into local view
+                auto idx = Kokkos::atomic_fetch_add(&local_view_index(), 1);
+                auto result = ijk2l.insert( Kokkos::Array<std::size_t, 3>{
+                                                cell_ijk[0],
+                                                cell_ijk[1],
+                                                cell_ijk[2]}, idx);
+                if (!result.success())
+                {
+                    // Shouldn't get here as all cells activated are unique
+                }
 
                 // printf("R%d: setting leaf c(%.3lf, %.3lf, %.3lf)\n",
                 //     rank, cell_center(0), cell_center(1), cell_center(2));
@@ -688,8 +703,10 @@ class TreeLayer
         auto M_coefficients = m2m.coefficients();
 
         // Set cell data for this cell
+        Kokkos::View<std::size_t, memory_space> local_view_index("local_view_index");
+        Kokkos::deep_copy(local_view_index, 0);
+        auto ijk2l = _ijk2l;
         auto aosoa = _cells_ptr->aosoa();
-        // aosoa.resize(aosoa.capacity());
         // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, aosoa.capacity(), _cells_ptr->size());
         Kokkos::parallel_for(
             "set_cell_data",
@@ -729,6 +746,17 @@ class TreeLayer
                                             cell_ijk[2]);
                 aosoa.setTuple(( tid << cell_bits_per_tile ) |
                                ( ctid & cell_mask_per_tile ), tp );
+
+                // Index into local view
+                auto idx = Kokkos::atomic_fetch_add(&local_view_index(), 1);
+                auto result = ijk2l.insert( Kokkos::Array<std::size_t, 3>{
+                                                cell_ijk[0],
+                                                cell_ijk[1],
+                                                cell_ijk[2]}, idx);
+                if (!result.success())
+                {
+                    // Shouldn't get here as all cells activated are unique
+                }
 
                 // printf("L%d: R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", layer_number, rank, cid,
                 //     tid, ctid,
@@ -858,6 +886,13 @@ class TreeLayer
 
         // Size the AoSoA based on how many cells have been activated.
         _cells_ptr->resize( map.sizeCell() );
+
+         // Initialize _ijk2l and _locals to slightly larger than the number of cells activated.
+        // XXX - Do we need to do this overallocation?
+        std::size_t allocation_size = static_cast<std::size_t>(map.sizeCell() * 1.2);
+        _ijk2l.clear();
+        _ijk2l.rehash(allocation_size);
+        _locals = Kokkos::View<cdouble*[p], memory_space>("_locals", allocation_size);
         
         // Sort the in2out array and by increasing cell_id
         auto sort_data = Cabana::sortByKey( out_id_slice );
@@ -986,6 +1021,13 @@ class TreeLayer
     // Map of cell id (cid, unique per process) to cell ijk position.
     // Cabana supports ijk -> cid but not the inverse.
     Kokkos::UnorderedMap<int, Kokkos::Array<std::size_t, 3>, memory_space> _cid2ijk;
+
+    // Map of cell_ijk to its location in the Local view.
+    Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space> _ijk2l;
+
+    // Locals coefficients for each cell. This data is haloed differently than
+    // multipole coefficients so it is stored outside of the sparse mesh.
+    Kokkos::View<cdouble*[p], memory_space> _locals;
 };
 
 template <class TreeType, std::size_t CellPerTileDim>
