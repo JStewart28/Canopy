@@ -950,6 +950,88 @@ class TreeLayer
         
     }
 
+    /**
+     * For each cell, iterate over all cells in its interaction list. These are cells that
+     * are at least two cells away from the cell in question and have not been accounted
+     * for in more coarse layers.
+     * Convert the multipole coefficients centered around the other cell to local coefficients
+     * centered around this cell.
+     */
+    void multipole_to_local(std::size_t outer_cell_cutoff)
+    {
+        auto map = *_map_ptr;
+        auto aosoa = _cells_ptr->aosoa();
+        auto cid2ijk = _cid2ijk;
+        auto ijk2l = _ijk2l;
+
+        int cells_per_dim = _cells_per_dim;
+
+        // Per-cell calculation
+        Kokkos::parallel_for("multipole_to_local",
+        Kokkos::RangePolicy<execution_space>(0, cid2ijk.capacity()),
+        KOKKOS_LAMBDA(const int cid2ijk_index)
+        {
+            if (cid2ijk.valid_at(cid2ijk_index))
+            {
+                // Cell ijk
+                auto cell_ijk = cid2ijk.value_at( index );
+
+                // Cell local index
+                auto ijk2l_index = cid2ijk.find(cell_ijk);
+                auto local_index = ijk2l.value_at(ijk2l_index);
+
+                // Set outer bound - where cells have been accounted for in
+                // more coarse layers
+                Kokkos::Array<int, 3> outer_upper_bound;
+                for (int i = 0; i < 3; i++)
+                    outer_upper_bound[i] = cell_ijk[i] + outer_cell_cutoff; // exclusive
+                Kokkos::Array<int, 3> outer_lower_bound;
+                for (int i = 0; i < 3; i++)
+                    outer_lower_bound[i] = cell_ijk[i] - outer_cell_cutoff; // inclusive
+
+                // Set inner bound - where cells are too close for the local
+                // approximation to be accurate. Inclusive on lower end,
+                // exclusive on upper end
+                Kokkos::Array<int, 3> inner_upper_bound;
+                for (int i = 0; i < 3; i++)
+                    inner_upper_bound[i] = cell_ijk[i] + 3; // +3 because inclusive
+                Kokkos::Array<int, 3> inner_lower_bound;
+                for (int i = 0; i < 3; i++)
+                    inner_lower_bound[i] = cell_ijk[i] - 2; // -2 because exclusive
+
+                // Iterate over all cells whose multipoles we must consider.
+                // XXX - Make this a team policy nested for loop
+                for (int ci = outer_lower_bound[0]; ci < outer_upper_bound[0]; ci++)
+                    for (int cj = outer_lower_bound[1]; cj < outer_upper_bound[1]; cj++)
+                        for (int ck = outer_lower_bound[2]; ck < outer_upper_bound[2]; ck++)
+                        {
+                            // Only consider cells between our outer lower and inner lower
+                            // or inner upper and outer upper bounds. If inside these bounds,
+                            // skip.
+                            if ((ci >= inner_lower_bound[0] && ci < inner_upper_bound[0]) &&
+                            (cj >= inner_lower_bound[1] && cj < inner_upper_bound[1]) &&
+                            (ck >= inner_lower_bound[2] && ck < inner_upper_bound[2]))
+                            {
+                                continue;
+                            }
+
+                            // XXX - for now, we assume this cell is haloed if necessary and
+                            // activated in the sparse map.
+                            auto cell_ijk = cid2ijk.value_at( index );
+                            auto tid = map.queryTile(ci, cj, ck);
+                            auto ctid = map.cell_local_id(ci, cj, ck);    
+                            auto tp = aosoa.getTuple(( tid << cell_bits_per_tile ) |
+                                                    ( ctid & cell_mask_per_tile ) );
+                                                    
+                            // Get a reference to the multipole coefficients stored in this tuple
+                            auto M = Cabana::get<0>(tp);
+
+                        }
+                
+            }
+        });
+    }
+
     void printOwnedCells()
     {
         // Test to iterate over call data
