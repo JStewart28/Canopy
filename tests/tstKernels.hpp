@@ -655,7 +655,6 @@ void testM2LFunc()
 
     // Perform local to potential conversion to calculate potential at
     // target. Equation 3.59 in Greengard
-
     cdouble potential_L1 = 0.0;
     cdouble potential_O1 = 0.0;
     cdouble potential_L2 = 0.0;
