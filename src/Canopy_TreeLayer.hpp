@@ -974,10 +974,10 @@ class TreeLayer
             if (cid2ijk.valid_at(cid2ijk_index))
             {
                 // Cell ijk
-                auto cell_ijk = cid2ijk.value_at( index );
+                auto cell_ijk = cid2ijk.value_at( cid2ijk_index );
 
                 // Cell local index
-                auto ijk2l_index = cid2ijk.find(cell_ijk);
+                auto ijk2l_index = ijk2l.find(cell_ijk);
                 auto local_index = ijk2l.value_at(ijk2l_index);
 
                 // Set outer bound - where cells have been accounted for in
@@ -1017,7 +1017,6 @@ class TreeLayer
 
                             // XXX - for now, we assume this cell is haloed if necessary and
                             // activated in the sparse map.
-                            auto cell_ijk = cid2ijk.value_at( index );
                             auto tid = map.queryTile(ci, cj, ck);
                             auto ctid = map.cell_local_id(ci, cj, ck);    
                             auto tp = aosoa.getTuple(( tid << cell_bits_per_tile ) |

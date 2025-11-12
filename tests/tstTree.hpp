@@ -178,6 +178,9 @@ void testUpwardsAggregation(bool balanced)
     //     EXPECT_EQ(rank_slice_host(i), rank) << "Rank " << rank << std::endl;
     // }
 
+    // XXX - At some point separate this out into a new test?
+    tree->multipole_to_local();
+
 }
 
 //---------------------------------------------------------------------------//
