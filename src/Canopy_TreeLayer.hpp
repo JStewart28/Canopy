@@ -1001,6 +1001,7 @@ class TreeLayer
 
                 // Iterate over all cells whose multipoles we must consider.
                 // XXX - Make this a team policy nested for loop
+                
                 for (int ci = outer_lower_bound[0]; ci < outer_upper_bound[0]; ci++)
                     for (int cj = outer_lower_bound[1]; cj < outer_upper_bound[1]; cj++)
                         for (int ck = outer_lower_bound[2]; ck < outer_upper_bound[2]; ck++)
@@ -1018,12 +1019,21 @@ class TreeLayer
                             // XXX - for now, we assume this cell is haloed if necessary and
                             // activated in the sparse map.
                             auto tid = map.queryTile(ci, cj, ck);
-                            auto ctid = map.cell_local_id(ci, cj, ck);    
+                            auto ctid = map.cell_local_id(ci, cj, ck);
+
+                            // Check if this cell is activated
+                            auto cell_key = map.queryCell(ci, cj, ck);
+
+                            
                             auto tp = aosoa.getTuple(( tid << cell_bits_per_tile ) |
                                                     ( ctid & cell_mask_per_tile ) );
                                                     
-                            // Get a reference to the multipole coefficients stored in this tuple
-                            auto M = Cabana::get<0>(tp);
+                            // Multipole expansion center (i.e. cell center)
+                            Kokkos::Array<double, 3> cell_center;
+                            for (int i = 0; i < 3; i++)
+                                cell_center[i] = Cabana::get<1>(tp, i);
+                            
+                            
 
                         }
                 
@@ -1108,7 +1118,7 @@ class TreeLayer
 
     // Locals coefficients for each cell. This data is haloed differently than
     // multipole coefficients so it is stored outside of the sparse mesh.
-    Kokkos::View<cdouble*[p], memory_space> _locals;
+    Kokkos::View<cdouble*[(p+1)*(p+1)], memory_space> _locals;
 };
 
 template <class TreeType, std::size_t CellPerTileDim>
