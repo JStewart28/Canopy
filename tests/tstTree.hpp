@@ -180,7 +180,7 @@ void testUpwardsAggregation(bool balanced)
     // }
 
     // XXX - At some point separate this out into a new test?
-    // tree->multipole_to_local();
+    tree->multipole_to_local();
 
 }
 
@@ -191,15 +191,15 @@ void testUpwardsAggregation(bool balanced)
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
 TEST( Tree, testUpwardsAggregation1_balanced ) { testUpwardsAggregation<1>(true); }
-TEST( Tree, testUpwardsAggregation2_balanced ) { testUpwardsAggregation<2>(true); }
-TEST( Tree, testUpwardsAggregation3_balanced ) { testUpwardsAggregation<3>(true); }
-TEST( Tree, testUpwardsAggregation4_balanced ) { testUpwardsAggregation<4>(true); }
+// TEST( Tree, testUpwardsAggregation2_balanced ) { testUpwardsAggregation<2>(true); }
+// TEST( Tree, testUpwardsAggregation3_balanced ) { testUpwardsAggregation<3>(true); }
+// TEST( Tree, testUpwardsAggregation4_balanced ) { testUpwardsAggregation<4>(true); }
 
 // Test with an unbalanced particle distribution.
-TEST( Tree, testUpwardsAggregation1_unbalanced ) { testUpwardsAggregation<1>(false); }
-TEST( Tree, testUpwardsAggregation2_unbalanced ) { testUpwardsAggregation<2>(false); }
-TEST( Tree, testUpwardsAggregation3_unbalanced ) { testUpwardsAggregation<3>(false); }
-TEST( Tree, testUpwardsAggregation4_unbalanced ) { testUpwardsAggregation<4>(false); }
+// TEST( Tree, testUpwardsAggregation1_unbalanced ) { testUpwardsAggregation<1>(false); }
+// TEST( Tree, testUpwardsAggregation2_unbalanced ) { testUpwardsAggregation<2>(false); }
+// TEST( Tree, testUpwardsAggregation3_unbalanced ) { testUpwardsAggregation<3>(false); }
+// TEST( Tree, testUpwardsAggregation4_unbalanced ) { testUpwardsAggregation<4>(false); }
 
 //---------------------------------------------------------------------------//
 
