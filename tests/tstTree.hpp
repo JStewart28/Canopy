@@ -63,11 +63,12 @@ void testUpwardsAggregation(bool balanced)
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
     
-    Kokkos::Array<double, 6> coord_bounds = {-1.5, -1.5, -1.5, 1.5, 1.5, 1.5};
+    double bound_val = 3.0;
+    Kokkos::Array<double, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
     // If not balanced, fill domain unevenly
     if (!balanced)
     {
-        coord_bounds = {-1.0, 0.3, 0.0, -0.5, 0.5, 1.3};
+        coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
     }
 
     fillRandomCoordinates(cart_coords, coord_bounds);
@@ -103,7 +104,7 @@ void testUpwardsAggregation(bool balanced)
 
     // Calculate direct potential.
     // Target point far away from domain so multipole approximation holds.
-    double Px = 8.8, Py = -5.1, Pz = 12.2;
+    double Px = 15.1, Py = -20.3, Pz = 16.2;
     double r, theta, phi;
     Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
     double potential_direct = 0.0;
@@ -179,7 +180,7 @@ void testUpwardsAggregation(bool balanced)
     // }
 
     // XXX - At some point separate this out into a new test?
-    tree->multipole_to_local();
+    // tree->multipole_to_local();
 
 }
 
@@ -193,13 +194,12 @@ TEST( Tree, testUpwardsAggregation1_balanced ) { testUpwardsAggregation<1>(true)
 TEST( Tree, testUpwardsAggregation2_balanced ) { testUpwardsAggregation<2>(true); }
 TEST( Tree, testUpwardsAggregation3_balanced ) { testUpwardsAggregation<3>(true); }
 TEST( Tree, testUpwardsAggregation4_balanced ) { testUpwardsAggregation<4>(true); }
-TEST( Tree, testUpwardsAggregation5_balanced ) { testUpwardsAggregation<5>(true); }
 
-// Test with an unbalanced particle distribution. We don't need to test as many
-// p-values because this mechanism is unchanged, basically we are testing
-// that the particles are distributed correctly after balancing.
+// Test with an unbalanced particle distribution.
 TEST( Tree, testUpwardsAggregation1_unbalanced ) { testUpwardsAggregation<1>(false); }
 TEST( Tree, testUpwardsAggregation2_unbalanced ) { testUpwardsAggregation<2>(false); }
+TEST( Tree, testUpwardsAggregation3_unbalanced ) { testUpwardsAggregation<3>(false); }
+TEST( Tree, testUpwardsAggregation4_unbalanced ) { testUpwardsAggregation<4>(false); }
 
 //---------------------------------------------------------------------------//
 

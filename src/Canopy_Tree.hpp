@@ -452,7 +452,7 @@ class Tree
         // Work coarse to fine layers
         for (int i = static_cast<int>(_tree.size() - 1); i >= 0; --i)
         {
-            _tree[i]->multipole_to_local(0);
+            _tree[i]->multipole_to_local(4);
         }
     }
 
