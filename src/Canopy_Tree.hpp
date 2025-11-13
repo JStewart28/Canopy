@@ -444,6 +444,19 @@ class Tree
     }
 
     /**
+     * For each layer, convert multipole coefficients to local coefficients centered
+     * around each cell.
+     */
+    void multipole_to_local()
+    {
+        // Work coarse to fine layers
+        for (int i = static_cast<int>(_tree.size() - 1); i >= 0; --i)
+        {
+            _tree[i]->multipole_to_local(4);
+        }
+    }
+
+    /**
      * Computes the interaction list for each cell in the tree.
      * 
      * The interaction list of cell0 is the set of all cells such that:

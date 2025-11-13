@@ -34,6 +34,7 @@ namespace Canopy
 namespace Kernel
 {
 
+using cdouble = Kokkos::complex<double>;
 constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
 // Cartesian to spherical coorindates: (x, y, z) -> (r,theta,phi)
@@ -117,8 +118,6 @@ double Pnm_impl( int n, int m, double x )
 KOKKOS_INLINE_FUNCTION
 Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
 {
-    using cdouble = Kokkos::complex<double>;
-
     int mp = Kokkos::abs( m );
     double x = Kokkos::cos( theta );
 
@@ -159,7 +158,6 @@ struct P2M
   public:
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
-    using cdouble = Kokkos::complex<double>;
 
     P2M( int p )
         : _p( p )
@@ -317,7 +315,6 @@ struct M2M
   public:
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
-    using cdouble = Kokkos::complex<double>;
 
     M2M( int p )
         : _p( p )
@@ -397,6 +394,62 @@ struct M2M
 /**
  * Convert multipole expansions into local expansions using
  * Theorem 2.4 in Cheng.
+ * Callable on the device
+ */
+template <std::size_t p>
+KOKKOS_INLINE_FUNCTION void
+m2l( const Kokkos::Array<cdouble, ( p + 1 ) * ( p + 1 )>& O,
+     Kokkos::Array<cdouble, ( p + 1 ) * ( p + 1 )>& L,
+     const Kokkos::Array<double, 3>& O_center )
+{
+    // Spherical coords of O_center
+    double rho, alpha, beta;
+    cart2sph( O_center[0], O_center[1], O_center[2], rho, alpha, beta );
+
+    for ( int j = 0; j <= p; ++j )
+    {
+        for ( int k = -j; k <= j; ++k )
+        {
+            cdouble Ljk( 0.0, 0.0 );
+
+            for ( int n = 0; n <= p; ++n )
+            {
+                for ( int m = -n; m <= n; ++m )
+                {
+                    // Originally, Greengard eq. 3.60 was used, but there
+                    // was a bug getting the potential calculated from the
+                    // local expansion to converge to the potential
+                    // calculated directly. Instead, Cheng eq. 17 is used to
+                    // compute local expansions.
+
+                    // Numerator
+                    cdouble O_nm = O[index( n, m )];
+                    cdouble i_unit( 0.0, 1.0 );
+                    auto power = Kokkos::abs( k - m ) - Kokkos::abs( k ) -
+                                 Kokkos::abs( m );
+                    auto i_term = Kokkos::pow( i_unit, power );
+                    auto A_nm = compute_A( n, m );
+                    auto A_jk = compute_A( j, k );
+                    auto Y_jn_mk = Ynm( j + n, m - k, alpha, beta );
+
+                    // Denominator
+                    auto sign = ( n % 2 == 0 ) ? 1.0 : -1.0;
+                    auto A_jn_mk = compute_A( j + n, m - k );
+                    auto rho_jn = Kokkos::pow( rho, j + n + 1 );
+
+                    // Compute L_jk partial term
+                    Ljk += ( O_nm * i_term * A_nm * A_jk * Y_jn_mk ) /
+                           ( sign * A_jn_mk * rho_jn );
+                }
+            }
+            L[index( j, k )] = Ljk;
+        }
+    }
+}
+
+/**
+ * Convert multipole expansions into local expansions using
+ * Theorem 2.4 in Cheng.
  */
 template <class MemorySpace, class ExecutionSpace>
 struct M2L
@@ -404,7 +457,6 @@ struct M2L
   public:
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
-    using cdouble = Kokkos::complex<double>;
 
     M2L( int p )
         : _p( p )
@@ -545,30 +597,35 @@ struct L2L
                     for ( int m = -n; m <= n; ++m )
                     {
                         // Skip regions where Y_nm is invalid.
-                        if (std::abs(m - k) > (n - j))
+                        if ( std::abs( m - k ) > ( n - j ) )
                             continue;
 
                         // Numerator
                         cdouble O_nm = O( index( n, m ) );
                         cdouble i_unit( 0.0, 1.0 );
-                        auto power = Kokkos::abs(m) - Kokkos::abs(m-k) - Kokkos::abs(k);
+                        auto power = Kokkos::abs( m ) - Kokkos::abs( m - k ) -
+                                     Kokkos::abs( k );
                         auto i_term = Kokkos::pow( i_unit, power );
-                        auto A_nj_mk = compute_A(n-j, m-k);
+                        auto A_nj_mk = compute_A( n - j, m - k );
                         auto A_jk = compute_A( j, k );
-                        auto Y_nj_mk = Ynm( n-j, m - k, alpha, beta );
-                        auto rho_nj = Kokkos::pow(rho, n-j);
+                        auto Y_nj_mk = Ynm( n - j, m - k, alpha, beta );
+                        auto rho_nj = Kokkos::pow( rho, n - j );
 
                         // Denominator
-                        auto sign = ( (n+j) % 2 == 0 ) ? 1.0 : -1.0;
+                        auto sign = ( ( n + j ) % 2 == 0 ) ? 1.0 : -1.0;
                         auto A_nm = compute_A( n, m );
 
                         // Compute L_jk partial term
-                        Ljk += ( O_nm * i_term * A_nj_mk * A_jk * Y_nj_mk * rho_nj ) /
+                        Ljk += ( O_nm * i_term * A_nj_mk * A_jk * Y_nj_mk *
+                                 rho_nj ) /
                                ( sign * A_nm );
-                        // printf("j: %d, k: %d, n: %d, m: %d, Y: (%.3lf, %.3lf), O_nm: (%.3lf, %.3lf), Ljk_piece: (%.3lf, %.3lf)\n",
+                        // printf("j: %d, k: %d, n: %d, m: %d, Y: (%.3lf,
+                        // %.3lf), O_nm: (%.3lf, %.3lf), Ljk_piece: (%.3lf,
+                        // %.3lf)\n",
                         //     j, k, n, m,
                         //     Y_nj_mk.real(), Y_nj_mk.imag(),
-                        //     O_nm.real(), O_nm.imag(), Ljk.real(), Ljk.imag());
+                        //     O_nm.real(), O_nm.imag(), Ljk.real(),
+                        //     Ljk.imag());
                     }
                 }
                 L( index( j, k ) ) = Ljk;
