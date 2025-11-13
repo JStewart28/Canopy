@@ -386,7 +386,7 @@ void testM2MStruct1()
     }
 }
 
-void testM2LStruct()
+void testM2LStruct0()
 {
     // Create points and q (scalar value)
     const int num_points = 500;
@@ -543,6 +543,260 @@ void testM2LStruct()
         // %0.5lf\n", p,
         //     potential_direct2, potential_L2.real(), potential_O2.real(),
         //     bound, error2);
+    }
+}
+
+/**
+ * Convert multipoles from two separate expansions to a single set
+ * of local coefficients.
+ */
+void testM2LStruct1()
+{
+    // Center of local expansion
+    Kokkos::Array<double, 3> local_center = { 0.8, 1.1, 0.4 };
+
+    // Create first set of points and q (scalar value)
+    const int num_points = 500;
+    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords0( "cart_coords0",
+                                                          num_points );
+    Kokkos::View<double*, TEST_MEMSPACE> q0( "q0", num_points );
+
+    Kokkos::Array<double, 6> coord_bounds0 = { -10.0, -10.0, -10.0,
+                                              -7.0, -7.0, -7.0 };
+    fillRandomCoordinates( cart_coords0, coord_bounds0 );
+
+    Kokkos::Array<double, 2> charge_bounds0 = { -3.0, 2.0 };
+    fillRandomScalar( q0, charge_bounds0 );
+
+    // Expansion 0 center
+    Kokkos::Array<double, 3> center0 = { -7.5, -7.4, -7.3 };
+    double rho0, alpha0, beta0;
+    Canopy::Kernel::cart2sph( center0[0], center0[1], center0[2], rho0, alpha0,
+                              beta0 );
+
+    // Create second set of points and q (scalar value)
+    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords1( "cart_coords1",
+                                                          num_points );
+    Kokkos::View<double*, TEST_MEMSPACE> q1( "q1", num_points );
+
+    Kokkos::Array<double, 6> coord_bounds1 = { 10.0, 10.0, 8.0,
+                                              7.0, 9.0, 7.3 };
+    fillRandomCoordinates( cart_coords1, coord_bounds1 );
+
+    Kokkos::Array<double, 2> charge_bounds1 = { -1.3, 3.0 };
+    fillRandomScalar( q1, charge_bounds1 );
+
+    // Expansion 2 center
+    Kokkos::Array<double, 3> center1 = { 8.5, 9.6, 7.8 };
+    double rho1, alpha1, beta1;
+    Canopy::Kernel::cart2sph( center1[0], center1[1], center1[2], rho1, alpha1,
+                              beta1 );
+
+    // First target point near local center (within radius 'a' of local center)
+    double Px1 = 0.2, Py1 = 0.4, Pz1 = -0.1;
+    double r1, theta1, phi1, r_d1, theta_d1, phi_d1;
+    Canopy::Kernel::cart2sph( Px1 - local_center[0],
+                              Py1 - local_center[1],
+                              Pz1 - local_center[2],
+                              r_d1, theta_d1, phi_d1 );
+    Canopy::Kernel::cart2sph( Px1, Py1, Pz1, r1, theta1, phi1 );
+
+    // Second target point near local center (within radius 'a' of local center)
+    double Px2 = 0.1, Py2 = 1.0, Pz2 = 0.5;
+    double r2, theta2, phi2, r_d2, theta_d2, phi_d2;
+    Canopy::Kernel::cart2sph( Px2 - local_center[0],
+                              Py2 - local_center[1],
+                              Pz2 - local_center[2],
+                              r_d2, theta_d2, phi_d2 );
+    Canopy::Kernel::cart2sph( Px2, Py2, Pz2, r2, theta2, phi2 );
+
+    // Compute a and total charge for error bound. (See figure 3.3)
+    // Also compute direct potential
+    auto cart_coords0_host =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), cart_coords0 );
+    auto q0_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q0 );
+    auto cart_coords1_host =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), cart_coords1 );
+    auto q1_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q1 );
+    double q_total = 0.0;
+    double a0 = 0.0;
+    double a1 = 0.0;
+    double potential_direct1 = 0.0;
+    double potential_direct2 = 0.0;
+    for ( int i = 0; i < num_points; ++i )
+    {
+        double dx, dy, dz, dist;
+
+        /////////////////////
+        // First expansion
+        /////////////////////
+
+        // Radius a
+        dx = cart_coords0_host( i, 0 ) - center0[0];
+        dy = cart_coords0_host( i, 1 ) - center0[1];
+        dz = cart_coords0_host( i, 2 ) - center0[2];
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        a0 = std::max( a0, dist );
+
+        // Total sum
+        q_total += std::abs( q0_host( i ) );
+
+        // Direct potential at first target point
+        dx = Px1 - cart_coords0_host( i, 0 );
+        dy = Py1 - cart_coords0_host( i, 1 );
+        dz = Pz1 - cart_coords0_host( i, 2 );
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        potential_direct1 += q0_host( i ) / dist;
+
+        // Direct potential at second target point
+        dx = Px2 - cart_coords0_host( i, 0 );
+        dy = Py2 - cart_coords0_host( i, 1 );
+        dz = Pz2 - cart_coords0_host( i, 2 );
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        potential_direct2 += q0_host( i ) / dist;
+
+        /////////////////////
+        // Second expansion
+        /////////////////////
+        
+        // Radius a
+        dx = cart_coords1_host( i, 0 ) - center1[0];
+        dy = cart_coords1_host( i, 1 ) - center1[1];
+        dz = cart_coords1_host( i, 2 ) - center1[2];
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        a1 = std::max( a1, dist );
+
+        // Total sum
+        q_total += std::abs( q1_host( i ) );
+
+        // Direct potential at first target point
+        dx = Px1 - cart_coords1_host( i, 0 );
+        dy = Py1 - cart_coords1_host( i, 1 );
+        dz = Pz1 - cart_coords1_host( i, 2 );
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        potential_direct1 += q1_host( i ) / dist;
+
+        // Direct potential at second target point
+        dx = Px2 - cart_coords1_host( i, 0 );
+        dy = Py2 - cart_coords1_host( i, 1 );
+        dz = Pz2 - cart_coords1_host( i, 2 );
+        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        potential_direct2 += q1_host( i ) / dist;
+    }
+
+    // Theorem 3.5.5 requires c > 1 and rho > (c+1)*a.
+    // Solve for c, getting c < (rho - a) / a for a > 0.
+    ASSERT_GT( a0, 0.0 );
+    ASSERT_GT( a1, 0.0 );
+    double c0 = ( rho0 - a0 ) / a0;
+    ASSERT_GT( c0, 1.0 )
+        << "Error: rho must be greater than (c+1)*a for theory to be valid.";
+    double c1 = ( rho1 - a1 ) / a1;
+    ASSERT_GT( c1, 1.0 )
+        << "Error: rho must be greater than (c+1)*a for theory to be valid.";
+
+    // Target points must be within radius a of local center
+    auto a_min = Kokkos::min(a0, a1);
+    ASSERT_LT( r1, a_min ) << "Error: Target point 1 must be within distance 'a' "
+                          "from local center for theory to be valid.";
+    ASSERT_LT( r2, a_min ) << "Error: Target point 2 must be within distance 'a' "
+                          "from local center for theory to be valid.";
+
+    // Loop over truncation degree
+    for ( int p = 1; p <= 3; ++p )
+    {
+        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m0( p );
+        p2m0( cart_coords0, q0, num_points, center0 );
+
+        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m1( p );
+        p2m0( cart_coords1, q1, num_points, center1 );
+
+        // Convert multipoles to locals
+        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l0( p );
+        m2l0( p2m0.coefficients(), Kokkos::Array<double, 3>{center0[0]- local_center[0],
+                                                            center0[1]- local_center[1], 
+                                                            center0[2]- local_center[2]} );
+        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l1( p );
+        m2l0( p2m1.coefficients(), Kokkos::Array<double, 3>{center1[0]- local_center[0],
+                                                            center1[1]- local_center[1], 
+                                                            center1[2]- local_center[2]} );
+
+        // Copy to host
+        auto L0_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                           m2l0.coefficients() );
+        auto O0_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                           p2m0.coefficients() );
+        auto L1_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                           m2l1.coefficients() );
+        auto O1_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                           p2m1.coefficients() );
+
+        // Perform local to potential conversion to calculate potential at
+        // target. Equation 3.59 in Greengard
+
+        cdouble potential_L1 = 0.0;
+        cdouble potential_O1 = 0.0;
+        cdouble potential_L2 = 0.0;
+        cdouble potential_O2 = 0.0;
+        for ( int j = 0; j <= p; ++j )
+        {
+            for ( int k = -j; k <= j; ++k )
+            {
+                int idx = Canopy::Kernel::Scalar::index( j, k );
+
+                /* Target point 1 calculations */
+                // Greengard eq. 3.59
+                potential_L1 +=
+                    L0_host( idx ) * Kokkos::pow( r1, j ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta1, phi1 );
+                // Greengard eq. 3.36
+                potential_O1 +=
+                    O0_host( idx ) / Kokkos::pow( r_d1, j + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d1, phi_d1 );
+                potential_L1 +=
+                    L1_host( idx ) * Kokkos::pow( r1, j ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta1, phi1 );
+                // Greengard eq. 3.36
+                potential_O1 +=
+                    O1_host( idx ) / Kokkos::pow( r_d1, j + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d1, phi_d1 );
+
+                /* Target point 2 calculations */
+                // Greengard eq. 3.59
+                potential_L2 +=
+                    L0_host( idx ) * Kokkos::pow( r2, j ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta2, phi2 );
+                // Greengard eq. 3.36
+                potential_O2 +=
+                    O0_host( idx ) / Kokkos::pow( r_d2, j + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d2, phi_d2 );
+                potential_L2 +=
+                    L1_host( idx ) * Kokkos::pow( r2, j ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta2, phi2 );
+                // Greengard eq. 3.36
+                potential_O2 +=
+                    O1_host( idx ) / Kokkos::pow( r_d2, j + 1 ) *
+                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d2, phi_d2 );
+            }
+        }
+
+        // Check the error bounds from eq. 3.61
+        auto c_min = Kokkos::min(c0, c1);
+        double bound = ( q_total / ( c_min * a_min - a_min ) ) * std::pow( 1.0 / c_min, p + 1 );
+        double error1 = std::abs( potential_L1.real() - potential_direct1 );
+        double error2 = std::abs( potential_L2.real() - potential_direct2 );
+        // EXPECT_LE( error1, bound ) << "p=" << p
+        //                            << ": error between local and direct "
+        //                               "potentials at target point 1 too high.";
+        // EXPECT_LE( error2, bound ) << "p=" << p
+        //                            << ": error between local and direct "
+        //                               "potentials at target point 2 too high.";
+        printf("p=%d: D1: %0.5lf, L1: %0.5lf, M1: %0.5lf, b1: %0.5lf e1: %0.5lf\n", p,
+            potential_direct1, potential_L1.real(), potential_O1.real(),
+            bound, error1);
+        printf("p=%d: D2: %0.5lf, L2: %0.5lf, M2: %0.5lf, b2: %0.5lf e2: %0.5lf\n", p,
+            potential_direct2, potential_L2.real(), potential_O2.real(),
+            bound, error2);
     }
 }
 
@@ -865,7 +1119,9 @@ TEST( Struct, testM2MStruct0 ) { testM2MStruct0(); }
 
 TEST( Struct, testM2MStruct1 ) { testM2MStruct1(); }
 
-TEST( Struct, testM2LStruct ) { testM2LStruct(); }
+TEST( Struct, testM2LStruct0 ) { testM2LStruct0(); }
+
+TEST( Struct, testM2LStruct1 ) { testM2LStruct1(); }
 
 TEST( Struct, testL2LStruct ) { testL2LStruct(); }
 
