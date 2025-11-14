@@ -20,6 +20,35 @@ namespace Canopy
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
 /**
+ * Convert a std::vector to a Kokkos::View
+ */
+template <class MemorySpace, class ElementType>
+Kokkos::View<typename ElementType::value_type**, MemorySpace>
+vec2view(const std::vector<ElementType>& vector, const std::string& label)
+{
+    using value_type = typename ElementType::value_type;
+    const std::size_t num_elements = vector.size();
+    constexpr std::size_t element_size = std::tuple_size<ElementType>::value;
+
+    // Create a host view
+    Kokkos::View<value_type**, Kokkos::HostSpace> host_view(label, num_elements, element_size);
+
+    // Copy vector data into the host view
+    for (std::size_t i = 0; i < num_elements; ++i)
+    {
+        for (std::size_t j = 0; j < element_size; ++j)
+        {
+            host_view(i, j) = vector[i][j];
+        }
+    }
+
+    // Copy to device
+    auto device_view = Kokkos::create_mirror_view_and_copy(MemorySpace(), host_view);
+
+    return device_view;
+}
+
+/**
  * Return the center of a cell given its ijk location
  */
 template <class Scalar>
@@ -129,12 +158,12 @@ class TreeLayer
             _cells_per_dim,
             _cells_per_dim
             };
-        // printf("R%d: high-low: %0.2lf, %0.2lf, %0.2lf, _tiles_per_dim: %d\n", _rank,
+        // printf("L%d: R%d: high-low: %0.2lf, %0.2lf, %0.2lf, _tiles_per_dim: %d\n", _layer_number, _rank,
         //     _global_high_corner[0] - _global_low_corner[0],
         //     _global_high_corner[1] - _global_low_corner[1],
         //     _global_high_corner[2] - _global_low_corner[2],
         //     _tiles_per_dim);
-        // printf("R%d: global_num_cell: %d, %d, %d\n", _rank, _global_num_cell[0], _global_num_cell[1], _global_num_cell[2]);
+        // printf("L%d: R%d: global_num_cell: %d, %d, %d\n",  _layer_number, _rank, _global_num_cell[0], _global_num_cell[1], _global_num_cell[2]);
                 
         // sparse partitioner
         float max_workload_coeff = 1.5;
@@ -231,6 +260,10 @@ class TreeLayer
         
         // Store cell size
         updateCellSize();
+
+        // Get the owned number of cells and the global cell offset
+        // each MPI rank on this layer.
+        computeCellInfo();
     }
 
     void updateCellSize()
@@ -250,32 +283,29 @@ class TreeLayer
         initialize();
     }
 
-    /**
-     * Get the domain in 3D space that each rank owns with the upper value being non-inclusive
-     * Each entry in the returned vector is (x_start, y_start, z_start, x_end, y_end, z_end)
-     */
-    std::vector<std::array<double, 6>> get_domains()
+     /*!
+      \brief Populate _domains, _num_owned_tile_view, and _tile_offsets_view using the current
+      partition.
+    */
+    void computeCellInfo()
     {
+        // Get x/y/z domains. The domains are also needed to correctly filter invalid
+        // cell counts and offsets
         auto current_partition = _partitioner_ptr->getCurrentPartition();
 
-        // Get the number of tiles per dimension
-        std::array<int, 3> num_tiles_per_dim;
-        for (int d = 0; d < 3; ++d)
-            num_tiles_per_dim[d] = current_partition[d].back();
+        // Allocate vectors
+        std::vector<Kokkos::Array<int, 3>> tile_offsets_vec(_comm_size);
+        std::vector<Kokkos::Array<int, 3>> num_owned_tile_vec(_comm_size);
+        std::vector<Kokkos::Array<double, 6>> domains_vec(_comm_size);
 
-        // Get total number of ranks
-        int size;
-        MPI_Comm_size(_cart_comm, &size);
-
-        // Allocate the result vector
-        std::vector<std::array<double, 6>> domains(size);
-
-        for (int rank = 0; rank < size; ++rank)
+        for (int rank = 0; rank < _comm_size; ++rank)
         {
             int coords[3];
             MPI_Cart_coords(_cart_comm, rank, 3, coords);
 
-            std::array<double, 6> domain;
+            Kokkos::Array<double, 6> domain;
+            Kokkos::Array<int, 3> tile_offsets;
+            Kokkos::Array<int, 3> tiles_owned;
             for (int d = 0; d < 3; ++d)
             {
                 int tile_start = current_partition[d][coords[d]];
@@ -283,16 +313,55 @@ class TreeLayer
 
                 double global_min = _global_low_corner[d];
                 double global_max = _global_high_corner[d];
-                double tile_width = (global_max - global_min) / num_tiles_per_dim[d];
+                double tile_width = (global_max - global_min) / _tiles_per_dim;
+                
+                // Set domain lower and upper bound for this rank
+                domain[d]     = global_min + tile_start * tile_width;
+                domain[d + 3] = global_min + tile_end   * tile_width;
 
-                domain[d]     = global_min + tile_start * tile_width;  // lower bound
-                domain[d + 3] = global_min + tile_end   * tile_width;  // upper bound
+                // Set cells owned: (cells per tile) * (tiles owned) 
+                tiles_owned[d] = (tile_end - tile_start);
+                // Set cell offset: (tile_start) * (cells per tile)
+                // No owned cells in this dimension = offset is invalid, set to -1
+                if (tiles_owned[d] == 0)
+                {
+                    // Set all offsets to -1 and cells owned to 0
+                    for (int j = 0; j < 3; ++j)
+                    {
+                        tile_offsets[j] = -1;
+                        tiles_owned[j] = 0;
+                    }
+                    break;
+                }
+                else
+                    tile_offsets[d] = tile_start;
+
             }
+            // if (_rank == 0) printf("L%d: R%d: i(%d, %d), j(%d, %d), k(%d, %d)\n", _layer_number, rank, 
+            //     current_partition[0][coords[0]], current_partition[0][coords[0] + 1],
+            //     current_partition[1][coords[1]], current_partition[1][coords[1] + 1],
+            //     current_partition[2][coords[2]], current_partition[2][coords[2] + 1]);
 
-            domains[rank] = domain;
+            domains_vec[rank] = domain;
+            num_owned_tile_vec[rank] = tiles_owned;
+            tile_offsets_vec[rank] = tile_offsets;
+            // if (_rank == 0) printf("L%d: R%d: tiles owned: (%d, %d, %d), offset: (%d, %d, %d)\n",
+            //     _layer_number, rank, tiles_owned[0], tiles_owned[1], tiles_owned[2],
+            //     tile_offsets[0], tile_offsets[1], tile_offsets[2]); 
         }
 
-        return domains;
+        // Convert vectors to views and save
+        _tile_offsets_view = vec2view<memory_space>(tile_offsets_vec, "_tile_offsets_view");
+        _num_owned_tile_view = vec2view<memory_space>(num_owned_tile_vec, "_num_owned_tile_view");
+        _domains = vec2view<memory_space>(domains_vec, "_domains");
+
+        // for (std::size_t i = 0; i < _domains.size(); ++i)
+        // {
+        //     if (_rank == 0)
+        //         printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", _layer_number,
+        //             i, _domains(i, 0), _domains(i, 1), _domains(i, 2), _domains(i, 3),
+        //             _domains(i, 4), _domains(i, 5));
+        // }
     }
 
     /**
@@ -306,7 +375,7 @@ class TreeLayer
         using exec_space = typename ViewType::execution_space;
 
         // Get all rank domains on host
-        auto domains_host = get_domains();
+        auto domains_host = _domains;
         int num_ranks = domains_host.size();
 
         // Copy domains to device
@@ -1140,6 +1209,14 @@ class TreeLayer
     int rank() const { return _rank; }
     int layerNumber() const { return _layer_number; }
 
+    /**
+     * Get the domain in 3D space that each rank owns with the upper value being non-inclusive
+     * Each entry in the returned vector is (x_start, y_start, z_start, x_end, y_end, z_end)
+     */
+    auto domains() const {return _domains;}
+    auto tile_offsets() const {return _tile_offsets_view;}
+    auto num_owned_tile() const {return _num_owned_tile_view;}
+
     std::shared_ptr<sparse_layout_type> layout() {return _layout_ptr;}
     std::shared_ptr<sparse_array_type> array() {return _cells_ptr;}
     std::shared_ptr<sparse_map_type> map() {return _map_ptr;}
@@ -1160,6 +1237,12 @@ class TreeLayer
 
     // Cell size in the x, y, and z dimensions.
     Kokkos::Array<double, 3> _cell_size;
+
+    // Information about which processes own which other
+    // section of the sparse mesh
+    Kokkos::View<int*[3], memory_space> _tile_offsets_view;
+    Kokkos::View<int*[3], memory_space> _num_owned_tile_view;
+    Kokkos::View<double*[6], memory_space> _domains;
 
     // Partitioner parameters
     int _num_step_rebalance, _max_optimize_iteration;

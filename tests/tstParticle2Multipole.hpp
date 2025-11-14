@@ -79,15 +79,6 @@ void testUpwardsAggregation(bool balanced)
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
 
-    // Returns a vector of domains for each rank
-    auto domains_host = tree->layer(0)->get_domains();
-    // for (std::size_t i = 0; i < domains_host.size(); ++i)
-    // {
-    //     if (rank == 0) printf("Before: L0: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n",
-    //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
-    //         domains_host[i][4], domains_host[i][5]);
-    // }
-
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
     auto q_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
@@ -98,8 +89,6 @@ void testUpwardsAggregation(bool balanced)
             pos_slice_host(i, j) = cart_coords_h(i, j);
         }
         scalar_slice_host(i) = q_h(i);
-        // printf("R%d: initial particle: p(%0.3lf, %0.3lf, %0.3lf), q(%0.3lf)\n", rank,
-        //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
     }
 
     // Calculate direct potential.
@@ -128,23 +117,10 @@ void testUpwardsAggregation(bool balanced)
     bool run_load_balance = !balanced;
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
-    domains_host = tree->layer(0)->get_domains();
-    // for (std::size_t i = 0; i < domains_host.size(); ++i)
-    // {
-    //     if (rank == 0) printf("After: L0: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n",
-    //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
-    //         domains_host[i][4], domains_host[i][5]);
-    // }
-
     /***********************************************
      * Check the data in the root layer
      **********************************************/
     auto m_root_h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), tree->M_root() );
-    // if (rank == 0)
-    //     for (std::size_t i = 0; i < m_root_h.size(); ++i)
-    //     {
-    //         printf("m_root(%d): (%.4lf, %.4lf)\n", i, m_root_h(i).real(), m_root_h(i).imag());
-    //     }
 
     // Compute potential at P using M
     Kokkos::complex<double> potential_M = 0.0;
@@ -167,21 +143,6 @@ void testUpwardsAggregation(bool balanced)
     EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
         << p << ": Potentials do not match. Tree depth " << tree->numLayers();
     // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
-    
-
-    // Each rank should own two particles
-    // EXPECT_EQ(2, data_host.size());
-
-    // Check that the correct rank owns the particle
-    // rank_slice_host = Cabana::slice<2>(data_host);
-    // for (std::size_t i = 0; i < data_host.size(); i++)
-    // {
-    //     EXPECT_EQ(rank_slice_host(i), rank) << "Rank " << rank << std::endl;
-    // }
-
-    // XXX - At some point separate this out into a new test?
-    // tree->multipole_to_local();
-
 }
 
 //---------------------------------------------------------------------------//

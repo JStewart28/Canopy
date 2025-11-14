@@ -153,22 +153,14 @@ class Tree
         }
 
         // Get all rank domains on host
-        auto domains_host = tree_layer->get_domains();
+        auto domain_bounds = tree_layer->domains();
+        int comm_size = _comm_size;
         // for (std::size_t i = 0; i < domains_host.size(); ++i)
         // {
         //     if (_rank == 0) printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", layer,
         //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
         //         domains_host[i][4], domains_host[i][5]);
         // }
-        int num_ranks = domains_host.size();
-
-        // Copy domains to device
-        Kokkos::View<double*[6], mem_space> domain_bounds("domain_bounds", num_ranks);
-        auto domain_bounds_host = Kokkos::create_mirror_view(domain_bounds);
-        for (int r = 0; r < num_ranks; ++r)
-            for (int j = 0; j < 6; ++j)
-                domain_bounds_host(r, j) = domains_host[r][j];
-        Kokkos::deep_copy(domain_bounds, domain_bounds_host);
 
         // Flag for cell centers that may be outside of the domain.
         // This will happen if the domain does not have integer-value
@@ -185,7 +177,7 @@ class Tree
                 double zpos = positions(i, 2);
 
                 // Linear search: check each rank domain
-                for (int r = 0; r < num_ranks; ++r)
+                for (int r = 0; r < comm_size; ++r)
                 {
                     double x_lo = domain_bounds(r, 0);
                     double y_lo = domain_bounds(r, 1);
@@ -240,7 +232,7 @@ class Tree
         // auto top_layer = _tree[0];
         auto top_layer = _tree.back();
 
-        // auto domains = top_layer->get_domains();
+        // auto domains = top_layer->domains();
         // for (std::size_t i = 0; i < domains.size(); ++i)
         // {
         //     if (_rank == 0) printf("R%d: [%d, %d, %d] to [%d, %d, %d]\n",
