@@ -576,21 +576,8 @@ void testM2LStruct1()
     fillRandomCoordinates( coord1, cbounds1 );
     fillRandomScalar( q, qbounds );
 
-    // Expansion center of Q0 in polar coordinates - rho0, alpha0, beta0
-    double rho0, alpha0, beta0;
-    Canopy::Kernel::cart2sph( -q0_center[0], -q0_center[1], -q0_center[2], rho0,
-                              alpha0, beta0 );
-
-    // Expansion center of Q1 in polar coordinates - rho1, alpha1, beta1
-    double rho1, alpha1, beta1;
-    Canopy::Kernel::cart2sph( -q1_center[0], -q1_center[1], -q1_center[2], rho1,
-                              alpha1, beta1 );
-
     // Center of local expansion
     Kokkos::Array<double, 3> l_center = { 1.3, 0.5, -0.6 };
-    double lrho, lalpha, lbeta;
-    Canopy::Kernel::cart2sph( -l_center[0], -l_center[1], -l_center[2], lrho,
-                              lalpha, lbeta );
 
     // Target point near local center - rho, theta, phi
     // Convert to spherical coordinates relative to local center
