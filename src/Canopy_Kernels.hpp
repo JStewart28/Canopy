@@ -531,7 +531,7 @@ struct M2L
                                ( sign * A_jn_mk * rho_jn );
                     }
                 }
-                L( index( j, k ) ) = Ljk;
+                L( index( j, k ) ) += Ljk;
             }
         }
     }

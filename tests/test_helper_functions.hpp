@@ -18,6 +18,17 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
+double distance(const Kokkos::Array<double,3>& a,
+                const Kokkos::Array<double,3>& b)
+{
+    double dx = a[0] - b[0];
+    double dy = a[1] - b[1];
+    double dz = a[2] - b[2];
+    return Kokkos::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+// Usage:
+
 /**
  * Fill a view with random (x, y, z) coordinates within the specified bounds,
  * where bounds is (x_min, y_min, z_min, x_max, y_max, z_max)
