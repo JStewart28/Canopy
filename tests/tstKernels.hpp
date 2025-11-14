@@ -661,18 +661,17 @@ void testM2LStruct1()
         p2m1( coord1, q1, points_per_section, q1_center );
 
         // Convert multipoles to locals
-        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l0( p );
-        m2l0( p2m0.coefficients(), Kokkos::Array<double, 3>{q0_center[0]- l_center[0],
+        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        m2l( p2m0.coefficients(), Kokkos::Array<double, 3>{q0_center[0]- l_center[0],
                                                             q0_center[1]- l_center[1], 
                                                             q0_center[2]- l_center[2]} );
-        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l1( p );
-        m2l0( p2m1.coefficients(), Kokkos::Array<double, 3>{q1_center[0]- l_center[0],
+        m2l( p2m1.coefficients(), Kokkos::Array<double, 3>{q1_center[0]- l_center[0],
                                                             q1_center[1]- l_center[1], 
                                                             q1_center[2]- l_center[2]} );
 
         // Copy to host
         auto L_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                           m2l0.coefficients() );
+                                                           m2l.coefficients() );
 
         // Perform local to potential conversion to calculate potential at
         // target. Equation 3.59 in Greengard
