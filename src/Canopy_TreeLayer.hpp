@@ -982,7 +982,7 @@ class TreeLayer
         auto ijk2l = _ijk2l;
 
         auto m_slice = Cabana::slice<0>(aosoa);
-        auto center_slice = Cabana::slice<1>(aosoa);
+        auto cell_center_slice = Cabana::slice<1>(aosoa);
 
         int cells_per_dim = _cells_per_dim;
         int rank = _rank;
@@ -1002,6 +1002,14 @@ class TreeLayer
                 auto ijk2l_index = ijk2l.find(cell_ijk);
                 auto local_index = ijk2l.value_at(ijk2l_index);
 
+                // Index of this cell into sparse array AoSoA
+                auto tid = map.queryTile(cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                auto ctid = map.cell_local_id(cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                auto this_cell_index = ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile );
+
+                // Center of this cell, which is the local center
+                Kokkos::Array<double, 3> local_center;
+
                 // Set outer bound - where cells have been accounted for in
                 // more coarse layers.
                 // Set inner bound - where cells are too close for the local
@@ -1018,17 +1026,18 @@ class TreeLayer
 
                     inner_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + 3, cells_per_dim);
                     inner_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - 2, 0);
-                }
 
+                    local_center[i] = cell_center_slice(this_cell_index, i);
+                }
                 
-                if (rank == 0 && layer_number == 1 && cell_ijk[0] == 1 && cell_ijk[1] == 3 && cell_ijk[2] == 2)
-                printf("L%d: R%d: considering cell %d, %d, %d, outer bounds: (%d, %d, %d), (%d, %d, %d), inner bounds: (%d, %d, %d), (%d, %d, %d)\n",
-                    layer_number, rank,
-                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
-                    outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
-                    inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
-                    inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
+                // if (rank == 0 && layer_number == 1 && cell_ijk[0] == 1 && cell_ijk[1] == 3 && cell_ijk[2] == 2)
+                // printf("L%d: R%d: considering cell %d, %d, %d, outer bounds: (%d, %d, %d), (%d, %d, %d), inner bounds: (%d, %d, %d), (%d, %d, %d)\n",
+                //     layer_number, rank,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
+                //     outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
+                //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
+                //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
 
 
                 // Iterate over all cells whose multipoles we must consider.
@@ -1047,13 +1056,10 @@ class TreeLayer
                                 continue;
                             }
 
+                            // Check if this cell is activated by checking if it's recorded
+                            // in the cell id to ijk map.
                             // XXX - for now, we assume this cell is haloed if necessary and
                             // activated in the sparse map.
-                            auto tid = map.queryTile(ci, cj, ck);
-                            auto ctid = map.cell_local_id(ci, cj, ck);
-
-                            // Check if this cell is activated by checking if it's recorded
-                            // in the cell id to ijk map
                             auto neighbor_cell_id = map.queryCell(ci, cj, ck);
                             auto neighbor_activated = cid2ijk.exists(neighbor_cell_id);
                             if (!neighbor_activated)
@@ -1067,12 +1073,15 @@ class TreeLayer
                                 cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
 
                             // Otherwise get the data
-                            auto neighbor_index = ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile );
+                            auto n_tid = map.queryTile(ci, cj, ck);
+                            auto n_ctid = map.cell_local_id(ci, cj, ck);
+                            auto neighbor_index = ( n_tid << cell_bits_per_tile ) | ( n_ctid & cell_mask_per_tile );
                             
-                            // Multipole expansion center (i.e. cell center)
-                            Kokkos::Array<double, 3> cell_center;
-                            for (int i = 0; i < 3; i++)
-                                cell_center[i] = center_slice(neighbor_index, i);
+                            // For multipole to local conversion we need the multipole
+                            // center relative to the local center
+                            Kokkos::Array<double, 3> m2l_vec;
+                            for (int i = 0; i < 3; ++i)
+                                m2l_vec[i] = cell_center_slice(neighbor_index, i) - cell_center_slice(this_cell_index, i);
                             
                             // Multipole coefficients
                             constexpr std::size_t num_coefficients = (p+1)*(p+1);
@@ -1086,11 +1095,11 @@ class TreeLayer
 
                             // Convert to locals
                             Kokkos::Array<cdouble, num_coefficients> L;
-                            Kernel::Scalar::m2l<p>(M, L, cell_center);
+                            Kernel::Scalar::m2l<p>(M, L, m2l_vec);
                             
                             // Add contribution to locals for this cell
                             for (std::size_t i = 0; i < num_coefficients; i++)
-                                locals(local_index, i) = L[i];
+                                locals(local_index, i) += L[i];
                         }
             }
         });
