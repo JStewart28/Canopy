@@ -235,7 +235,7 @@ void testM2MStruct0()
 /**
  * Tests addition and translation of multipole coefficients.
  * Creates two multipole expansions around centers with charges
- * disjunct, well-seperated domains. Translations these expansions
+ * disjunct, well-separated domains. Translations these expansions
  * to center around a new center and then adds these expansions together.
  * Converts the aggregated multipole expansions back to potentials at
  * a target point and compares the result to the directly calculated potential
@@ -245,7 +245,6 @@ void testM2MStruct1()
 {
     const int points_per_section = 200;
 
-    //
     Kokkos::View<double* [3], TEST_MEMSPACE> coords( "coords",
                                                      points_per_section * 2 );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", points_per_section * 2 );
@@ -552,137 +551,89 @@ void testM2LStruct0()
  */
 void testM2LStruct1()
 {
-    // Center of local expansion
-    Kokkos::Array<double, 3> local_center = { 0.8, 1.1, 0.4 };
+    const int points_per_section = 200;
 
-    // Create first set of points and q (scalar value)
-    const int num_points = 500;
-    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords0( "cart_coords0",
-                                                          num_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q0( "q0", num_points );
+    Kokkos::View<double* [3], TEST_MEMSPACE> coords( "coords",
+                                                     points_per_section * 2 );
+    Kokkos::View<double*, TEST_MEMSPACE> q( "q", points_per_section * 2 );
 
-    Kokkos::Array<double, 6> coord_bounds0 = { -10.0, -10.0, -10.0,
-                                              -7.0, -7.0, -7.0 };
-    fillRandomCoordinates( cart_coords0, coord_bounds0 );
+    auto c0 = Kokkos::subview(
+        coords, Kokkos::make_pair( 0, points_per_section ), Kokkos::ALL );
+    auto c1 = Kokkos::subview(
+        coords, Kokkos::make_pair( points_per_section, points_per_section * 2 ),
+        Kokkos::ALL );
+    auto q0 = Kokkos::subview( q, Kokkos::make_pair( 0, points_per_section ) );
+    auto q1 = Kokkos::subview(
+        q, Kokkos::make_pair( points_per_section, points_per_section * 2 ) );
 
-    Kokkos::Array<double, 2> charge_bounds0 = { -3.0, 2.0 };
-    fillRandomScalar( q0, charge_bounds0 );
+    Kokkos::Array<double, 6> cbounds0 = { -3.0, -3.0, -3.0, -2.0, -2.0, -2.0 };
+    Kokkos::Array<double, 6> cbounds1 = { 1.0, 1.0, 1.0, 2.0, 2.0, 2.0 };
+    Kokkos::Array<double, 3> q0_center = { -2.5, -2.6, -2.7 };
+    Kokkos::Array<double, 3> q1_center = { 1.3, 1.5, 1.6 };
+    Kokkos::Array<double, 2> qbounds = { -10.0, 10.0 };
 
-    // Expansion 0 center
-    Kokkos::Array<double, 3> center0 = { -7.5, -7.4, -7.3 };
+    fillRandomCoordinates( c0, cbounds0 );
+    fillRandomCoordinates( c1, cbounds1 );
+    fillRandomScalar( q, qbounds );
+
+    // Expansion center of Q0 in polar coordinates - rho0, alpha0, beta0
     double rho0, alpha0, beta0;
-    Canopy::Kernel::cart2sph( center0[0], center0[1], center0[2], rho0, alpha0,
-                              beta0 );
+    Canopy::Kernel::cart2sph( -q0_center[0], -q0_center[1], -q0_center[2], rho0,
+                              alpha0, beta0 );
 
-    // Create second set of points and q (scalar value)
-    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords1( "cart_coords1",
-                                                          num_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q1( "q1", num_points );
-
-    Kokkos::Array<double, 6> coord_bounds1 = { 10.0, 10.0, 8.0,
-                                              7.0, 9.0, 7.3 };
-    fillRandomCoordinates( cart_coords1, coord_bounds1 );
-
-    Kokkos::Array<double, 2> charge_bounds1 = { -1.3, 3.0 };
-    fillRandomScalar( q1, charge_bounds1 );
-
-    // Expansion 2 center
-    Kokkos::Array<double, 3> center1 = { 8.5, 9.6, 7.8 };
+    // Expansion center of Q1 in polar coordinates - rho1, alpha1, beta1
     double rho1, alpha1, beta1;
-    Canopy::Kernel::cart2sph( center1[0], center1[1], center1[2], rho1, alpha1,
-                              beta1 );
+    Canopy::Kernel::cart2sph( -q1_center[0], -q1_center[1], -q1_center[2], rho1,
+                              alpha1, beta1 );
 
-    // First target point near local center (within radius 'a' of local center)
-    double Px1 = 0.2, Py1 = 0.4, Pz1 = -0.1;
-    double r1, theta1, phi1, r_d1, theta_d1, phi_d1;
-    Canopy::Kernel::cart2sph( Px1 - local_center[0],
-                              Py1 - local_center[1],
-                              Pz1 - local_center[2],
-                              r_d1, theta_d1, phi_d1 );
-    Canopy::Kernel::cart2sph( Px1, Py1, Pz1, r1, theta1, phi1 );
+    // Target point near local center - rho0, theta, phi
+    double Px = 15.0, Py = -10.0, Pz = 7.0;
+    double r, theta, phi;
+    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
 
-    // Second target point near local center (within radius 'a' of local center)
-    double Px2 = 0.1, Py2 = 1.0, Pz2 = 0.5;
-    double r2, theta2, phi2, r_d2, theta_d2, phi_d2;
-    Canopy::Kernel::cart2sph( Px2 - local_center[0],
-                              Py2 - local_center[1],
-                              Pz2 - local_center[2],
-                              r_d2, theta_d2, phi_d2 );
-    Canopy::Kernel::cart2sph( Px2, Py2, Pz2, r2, theta2, phi2 );
-
-    // Compute a and total charge for error bound. (See figure 3.3)
-    // Also compute direct potential
-    auto cart_coords0_host =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), cart_coords0 );
-    auto q0_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q0 );
-    auto cart_coords1_host =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), cart_coords1 );
-    auto q1_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q1 );
-    double q_total = 0.0;
-    double a0 = 0.0;
-    double a1 = 0.0;
-    double potential_direct1 = 0.0;
-    double potential_direct2 = 0.0;
-    for ( int i = 0; i < num_points; ++i )
+    // Direct potential using P relative to the origin.
+    auto coords_host =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), coords );
+    auto q_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q );
+    double potential_direct = 0.0;
+    double a0 = 0.0, a1 = 0.0;
+    for ( int i = 0; i < points_per_section * 2; ++i )
     {
         double dx, dy, dz, dist;
+        double ddx, ddy, ddz, rho_tmp;
 
-        /////////////////////
-        // First expansion
-        /////////////////////
-
-        // Radius a
-        dx = cart_coords0_host( i, 0 ) - center0[0];
-        dy = cart_coords0_host( i, 1 ) - center0[1];
-        dz = cart_coords0_host( i, 2 ) - center0[2];
+        dx = Px - coords_host( i, 0 );
+        dy = Py - coords_host( i, 1 );
+        dz = Pz - coords_host( i, 2 );
         dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        a0 = std::max( a0, dist );
+        potential_direct += q_host( i ) / dist;
 
-        // Total sum
-        q_total += std::abs( q0_host( i ) );
-
-        // Direct potential at first target point
-        dx = Px1 - cart_coords0_host( i, 0 );
-        dy = Py1 - cart_coords0_host( i, 1 );
-        dz = Pz1 - cart_coords0_host( i, 2 );
-        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        potential_direct1 += q0_host( i ) / dist;
-
-        // Direct potential at second target point
-        dx = Px2 - cart_coords0_host( i, 0 );
-        dy = Py2 - cart_coords0_host( i, 1 );
-        dz = Pz2 - cart_coords0_host( i, 2 );
-        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        potential_direct2 += q0_host( i ) / dist;
-
-        /////////////////////
-        // Second expansion
-        /////////////////////
-        
-        // Radius a
-        dx = cart_coords1_host( i, 0 ) - center1[0];
-        dy = cart_coords1_host( i, 1 ) - center1[1];
-        dz = cart_coords1_host( i, 2 ) - center1[2];
-        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        a1 = std::max( a1, dist );
-
-        // Total sum
-        q_total += std::abs( q1_host( i ) );
-
-        // Direct potential at first target point
-        dx = Px1 - cart_coords1_host( i, 0 );
-        dy = Py1 - cart_coords1_host( i, 1 );
-        dz = Pz1 - cart_coords1_host( i, 2 );
-        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        potential_direct1 += q1_host( i ) / dist;
-
-        // Direct potential at second target point
-        dx = Px2 - cart_coords1_host( i, 0 );
-        dy = Py2 - cart_coords1_host( i, 1 );
-        dz = Pz2 - cart_coords1_host( i, 2 );
-        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        potential_direct2 += q1_host( i ) / dist;
+        // Get max distance from center for error estimate.
+        if ( i < points_per_section )
+        {
+            // Use q0_center
+            ddx = coords_host( i, 0 ) + q0_center[0];
+            ddy = coords_host( i, 1 ) + q0_center[1];
+            ddz = coords_host( i, 2 ) + q0_center[2];
+            rho_tmp = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
+            a0 = std::max( a0, rho_tmp );
+        }
+        else
+        {
+            // Use q1_center
+            ddx = coords_host( i, 0 ) + q1_center[0];
+            ddy = coords_host( i, 1 ) + q1_center[1];
+            ddz = coords_host( i, 2 ) + q1_center[2];
+            rho_tmp = std::sqrt( ddx * ddx + ddy * ddy + ddz * ddz );
+            a1 = std::max( a1, rho_tmp );
+        }
     }
+
+    // P should be far enough away from both centers
+    ASSERT_GT( r, ( a0 + rho0 ) )
+        << "Point P is not far enough away from q0_center";
+    ASSERT_GT( r, ( a1 + rho1 ) )
+        << "Point P is not far enough away from q1_center";
 
     // Theorem 3.5.5 requires c > 1 and rho > (c+1)*a.
     // Solve for c, getting c < (rho - a) / a for a > 0.
@@ -695,11 +646,9 @@ void testM2LStruct1()
     ASSERT_GT( c1, 1.0 )
         << "Error: rho must be greater than (c+1)*a for theory to be valid.";
 
-    // Target points must be within radius a of local center
+    // Target point must be within radius a of local center
     auto a_min = Kokkos::min(a0, a1);
-    ASSERT_LT( r1, a_min ) << "Error: Target point 1 must be within distance 'a' "
-                          "from local center for theory to be valid.";
-    ASSERT_LT( r2, a_min ) << "Error: Target point 2 must be within distance 'a' "
+    ASSERT_LT( r1, a_min ) << "Error: Target point must be within distance 'a' "
                           "from local center for theory to be valid.";
 
     // Loop over truncation degree
