@@ -442,7 +442,7 @@ m2l( const Kokkos::Array<cdouble, ( p + 1 ) * ( p + 1 )>& O,
                            ( sign * A_jn_mk * rho_jn );
                 }
             }
-            L[index( j, k )] = Ljk;
+            L[index( j, k )] += Ljk;
         }
     }
 }
