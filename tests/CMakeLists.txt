@@ -21,6 +21,7 @@ set(SERIAL_TESTS
 
 set(MPI_TESTS
   Particle2Multipole
+  Multipole2Local
   )
 
 Canopy_add_tests_nobackend(PACKAGE Canopy NAMES ${NOBACKEND_TESTS})
