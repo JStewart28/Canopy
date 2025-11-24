@@ -29,7 +29,7 @@ namespace Test
  * at the leaf layer.
  */
 template <std::size_t p_val>
-void testUpwardsAggregation(bool balanced)
+void testParticle2Multipole(bool balanced)
 {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -151,16 +151,16 @@ void testUpwardsAggregation(bool balanced)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-TEST( Tree, testUpwardsAggregation1_balanced ) { testUpwardsAggregation<1>(true); }
-TEST( Tree, testUpwardsAggregation2_balanced ) { testUpwardsAggregation<2>(true); }
-TEST( Tree, testUpwardsAggregation3_balanced ) { testUpwardsAggregation<3>(true); }
-TEST( Tree, testUpwardsAggregation4_balanced ) { testUpwardsAggregation<4>(true); }
+TEST( Tree, testParticle2Multipole1_balanced ) { testParticle2Multipole<1>(true); }
+TEST( Tree, testParticle2Multipole2_balanced ) { testParticle2Multipole<2>(true); }
+TEST( Tree, testParticle2Multipole3_balanced ) { testParticle2Multipole<3>(true); }
+TEST( Tree, testParticle2Multipole4_balanced ) { testParticle2Multipole<4>(true); }
 
 // Test with an unbalanced particle distribution.
-TEST( Tree, testUpwardsAggregation1_unbalanced ) { testUpwardsAggregation<1>(false); }
-TEST( Tree, testUpwardsAggregation2_unbalanced ) { testUpwardsAggregation<2>(false); }
-TEST( Tree, testUpwardsAggregation3_unbalanced ) { testUpwardsAggregation<3>(false); }
-TEST( Tree, testUpwardsAggregation4_unbalanced ) { testUpwardsAggregation<4>(false); }
+TEST( Tree, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(false); }
+TEST( Tree, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(false); }
+TEST( Tree, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(false); }
+TEST( Tree, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(false); }
 
 //---------------------------------------------------------------------------//
 
