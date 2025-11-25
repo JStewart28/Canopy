@@ -1084,18 +1084,15 @@ class TreeLayer
                 auto ctid = map.cell_local_id(cell_ijk[0], cell_ijk[1], cell_ijk[2]);
                 auto this_cell_index = ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile );
 
-                // Center of this cell, which is the local center
-                Kokkos::Array<double, 3> local_center;
-
                 // Set outer bound - where cells have been accounted for in
                 // more coarse layers.
                 // Set inner bound - where cells are too close for the local
                 // approximation to be accurate. Inclusive on lower end,
                 // exclusive on upper end
-                Kokkos::Array<int, 3> outer_lower_bound;
-                Kokkos::Array<int, 3> outer_upper_bound;
-                Kokkos::Array<int, 3> inner_lower_bound;
-                Kokkos::Array<int, 3> inner_upper_bound;
+                Kokkos::Array<std::size_t, 3> outer_lower_bound;
+                Kokkos::Array<std::size_t, 3> outer_upper_bound;
+                Kokkos::Array<std::size_t, 3> inner_lower_bound;
+                Kokkos::Array<std::size_t, 3> inner_upper_bound;
                 for (int i = 0; i < 3; i++)
                 {
                     outer_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + outer_cell_cutoff, cells_per_dim);
@@ -1103,8 +1100,6 @@ class TreeLayer
 
                     inner_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + 3, cells_per_dim);
                     inner_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - 2, 0);
-
-                    local_center[i] = cell_center_slice(this_cell_index, i);
                 }
                 
                 // if (rank == 0 && layer_number == 0)
@@ -1115,17 +1110,17 @@ class TreeLayer
                 //     outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
                 //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
                 //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
-                // if (rank == 0 && layer_number == 0)
-                // printf("L%d: R%d: considering cell %d, %d, %d, li: %d\n",
+                // if (rank == 0 && layer_number == 0 && cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
+                // printf("L%d: R%d: considering cell %d, %d, %d, center(%.2lf, %.2lf, %.2lf)\n",
                 //     layer_number, rank,
                 //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     local_index);
+                //     cell_center_slice(this_cell_index, 0), cell_center_slice(this_cell_index, 1), cell_center_slice(this_cell_index, 2));
 
                 // Iterate over all cells whose multipoles we must consider.
                 // XXX - Make this a team policy nested for loop
-                for (int ci = outer_lower_bound[0]; ci < outer_upper_bound[0]; ci++)
-                    for (int cj = outer_lower_bound[1]; cj < outer_upper_bound[1]; cj++)
-                        for (int ck = outer_lower_bound[2]; ck < outer_upper_bound[2]; ck++)
+                for (std::size_t ci = outer_lower_bound[0]; ci < outer_upper_bound[0]; ci++)
+                    for (std::size_t cj = outer_lower_bound[1]; cj < outer_upper_bound[1]; cj++)
+                        for (std::size_t ck = outer_lower_bound[2]; ck < outer_upper_bound[2]; ck++)
                         {
                             // Only consider cells between our outer lower and inner lower
                             // or inner upper and outer upper bounds. If inside these bounds,
@@ -1149,7 +1144,7 @@ class TreeLayer
                                 // Cell not activated; do not consider
                                 continue;
                             }
-                            // if (rank == 0 && layer_number == 0 && cell_ijk[0] == 10 && cell_ijk[1] == 10 && cell_ijk[2] == 3)
+                            // if (rank == 0 && layer_number == 0 && cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
                             // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
                             //     cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
 
