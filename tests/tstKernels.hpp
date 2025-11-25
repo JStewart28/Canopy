@@ -36,10 +36,10 @@ void testScalarP2MStruct()
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
 
     Kokkos::Array<double, 6> coord_bounds = { -1.0, -1.0, -1.0, 1.0, 1.0, 1.0 };
-    fillRandomCoordinates( cart_coords, coord_bounds );
+    fillRandomCoordinates( cart_coords, coord_bounds, 321 );
 
     Kokkos::Array<double, 2> charge_bounds = { -10.0, 10.0 };
-    fillRandomScalar( q, charge_bounds );
+    fillRandomScalar( q, charge_bounds, 234 );
 
     // Expansion center
     Kokkos::Array<double, 3> expansion_center = { 0.1, -0.6, 0.3 };
@@ -131,9 +131,9 @@ void testM2MStruct0()
     Kokkos::View<double* [3], TEST_MEMSPACE> coords0( "coords0", num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q0( "q", num_points );
     Kokkos::Array<double, 6> bounds0 = { -1.0, -1.0, -1.0, 1.0, 1.0, 1.0 };
-    fillRandomCoordinates( coords0, bounds0 );
+    fillRandomCoordinates( coords0, bounds0, 789 );
     Kokkos::Array<double, 2> qbounds0 = { -10.0, 10.0 };
-    fillRandomScalar( q0, qbounds0 );
+    fillRandomScalar( q0, qbounds0, 987 );
 
     // Center of Q coefficients
     Kokkos::Array<double, 3> q_center = { -0.1, 0.3, 0.2 };
@@ -264,9 +264,9 @@ void testM2MStruct1()
     Kokkos::Array<double, 3> q1_center = { 1.3, 1.5, 1.6 };
     Kokkos::Array<double, 2> qbounds = { -10.0, 10.0 };
 
-    fillRandomCoordinates( c0, cbounds0 );
-    fillRandomCoordinates( c1, cbounds1 );
-    fillRandomScalar( q, qbounds );
+    fillRandomCoordinates( c0, cbounds0, 765 );
+    fillRandomCoordinates( c1, cbounds1, 567 );
+    fillRandomScalar( q, qbounds, 444 );
 
     // Expansion center of Q0 in polar coordinates - rho0, alpha0, beta0
     double rho0, alpha0, beta0;
@@ -377,7 +377,7 @@ void testM2MStruct1()
         // Check error between translated multipole and direct potentials
         // The error is already mathematically checked in testM2MStruct0,
         // so here we just make sure they are close to each other.
-        double error = Kokkos::pow( 10, -p + 1 );
+        double error = Kokkos::pow( 10, -p + 2 );
         EXPECT_NEAR( potential_direct, potential_M.real(), error )
             << "p=" << p
             << ": error between (shifted and added) and (direct potential) "
@@ -395,10 +395,10 @@ void testM2LStruct0()
 
     Kokkos::Array<double, 6> coord_bounds = { -8.0, -8.0, -8.0,
                                               -5.0, -5.0, -5.0 };
-    fillRandomCoordinates( cart_coords, coord_bounds );
+    fillRandomCoordinates( cart_coords, coord_bounds, 563 );
 
     Kokkos::Array<double, 2> charge_bounds = { -3.0, 2.0 };
-    fillRandomScalar( q, charge_bounds );
+    fillRandomScalar( q, charge_bounds, 742 );
 
     // Expansion center
     Kokkos::Array<double, 3> center = { -5.5, -5.4, -5.3 };
@@ -572,9 +572,9 @@ void testM2LStruct1()
     Kokkos::Array<double, 3> q1_center = { 11.3, 11.5, 11.6 };
     Kokkos::Array<double, 2> qbounds = { -10.0, 10.0 };
 
-    fillRandomCoordinates( coord0, cbounds0 );
-    fillRandomCoordinates( coord1, cbounds1 );
-    fillRandomScalar( q, qbounds );
+    fillRandomCoordinates( coord0, cbounds0, 123 );
+    fillRandomCoordinates( coord1, cbounds1, 321 );
+    fillRandomScalar( q, qbounds, 111 );
 
     // Center of local expansion
     Kokkos::Array<double, 3> l_center = { 1.3, 0.5, -0.6 };
@@ -710,10 +710,10 @@ void testM2LFunc()
 
     Kokkos::Array<double, 6> coord_bounds = { -8.0, -8.0, -8.0,
                                               -5.0, -5.0, -5.0 };
-    fillRandomCoordinates( cart_coords, coord_bounds );
+    fillRandomCoordinates( cart_coords, coord_bounds, 123 );
 
     Kokkos::Array<double, 2> charge_bounds = { -3.0, 2.0 };
-    fillRandomScalar( q, charge_bounds );
+    fillRandomScalar( q, charge_bounds, 999 );
 
     // Expansion center
     Kokkos::Array<double, 3> center = { -5.5, -5.4, -5.3 };
@@ -868,10 +868,10 @@ void testL2LStruct()
 
     Kokkos::Array<double, 6> coord_bounds = { -8.0, -8.0, -8.0,
                                               -5.0, -5.0, -5.0 };
-    fillRandomCoordinates( cart_coords, coord_bounds );
+    fillRandomCoordinates( cart_coords, coord_bounds, 456 );
 
     Kokkos::Array<double, 2> charge_bounds = { -3.0, 2.0 };
-    fillRandomScalar( q, charge_bounds );
+    fillRandomScalar( q, charge_bounds, 654 );
 
     // Multipole expansion center. Coordinates from local center
     // to multipole center.

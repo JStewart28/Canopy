@@ -34,10 +34,10 @@ double distance(const Kokkos::Array<double,3>& a,
  * where bounds is (x_min, y_min, z_min, x_max, y_max, z_max)
  */
 template <class PosView>
-void fillRandomCoordinates(PosView& cart_coords, Kokkos::Array<double, 6> bounds)
+void fillRandomCoordinates(PosView& cart_coords, Kokkos::Array<double, 6> bounds, int seed)
 {
     using RandomPool = Kokkos::Random_XorShift64_Pool<TEST_EXECSPACE>;
-    RandomPool rand_pool( 12345 ); // Seed the random number generator
+    RandomPool rand_pool( seed );
     Kokkos::parallel_for(
         "populate_cart_coords",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, cart_coords.extent(0) ),
@@ -68,10 +68,10 @@ void fillRandomCoordinates(PosView& cart_coords, Kokkos::Array<double, 6> bounds
  * Fill a view with random scalar values within the specified (min, max) bound.
  */
 template <class View>
-void fillRandomScalar(View& q, Kokkos::Array<double, 2> bounds)
+void fillRandomScalar(View& q, Kokkos::Array<double, 2> bounds, int seed)
 {
     using RandomPool = Kokkos::Random_XorShift64_Pool<TEST_EXECSPACE>;
-    RandomPool rand_pool( 12345 ); // Seed the random number generator
+    RandomPool rand_pool( seed );
     Kokkos::parallel_for(
         "populate_cart_coords",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, q.extent(0) ),

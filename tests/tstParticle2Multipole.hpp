@@ -71,9 +71,9 @@ void testParticle2Multipole(bool balanced)
         coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
     }
 
-    fillRandomCoordinates(cart_coords, coord_bounds);
+    fillRandomCoordinates(cart_coords, coord_bounds, 123);
     Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
-    fillRandomScalar(q, charge_bounds);
+    fillRandomScalar(q, charge_bounds, 123);
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
