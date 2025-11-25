@@ -77,7 +77,7 @@ void testMultipole2Local(bool balanced)
 
     // Create the data on rank 0. It will automatically be distributed correctly when
     // filled into the tree.
-    int num_points = (rank == 0) ? (comm_size * 1) : 0;
+    int num_points = (rank == 0) ? (comm_size * 2) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -119,7 +119,7 @@ void testMultipole2Local(bool balanced)
     // Fill the tree
     bool run_load_balance = !balanced;
     tree->create_multipoles(particle_aosoa, run_load_balance);
-    tree->multipole_to_local();
+    layer->multipole_to_local(50);
     return;
 
     // Create target points at which to calculate potential directly, omitting

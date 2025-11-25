@@ -163,8 +163,8 @@ class TreeLayer
         //     _global_high_corner[1] - _global_low_corner[1],
         //     _global_high_corner[2] - _global_low_corner[2],
         //     _tiles_per_dim);
-        printf("L%d: R%d: global_num_cell: %d, %d, %d\n",  _layer_number, _rank, _global_num_cell[0], _global_num_cell[1], _global_num_cell[2]);
-                
+        // printf("L%d: R%d: global_num_cell: %d, %d, %d\n",  _layer_number, _rank, _global_num_cell[0], _global_num_cell[1], _global_num_cell[2]);
+    
         // sparse partitioner
         float max_workload_coeff = 1.5;
         int workload_num = _cells_per_dim * _cells_per_dim * _cells_per_dim;
@@ -264,6 +264,10 @@ class TreeLayer
         // Get the owned number of cells and the global cell offset
         // each MPI rank on this layer.
         computeCellInfo();
+
+        // Set local view index to 0
+        _local_view_index = Kokkos::View<std::size_t, memory_space>("local_view_index");
+        Kokkos::deep_copy(_local_view_index, 0);
     }
 
     void updateCellSize()
@@ -482,7 +486,7 @@ class TreeLayer
         }
 
         int rank = _rank;
-        // int layer_number = _layer_number;
+        int layer_number = _layer_number;
         // printf("R%d: leaf cell data from [%d, %d)\n", rank, start, end);
 
         std::size_t view_size = end - start;
@@ -575,8 +579,7 @@ class TreeLayer
          *  4. The rank that owns this cell.
          *  5. Where this cell indexes into the _locals view (via ijk2l map)
          */
-        Kokkos::View<std::size_t, memory_space> local_view_index("local_view_index");
-        Kokkos::deep_copy(local_view_index, 0);
+        auto local_view_index = _local_view_index;
         auto ijk2l = _ijk2l;
         auto aosoa = _cells_ptr->aosoa();
         // aosoa.resize(aosoa.capacity());
@@ -628,7 +631,13 @@ class TreeLayer
                                                 cell_ijk[2]}, idx);
                 if (!result.success())
                 {
-                    // Shouldn't get here as all cells activated are unique
+                    printf("Did not add local index\n");
+                }
+                else
+                {
+                    printf("L%d: R%d: cell (%d, %d, %d), lid: %d\n", layer_number, rank, cell_ijk[0],
+                                                cell_ijk[1],
+                                                cell_ijk[2], idx);
                 }
 
                 // printf("R%d: setting leaf c(%.3lf, %.3lf, %.3lf)\n",
@@ -772,8 +781,7 @@ class TreeLayer
         auto M_coefficients = m2m.coefficients();
 
         // Set cell data for this cell
-        Kokkos::View<std::size_t, memory_space> local_view_index("local_view_index");
-        Kokkos::deep_copy(local_view_index, 0);
+        auto local_view_index = _local_view_index;
         auto ijk2l = _ijk2l;
         auto aosoa = _cells_ptr->aosoa();
         // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, aosoa.capacity(), _cells_ptr->size());
@@ -1043,7 +1051,7 @@ class TreeLayer
         {
             throw std::runtime_error("multipole_to_local only works for comm_size 1");
         }
-        printf("Starting layer %d...\n", _layer_number);
+        printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
         auto map = *_map_ptr;
         auto aosoa = _cells_ptr->aosoa();
@@ -1099,14 +1107,19 @@ class TreeLayer
                     local_center[i] = cell_center_slice(this_cell_index, i);
                 }
                 
-                // if (rank == 0 && layer_number == 1 && cell_ijk[0] == 1 && cell_ijk[1] == 3 && cell_ijk[2] == 2)
-                // printf("L%d: R%d: considering cell %d, %d, %d, outer bounds: (%d, %d, %d), (%d, %d, %d), inner bounds: (%d, %d, %d), (%d, %d, %d)\n",
+                // if (rank == 0 && layer_number == 0)
+                // printf("L%d: R%d: considering cell %d, %d, %d, o: (%d, %d, %d), (%d, %d, %d), i: (%d, %d, %d), (%d, %d, %d)\n",
                 //     layer_number, rank,
                 //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
                 //     outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
                 //     outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
                 //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
                 //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
+                // if (rank == 0 && layer_number == 0)
+                printf("L%d: R%d: considering cell %d, %d, %d, li: %d\n",
+                    layer_number, rank,
+                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    local_index);
 
                 // Iterate over all cells whose multipoles we must consider.
                 // XXX - Make this a team policy nested for loop
@@ -1125,20 +1138,20 @@ class TreeLayer
                             }
 
                             // Check if this cell is activated by checking if it's recorded
-                            // in the cell id to ijk map.
+                            // in the cell id to local index map.
                             // XXX - for now, we assume this cell is haloed if necessary and
                             // activated in the sparse map.
-                            auto neighbor_cell_id = map.queryCell(ci, cj, ck);
-                            if (rank == 0 && layer_number == 0)
-                            printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d, nid: %d\n", layer_number, rank,
-                                cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck, neighbor_cell_id);
-                            
-                            // auto neighbor_activated = cid2ijk.exists(neighbor_cell_id);
+                            Kokkos::Array<std::size_t, 3> neighbor_ijk = {ci, cj, ck};                   
+                            auto neighbor_exists = ijk2l.exists(neighbor_ijk);
+                            // auto neighbor_lid = ijk2l.value_at(neighbor_i);
                             // if (!neighbor_activated)
                             // {
                             //     // Cell not activated; do not consider
                             //     continue;
                             // }
+                            if (rank == 0 && layer_number == 0 && neighbor_exists)
+                            printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d, exists: %d\n", layer_number, rank,
+                                cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck, neighbor_exists);      
 
                             
                             continue;
@@ -1268,6 +1281,7 @@ class TreeLayer
     Kokkos::UnorderedMap<int, Kokkos::Array<std::size_t, 3>, memory_space> _cid2ijk;
 
     // Map of cell_ijk to its location in the Local view.
+    Kokkos::View<std::size_t, memory_space> _local_view_index;
     Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space> _ijk2l;
 
     // Locals coefficients for each cell. This data is haloed differently than
