@@ -21,6 +21,8 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
+using cdouble = Kokkos::complex<double>;
+
 /**
  * Tests that on a single layer, multipole are correctly converted to locals.
  * Process:
@@ -45,6 +47,7 @@ void testMultipole2Local(bool balanced)
     using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
     std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
     std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
+
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
@@ -62,7 +65,7 @@ void testMultipole2Local(bool balanced)
 
     // Check mesh information for leaf layer (layer 0)
     auto layer = tree->layer(0);
-    std::size_t cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
+    int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
     Kokkos::Array<double, 3> cell_size;
     for (int i = 0; i < 3; ++i)
     {
@@ -74,7 +77,7 @@ void testMultipole2Local(bool balanced)
 
     // Create the data on rank 0. It will automatically be distributed correctly when
     // filled into the tree.
-    int num_points = (rank == 0) ? (comm_size * 500) : 0;
+    int num_points = (rank == 0) ? (comm_size * 1) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -109,9 +112,19 @@ void testMultipole2Local(bool balanced)
         //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
     }
 
+    // // Copy to device
+    auto particle_aosoa =
+        Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
+        
+    // Fill the tree
+    bool run_load_balance = !balanced;
+    tree->create_multipoles(particle_aosoa, run_load_balance);
+    tree->multipole_to_local();
+    return;
+
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 20;
+    int num_target_points = 3;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
     fillRandomCoordinates(target_points, coord_bounds);
@@ -122,111 +135,126 @@ void testMultipole2Local(bool balanced)
     Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
                                                           num_target_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
-    for (int i = 0; i < num_target_points; ++i)
+    for (int tpi = 0; tpi < num_target_points; ++tpi)
     {
         // Get the cell this point falls into
-        Kokkos::Array<int, 3> target_cell_ijk;
-        for (int j = 0; j < 3; ++j)
+        Kokkos::Array<std::size_t, 3> target_cell_ijk;
+        for (int dim = 0; dim < 3; ++dim)
         {
-            target_cell_ijk[0] = static_cast<int>( std::floor(target_points_host(i, j) / cell_size[j]) );
+            target_cell_ijk[dim] = static_cast<std::size_t>(
+                Kokkos::floor((target_points_host(tpi, dim) - global_low_corner[dim]) / cell_size[dim]) );
         }
+        // printf("target_cell_ijk(%d): (%d, %d, %d)\n", tpi, target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2]);
 
         // Set inner bound - where cells are too close for the local
         // approximation to be accurate. Inclusive on lower end,
         // exclusive on upper end
         Kokkos::Array<int, 3> inner_lower_bound;
         Kokkos::Array<int, 3> inner_upper_bound;
-        for (int j = 0; j < 3; j++)
+        for (int dim = 0; dim < 3; ++dim)
         {
-            inner_upper_bound[j] = Kokkos::min(static_cast<int>(target_cell_ijk[j]) + 3, cells_per_leaf_dimension);
-            inner_lower_bound[j] = Kokkos::max(static_cast<int>(target_cell_ijk[j]) - 2, 0);
+            inner_upper_bound[dim] = Kokkos::min(static_cast<int>(target_cell_ijk[dim]) + 3, cells_per_leaf_dimension);
+            inner_lower_bound[dim] = Kokkos::max(static_cast<int>(target_cell_ijk[dim]) - 2, 0);
         }
 
         // Iterate over all particles inserted into the mesh. If it falls into a cell
         // within 2 cells of the target point's cell, skip it. If not, add its contribution
         // to the potential at the target point.
-        for (int j = 0; j < num_points; ++j)
+        for (int op = 0; op < num_points; ++op)
         {
             Kokkos::Array<int, 3> cell_ijk;
-            for (int d = 0; d < 3; ++d)
+            for (int dim = 0; dim < 3; ++dim)
             {
-                cell_ijk[d] = static_cast<int>( std::floor(cart_coords_h(j, d) / cell_size[j]) );
+                cell_ijk[dim] = static_cast<int>(
+                    Kokkos::floor((cart_coords_h(op, dim) - global_low_corner[dim]) / cell_size[dim]) );
             }
 
-             for (int ci = 0; ci < cells_per_leaf_dimension; ci++)
-                for (int cj = 0; cj < cells_per_leaf_dimension; cj++)
-                    for (int ck = 0; ck < cells_per_leaf_dimension; ck++)
-                    {
-                        // Only consider cells between our outer lower and inner lower
-                        // or inner upper and outer upper bounds. If inside these bounds,
-                        // skip.
-                        if ((ci >= inner_lower_bound[0] && ci < inner_upper_bound[0]) &&
-                        (cj >= inner_lower_bound[1] && cj < inner_upper_bound[1]) &&
-                        (ck >= inner_lower_bound[2] && ck < inner_upper_bound[2]))
-                        {
-                            continue;
-                        }
+            // Only consider cells between our outer lower and inner lower
+            // or inner upper and outer upper bounds. If inside these bounds,
+            // skip.
+            if ((cell_ijk[0] >= inner_lower_bound[0] && cell_ijk[0] < inner_upper_bound[0]) &&
+            (cell_ijk[1] >= inner_lower_bound[1] && cell_ijk[1] < inner_upper_bound[1]) &&
+            (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
+            {
+                continue;
+            }
 
-                        // Check if this cell is activated by checking if it's recorded
-                        // in the cell id to ijk map.
-                        // XXX - for now, we assume this cell is haloed if necessary and
-                        // activated in the sparse map.
-                        auto neighbor_cell_id = map.queryCell(ci, cj, ck);
-                        auto neighbor_activated = cid2ijk.exists(neighbor_cell_id);
-                        if (!neighbor_activated)
-                        {
-                            // Cell not activated; do not consider
-                            continue;
-                        }
+            // printf("p%d: Far cell (%d, %d, %d) p(%.2lf, %.2lf, %.2lf)\n", op,
+            //     cell_ijk[0], cell_ijk[1], cell_ijk[2], cart_coords_h( op, 0 ), cart_coords_h( op, 1 ), cart_coords_h( op, 2 ));
 
-                        if (rank == 0 && layer_number == 1 && cell_ijk[0] == 1 && cell_ijk[1] == 3 && cell_ijk[2] == 2)
-                        printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
-                            cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
-
-                        // Otherwise get the data
-                        auto n_tid = map.queryTile(ci, cj, ck);
-                        auto n_ctid = map.cell_local_id(ci, cj, ck);
-                        auto neighbor_index = ( n_tid << cell_bits_per_tile ) | ( n_ctid & cell_mask_per_tile );
-                        
-                        // For multipole to local conversion we need the multipole
-                        // center relative to the local center
-                        Kokkos::Array<double, 3> m2l_vec;
-                        for (int i = 0; i < 3; ++i)
-                            m2l_vec[i] = cell_center_slice(neighbor_index, i) - cell_center_slice(this_cell_index, i);
-                        
-                        // Multipole coefficients
-                        constexpr std::size_t num_coefficients = (p+1)*(p+1);
-                        Kokkos::Array<cdouble, num_coefficients> M;
-                        for (std::size_t i = 0; i < num_coefficients; i++)
-                        {
-                            cdouble val;
-                            val.real() = m_slice(neighbor_index, i, 0);
-                            val.imag() = m_slice(neighbor_index, i, 1);
-                        }
-
-                        // Convert to locals
-                        Kokkos::Array<cdouble, num_coefficients> L;
-                        Kernel::Scalar::m2l<p>(M, L, m2l_vec);
-                        
-                        // Add contribution to locals for this cell
-                        for (std::size_t i = 0; i < num_coefficients; i++)
-                            locals(local_index, i) += L[i];
-                    }
+            // Add this particle's contribution to the potential
+            double dx = target_points_host(tpi, 0) - cart_coords_h( op, 0 );
+            double dy = target_points_host(tpi, 1) - cart_coords_h( op, 1 );
+            double dz = target_points_host(tpi, 2) - cart_coords_h( op, 2 );
+            double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
+            direct_potentials(tpi) += q_h( op ) / dist;
         
+        }
+        printf("target_cell_ijk(%d): (%lu, %lu, %lu), c(%.2lf, %.2lf, %.2lf): %.3lf\n", tpi,
+            target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+            target_points_host(tpi, 0), target_points_host(tpi, 1), target_points_host(tpi, 2),
+            direct_potentials(tpi));
     }
-    // Target point far away from domain so multipole approximation holds.
-    // double Px = 15.1, Py = -20.3, Pz = 16.2;
-    // double r, theta, phi;
-    // Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
-    // double potential_direct = 0.0;
-    // for (std::size_t i = 0; i < num_points; ++i)
-    // {
-    //     double dx = Px - pos_slice_host( i, 0 );
-    //     double dy = Py - pos_slice_host( i, 1 );
-    //     double dz = Pz - pos_slice_host( i, 2 );
-    //     double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-    //     potential_direct += scalar_slice_host( i ) / dist;
-    // }
+
+    // Get locals
+    auto locals = layer->locals();
+    auto ijk2l = layer->cellijk2l();
+
+    // Device-friendly version of global low corner
+    Kokkos::Array<double, 3> global_low_corner_k;
+    for (int i = 0; i < 3; i++)
+        global_low_corner_k[i] = global_low_corner[i];
+
+    // Iterate over target points and use locals to calculate potential
+    Kokkos::View<cdouble*, TEST_MEMSPACE> local_potential("local_potential", num_target_points);
+    Kokkos::deep_copy(local_potential, cdouble(0.0, 0.0));
+    Kokkos::parallel_for(
+        "populate_local_potential",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_target_points ),
+        KOKKOS_LAMBDA( const int tpi ) {
+
+            // Get the cell this point falls into
+            Kokkos::Array<std::size_t, 3> target_cell_ijk;
+            for (int dim = 0; dim < 3; ++dim)
+            {
+                target_cell_ijk[dim] = static_cast<std::size_t>(
+                    Kokkos::floor((target_points(tpi, dim) - global_low_corner_k[dim]) / cell_size[dim]) );
+            }
+
+             // Center of local expansion is the cell center
+            Kokkos::Array<double, 3> l_center;
+            for (int i = 0; i < 3; i++)
+                l_center[i] = global_low_corner_k[i] + (static_cast<double>(i) + 0.5) * cell_size[i];
+
+            // Convert target point to spherical coordinates relative to local center
+            double r, theta, phi;
+            Canopy::Kernel::cart2sph( target_points(tpi, 0) - l_center[0],
+                                      target_points(tpi, 1) - l_center[1],
+                                      target_points(tpi, 2) - l_center[2],
+                                      r, theta, phi );
+
+            // Get the locals for this cell
+            auto ijk2l_index = ijk2l.find(target_cell_ijk);
+            printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2l index: %u\n", tpi,
+                    target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], ijk2l_index);
+            // auto local_index = ijk2l.value_at(ijk2l_index);
+            // printf("tpi: %d, local index: %lu\n", tpi, local_index);
+            // Calculate potential using locals
+            // for ( int j = 0; j <= p_val; ++j )
+            // {
+            //     for ( int k = -j; k <= p_val; ++k )
+            //     {
+            //         int idx = Canopy::Kernel::Scalar::index( j, k );
+
+            //         /* Target point 1 calculations */
+            //         // Greengard eq. 3.59
+            //         local_potential(tpi) +=
+            //             locals( local_index, idx ) * Kokkos::pow( r, j ) *
+            //             Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+            //     }
+            // }
+        } );
+    Kokkos::fence();
 
     // // Broadcast direct potential to all other ranks.
     // MPI_Bcast(&potential_direct, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);

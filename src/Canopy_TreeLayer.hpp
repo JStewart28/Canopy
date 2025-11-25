@@ -163,7 +163,7 @@ class TreeLayer
         //     _global_high_corner[1] - _global_low_corner[1],
         //     _global_high_corner[2] - _global_low_corner[2],
         //     _tiles_per_dim);
-        // printf("L%d: R%d: global_num_cell: %d, %d, %d\n",  _layer_number, _rank, _global_num_cell[0], _global_num_cell[1], _global_num_cell[2]);
+        printf("L%d: R%d: global_num_cell: %d, %d, %d\n",  _layer_number, _rank, _global_num_cell[0], _global_num_cell[1], _global_num_cell[2]);
                 
         // sparse partitioner
         float max_workload_coeff = 1.5;
@@ -853,8 +853,8 @@ class TreeLayer
     template <class ParticleAoSoA>
     void populateCells(const ParticleAoSoA data_aosoa)
     {
-        // int rank = _rank;
-        // int layer_number = _layer_number;
+        int rank = _rank;
+        int layer_number = _layer_number;
 
         updateCellSize();
 
@@ -933,15 +933,15 @@ class TreeLayer
                     // Getting here means some particles activate the same cell.
                     // printf("Rank %d: incoming tuple %d activates already activated cell at cell id %d\n", rank, pid, cell_id);
                 }
-                // if (result.success() && layer_number == 2)
-                // {
-                //     printf("Insert: R%d: cid: %llu, ijk: %llu, %llu, %llu, cell size: %0.3lf\n",
-                //         rank,
-                //         (unsigned long long)cell_id,
-                //         (unsigned long long)cell_activated_ijk[0],
-                //         (unsigned long long)cell_activated_ijk[1],
-                //         (unsigned long long)cell_activated_ijk[2], cell_size[0]);
-                // }
+                if (result.success() && layer_number == 0)
+                {
+                    printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu, cell size: %0.3lf\n",
+                        layer_number, rank,
+                        (unsigned long long)cell_id,
+                        (unsigned long long)cell_activated_ijk[0],
+                        (unsigned long long)cell_activated_ijk[1],
+                        (unsigned long long)cell_activated_ijk[2], cell_size[0]);
+                }
 
                 // Save the cell the incoming data activates.
                 // The following line appears redundant, but later this
@@ -1043,7 +1043,7 @@ class TreeLayer
         {
             throw std::runtime_error("multipole_to_local only works for comm_size 1");
         }
-
+        printf("Starting layer %d...\n", _layer_number);
         auto locals = _locals;
         auto map = *_map_ptr;
         auto aosoa = _cells_ptr->aosoa();
@@ -1070,7 +1070,7 @@ class TreeLayer
                 // Cell local index
                 auto ijk2l_index = ijk2l.find(cell_ijk);
                 auto local_index = ijk2l.value_at(ijk2l_index);
-
+                
                 // Index of this cell into sparse array AoSoA
                 auto tid = map.queryTile(cell_ijk[0], cell_ijk[1], cell_ijk[2]);
                 auto ctid = map.cell_local_id(cell_ijk[0], cell_ijk[1], cell_ijk[2]);
@@ -1108,7 +1108,6 @@ class TreeLayer
                 //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
                 //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
 
-
                 // Iterate over all cells whose multipoles we must consider.
                 // XXX - Make this a team policy nested for loop
                 for (int ci = outer_lower_bound[0]; ci < outer_upper_bound[0]; ci++)
@@ -1130,17 +1129,19 @@ class TreeLayer
                             // XXX - for now, we assume this cell is haloed if necessary and
                             // activated in the sparse map.
                             auto neighbor_cell_id = map.queryCell(ci, cj, ck);
-                            auto neighbor_activated = cid2ijk.exists(neighbor_cell_id);
-                            if (!neighbor_activated)
-                            {
-                                // Cell not activated; do not consider
-                                continue;
-                            }
+                            if (rank == 0 && layer_number == 0)
+                            printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d, nid: %d\n", layer_number, rank,
+                                cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck, neighbor_cell_id);
+                            
+                            // auto neighbor_activated = cid2ijk.exists(neighbor_cell_id);
+                            // if (!neighbor_activated)
+                            // {
+                            //     // Cell not activated; do not consider
+                            //     continue;
+                            // }
 
-                            if (rank == 0 && layer_number == 1 && cell_ijk[0] == 1 && cell_ijk[1] == 3 && cell_ijk[2] == 2)
-                            printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
-                                cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
-
+                            
+                            continue;
                             // Otherwise get the data
                             auto n_tid = map.queryTile(ci, cj, ck);
                             auto n_ctid = map.cell_local_id(ci, cj, ck);
@@ -1224,6 +1225,12 @@ class TreeLayer
     int tilesPerDim() const {return _tiles_per_dim;}
     Kokkos::Array<double, 3> cellSize() const {return _cell_size;}
     Kokkos::UnorderedMap<int, Kokkos::Array<std::size_t, 3>, memory_space>& cid2ijk() {return _cid2ijk;}
+
+    // Get the local coefficients
+    auto locals() {return _locals;}
+
+    // Return cell_ijk to index into local view map
+    auto cellijk2l() {return _ijk2l;}
 
   private:
     const std::array<double, 3> _global_high_corner;
