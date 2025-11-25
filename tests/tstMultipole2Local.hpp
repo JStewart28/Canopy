@@ -76,8 +76,11 @@ void testMultipole2Local(bool balanced)
     ASSERT_EQ(layer->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
 
     // Create the data on rank 0. It will automatically be distributed correctly when
-    // filled into the tree.
-    int num_points = (rank == 0) ? (comm_size * 2) : 0;
+    // filled into the tree. There must be enough particles so that the target point resides
+    // in a cell that has been activated in the mesh. This won't be a problem in the
+    // "real" code because we only evaluate locals where cells are activated.
+    int points_per_proc = 50;
+    int num_points = (rank == 0) ? (comm_size * points_per_proc) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -91,8 +94,8 @@ void testMultipole2Local(bool balanced)
         coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
     }
 
-    fillRandomCoordinates(cart_coords, coord_bounds);
-    fillRandomScalar(q, charge_bounds);
+    fillRandomCoordinates(cart_coords, coord_bounds, 123);
+    fillRandomScalar(q, charge_bounds, 321);
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
@@ -119,15 +122,16 @@ void testMultipole2Local(bool balanced)
     // Fill the tree
     bool run_load_balance = !balanced;
     tree->create_multipoles(particle_aosoa, run_load_balance);
-    layer->multipole_to_local(50);
-    return;
+
+    // Consider all cells when creating locals because we are only testing one layer
+    layer->multipole_to_local(cells_per_leaf_dimension);
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 3;
+    int num_target_points = 11;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
-    fillRandomCoordinates(target_points, coord_bounds);
+    fillRandomCoordinates(target_points, coord_bounds, 456);
     
     auto target_points_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), target_points);
 
@@ -190,12 +194,12 @@ void testMultipole2Local(bool balanced)
             direct_potentials(tpi) += q_h( op ) / dist;
         
         }
-        printf("target_cell_ijk(%d): (%lu, %lu, %lu), c(%.2lf, %.2lf, %.2lf): %.3lf\n", tpi,
-            target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            target_points_host(tpi, 0), target_points_host(tpi, 1), target_points_host(tpi, 2),
-            direct_potentials(tpi));
+        // printf("target_cell_ijk(%d): (%lu, %lu, %lu), c(%.2lf, %.2lf, %.2lf), dp: %.3lf\n", tpi,
+        //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+        //     target_points_host(tpi, 0), target_points_host(tpi, 1), target_points_host(tpi, 2),
+        //     direct_potentials(tpi));
     }
-
+    
     // Get locals
     auto locals = layer->locals();
     auto ijk2l = layer->cellijk2l();
@@ -221,6 +225,11 @@ void testMultipole2Local(bool balanced)
                     Kokkos::floor((target_points(tpi, dim) - global_low_corner_k[dim]) / cell_size[dim]) );
             }
 
+            // Only continue if this cell exists in the mesh
+            auto cell_exists = ijk2l.exists(target_cell_ijk);
+            if (!cell_exists)
+                return;
+
              // Center of local expansion is the cell center
             Kokkos::Array<double, 3> l_center;
             for (int i = 0; i < 3; i++)
@@ -233,26 +242,33 @@ void testMultipole2Local(bool balanced)
                                       target_points(tpi, 2) - l_center[2],
                                       r, theta, phi );
 
-            // Get the locals for this cell
             auto ijk2l_index = ijk2l.find(target_cell_ijk);
-            printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2l index: %u\n", tpi,
-                    target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], ijk2l_index);
-            // auto local_index = ijk2l.value_at(ijk2l_index);
+            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2l index: %u\n", tpi,
+            //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], ijk2l_index);
+            auto local_index = ijk2l.value_at(ijk2l_index);
             // printf("tpi: %d, local index: %lu\n", tpi, local_index);
+            printf("tcell(%d, %d, %d): l(%d): (%.2lf, %.2lf, %.2lf, %.2lf)\n",
+                    target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+                    local_index, locals(local_index, 0).real(), locals(local_index, 1).real(),
+                    locals(local_index, 2).real(), locals(local_index, 3).real());
             // Calculate potential using locals
-            // for ( int j = 0; j <= p_val; ++j )
-            // {
-            //     for ( int k = -j; k <= p_val; ++k )
-            //     {
-            //         int idx = Canopy::Kernel::Scalar::index( j, k );
+            for ( int j = 0; j <= p_val; ++j )
+            {
+                for ( int k = -j; k <= p_val; ++k )
+                {
+                    int idx = Canopy::Kernel::Scalar::index( j, k );
 
-            //         /* Target point 1 calculations */
-            //         // Greengard eq. 3.59
-            //         local_potential(tpi) +=
-            //             locals( local_index, idx ) * Kokkos::pow( r, j ) *
-            //             Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
-            //     }
-            // }
+                    /* Target point 1 calculations */
+                    // Greengard eq. 3.59
+                    local_potential(tpi) +=
+                        locals( local_index, idx ) * Kokkos::pow( r, j ) *
+                        Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                    printf("Size: %d, Index %d, adding val %.2lf\n", (p_val+1)*(p_val+1), idx, locals( local_index, idx ) * Kokkos::pow( r, j ) *
+                        Canopy::Kernel::Scalar::Ynm( j, k, theta, phi ));
+                }
+            }
+            printf("tcell(%d, %d, %d), lp: %.3lf\n",
+                target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], local_potential(tpi).real());
         } );
     Kokkos::fence();
 

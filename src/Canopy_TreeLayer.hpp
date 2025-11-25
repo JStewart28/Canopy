@@ -631,14 +631,14 @@ class TreeLayer
                                                 cell_ijk[2]}, idx);
                 if (!result.success())
                 {
-                    printf("Did not add local index\n");
+                    // printf("Did not add local index\n");
                 }
-                else
-                {
-                    printf("L%d: R%d: cell (%d, %d, %d), lid: %d\n", layer_number, rank, cell_ijk[0],
-                                                cell_ijk[1],
-                                                cell_ijk[2], idx);
-                }
+                // else
+                // {
+                //     printf("L%d: R%d: cell (%d, %d, %d), lid: %d\n", layer_number, rank, cell_ijk[0],
+                //                                 cell_ijk[1],
+                //                                 cell_ijk[2], idx);
+                // }
 
                 // printf("R%d: setting leaf c(%.3lf, %.3lf, %.3lf)\n",
                 //     rank, cell_center(0), cell_center(1), cell_center(2));
@@ -941,15 +941,15 @@ class TreeLayer
                     // Getting here means some particles activate the same cell.
                     // printf("Rank %d: incoming tuple %d activates already activated cell at cell id %d\n", rank, pid, cell_id);
                 }
-                if (result.success() && layer_number == 0)
-                {
-                    printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu, cell size: %0.3lf\n",
-                        layer_number, rank,
-                        (unsigned long long)cell_id,
-                        (unsigned long long)cell_activated_ijk[0],
-                        (unsigned long long)cell_activated_ijk[1],
-                        (unsigned long long)cell_activated_ijk[2], cell_size[0]);
-                }
+                // if (result.success() && layer_number == 0)
+                // {
+                //     printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu, cell size: %0.3lf\n",
+                //         layer_number, rank,
+                //         (unsigned long long)cell_id,
+                //         (unsigned long long)cell_activated_ijk[0],
+                //         (unsigned long long)cell_activated_ijk[1],
+                //         (unsigned long long)cell_activated_ijk[2], cell_size[0]);
+                // }
 
                 // Save the cell the incoming data activates.
                 // The following line appears redundant, but later this
@@ -1116,10 +1116,10 @@ class TreeLayer
                 //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
                 //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
                 // if (rank == 0 && layer_number == 0)
-                printf("L%d: R%d: considering cell %d, %d, %d, li: %d\n",
-                    layer_number, rank,
-                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    local_index);
+                // printf("L%d: R%d: considering cell %d, %d, %d, li: %d\n",
+                //     layer_number, rank,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     local_index);
 
                 // Iterate over all cells whose multipoles we must consider.
                 // XXX - Make this a team policy nested for loop
@@ -1142,19 +1142,17 @@ class TreeLayer
                             // XXX - for now, we assume this cell is haloed if necessary and
                             // activated in the sparse map.
                             Kokkos::Array<std::size_t, 3> neighbor_ijk = {ci, cj, ck};                   
-                            auto neighbor_exists = ijk2l.exists(neighbor_ijk);
+                            auto neighbor_activated = ijk2l.exists(neighbor_ijk);
                             // auto neighbor_lid = ijk2l.value_at(neighbor_i);
-                            // if (!neighbor_activated)
-                            // {
-                            //     // Cell not activated; do not consider
-                            //     continue;
-                            // }
-                            if (rank == 0 && layer_number == 0 && neighbor_exists)
-                            printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d, exists: %d\n", layer_number, rank,
-                                cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck, neighbor_exists);      
+                            if (!neighbor_activated)
+                            {
+                                // Cell not activated; do not consider
+                                continue;
+                            }
+                            // if (rank == 0 && layer_number == 0 && cell_ijk[0] == 10 && cell_ijk[1] == 10 && cell_ijk[2] == 3)
+                            // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
+                            //     cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
 
-                            
-                            continue;
                             // Otherwise get the data
                             auto n_tid = map.queryTile(ci, cj, ck);
                             auto n_ctid = map.cell_local_id(ci, cj, ck);
@@ -1171,9 +1169,8 @@ class TreeLayer
                             Kokkos::Array<cdouble, num_coefficients> M;
                             for (std::size_t i = 0; i < num_coefficients; i++)
                             {
-                                cdouble val;
-                                val.real() = m_slice(neighbor_index, i, 0);
-                                val.imag() = m_slice(neighbor_index, i, 1);
+                                M[i].real() = m_slice(neighbor_index, i, 0);
+                                M[i].imag() = m_slice(neighbor_index, i, 1);
                             }
 
                             // Convert to locals
@@ -1184,6 +1181,11 @@ class TreeLayer
                             for (std::size_t i = 0; i < num_coefficients; i++)
                                 locals(local_index, i) += L[i];
                         }
+                // if (cell_ijk[0] == 10 && cell_ijk[1] == 10 && cell_ijk[2] == 3)
+                // printf("L%d: R%d: cell(%d, %d, %d): locals: %.1lf, %.1lf, %.1lf\n", layer_number, rank,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     locals(local_index, 0).real(), locals(local_index, 1).real(),
+                //     locals(local_index, 2).real(), locals(local_index, 3).real());
             }
         });
     }
