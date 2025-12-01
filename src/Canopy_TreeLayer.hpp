@@ -939,19 +939,28 @@ class TreeLayer
                 if (!result.success())
                 {
                     // Getting here means some particles activate the same cell.
-                    // printf("Rank %d: incoming tuple %d activates already activated cell at cell id %d\n", rank, pid, cell_id);
+                    if (layer_number == 0)
+                    {
+                        auto ccenter = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2],
+                            low_corner, cell_size);
+                        printf("Same cell activated: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
+                            layer_number, rank,
+                            (unsigned long long)cell_id,
+                            (unsigned long long)cell_activated_ijk[0],
+                            (unsigned long long)cell_activated_ijk[1],
+                            (unsigned long long)cell_activated_ijk[2],
+                            positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
+                    }
                 }
                 if (result.success() && layer_number == 0)
                 {
-                    auto ccenter = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2],
-                        low_corner, cell_size);
-                    printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu, c(%.2lf, %.2lf, %.2lf) cell size: %0.3lf\n",
+                    printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
                         layer_number, rank,
                         (unsigned long long)cell_id,
                         (unsigned long long)cell_activated_ijk[0],
                         (unsigned long long)cell_activated_ijk[1],
                         (unsigned long long)cell_activated_ijk[2],
-                        ccenter[0], ccenter[1], ccenter[2], cell_size[0]);
+                        positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
                 }
 
                 // Save the cell the incoming data activates.
@@ -1054,7 +1063,7 @@ class TreeLayer
         {
             throw std::runtime_error("multipole_to_local only works for comm_size 1");
         }
-        printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
+        // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
         auto map = *_map_ptr;
         auto aosoa = _cells_ptr->aosoa();
@@ -1171,6 +1180,19 @@ class TreeLayer
                                 M[i].imag() = m_slice(neighbor_index, i, 1);
                             }
 
+                            if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
+                            {
+                                if( ci == 5 && cj == 15 && ck == 9)
+                                {
+                                    for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
+                                    {
+                                        printf("L%d: R%d: cell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
+                                            cell_ijk[0], cell_ijk[1], cell_ijk[2], lid,
+                                            m_slice(neighbor_index, lid, 0), m_slice(neighbor_index, lid, 1));
+                                    }
+                                }
+                            }
+
                             // Convert to locals
                             Kokkos::Array<cdouble, num_coefficients> L;
                             Kernel::Scalar::m2l<p>(M, L, m2l_vec);
@@ -1179,11 +1201,15 @@ class TreeLayer
                             for (std::size_t i = 0; i < num_coefficients; i++)
                                 locals(local_index, i) += L[i];
                         }
-                // if (cell_ijk[0] == 10 && cell_ijk[1] == 10 && cell_ijk[2] == 3)
-                // printf("L%d: R%d: cell(%d, %d, %d): locals: %.1lf, %.1lf, %.1lf\n", layer_number, rank,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     locals(local_index, 0).real(), locals(local_index, 1).real(),
-                //     locals(local_index, 2).real(), locals(local_index, 3).real());
+                // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
+                // {
+                //     for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
+                //     {
+                //         printf("L%d: R%d: cell(%d, %d, %d): locals(%d): (%.3lf, %.3lf)\n", layer_number, rank,
+                //             cell_ijk[0], cell_ijk[1], cell_ijk[2], lid,
+                //             locals(local_index, lid).real(), locals(local_index, lid).imag());
+                //     }
+                // }
             }
         });
     }
