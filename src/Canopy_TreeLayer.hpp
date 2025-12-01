@@ -941,15 +941,18 @@ class TreeLayer
                     // Getting here means some particles activate the same cell.
                     // printf("Rank %d: incoming tuple %d activates already activated cell at cell id %d\n", rank, pid, cell_id);
                 }
-                // if (result.success() && layer_number == 0)
-                // {
-                //     printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu, cell size: %0.3lf\n",
-                //         layer_number, rank,
-                //         (unsigned long long)cell_id,
-                //         (unsigned long long)cell_activated_ijk[0],
-                //         (unsigned long long)cell_activated_ijk[1],
-                //         (unsigned long long)cell_activated_ijk[2], cell_size[0]);
-                // }
+                if (result.success() && layer_number == 0)
+                {
+                    auto ccenter = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2],
+                        low_corner, cell_size);
+                    printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu, c(%.2lf, %.2lf, %.2lf) cell size: %0.3lf\n",
+                        layer_number, rank,
+                        (unsigned long long)cell_id,
+                        (unsigned long long)cell_activated_ijk[0],
+                        (unsigned long long)cell_activated_ijk[1],
+                        (unsigned long long)cell_activated_ijk[2],
+                        ccenter[0], ccenter[1], ccenter[2], cell_size[0]);
+                }
 
                 // Save the cell the incoming data activates.
                 // The following line appears redundant, but later this

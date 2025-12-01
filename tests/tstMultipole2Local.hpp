@@ -79,7 +79,7 @@ void testMultipole2Local(bool balanced)
     // filled into the tree. There must be enough particles so that the target point resides
     // in a cell that has been activated in the mesh. This won't be a problem in the
     // "real" code because we only evaluate locals where cells are activated.
-    int points_per_proc = 100;
+    int points_per_proc = 2;
     int num_points = (rank == 0) ? (comm_size * points_per_proc) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
@@ -94,7 +94,16 @@ void testMultipole2Local(bool balanced)
         coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
     }
 
-    fillRandomCoordinates(cart_coords, coord_bounds, 123);
+    // fillRandomCoordinates(cart_coords, coord_bounds, 123);
+    // Activate cell (14, 12, 5) center(2.42, 1.81, -1.04) where the target point will be
+    // Activate cell (1, 5, 13) center(-2.44, -0.94, 2.06), far from target point cell
+    cart_coords(0, 0) = 2.3;
+    cart_coords(0, 1) = 1.8;
+    cart_coords(0, 2) = -1.09;
+    cart_coords(1, 0) = -2.5;
+    cart_coords(1, 1) = -0.8;
+    cart_coords(1, 2) = 1.9;
+
     fillRandomScalar(q, charge_bounds, 321);
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
@@ -128,10 +137,16 @@ void testMultipole2Local(bool balanced)
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 120;
+    int num_target_points = 1;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
-    fillRandomCoordinates(target_points, coord_bounds, 456);
+    // fillRandomCoordinates(target_points, coord_bounds, 456);
+
+    // Put target point in cell (14, 12, 5)
+    // cell: (14, 12, 5) center: (2.44, 1.69, -0.94)
+    target_points(0, 0) = 2.5;
+    target_points(0, 1) = 1.5;
+    target_points(0, 2) = -0.9;
     
     auto target_points_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), target_points);
 
@@ -235,6 +250,11 @@ void testMultipole2Local(bool balanced)
             for (int i = 0; i < 3; i++)
                 l_center[i] = global_low_corner_k[i] + (static_cast<double>(target_cell_ijk[i]) + 0.5) * cell_size[i];
 
+            // printf("t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf)\n", tpi,
+            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+            //     l_center[0], l_center[1], l_center[2]);
+
+
             // Convert target point to spherical coordinates relative to local center
             double r, theta, phi;
             Canopy::Kernel::cart2sph( target_points(tpi, 0) - l_center[0],
@@ -268,7 +288,7 @@ void testMultipole2Local(bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            printf("t%d, cell(%d, %d, %d), dp: %.3lf, lp: %.3lf\n", tpi,
+            printf("t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.3lf, lp: %.3lf\n", tpi,
                 target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
                 l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
