@@ -34,7 +34,7 @@ using cdouble = Kokkos::complex<double>;
  *  3. Calculate the potential using local approximation and compare values.
  */
 template <std::size_t p_val>
-void testMultipole2Local(bool balanced)
+void testMultipole2Local(int points_per_proc_in, bool balanced)
 {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -79,7 +79,7 @@ void testMultipole2Local(bool balanced)
     // filled into the tree. There must be enough particles so that the target point resides
     // in a cell that has been activated in the mesh. This won't be a problem in the
     // "real" code because we only evaluate locals where cells are activated.
-    int points_per_proc = 34;
+    int points_per_proc = points_per_proc_in;
     int num_points = (rank == 0) ? (comm_size * points_per_proc) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
@@ -95,36 +95,52 @@ void testMultipole2Local(bool balanced)
     }
 
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
+    fillRandomScalar(q, charge_bounds, 321);
+
     // Activate cell (14, 12, 5) center(2.42, 1.81, -1.04) where the target point will be
-    // Activate cell (1, 5, 13) center(-2.44, -0.94, 2.06), far from target point cell
     cart_coords(0, 0) = 2.3;
     cart_coords(0, 1) = 1.8;
     cart_coords(0, 2) = -1.09;
+    q(0) = -1.0;
 
-    // Cell causing issues: Particle 34 pos: -0.90, 2.94, 0.68
+    // Cell causing issues: Particle 34 pos: -0.90, 2.94, 0.68, ijk: 5, 15, 9
     cart_coords(1, 0) = -0.9;
     cart_coords(1, 1) = 2.94;
     cart_coords(1, 2) = 0.68;
-    q(1) = 2.2;
+    q(1) = 0.9;
 
-    cart_coords(2, 0) = -2.5;
-    cart_coords(2, 1) = -0.8;
-    cart_coords(2, 2) = 1.9;
+    // Cell causing issues: Particle 11 pos: -1.05, 2.34, 0.72, ijk: 5, 14, 9
+    cart_coords(2, 0) = -1.05;
+    cart_coords(2, 1) = 2.34;
+    cart_coords(2, 2) = -0.72;
+    q(2) = 2.0;
+
+    // Particle 11 pos: -1.05, 2.34, 0.72
+    cart_coords(3, 0) = 1.05;
+    cart_coords(3, 1) = 2.34;
+    cart_coords(3, 2) = 0.1;
+    q(3) = -3.0;
+
+    for (int i = 4; i < points_per_proc; i++)
+    {
+        q(i) = 0.0;
+    }
 
     // Cell causing issues: Particle 11 pos: -1.05, 2.34, 0.72
-    // cart_coords(3, 0) = -1.05;
-    // cart_coords(3, 1) = 2.34;
-    // cart_coords(3, 2) = 0.72;
+    if (points_per_proc == 12)
+    {
+        cart_coords(11, 0) = -1.052;
+        cart_coords(11, 1) = 2.342;
+        cart_coords(11, 2) = 0.722;
+        q(11) = 0.0;
+    }
+    
     // for (int i = 3; i < points_per_proc; i++)
     // {
     //     cart_coords(i, 0) = -2.5+0.001*i;
     //     cart_coords(i, 1) = -0.8+0.001*i;
     //     cart_coords(i, 2) = 1.9+0.001*i;
     // }
-
-    // printf("Particle 11 pos: %.2lf, %.2lf, %.2lf\n", cart_coords(11, 0), cart_coords(11, 1), cart_coords(11, 2));
-
-    fillRandomScalar(q, charge_bounds, 321);
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
@@ -133,6 +149,12 @@ void testMultipole2Local(bool balanced)
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
     auto q_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
+
+    int pindex = points_per_proc - 1;
+    printf("Particle %d pos: %.3lf, %.3lf, %.3lf, q: %.1lf\n", pindex,
+        cart_coords_h(pindex, 0), cart_coords_h(pindex, 1), cart_coords_h(pindex, 2),
+        q_h(pindex));
+
     for (int i = 0; i < num_points; ++i)
     {
         for (int j = 0; j < 3; ++j)
@@ -230,8 +252,7 @@ void testMultipole2Local(bool balanced)
             double dy = target_points_host(tpi, 1) - cart_coords_h( op, 1 );
             double dz = target_points_host(tpi, 2) - cart_coords_h( op, 2 );
             double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
-            direct_potentials(tpi) += q_h( op ) / dist;
-        
+            direct_potentials(tpi) += q_h( op ) / dist;        
         }
         // printf("t%d, cell(%lu, %lu, %lu), coord(%.2lf, %.2lf, %.2lf), dp: %.3lf\n", tpi,
         //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
@@ -312,7 +333,7 @@ void testMultipole2Local(bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            printf("t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", tpi,
+            printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
                 target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
                 l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
@@ -391,7 +412,11 @@ void testMultipole2Local(bool balanced)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-TEST( Tree, testMultipole2Local_balanced ) { testMultipole2Local<4>(true); }
+TEST( Tree, testMultipole2Local_balanced )
+{ 
+    for (int i = 11; i < 13; i++)
+        testMultipole2Local<1>(i, true); 
+}
 
 //---------------------------------------------------------------------------//
 

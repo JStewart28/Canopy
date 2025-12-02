@@ -523,11 +523,16 @@ class TreeLayer
                     // will be the same for all threads so only one thread needs to
                     // compute them.
                     auto cid = out_id_slice(in_id);
-                    auto index = cid2ijk.find(cid);
+                    auto cid_index = cid2ijk.find(cid);
 
                     // Get the cell center for multipole calculations using the cid
-                    auto cell_ijk = cid2ijk.value_at(index);
+                    auto cell_ijk = cid2ijk.value_at(cid_index);
                     auto cell_center_array = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2], low_corner, cell_size);
+                    printf("c_ijk(%d, %d, %d): center(%.3lf, %.3lf, %.3lf), low(%.1lf, %.1lf, %.1lf), size(%.3lf, %.3lf, %.3lf)\n",
+                        cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        cell_center_array[0], cell_center_array[1], cell_center_array[2],
+                        low_corner[0], low_corner[1], low_corner[2],
+                        cell_size[0], cell_size[1], cell_size[2]);
                     // printf("L0: R%d: cid: %llu, ijk: %llu, %llu, %llu\n",
                     //     rank,
                     //     (unsigned long long)cid,
@@ -591,14 +596,29 @@ class TreeLayer
 
                 tuple_type tp;
 
+                auto cid = out_id_slice(start);
+                auto cid_index = cid2ijk.find(cid);
+                auto cell_ijk = cid2ijk.value_at(cid_index);
+
                 // Multipole coefficients
                 for (std::size_t j = 0; j < ((p+1)*(p+1)); ++j)
                 {
                     Cabana::get<0>(tp, j, 0) = M_coefficients(j).real();
                     Cabana::get<0>(tp, j, 1) = M_coefficients(j).imag();
-                    // printf("R%d: cid: %d: P2M(%d): (%0.4lf, %0.4lf)\n", rank, out_id_slice(start),
+                    // printf("R%d: cell(%d, %d, %d): M(%d): (%0.3lf, %0.3lf)\n", rank,
+                    //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
                     //     j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
                 }
+                // for (std::size_t j = 0; j < view_size; j++)
+                // {
+                //     printf("R%d: cell(%d, %d, %d): c(%.2lf, %.2lf, %.2lf), csize(%.2lf, %.2lf, %.2lf), lowc(%.2lf, %.2lf, %.2lf), p%d(%.2lf, %.2lf, %.2lf), q%d(%.2lf)\n", rank,
+                //         cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //         cell_center(0), cell_center(1), cell_center(2),
+                //         cell_size[0], cell_size[1], cell_size[2],
+                //         low_corner[0], low_corner[1], low_corner[2],
+                //         j, positions(j, 0), positions(j, 1), positions(j, 2),
+                //         j, scalars(j));
+                // }
 
                 // Cell center
                 for (std::size_t j = 0; j < 3; ++j)
@@ -609,10 +629,6 @@ class TreeLayer
 
                 // Rank
                 Cabana::get<3>(tp) = rank;
-
-                auto cid = out_id_slice(start);
-                auto index = cid2ijk.find(cid);
-                auto cell_ijk = cid2ijk.value_at(index);
 
                 auto tid = map.queryTile(cell_ijk[0],
                                             cell_ijk[1],
@@ -909,6 +925,13 @@ class TreeLayer
                 //         (unsigned long long)cell_activated_ijk[1],
                 //         (unsigned long long)cell_activated_ijk[2], cell_size[0]);
                 // }
+                // 5, 14, 9
+                // if (cell_activated_ijk[0] == 5 && cell_activated_ijk[1] == 14 && cell_activated_ijk[2] == 9)
+                // {
+                //     printf("Skipping cell 5, 14, 9\n");
+                //     return;
+                // }
+                   
 
                 // register grids that will have data transfer with the particle
                 map.insertCell( cell_activated_ijk[0], cell_activated_ijk[1],
@@ -1182,15 +1205,15 @@ class TreeLayer
 
                             if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
                             {
-                                if( ci == 5 && cj == 15 && ck == 9)
-                                {
+                                // if( ci == 5 && cj == 15 && ck == 9)
+                                // {
                                     for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
                                     {
-                                        printf("L%d: R%d: cell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
-                                            cell_ijk[0], cell_ijk[1], cell_ijk[2], lid,
+                                        printf("L%d: R%d: ncell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
+                                            ci, cj, ck, lid,
                                             m_slice(neighbor_index, lid, 0), m_slice(neighbor_index, lid, 1));
                                     }
-                                }
+                                // }
                             }
 
                             // Convert to locals
