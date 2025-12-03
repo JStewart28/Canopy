@@ -496,6 +496,7 @@ class TreeLayer
         auto in_id_slice = Cabana::slice<0>(in2out);
         auto out_id_slice = Cabana::slice<1>(in2out);
         Kokkos::View<double[3], memory_space> cell_center("cell_center");
+        Kokkos::View<std::size_t[3], memory_space> cell_ijk("cell_ijk");
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
         auto cid2ijk = _cid2ijk;
@@ -526,23 +527,24 @@ class TreeLayer
                     auto cid_index = cid2ijk.find(cid);
 
                     // Get the cell center for multipole calculations using the cid
-                    auto cell_ijk = cid2ijk.value_at(cid_index);
-                    auto cell_center_array = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2], low_corner, cell_size);
-                    printf("c_ijk(%d, %d, %d): center(%.3lf, %.3lf, %.3lf), low(%.1lf, %.1lf, %.1lf), size(%.3lf, %.3lf, %.3lf)\n",
-                        cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        cell_center_array[0], cell_center_array[1], cell_center_array[2],
-                        low_corner[0], low_corner[1], low_corner[2],
-                        cell_size[0], cell_size[1], cell_size[2]);
+                    auto cell_ijk_array = cid2ijk.value_at(cid_index);
+                    auto cell_center_array = cellCenter(cell_ijk_array[0], cell_ijk_array[1], cell_ijk_array[2], low_corner, cell_size);
                     // printf("L0: R%d: cid: %llu, ijk: %llu, %llu, %llu\n",
                     //     rank,
                     //     (unsigned long long)cid,
-                    //     (unsigned long long)cell_ijk[0],
-                    //     (unsigned long long)cell_ijk[1],
-                    //     (unsigned long long)cell_ijk[2]);
+                    //     (unsigned long long)cell_ijk_array[0],
+                    //     (unsigned long long)cell_ijk_array[1],
+                    //     (unsigned long long)cell_ijk_array[2]);
                     for (int j = 0; j < 3; ++j)
                     {
                         cell_center(j) = cell_center_array[j];
+                        cell_ijk(j) = cell_ijk_array[j];
                     }
+
+                    // printf("c_ijk(%d, %d, %d): c_arr(%.3lf, %.3lf, %.3lf), c_c(%.3lf, %.3lf, %.3lf)\n",
+                    //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    //     cell_center_array[0], cell_center_array[1], cell_center_array[2],
+                    //     cell_center(0), cell_center(1), cell_center(2));
 
                     // Save the tile id and cell tile id
                     // auto tid = map.queryTile(cell_ijk[0],
@@ -563,17 +565,25 @@ class TreeLayer
         Kokkos::fence();
 
         // Copy cell center to host and move to a Kokkos::Array
-        auto cell_center_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_center);
-        Kokkos::Array<double, 3> cell_center_array;
-        for (std::size_t i = 0; i < 3; ++i)
-            cell_center_array[i] = cell_center_h(i);
+        // auto cell_center_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cell_center);
+        // Kokkos::Array<double, 3> cell_center_array;
+        // for (std::size_t i = 0; i < 3; ++i)
+        //     cell_center_array[i] = cell_center_h(i);
         
         // Use the center of the activated cell, the positions of the incoming data, and the 
         // scalar values attached to the incoming data to compute multipole coefficients.
         Kernel::Scalar::P2M<memory_space, execution_space> p2m( p );
         auto positions = Cabana::slice<0>(cell_data);
         auto scalars = Cabana::slice<1>(cell_data);
-        p2m(positions, scalars, view_size, cell_center_array);
+        for (std::size_t i = 0; i < cell_data.size(); i++)
+        {
+            printf("cell_ijk: (%d, %d, %d), center(%.3lf, %.3lf, %.3lf), i%d: pos(%.3lf, %.3lf, %.3lf), sc(%.1lf)\n",
+            cell_ijk(0), cell_ijk(1), cell_ijk(2),
+            cell_center(0), cell_center(1), cell_center(2), i,
+            positions(i, 0), positions(i, 1), positions(i, 2),
+            scalars(i));
+        }
+        p2m(positions, scalars, view_size, cell_center);
         auto M_coefficients = p2m.coefficients();
 
         /**
@@ -596,10 +606,6 @@ class TreeLayer
 
                 tuple_type tp;
 
-                auto cid = out_id_slice(start);
-                auto cid_index = cid2ijk.find(cid);
-                auto cell_ijk = cid2ijk.value_at(cid_index);
-
                 // Multipole coefficients
                 for (std::size_t j = 0; j < ((p+1)*(p+1)); ++j)
                 {
@@ -611,11 +617,9 @@ class TreeLayer
                 }
                 // for (std::size_t j = 0; j < view_size; j++)
                 // {
-                //     printf("R%d: cell(%d, %d, %d): c(%.2lf, %.2lf, %.2lf), csize(%.2lf, %.2lf, %.2lf), lowc(%.2lf, %.2lf, %.2lf), p%d(%.2lf, %.2lf, %.2lf), q%d(%.2lf)\n", rank,
+                //     printf("R%d: cell(%d, %d, %d): c(%.2lf, %.2lf, %.2lf), p%d(%.2lf, %.2lf, %.2lf), q%d(%.2lf)\n", rank,
                 //         cell_ijk[0], cell_ijk[1], cell_ijk[2],
                 //         cell_center(0), cell_center(1), cell_center(2),
-                //         cell_size[0], cell_size[1], cell_size[2],
-                //         low_corner[0], low_corner[1], low_corner[2],
                 //         j, positions(j, 0), positions(j, 1), positions(j, 2),
                 //         j, scalars(j));
                 // }
@@ -630,21 +634,21 @@ class TreeLayer
                 // Rank
                 Cabana::get<3>(tp) = rank;
 
-                auto tid = map.queryTile(cell_ijk[0],
-                                            cell_ijk[1],
-                                            cell_ijk[2]);
-                auto ctid = map.cell_local_id(cell_ijk[0],
-                                            cell_ijk[1],
-                                            cell_ijk[2]);
+                auto tid = map.queryTile(cell_ijk(0),
+                                            cell_ijk(1),
+                                            cell_ijk(2));
+                auto ctid = map.cell_local_id(cell_ijk(0),
+                                            cell_ijk(1),
+                                            cell_ijk(2));
                 aosoa.setTuple(( tid << cell_bits_per_tile ) |
                                ( ctid & cell_mask_per_tile ), tp );
 
                 // Index into local view
                 auto idx = Kokkos::atomic_fetch_add(&local_view_index(), 1);
                 auto result = ijk2l.insert( Kokkos::Array<std::size_t, 3>{
-                                                cell_ijk[0],
-                                                cell_ijk[1],
-                                                cell_ijk[2]}, idx);
+                                                cell_ijk(0),
+                                                cell_ijk(1),
+                                                cell_ijk(2)}, idx);
                 if (!result.success())
                 {
                     // printf("Did not add local index\n");

@@ -188,10 +188,10 @@ struct P2M
      * where (ρ_i,α_i,β_i) are spherical coords of point i
      * relative to expansion_center.
      */
-    template <class PositionArray, class ScalarArray>
+    template <class PositionArray, class ScalarArray, class CenterArray>
     void operator()( const PositionArray& pos, const ScalarArray& scalar,
                      std::size_t k,
-                     const Kokkos::Array<double, 3>& expansion_center ) const
+                     const CenterArray& expansion_center ) const
     {
         int p = _p;
         auto M = _M;
@@ -202,9 +202,9 @@ struct P2M
             Kokkos::RangePolicy<execution_space>( 0, k ),
             KOKKOS_LAMBDA( const int i ) {
                 // Construct coordinates relative to the expansion center.
-                double dx = pos( i, 0 ) - expansion_center[0];
-                double dy = pos( i, 1 ) - expansion_center[1];
-                double dz = pos( i, 2 ) - expansion_center[2];
+                double dx = pos( i, 0 ) - expansion_center(0);
+                double dy = pos( i, 1 ) - expansion_center(1);
+                double dz = pos( i, 2 ) - expansion_center(2);
 
                 double rho, alpha, beta;
                 cart2sph( dx, dy, dz, rho, alpha, beta );
