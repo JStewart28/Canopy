@@ -501,6 +501,10 @@ class TreeLayer
         auto cell_size = _cell_size;
         auto cid2ijk = _cid2ijk;
 
+
+        auto positions = Cabana::slice<0>(cell_data);
+        auto scalars = Cabana::slice<1>(cell_data);
+
         // Save the tile id and cell tile id to set the approportiate index
         // in the sparse mesh AoSoA.
         auto map = *_map_ptr;
@@ -541,10 +545,14 @@ class TreeLayer
                         cell_ijk(j) = cell_ijk_array[j];
                     }
 
-                    // printf("c_ijk(%d, %d, %d): c_arr(%.3lf, %.3lf, %.3lf), c_c(%.3lf, %.3lf, %.3lf)\n",
+                    // printf("c_ijk(%d, %d, %d): c_c(%.3lf, %.3lf, %.3lf)\n",
                     //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    //     cell_center_array[0], cell_center_array[1], cell_center_array[2],
                     //     cell_center(0), cell_center(1), cell_center(2));
+                    printf("cell_ijk: (%d, %d, %d), center(%.3lf, %.3lf, %.3lf), i%d: pos(%.3lf, %.3lf, %.3lf), sc(%.1lf), cid: %d, index: %d\n",
+                        cell_ijk(0), cell_ijk(1), cell_ijk(2),
+                        cell_center(0), cell_center(1), cell_center(2), 0,
+                        positions(0, 0), positions(0, 1), positions(0, 2),
+                        scalars(0), cid, cid_index);
 
                     // Save the tile id and cell tile id
                     // auto tid = map.queryTile(cell_ijk[0],
@@ -573,15 +581,10 @@ class TreeLayer
         // Use the center of the activated cell, the positions of the incoming data, and the 
         // scalar values attached to the incoming data to compute multipole coefficients.
         Kernel::Scalar::P2M<memory_space, execution_space> p2m( p );
-        auto positions = Cabana::slice<0>(cell_data);
-        auto scalars = Cabana::slice<1>(cell_data);
+        
         for (std::size_t i = 0; i < cell_data.size(); i++)
         {
-            printf("cell_ijk: (%d, %d, %d), center(%.3lf, %.3lf, %.3lf), i%d: pos(%.3lf, %.3lf, %.3lf), sc(%.1lf)\n",
-            cell_ijk(0), cell_ijk(1), cell_ijk(2),
-            cell_center(0), cell_center(1), cell_center(2), i,
-            positions(i, 0), positions(i, 1), positions(i, 2),
-            scalars(i));
+            
         }
         p2m(positions, scalars, view_size, cell_center);
         auto M_coefficients = p2m.coefficients();
