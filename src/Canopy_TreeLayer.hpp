@@ -501,6 +501,8 @@ class TreeLayer
         auto cell_size = _cell_size;
         auto cid2ijk = _cid2ijk;
 
+        static constexpr std::size_t position_index =
+            std::is_same_v<ParticleAoSoA, data_aosoa_type> ? 1 : 0;
 
         auto positions = Cabana::slice<0>(cell_data);
         auto scalars = Cabana::slice<1>(cell_data);
@@ -527,11 +529,16 @@ class TreeLayer
                     // Since all incoming data are in the same cell, these values
                     // will be the same for all threads so only one thread needs to
                     // compute them.
-                    auto cid = out_id_slice(in_id);
-                    auto cid_index = cid2ijk.find(cid);
+                    auto xpos = Cabana::get<position_index>(data_tuple, 0);
+                    auto ypos = Cabana::get<position_index>(data_tuple, 1);
+                    auto zpos = Cabana::get<position_index>(data_tuple, 2);
+                    auto cell_ijk_array = position2ijk(xpos, ypos, zpos, low_corner, cell_size);
+                   
+                    // auto cid = out_id_slice(in_id);
+                    // auto cid_index = cid2ijk.find(cid);
 
                     // Get the cell center for multipole calculations using the cid
-                    auto cell_ijk_array = cid2ijk.value_at(cid_index);
+                    // auto cell_ijk_array = cid2ijk.value_at(cid_index);
                     auto cell_center_array = cellCenter(cell_ijk_array[0], cell_ijk_array[1], cell_ijk_array[2], low_corner, cell_size);
                     // printf("L0: R%d: cid: %llu, ijk: %llu, %llu, %llu\n",
                     //     rank,
@@ -548,11 +555,10 @@ class TreeLayer
                     // printf("c_ijk(%d, %d, %d): c_c(%.3lf, %.3lf, %.3lf)\n",
                     //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
                     //     cell_center(0), cell_center(1), cell_center(2));
-                    printf("cell_ijk: (%d, %d, %d), center(%.3lf, %.3lf, %.3lf), i%d: pos(%.3lf, %.3lf, %.3lf), sc(%.1lf), cid: %d, index: %d\n",
-                        cell_ijk(0), cell_ijk(1), cell_ijk(2),
-                        cell_center(0), cell_center(1), cell_center(2), 0,
-                        positions(0, 0), positions(0, 1), positions(0, 2),
-                        scalars(0), cid, cid_index);
+                    // printf("cell_ijk: (%d, %d, %d), center(%.3lf, %.3lf, %.3lf), i%d: pos(%.3lf, %.3lf, %.3lf)\n",
+                    //     cell_ijk(0), cell_ijk(1), cell_ijk(2),
+                    //     cell_center(0), cell_center(1), cell_center(2), 0,
+                    //     xpos, ypos, zpos);
 
                     // Save the tile id and cell tile id
                     // auto tid = map.queryTile(cell_ijk[0],
@@ -1210,18 +1216,18 @@ class TreeLayer
                                 M[i].imag() = m_slice(neighbor_index, i, 1);
                             }
 
-                            if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
-                            {
-                                // if( ci == 5 && cj == 15 && ck == 9)
-                                // {
-                                    for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
-                                    {
-                                        printf("L%d: R%d: ncell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
-                                            ci, cj, ck, lid,
-                                            m_slice(neighbor_index, lid, 0), m_slice(neighbor_index, lid, 1));
-                                    }
-                                // }
-                            }
+                            // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
+                            // {
+                            //     // if( ci == 5 && cj == 15 && ck == 9)
+                            //     // {
+                            //         for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
+                            //         {
+                            //             printf("L%d: R%d: ncell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
+                            //                 ci, cj, ck, lid,
+                            //                 m_slice(neighbor_index, lid, 0), m_slice(neighbor_index, lid, 1));
+                            //         }
+                            //     // }
+                            // }
 
                             // Convert to locals
                             Kokkos::Array<cdouble, num_coefficients> L;

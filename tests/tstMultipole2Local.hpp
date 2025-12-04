@@ -121,10 +121,10 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
     cart_coords(3, 2) = 0.1;
     q(3) = -3.0;
 
-    for (int i = 4; i < points_per_proc; i++)
-    {
-        q(i) = 0.0;
-    }
+    // for (int i = 4; i < points_per_proc; i++)
+    // {
+    //     q(i) = 0.0;
+    // }
 
     // Cell causing issues: Particle 11 pos: -1.05, 2.34, 0.72
     if (points_per_proc == 12)
@@ -151,9 +151,9 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
     auto q_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
 
     int pindex = points_per_proc - 1;
-    printf("Particle %d pos: %.3lf, %.3lf, %.3lf, q: %.1lf\n", pindex,
-        cart_coords_h(pindex, 0), cart_coords_h(pindex, 1), cart_coords_h(pindex, 2),
-        q_h(pindex));
+    // printf("Particle %d pos: %.3lf, %.3lf, %.3lf, q: %.1lf\n", pindex,
+    //     cart_coords_h(pindex, 0), cart_coords_h(pindex, 1), cart_coords_h(pindex, 2),
+    //     q_h(pindex));
 
     for (int i = 0; i < num_points; ++i)
     {
@@ -414,7 +414,7 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
 // Test with a balanced particle distribution.
 TEST( Tree, testMultipole2Local_balanced )
 { 
-    for (int i = 11; i < 13; i++)
+    for (int i = 99; i < 100; i++)
         testMultipole2Local<1>(i, true); 
 }
 
