@@ -179,10 +179,10 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 1;
+    int num_target_points = 100;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
-    // fillRandomCoordinates(target_points, coord_bounds, 456);
+    fillRandomCoordinates(target_points, coord_bounds, 456);
 
     // Put target point in cell (14, 12, 5)
     // cell: (14, 12, 5) center: (2.44, 1.69, -0.94)
@@ -333,11 +333,21 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
-                target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-                l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
+            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
+            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+            //     l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
     Kokkos::fence();
+
+    // Copy to host and test
+    int p_int = static_cast<int>(p_val);
+    auto local_potential_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), local_potential);
+    for (std::size_t i = 0; i < local_potential.extent(0); i++)
+    {
+        auto direct_potential = direct_potentials(i);
+        auto local_potential = local_potential_h(i).real();
+        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p));
+    }
 
     // // Broadcast direct potential to all other ranks.
     // MPI_Bcast(&potential_direct, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
@@ -414,8 +424,7 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
 // Test with a balanced particle distribution.
 TEST( Tree, testMultipole2Local_balanced )
 { 
-    for (int i = 99; i < 100; i++)
-        testMultipole2Local<1>(i, true); 
+    testMultipole2Local<3>(500, true); 
 }
 
 //---------------------------------------------------------------------------//

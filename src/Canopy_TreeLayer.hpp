@@ -988,16 +988,16 @@ class TreeLayer
                             positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
                     }
                 }
-                if (result.success() && layer_number == 0)
-                {
-                    printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
-                        layer_number, rank,
-                        (unsigned long long)cell_id,
-                        (unsigned long long)cell_activated_ijk[0],
-                        (unsigned long long)cell_activated_ijk[1],
-                        (unsigned long long)cell_activated_ijk[2],
-                        positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
-                }
+                // if (result.success() && layer_number == 0)
+                // {
+                //     printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
+                //         layer_number, rank,
+                //         (unsigned long long)cell_id,
+                //         (unsigned long long)cell_activated_ijk[0],
+                //         (unsigned long long)cell_activated_ijk[1],
+                //         (unsigned long long)cell_activated_ijk[2],
+                //         positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
+                // }
 
                 // Save the cell the incoming data activates.
                 // The following line appears redundant, but later this
