@@ -97,51 +97,6 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
-    // Activate cell (14, 12, 5) center(2.42, 1.81, -1.04) where the target point will be
-    cart_coords(0, 0) = 2.3;
-    cart_coords(0, 1) = 1.8;
-    cart_coords(0, 2) = -1.09;
-    q(0) = -1.0;
-
-    // Cell causing issues: Particle 34 pos: -0.90, 2.94, 0.68, ijk: 5, 15, 9
-    cart_coords(1, 0) = -0.9;
-    cart_coords(1, 1) = 2.94;
-    cart_coords(1, 2) = 0.68;
-    q(1) = 0.9;
-
-    // Cell causing issues: Particle 11 pos: -1.05, 2.34, 0.72, ijk: 5, 14, 9
-    cart_coords(2, 0) = -1.05;
-    cart_coords(2, 1) = 2.34;
-    cart_coords(2, 2) = -0.72;
-    q(2) = 2.0;
-
-    // Particle 11 pos: -1.05, 2.34, 0.72
-    cart_coords(3, 0) = 1.05;
-    cart_coords(3, 1) = 2.34;
-    cart_coords(3, 2) = 0.1;
-    q(3) = -3.0;
-
-    // for (int i = 4; i < points_per_proc; i++)
-    // {
-    //     q(i) = 0.0;
-    // }
-
-    // Cell causing issues: Particle 11 pos: -1.05, 2.34, 0.72
-    if (points_per_proc == 12)
-    {
-        cart_coords(11, 0) = -1.052;
-        cart_coords(11, 1) = 2.342;
-        cart_coords(11, 2) = 0.722;
-        q(11) = 0.0;
-    }
-    
-    // for (int i = 3; i < points_per_proc; i++)
-    // {
-    //     cart_coords(i, 0) = -2.5+0.001*i;
-    //     cart_coords(i, 1) = -0.8+0.001*i;
-    //     cart_coords(i, 2) = 1.9+0.001*i;
-    // }
-
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
@@ -149,11 +104,6 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
     auto q_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
-
-    int pindex = points_per_proc - 1;
-    // printf("Particle %d pos: %.3lf, %.3lf, %.3lf, q: %.1lf\n", pindex,
-    //     cart_coords_h(pindex, 0), cart_coords_h(pindex, 1), cart_coords_h(pindex, 2),
-    //     q_h(pindex));
 
     for (int i = 0; i < num_points; ++i)
     {
@@ -346,74 +296,8 @@ void testMultipole2Local(int points_per_proc_in, bool balanced)
     {
         auto direct_potential = direct_potentials(i);
         auto local_potential = local_potential_h(i).real();
-        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p));
+        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_val));
     }
-
-    // // Broadcast direct potential to all other ranks.
-    // MPI_Bcast(&potential_direct, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
-    // // Copy to device
-    // auto particle_aosoa =
-    //     Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
-        
-    // // Fill the tree
-    // bool run_load_balance = !balanced;
-    // tree->create_multipoles(particle_aosoa, run_load_balance);
-
-    // domains_host = tree->layer(0)->domains();
-    // // for (std::size_t i = 0; i < domains_host.size(); ++i)
-    // // {
-    // //     if (rank == 0) printf("After: L0: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n",
-    // //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
-    // //         domains_host[i][4], domains_host[i][5]);
-    // // }
-
-    // /***********************************************
-    //  * Check the data in the root layer
-    //  **********************************************/
-    // auto m_root_h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), tree->M_root() );
-    // // if (rank == 0)
-    // //     for (std::size_t i = 0; i < m_root_h.size(); ++i)
-    // //     {
-    // //         printf("m_root(%d): (%.4lf, %.4lf)\n", i, m_root_h(i).real(), m_root_h(i).imag());
-    // //     }
-
-    // // Compute potential at P using M
-    // Kokkos::complex<double> potential_M = 0.0;
-    // for ( int j = 0; j <= p; ++j )
-    // {
-    //     for ( int k = -j; k <= j; ++k )
-    //     {
-    //         int idx = Canopy::Kernel::Scalar::index( j, k );
-    //         potential_M +=
-    //             m_root_h( idx ) / Kokkos::pow( r, j + 1 ) *
-    //             Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
-    //     }
-    // }
-
-    // // Check error between translated multipole and direct potentials
-    // // The error is already mathematically checked in testM2MKernel0,
-    // // so here we just make sure they are close to each other.
-    // int p_int = p;
-    // double error = Kokkos::pow(10, -p_int+1);
-    // EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
-    //     << p << ": Potentials do not match. Tree depth " << tree->numLayers();
-    // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
-    
-
-    // Each rank should own two particles
-    // EXPECT_EQ(2, data_host.size());
-
-    // Check that the correct rank owns the particle
-    // rank_slice_host = Cabana::slice<2>(data_host);
-    // for (std::size_t i = 0; i < data_host.size(); i++)
-    // {
-    //     EXPECT_EQ(rank_slice_host(i), rank) << "Rank " << rank << std::endl;
-    // }
-
-    // XXX - At some point separate this out into a new test?
-    // tree->multipole_to_local();
-
 }
 
 //---------------------------------------------------------------------------//
