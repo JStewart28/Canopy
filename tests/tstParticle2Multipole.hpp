@@ -139,7 +139,7 @@ void testParticle2Multipole(bool balanced)
     // The error is already mathematically checked in testM2MKernel0,
     // so here we just make sure they are close to each other.
     int p_int = p;
-    double error = Kokkos::pow(10, -p_int+1);
+    double error = Kokkos::pow(10, -p_int);
     EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
         << p << ": Potentials do not match. Tree depth " << tree->numLayers();
     // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
