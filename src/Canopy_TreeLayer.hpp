@@ -975,18 +975,18 @@ class TreeLayer
                 if (!result.success())
                 {
                     // Getting here means some particles activate the same cell.
-                    if (layer_number == 0)
-                    {
-                        auto ccenter = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2],
-                            low_corner, cell_size);
-                        printf("Same cell activated: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
-                            layer_number, rank,
-                            (unsigned long long)cell_id,
-                            (unsigned long long)cell_activated_ijk[0],
-                            (unsigned long long)cell_activated_ijk[1],
-                            (unsigned long long)cell_activated_ijk[2],
-                            positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
-                    }
+                    // if (layer_number == 0)
+                    // {
+                    //     auto ccenter = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2],
+                    //         low_corner, cell_size);
+                    //     printf("Same cell activated: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
+                    //         layer_number, rank,
+                    //         (unsigned long long)cell_id,
+                    //         (unsigned long long)cell_activated_ijk[0],
+                    //         (unsigned long long)cell_activated_ijk[1],
+                    //         (unsigned long long)cell_activated_ijk[2],
+                    //         positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
+                    // }
                 }
                 // if (result.success() && layer_number == 0)
                 // {
