@@ -95,7 +95,7 @@ class Tree
     
     void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
     {
-        // printf("R%d: cell_per_tile: %d\n", _rank, cell_per_tile_dim);
+        printf("L%d: cell_per_dim: %d\n", layer_num, cell_per_tile_dim * tiles_per_dim);
         auto layer = createTreeLayer<tree_type, cell_per_tile_dim>(
             _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, layer_num, _comm);
         _tree.push_back(layer);
@@ -441,10 +441,46 @@ class Tree
      */
     void multipole_to_local()
     {
-        // Work coarse to fine layers
-        for (int i = static_cast<int>(_tree.size() - 1); i >= 0; --i)
+        // Work coarse to fine layers.
+        int starting_layer = static_cast<int>(_tree.size() - 1);
+
+        // Find the first layer with at least 4 cells per dimension, which is
+        // when the multipole to local calculations are valid.
+        bool is_first_layer = false;
+        for (int i = starting_layer; i >= 0; --i)
         {
-            _tree[i]->multipole_to_local(50);
+            std::size_t cells_per_dim = _tree[i]->cellsPerDim();
+
+            // Need at least 4 cells per dimensions for any cells to be
+            // outside of second-nearest neighbors.
+            if (cells_per_dim < 4)
+                continue;
+
+            if (!is_first_layer)
+            {
+                // For first iteration, outer cell cutoff is the number of cells per dimension.
+                printf("L%d: cells_per_dim: %d, outer cutoff: %d\n", i, cells_per_dim, cells_per_dim);
+                // _tree[i]->multipole_to_local(cells_per_dim);
+                is_first_layer = true;
+                continue;
+            }
+                
+            
+
+    
+            auto prev_cell_cutoff = _tree[i+1]->cellsPerDim() - 3;
+            auto outer_cutoff = prev_cell_cutoff * _tile_reduction_factor;
+            
+                
+
+            
+            if (cells_per_dim >= 4)
+            {
+                printf("L%d: cells_per_dim: %d, outer cutoff: %d\n", i, cells_per_dim, outer_cutoff);
+                // _tree[i]->multipole_to_local(50);
+            }
+
+            // _tree[i]->multipole_to_local(50);
         }
     }
 
