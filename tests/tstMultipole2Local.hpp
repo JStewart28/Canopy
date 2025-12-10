@@ -322,7 +322,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size * 8, leaf_tiles = comm_size * 8;
+    red_factor = comm_size, leaf_tiles = comm_size * 64;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
         num_dim, cells_per_tile, p>(
@@ -330,8 +330,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
-    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
+    ASSERT_GT(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
 
     // Check mesh information for leaf layer (layer 0)
     auto layer = tree->layer(0);

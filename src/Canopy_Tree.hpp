@@ -441,48 +441,46 @@ class Tree
      */
     void multipole_to_local()
     {
-        // Work coarse to fine layers.
-        int starting_layer = static_cast<int>(_tree.size() - 1);
+        int starting_layer = static_cast<int>(_tree.size()) - 1;
 
-        // Find the first layer with at least 4 cells per dimension, which is
-        // when the multipole to local calculations are valid.
-        bool is_first_layer = false;
-        for (int i = starting_layer; i >= 0; --i)
+        // Find the first valid layer
+        int first_valid_layer = -1;
+        std::size_t valid_layer_cells_per_dim;
+        std::size_t first_layer_cells_used;
+        for (int L = starting_layer; L >= 0; --L)
         {
-            std::size_t cells_per_dim = _tree[i]->cellsPerDim();
-
-            // Need at least 4 cells per dimensions for any cells to be
-            // outside of second-nearest neighbors.
-            if (cells_per_dim < 4)
-                continue;
-
-            if (!is_first_layer)
+            auto cpd = _tree[L]->cellsPerDim();
+            if (cpd >= 4)
             {
-                // For first iteration, outer cell cutoff is the number of cells per dimension.
-                printf("L%d: cells_per_dim: %d, outer cutoff: %d\n", i, cells_per_dim, cells_per_dim);
-                // _tree[i]->multipole_to_local(cells_per_dim);
-                is_first_layer = true;
-                continue;
+                first_valid_layer = L;
+                valid_layer_cells_per_dim = cpd;
+                first_layer_cells_used = cpd - 3;
+                break;
             }
-                
-            
+        }
 
-    
-            auto prev_cell_cutoff = _tree[i+1]->cellsPerDim() - 3;
-            auto outer_cutoff = prev_cell_cutoff * _tile_reduction_factor;
-            
-                
+        if (first_valid_layer < 0)
+        {
+            printf("No valid multipole layers (need >= 4 cells per dimension)\n");
+            return;
+        }
+        
+        for (int L = first_valid_layer - 1; L >= 0; --L)
+        {
+            int difference = first_valid_layer - L;
+            int considered = first_layer_cells_used * Kokkos::pow(_tile_reduction_factor, difference);
+            int cutoff = _tree[L]->cellsPerDim() - considered;
+            // auto cells_considered = first_layer_cells_used * Kokkos::pow(_tile_reduction_factor, first_valid_layer - L);
+            // auto outer_cutoff = _tree[L]->cellsPerDim() - cells_considered;
+          
+            printf("L%d: diff: %d, cells_considered: %d, cutoff: %d\n",
+                L, difference, considered, cutoff);
 
-            
-            if (cells_per_dim >= 4)
-            {
-                printf("L%d: cells_per_dim: %d, outer cutoff: %d\n", i, cells_per_dim, outer_cutoff);
-                // _tree[i]->multipole_to_local(50);
-            }
-
-            // _tree[i]->multipole_to_local(50);
+            // _tree[L]->multipole_to_local(outer_cutoff[L]);
         }
     }
+
+
 
     /**
      * Computes the interaction list for each cell in the tree.
