@@ -1081,7 +1081,7 @@ class TreeLayer
      *  2) cell0 and cell_other do not touch.
      *  3) The parent cells of cell0 and cell_other do touch.
      */
-    void computeInteractionList(Kokkos::Array<double, 3> parent_cell_size)
+    void computeInteractionBounds(int tile_reduction_factor)
     {
         
     }
