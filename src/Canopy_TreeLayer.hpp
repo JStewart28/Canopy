@@ -1028,6 +1028,7 @@ class TreeLayer
         _ijk2l.clear();
         _ijk2l.rehash(allocation_size);
         _locals = Kokkos::View<cdouble*[(p+1)*(p+1)], memory_space>("_locals", allocation_size);
+        _m2l_bounds = Kokkos::View<Kokkos::Array<std::size_t, 6>*, memory_space>("_m2l_bounds", allocation_size);
         
         // Sort the in2out array and by increasing cell_id
         auto sort_data = Cabana::sortByKey( out_id_slice );
@@ -1101,6 +1102,7 @@ class TreeLayer
         }
         // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
+        auto m2l_bounds = _m2l_bounds;
         auto map = *_map_ptr;
         auto aosoa = _cells_ptr->aosoa();
         auto cid2ijk = _cid2ijk;
@@ -1304,6 +1306,9 @@ class TreeLayer
     // Get the local coefficients
     auto locals() {return _locals;}
 
+    // Get the m2l bounds
+    auto m2l_bounds() {return _m2l_bounds;}
+
     // Return cell_ijk to index into local view map
     auto cellijk2l() {return _ijk2l;}
 
@@ -1342,13 +1347,20 @@ class TreeLayer
     // Cabana supports ijk -> cid but not the inverse.
     Kokkos::UnorderedMap<int, Kokkos::Array<std::size_t, 3>, memory_space> _cid2ijk;
 
-    // Map of cell_ijk to its location in the Local view.
+    // Map of cell_ijk to its location in the Local data structures.
     Kokkos::View<std::size_t, memory_space> _local_view_index;
     Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space> _ijk2l;
 
     // Locals coefficients for each cell. This data is haloed differently than
     // multipole coefficients so it is stored outside of the sparse mesh.
     Kokkos::View<cdouble*[(p+1)*(p+1)], memory_space> _locals;
+
+    // For each cell, the subset of the domain, in i/j/k indices for cells in this layer,
+    // where the contribution from cells outside of these bounds have already been
+    // accounted for in more coarse layers.
+    // Indices 0, 1, 2 = lower bound, inclusive
+    // Indices 3, 4, 5 = upper bound, exclusive
+    Kokkos::View<Kokkos::Array<std::size_t, 6>*, memory_space> _m2l_bounds;
 };
 
 template <class TreeType, std::size_t CellPerTileDim>
