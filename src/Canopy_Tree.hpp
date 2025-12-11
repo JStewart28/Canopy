@@ -445,16 +445,14 @@ class Tree
 
         // Find the first valid layer
         int first_valid_layer = -1;
-        std::size_t valid_layer_cells_per_dim;
-        std::size_t first_layer_cells_used;
+        std::size_t cells_considered;
         for (int L = starting_layer; L >= 0; --L)
         {
             auto cpd = _tree[L]->cellsPerDim();
             if (cpd >= 4)
             {
                 first_valid_layer = L;
-                valid_layer_cells_per_dim = cpd;
-                first_layer_cells_used = cpd - 3;
+                cells_considered = cpd - 3;
                 break;
             }
         }
@@ -467,14 +465,16 @@ class Tree
         
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
-            int difference = first_valid_layer - L;
-            int considered = first_layer_cells_used * Kokkos::pow(_tile_reduction_factor, difference);
-            int cutoff = _tree[L]->cellsPerDim() - considered;
+            // Update cells considered in terms of this layer's cells
+            cells_considered *= _tile_reduction_factor;
+            std::size_t cutoff = _tree[L]->cellsPerDim() - cells_considered;
             // auto cells_considered = first_layer_cells_used * Kokkos::pow(_tile_reduction_factor, first_valid_layer - L);
             // auto outer_cutoff = _tree[L]->cellsPerDim() - cells_considered;
           
-            printf("L%d: diff: %d, cells_considered: %d, cutoff: %d\n",
-                L, difference, considered, cutoff);
+            printf("L%d: cells_considered: %d, cutoff: %d\n",
+                L, cells_considered, cutoff);
+
+            cells_considered += cutoff - 3;
 
             // _tree[L]->multipole_to_local(outer_cutoff[L]);
         }
