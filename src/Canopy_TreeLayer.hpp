@@ -89,6 +89,27 @@ position2ijk(Scalar x, Scalar y, Scalar z,
         static_cast<std::size_t>( std::floor( pos[2] * dx_inv[2] ) ) };
 }
 
+/**
+ * Given a cell ijk location, outer local cutoff from a more coarse layer
+ * in terms of the cell size on this layer, and the cells per dimension,
+ * return the new outer bounds for the local cutoff.
+ */
+template <class Integer>
+KOKKOS_INLINE_FUNCTION
+Kokkos::Array<Integer, 6>
+cell2NeighborBounds(const Kokkos::Array<Integer, 3>& cell_ijk,
+                    const Kokkos::Array<Integer, 3>& cutoff,
+                    const Integer cells_per_dimension)
+{
+    Kokkos::Array<Integer, 6> new_cutoff;
+    for (int i = 0; i < 3; i++)
+    {
+        outer_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + outer_cell_cutoff, cutoff);
+        outer_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - outer_cell_cutoff, 0);
+    }
+
+}
+
 template <class TreeType, std::size_t CellPerTileDim>
 class TreeLayer
 {
