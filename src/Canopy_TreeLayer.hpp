@@ -90,24 +90,55 @@ position2ijk(Scalar x, Scalar y, Scalar z,
 }
 
 /**
- * Given a cell ijk location, outer local cutoff from a more coarse layer
- * in terms of the cell size on this layer, and the cells per dimension,
- * return the new outer bounds for the local cutoff.
+ * Given a cell ijk and number of cells per dimension, compute
+ * the lower and upper bounds
  */
 template <class Integer>
 KOKKOS_INLINE_FUNCTION
-Kokkos::Array<Integer, 6>
-cell2NeighborBounds(const Kokkos::Array<Integer, 3>& cell_ijk,
-                    const Kokkos::Array<Integer, 3>& cutoff,
-                    const Integer cells_per_dimension)
+void 
+cell2Bound(Kokkos::pair<Kokkos::Array<Integer, 6>, Kokkos::Array<Integer, 6>>& bounds,
+           const Kokkos::Array<Integer, 3>& cell_ijk,
+           Integer cells_per_dimension,
+           Integer cell_incr_factor
+           )
 {
-    Kokkos::Array<Integer, 6> new_cutoff;
+    // Adjust bounds
+    for (int i = 0; i < 6; i++)
+        bounds.first[i] *= cell_incr_factor;
+
     for (int i = 0; i < 3; i++)
     {
-        outer_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + outer_cell_cutoff, cutoff);
-        outer_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - outer_cell_cutoff, 0);
+        bounds.second[i] = Kokkos::max(cell_ijk[i] - 2, 0);
+        bounds.second[i + 3] = Kokkos::max(cell_ijk[i] + 3, cells_per_dimension);
+    }
+}
+
+/**
+ * Given a cell ijk location, inner local cutoff from a more coarse layer
+ * in terms of the cell ijk of this layer, and the cells per dimension,
+ * return the new outer bounds and inner bounds for the local cutoff.
+ */
+template <class Integer, class IjkView>
+KOKKOS_INLINE_FUNCTION
+Kokkos::pair<Kokkos::Array<Integer, 6>, Kokkos::Array<Integer, 6>>
+cell2Bound(const IjkView ijk,
+           const Integer cells_per_dimension,
+           const Integer cell_incr_factor,
+           const Integer layer)
+{
+    // Set initial bounds as the entire mesh
+    Kokkos::Array<Integer, 6>
+        base = {0, 0, 0, cells_per_dimension, cells_per_dimension, cells_per_dimension};
+    Kokkos::pair<Kokkos::Array<Integer, 6>, Kokkos::Array<Integer, 6>>
+        bounds = Kokkos::make_pair(base, base);
+
+    for (int i = 0; i < layer; i++)
+    {
+        printf("L%d: ijk:")
+        cell2Bound(bounds, cell_ijk, cells_per_dimension, cell_incr_factor)
     }
 
+    return bounds;
 }
 
 template <class TreeType, std::size_t CellPerTileDim>
