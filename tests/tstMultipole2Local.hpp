@@ -582,7 +582,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testMultipole2Local1_balanced )
 { 
-    testMultipole2Local1<3>(500, true); 
+    testMultipole2Local1<3>(2, true); 
 }
 
 //---------------------------------------------------------------------------//

@@ -122,6 +122,7 @@ template <class IjkView>
 KOKKOS_INLINE_FUNCTION
 Kokkos::Array<int, 6>
 cell2Bound(const IjkView ijk,
+           const int ijk_index,
            const int start_cpd,
            const int cell_incr_factor,
            const int this_layer)
@@ -131,15 +132,15 @@ cell2Bound(const IjkView ijk,
     Kokkos::Array<int, 6> exclude;
     for (int i = 0; i < 3; i++)
     {
-        exclude[i] = Kokkos::max(ijk(0, i) - 2, 0);
-        exclude[i + 3] = Kokkos::min(ijk(0, i) + 2, start_cpd);
+        exclude[i] = Kokkos::max(ijk(ijk_index, 0, i) - 2, 0);
+        exclude[i + 3] = Kokkos::min(ijk(ijk_index, 0, i) + 2, start_cpd);
     }
 
     // Save cells per dimension
     int cpd = start_cpd;
 
     // Adjust bounds to current layer
-    for (int l = 0; i < this_layer; i++)
+    for (int l = 0; l < this_layer; l++)
     {
         // Cells per dimension increases by increase factor
         cpd *= cell_incr_factor;
@@ -154,11 +155,11 @@ cell2Bound(const IjkView ijk,
         // Exclude bounds based on cell ijk in this layer
         for (int i = 0; i < 3; i++)
         {
-            exclude[i] = Kokkos::max(ijk(l, i) - 2, 0);
-            exclude[i + 3] = Kokkos::min(ijk(l, i) + 2, cpd);
+            exclude[i] = Kokkos::max(ijk(ijk_index, l, i) - 2, 0);
+            exclude[i + 3] = Kokkos::min(ijk(ijk_index, l, i) + 2, cpd);
         }
         printf("L%d: ijk: (%d, %d, %d), in: (%d, %d, %d)-(%d, %d, %d), ex: (%d, %d, %d)-(%d, %d, %d)\n",
-            l, ijk(l, 0), ijk(l, 1), ijk(l, 2),
+            l, ijk(ijk_index, l, 0), ijk(ijk_index, l, 1), ijk(ijk_index, l, 2),
             include[0], include[1], include[2], include[3], include[4], include[5],
             exclude[0], exclude[1], exclude[2],exclude[3], exclude[4], exclude[5]);
         // cell2Bound(bounds, cell_ijk, cells_per_dimension, cell_incr_factor)
@@ -217,12 +218,14 @@ class TreeLayer
     
     TreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
-	        const int tiles_per_dim, const int halo_width,
+	        const int tiles_per_dim, const int tile_reduction_factor,
+            const int halo_width,
             const int layer_number,
             MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
         , _tiles_per_dim( tiles_per_dim )
+        , _tile_reduction_factor( tile_reduction_factor )
         , _halo_width( halo_width )
         , _layer_number( layer_number )
         , _cells_per_dim( _tiles_per_dim * cell_per_tile_dim )
@@ -1106,7 +1109,7 @@ class TreeLayer
         _ijk2l.clear();
         _ijk2l.rehash(allocation_size);
         _locals = Kokkos::View<cdouble*[(p+1)*(p+1)], memory_space>("_locals", allocation_size);
-        _m2l_bounds = Kokkos::View<Kokkos::Array<std::size_t, 6>*, memory_space>("_m2l_bounds", allocation_size);
+        _m2l_bounds = Kokkos::View<Kokkos::Array<int, 6>*, memory_space>("_m2l_bounds", allocation_size);
         
         // Sort the in2out array and by increasing cell_id
         auto sort_data = Cabana::sortByKey( out_id_slice );
@@ -1159,7 +1162,7 @@ class TreeLayer
      *  2) cell0 and cell_other do not touch.
      *  3) The parent cells of cell0 and cell_other do touch.
      */
-    void computeInteractionBounds(int tile_reduction_factor)
+    void computeInteractionBounds(int starting_cells_per_dimension, int num_layers)
     {
         // Iterate over cells
         // This only works for one process right now.
@@ -1176,9 +1179,11 @@ class TreeLayer
         int cells_per_dim = _cells_per_dim;
         int rank = _rank;
         int layer_number = _layer_number;
+        int cell_incr_factor = _tile_reduction_factor;
 
         // Hold cell ijk position at other layers
-        Kokkos::View<std::size_t**[3], memory_space> ijk("ijk", _m2l_bounds.extent(0), _layer_number);
+        Kokkos::View<int**[3], memory_space> ijk("ijk", _m2l_bounds.extent(0), num_layers - _layer_number);
+        printf("L%d: ijk view extent: %d, %d, %d\n", _layer_number, ijk.extent(0), ijk.extent(1), ijk.extent(2));
 
         // Per-cell calculation
         Kokkos::parallel_for("multipole_to_local",
@@ -1193,8 +1198,33 @@ class TreeLayer
                 // Cell index into local view
                 auto ijk2l_index = ijk2l.find(cell_ijk);
                 auto local_index = ijk2l.value_at(ijk2l_index);
-            
-                auto bounds = cell2Bound()    
+                // printf("L%d: ijk: (%d, %d, %d), li: %d\n", layer_number,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2], local_index);
+
+                // Fill ijk for this cell
+                // for (int d = 0; d < 3; d++)
+                // {
+                //     ijk(local_index, 0, d) = cell_ijk[d];
+                // }
+
+                // if (layer_number == 0)
+                //     printf("L%d: ijk(%d, %d, %d) = (%d, %d, %d)\n", layer_number,
+                //         ijk(local_index, 0, 0), ijk(local_index, 0, 1), ijk(local_index, 0, 2));
+
+               
+
+                if (layer_number == 0)
+                    for (int l = 1; l < layer_number; l++)
+                        for (int d = 0; d < 3; d++)
+                        {
+                            // ijk(local_index, l, d) = Kokkos::floor(ijk(local_index, l+1, d) / cell_incr_factor);
+                            // printf("L%d: ijk(%d, %d, %d) = (%d, %d, %d)\n", local_index, layer_number, d,
+                            //     ijk(local_index, l, 0), ijk(local_index, l, 1), ijk(local_index, l, 2));
+                        }
+                           
+                
+                // auto bounds = cell2Bound(ijk, local_index, starting_cells_per_dimension,
+                //     cell_incr_factor, layer_number);
             }
         });
 
@@ -1216,13 +1246,16 @@ class TreeLayer
      * Convert the multipole coefficients centered around the other cell to local coefficients
      * centered around this cell.
      */
-    void multipole_to_local(int outer_cell_cutoff)
+    void multipole_to_local(int starting_cells_per_dimension, int num_layers)
     {
         // This only works for one process right now.
         if (_comm_size != 1)
         {
             throw std::runtime_error("multipole_to_local only works for comm_size 1");
         }
+
+        computeInteractionBounds(starting_cells_per_dimension, num_layers);
+        return;
         // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
         auto m2l_bounds = _m2l_bounds;
@@ -1268,8 +1301,8 @@ class TreeLayer
                 Kokkos::Array<std::size_t, 3> inner_upper_bound;
                 for (int i = 0; i < 3; i++)
                 {
-                    outer_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + outer_cell_cutoff, cells_per_dim);
-                    outer_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - outer_cell_cutoff, 0);
+                    outer_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + 50, cells_per_dim);
+                    outer_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - 50, 0);
 
                     inner_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + 3, cells_per_dim);
                     inner_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - 2, 0);
@@ -1440,6 +1473,7 @@ class TreeLayer
     const std::array<double, 3> _global_low_corner;
     std::array<int, 3> _global_num_cell;
 	const int _tiles_per_dim;
+    const int _tile_reduction_factor;
     const int _halo_width;
     const int _cells_per_dim;
     const int _layer_number;
@@ -1489,13 +1523,15 @@ class TreeLayer
 template <class TreeType, std::size_t CellPerTileDim>
 std::shared_ptr<TreeLayer<TreeType, CellPerTileDim>> createTreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
-	        const int tiles_per_dim, const int halo_width,
+	        const int tiles_per_dim, const int tile_reduction_factor,
+            const int halo_width,
             const int layer_number,
             MPI_Comm comm)
 {
     return std::make_shared<TreeLayer<TreeType, CellPerTileDim>>(global_low_corner,
             global_high_corner,
-	        tiles_per_dim, halo_width, layer_number, comm);
+	        tiles_per_dim, tile_reduction_factor,
+            halo_width, layer_number, comm);
 }
 
 } // end namespace Canopy

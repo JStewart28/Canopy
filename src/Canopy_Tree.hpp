@@ -97,7 +97,7 @@ class Tree
     {
         printf("L%d: cell_per_dim: %d\n", layer_num, cell_per_tile_dim * tiles_per_dim);
         auto layer = createTreeLayer<tree_type, cell_per_tile_dim>(
-            _global_low_corner, _global_high_corner, tiles_per_dim, halo_width, layer_num, _comm);
+            _global_low_corner, _global_high_corner, tiles_per_dim, _tile_reduction_factor, halo_width, layer_num, _comm);
         _tree.push_back(layer);
     }
 
@@ -445,14 +445,14 @@ class Tree
 
         // Find the first valid layer
         int first_valid_layer = -1;
-        std::size_t cells_considered;
+        std::size_t starting_cells_per_dimension;
         for (int L = starting_layer; L >= 0; --L)
         {
             auto cpd = _tree[L]->cellsPerDim();
             if (cpd >= 4)
             {
                 first_valid_layer = L;
-                cells_considered = cpd - 3;
+                starting_cells_per_dimension = cpd;
                 break;
             }
         }
@@ -462,21 +462,10 @@ class Tree
             printf("No valid multipole layers (need >= 4 cells per dimension)\n");
             return;
         }
-        
+        printf("First starting layer: %d\n", first_valid_layer);
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
-            // Update cells considered in terms of this layer's cells
-            cells_considered *= _tile_reduction_factor;
-            std::size_t cutoff = _tree[L]->cellsPerDim() - cells_considered;
-            // auto cells_considered = first_layer_cells_used * Kokkos::pow(_tile_reduction_factor, first_valid_layer - L);
-            // auto outer_cutoff = _tree[L]->cellsPerDim() - cells_considered;
-          
-            printf("L%d: cells_considered: %d, cutoff: %d\n",
-                L, cells_considered, cutoff);
-
-            cells_considered += cutoff - 3;
-
-            // _tree[L]->multipole_to_local(outer_cutoff[L]);
+            _tree[L]->multipole_to_local(starting_cells_per_dimension, starting_layer);
         }
     }
 
