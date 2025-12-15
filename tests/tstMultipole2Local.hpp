@@ -125,7 +125,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     // Consider all cells when creating locals because we are only testing one layer
-    layer->multipole_to_local(cells_per_leaf_dimension);
+    layer->multipole_to_local(16, tree->numLayers() - 2);
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
@@ -209,7 +209,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
         //     target_points_host(tpi, 0), target_points_host(tpi, 1), target_points_host(tpi, 2),
         //     direct_potentials(tpi));
     }
-    
+
     // Get locals
     auto locals = layer->locals();
     auto ijk2l = layer->cellijk2l();
@@ -288,6 +288,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             //     l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
     Kokkos::fence();
+    printf("Finished calculating local potentials\n");
 
     // Copy to host and test
     int p_int = static_cast<int>(p_val);
@@ -398,7 +399,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     return;
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 100;
+    int num_target_points = 1;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
     fillRandomCoordinates(target_points, coord_bounds, 456);
@@ -575,15 +576,15 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-// TEST( Tree, testMultipole2Local0_balanced )
-// { 
-//     testMultipole2Local0<3>(500, true); 
-// }
-
-TEST( Tree, testMultipole2Local1_balanced )
+TEST( Tree, testMultipole2Local0_balanced )
 { 
-    testMultipole2Local1<3>(2, true); 
+    testMultipole2Local0<3>(500, true); 
 }
+
+// TEST( Tree, testMultipole2Local1_balanced )
+// { 
+//     testMultipole2Local1<3>(2, true); 
+// }
 
 //---------------------------------------------------------------------------//
 
