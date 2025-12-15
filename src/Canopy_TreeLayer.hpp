@@ -125,22 +125,26 @@ cell2Bound(const IjkView ijk,
            const int ijk_index,
            const int start_cpd,
            const int cell_incr_factor,
-           const int this_layer)
+           const int layers_to_top)
 {
     // Set initial bounds
     Kokkos::Array<int, 6> include = {0, 0, 0, start_cpd, start_cpd, start_cpd};
     Kokkos::Array<int, 6> exclude;
     for (int i = 0; i < 3; i++)
     {
-        exclude[i] = Kokkos::max(ijk(ijk_index, 0, i) - 2, 0);
-        exclude[i + 3] = Kokkos::min(ijk(ijk_index, 0, i) + 2, start_cpd);
+        exclude[i] = Kokkos::max(ijk(ijk_index, layers_to_top-1, i) - 2, 0);
+        exclude[i + 3] = Kokkos::min(ijk(ijk_index, layers_to_top-1, i) + 2, start_cpd);
     }
+    printf("L%d: first ijk: (%d, %d, %d), in: (%d, %d, %d)-(%d, %d, %d), ex: (%d, %d, %d)-(%d, %d, %d)\n",
+            0, ijk(ijk_index, layers_to_top-1, 0), ijk(ijk_index, layers_to_top-1, 1), ijk(ijk_index, layers_to_top-1, 2),
+            include[0], include[1], include[2], include[3], include[4], include[5],
+            exclude[0], exclude[1], exclude[2], exclude[3], exclude[4], exclude[5]);
 
     // Save cells per dimension
     int cpd = start_cpd;
 
     // Adjust bounds to current layer
-    for (int l = 0; l < this_layer; l++)
+    for (int l = layers_to_top - 2; l >= 0; l--)
     {
         // Cells per dimension increases by increase factor
         cpd *= cell_incr_factor;
@@ -161,7 +165,7 @@ cell2Bound(const IjkView ijk,
         printf("L%d: ijk: (%d, %d, %d), in: (%d, %d, %d)-(%d, %d, %d), ex: (%d, %d, %d)-(%d, %d, %d)\n",
             l, ijk(ijk_index, l, 0), ijk(ijk_index, l, 1), ijk(ijk_index, l, 2),
             include[0], include[1], include[2], include[3], include[4], include[5],
-            exclude[0], exclude[1], exclude[2],exclude[3], exclude[4], exclude[5]);
+            exclude[0], exclude[1], exclude[2], exclude[3], exclude[4], exclude[5]);
         // cell2Bound(bounds, cell_ijk, cells_per_dimension, cell_incr_factor)
     }
 
@@ -1202,29 +1206,38 @@ class TreeLayer
                 //     cell_ijk[0], cell_ijk[1], cell_ijk[2], local_index);
 
                 // Fill ijk for this cell
-                // for (int d = 0; d < 3; d++)
-                // {
-                //     ijk(local_index, 0, d) = cell_ijk[d];
-                // }
+                for (int d = 0; d < 3; d++)
+                {
+                    ijk(local_index, 0, d) = cell_ijk[d];
+                }
 
                 // if (layer_number == 0)
-                //     printf("L%d: ijk(%d, %d, %d) = (%d, %d, %d)\n", layer_number,
+                //     printf("L%d: L%d: ijk(%d, %d, %d)\n", layer_number, layer_number,
                 //         ijk(local_index, 0, 0), ijk(local_index, 0, 1), ijk(local_index, 0, 2));
 
-               
+                int layers_to_top = num_layers - layer_number;
 
                 if (layer_number == 0)
-                    for (int l = 1; l < layer_number; l++)
+                    for (int l = 1; l < layers_to_top; l++)
+                    {
                         for (int d = 0; d < 3; d++)
                         {
-                            // ijk(local_index, l, d) = Kokkos::floor(ijk(local_index, l+1, d) / cell_incr_factor);
-                            // printf("L%d: ijk(%d, %d, %d) = (%d, %d, %d)\n", local_index, layer_number, d,
-                            //     ijk(local_index, l, 0), ijk(local_index, l, 1), ijk(local_index, l, 2));
+                            ijk(local_index, l, d) = Kokkos::floor(ijk(local_index, l-1, d) / cell_incr_factor);
                         }
+                        // printf("L%d: L%d: cell ijk(%d, %d, %d)\n", layer_number, l,
+                        //     ijk(local_index, l, 0), ijk(local_index, l, 1), ijk(local_index, l, 2));
+                    }
                            
                 
-                // auto bounds = cell2Bound(ijk, local_index, starting_cells_per_dimension,
-                //     cell_incr_factor, layer_number);
+                if (layer_number == 0) 
+                {
+                auto bounds = cell2Bound(ijk, local_index, starting_cells_per_dimension,
+                    cell_incr_factor, layers_to_top);
+                printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
+                    layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    bounds[0], bounds[1], bounds[2],
+                    bounds[3], bounds[4], bounds[5]);
+                }
             }
         });
 
