@@ -38,17 +38,59 @@ class Halo
     using local_map_type = Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space>;
     // Local coefficients
     using cdouble = Kokkos::complex<double>;
-    using local_view_type = Kokkos::View<cdouble*[num_coefficients], memory_space>
+    using local_view_type = Kokkos::View<cdouble*[num_coefficients], memory_space>;
+
+    using view_type = Kokkos::View<int*, memory_space>;
+
+    // Cabana halo type
+    using cabana_halo_type = Cabana::Halo<memory_space>;
     
-    Halo(local_map_type local_map, local_view_type locals, MPI_Comm comm)
+    Halo(local_map_type local_map, local_view_type locals, view_type export_ids,
+         view_type export_ranks, MPI_Comm comm)
+        : _num_tuple( locals.extent(0) )
+        , _comm( comm )
     {
         // Allocate aosoa
-        _data = halo_aosoa_type("_halo_data", locals.extent(0));
+        _data = halo_aosoa_type("_halo_data", _num_tuple);
+
+        // Fill aosoa
+        auto ijk_slice = Cabana::slice<1>(_data);
+        auto coefficient_slice = Cabana::slice<0>(_data);
+        Kokkos::parallel_for("fill_halo_aosoa",
+        Kokkos::RangePolicy<execution_space>(0, local_map.capacity()),
+        KOKKOS_LAMBDA(const int index)
+        {
+            if (cid2ijk.valid_at(index))
+            {
+                // Cell ijk
+                auto cell_ijk = cid2ijk.key_at( cid2ijk_index );
+
+                // Cell local index
+                auto local_index = ijk2l.value_at(ijk2l_index);
+                
+                // Set cell ijk
+                for (int i = 0; i < 3; i++)
+                    ijk_slice(local_index, i) = cell_ijk[i];
+                
+                // Set local coefficients
+                for (std::size_t i = 0; i < num_coefficients; i++)
+                {
+                    coefficient_slice(local_index, i).real() = locals(local_index, i).real();
+                    coefficient_slice(local_index, i).imag() = locals(local_index, i).imag();
+                }    
+            }
+        });
+
+        _halo = cabana_halo_type(_comm, _num_tuple, export_ids, export_ranks);
+
+        _data.resize(_halo.numLocal() + halo.numGhost());
     }
 
   private:
+    std::size_t _num_tuple;
+    MPI_Comm _comm;
     halo_aosoa_type _data;
-    Kokkos::
+    cabana_halo_type _halo;
 };
 
 template <class ExecutionSpace, class MemorySpace, std::size_t p>

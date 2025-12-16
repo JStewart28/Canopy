@@ -1303,16 +1303,15 @@ class TreeLayer
 
         // Per-cell calculation
         Kokkos::parallel_for("multipole_to_local",
-        Kokkos::RangePolicy<execution_space>(0, cid2ijk.capacity()),
-        KOKKOS_LAMBDA(const int cid2ijk_index)
+        Kokkos::RangePolicy<execution_space>(0, ijk2l.capacity()),
+        KOKKOS_LAMBDA(const int ijk2l_index)
         {
-            if (cid2ijk.valid_at(cid2ijk_index))
+            if (cid2ijk.valid_at(ijk2l_index))
             {
                 // Cell ijk
-                auto cell_ijk = cid2ijk.value_at( cid2ijk_index );
+                auto cell_ijk = cid2ijk.key_at( ijk2l_index );
 
                 // Cell local index
-                auto ijk2l_index = ijk2l.find(cell_ijk);
                 auto local_index = ijk2l.value_at(ijk2l_index);
                 
                 // Index of this cell into sparse array AoSoA
