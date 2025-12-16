@@ -83,7 +83,7 @@ class Halo
 
         _halo = cabana_halo_type(_comm, _num_tuple, export_ids, export_ranks);
 
-        _data.resize(_halo.numLocal() + halo.numGhost());
+        _data.resize(_halo.numLocal() + _halo.numGhost());
     }
 
   private:
