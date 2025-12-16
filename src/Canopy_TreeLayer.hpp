@@ -1173,6 +1173,37 @@ class TreeLayer
      *  3. Iterate over parent locals. Shift and add parent locals to all its
      *      child cells on this layer. 
      */
+    void getCoarseLocals(const Kokkos::View<double*[6], memory_space>& fine_domain)
+    {
+        auto ijk2l = _ijk2l;
+
+        std::size_t num_exports = _cells_per_dim * _cells_per_dim * _tile_reduction_factor * _tile_reduction_factor;
+        Kokkos::View<int*, memory_space> export_ids("export_ids", num_exports);
+        Kokkos::View<int*, memory_space> export_ranks("export_ranks", num_exports);
+        Kokkos::parallel_for("fill_vert_halo_data",
+        Kokkos::RangePolicy<execution_space>(0, ijk2l.capacity()),
+        KOKKOS_LAMBDA(const int ijk2l_index)
+        {
+            if (cid2ijk.valid_at(ijk2l_index))
+            {
+                // Cell ijk
+                auto cell_ijk = cid2ijk.key_at( ijk2l_index );
+
+                // Cell local index
+                auto local_index = ijk2l.value_at(ijk2l_index);
+
+                // Each thread sets (local_index + _tile_reduction_factor * _tile_reduction_factor)
+                // part of export data because each cell has _tile_reduction_factor * _tile_reduction_factor
+                // children
+
+
+            }
+        });
+
+        // Vertical halo for getting local coefficients from more coarse cells
+        // auto vertical_halo = Halo<execution_space, memory_space, p>(_ijk2l, _locals,
+        //     export_ids, export_ranks, _comm);
+    }
 
     /**
      * Computes the interaction list for each cell in the layer.

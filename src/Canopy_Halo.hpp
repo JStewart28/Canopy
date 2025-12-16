@@ -86,6 +86,13 @@ class Halo
         _data.resize(_halo.numLocal() + _halo.numGhost());
     }
 
+    void gather()
+    {
+        Cabana::gather( _halo, _data );
+    }
+
+    auto data() const { return _data; }
+
   private:
     std::size_t _num_tuple;
     MPI_Comm _comm;
