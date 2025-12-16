@@ -1164,6 +1164,14 @@ class TreeLayer
      * Then send these ranks the ijk indices of the local coefficients we need
      * Then get those local coefficients sent to us.
      * 
+     * Steps:
+     *  1. Iterate over our cells in ijk2l map:
+     *      a) Save which ranks own child cells we need to send locals to
+     *      b) Pack (ijk, locals) pairs into an aosoa for haloing 
+     *      c) Fill another aosoa that was which pairs go to which ranks
+     *  2. Gather locals - each rank now has the locals of all its cells' parents.
+     *  3. Iterate over parent locals. Shift and add parent locals to all its
+     *      child cells on this layer. 
      */
 
     /**
