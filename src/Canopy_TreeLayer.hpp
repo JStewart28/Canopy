@@ -1159,6 +1159,14 @@ class TreeLayer
     }
 
     /**
+     * Figure out which local coefficients from the cells in the layer above we need,
+     * and which ranks we need them from.
+     * Then send these ranks the ijk indices of the local coefficients we need
+     * Then get those local coefficients sent to us.
+     * 
+     */
+
+    /**
      * Computes the interaction list for each cell in the layer.
      * 
      * The interaction list of cell0 is the set of all cells such that:
@@ -1221,6 +1229,7 @@ class TreeLayer
                 {
                     for (int d = 0; d < 3; d++)
                     {
+                        // Compute parent cells
                         ijk(local_index, l, d) = Kokkos::floor(ijk(local_index, l-1, d) / cell_incr_factor);
                     }
                     // printf("L%d: L%d: cell ijk(%d, %d, %d)\n", layer_number, l,

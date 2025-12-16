@@ -576,15 +576,15 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-TEST( Tree, testMultipole2Local0_balanced )
-{ 
-    testMultipole2Local0<3>(500, true); 
-}
-
-// TEST( Tree, testMultipole2Local1_balanced )
+// TEST( Tree, testMultipole2Local0_balanced )
 // { 
-//     testMultipole2Local1<3>(2, true); 
+//     testMultipole2Local0<3>(500, true); 
 // }
+
+TEST( Tree, testMultipole2Local1_balanced )
+{ 
+    testMultipole2Local1<3>(2, true); 
+}
 
 //---------------------------------------------------------------------------//
 
