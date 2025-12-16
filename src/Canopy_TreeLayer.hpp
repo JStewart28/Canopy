@@ -1173,36 +1173,120 @@ class TreeLayer
      *  3. Iterate over parent locals. Shift and add parent locals to all its
      *      child cells on this layer. 
      */
-    void getCoarseLocals(const Kokkos::View<double*[6], memory_space>& fine_domain)
+    void getCoarseLocals(const Kokkos::View<double*[6], memory_space>& child_domain)
     {
-        auto ijk2l = _ijk2l;
+        // Locals, cell ijk index
+        static constexpr std::size_t num_coefficients = (p+1)*(p+1);
+        using halo_tuple_type = Cabana::MemberTypes<double[num_coefficients][2], int[3]>;
+        using halo_aosoa_type = Cabana::AoSoA<halo_tuple_type, memory_space, 4>;
 
-        std::size_t num_exports = _cells_per_dim * _cells_per_dim * _tile_reduction_factor * _tile_reduction_factor;
-        Kokkos::View<int*, memory_space> export_ids("export_ids", num_exports);
-        Kokkos::View<int*, memory_space> export_ranks("export_ranks", num_exports);
+        auto ijk2l = _ijk2l;
+        auto locals = _locals;
+
+        // For cell center calculations
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        auto factor = _tile_reduction_factor;
+        auto cell_size = _cell_size;
+        Kokkos::Array<double, 3> child_size;
+        for (int i = 0; i < 3; i++)
+            child_size[i] = cell_size[i] / factor;
+
+        const int children_per_cell = factor * factor * factor;
+
+        std::size_t num_exports = _locals.extent(0) * children_per_cell;
+        Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks(num_exports);
+        auto id_slice = Cabana::slice<0>(ids_ranks);
+        auto rank_slice = Cabana::slice<1>(ids_ranks);
+        halo_aosoa_type halo_data = halo_aosoa_type("halo_data", _locals.extent(0));
+        auto ijk_slice = Cabana::slice<1>(halo_data);
+        auto coefficient_slice = Cabana::slice<0>(halo_data);
+
         Kokkos::parallel_for("fill_vert_halo_data",
         Kokkos::RangePolicy<execution_space>(0, ijk2l.capacity()),
         KOKKOS_LAMBDA(const int ijk2l_index)
         {
-            if (cid2ijk.valid_at(ijk2l_index))
+            if (ijk2l.valid_at(ijk2l_index))
             {
                 // Cell ijk
-                auto cell_ijk = cid2ijk.key_at( ijk2l_index );
+                auto cell_ijk = ijk2l.key_at( ijk2l_index );
+
+                // Cell center
+                auto cell_center = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2], low_corner, cell_size);
 
                 // Cell local index
                 auto local_index = ijk2l.value_at(ijk2l_index);
 
-                // Each thread sets (local_index + _tile_reduction_factor * _tile_reduction_factor)
-                // part of export data because each cell has _tile_reduction_factor * _tile_reduction_factor
+                // Set cell ijk
+                for (int i = 0; i < 3; i++)
+                    ijk_slice(local_index, i) = cell_ijk[i];
+                
+                // Set local coefficients
+                for (std::size_t i = 0; i < num_coefficients; i++)
+                {
+                    coefficient_slice(local_index, i, 0) = locals(local_index, i).real();
+                    coefficient_slice(local_index, i, 1) = locals(local_index, i).imag();
+                }   
+
+                // Each thread sets (local_index + _tile_reduction_factor^3)
+                // part of export data because each cell has _tile_reduction_factor^3
                 // children
+                const int export_base = local_index * children_per_cell;
+                for (int c = 0; c < factor*factor*factor; ++c)
+                {
+                    int di =  c % factor;
+                    int dj = (c / factor) % factor;
+                    int dk =  c / (factor*factor);
+                    
+                    Kokkos::Array<int,3> child_ijk = {
+                        cell_ijk[0] * factor + di,
+                        cell_ijk[1] * factor + dj,
+                        cell_ijk[2] * factor + dk
+                    };
 
+                    auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
 
+                    int owner_rank = -1;
+
+                    for (int r = 0; r < child_domain.extent(0); ++r)
+                    {
+                        if ( child_center[0] >= child_domain(r, 0) &&
+                            child_center[0] <  child_domain(r, 3) &&
+                            child_center[1] >= child_domain(r, 1) &&
+                            child_center[1] <  child_domain(r, 4) &&
+                            child_center[2] >= child_domain(r, 2) &&
+                            child_center[2] <  child_domain(r, 5) )
+                        {
+                            owner_rank = r;
+                            break;
+                        }
+                    }
+
+                    id_slice(export_base + c) = local_index;
+                    rank_slice(export_base + c) = owner_rank;
+                    // printf("L%d: pijk:(%d, %d, %d), cijk:(%d, %d, %d)\n",
+                    //     _layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    //     child_ijk[0], child_ijk[1], child_ijk[2]);
+                }
             }
         });
 
+        
+
+
+
         // Vertical halo for getting local coefficients from more coarse cells
-        // auto vertical_halo = Halo<execution_space, memory_space, p>(_ijk2l, _locals,
-        //     export_ids, export_ranks, _comm);
+        Cabana::Halo<memory_space> halo( _comm, _locals.extent(0), export_ids,
+                                    export_ranks );
+        halo_data.resize(halo.numLocal() + halo.numGhost());
+        Cabana::gather(halo, halo_data);
+
+        ijk_slice = Cabana::slice<1>(halo_data);
+        coefficient_slice = Cabana::slice<0>(halo_data);
+        printf("num local: %d, num ghost: %d\n", halo.numLocal(), halo.numGhost() );
+        for (std::size_t i = halo.numLocal(); i < halo.numGhost(); i++)
+        {
+            // printf("Got pijk(%d, %d, %d)\n", ijk_slice(i, 0), ijk_slice(i, 1), ijk_slice(i, 2));
+        }
     }
 
     /**

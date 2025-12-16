@@ -465,7 +465,8 @@ class Tree
         printf("First starting layer: %d\n", first_valid_layer);
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
-            _tree[L]->multipole_to_local(starting_cells_per_dimension, starting_layer);
+            _tree[L]->getCoarseLocals(_tree[L+1]->domains());
+            // _tree[L]->multipole_to_local(starting_cells_per_dimension, starting_layer);
         }
     }
 
