@@ -463,11 +463,23 @@ class Tree
             return;
         }
         printf("First starting layer: %d\n", first_valid_layer);
+
+        // Halo and translate locals vertically
+        static constexpr std::size_t num_coefficients = (p+1)*(p+1);
+        using halo_tuple_type = Cabana::MemberTypes<double[num_coefficients][2], int[3]>;
+        using halo_aosoa_type = Cabana::AoSoA<halo_tuple_type, memory_space, 4>;
+        halo_aosoa_type halo_data("halo_data", 0);
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
-            _tree[L]->getCoarseLocals(_tree[L+1]->domains());
-            // _tree[L]->multipole_to_local(starting_cells_per_dimension, starting_layer);
+            _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L+1]->domains());
+            _tree[L]->addCoarseLocals(halo_data);
         }
+
+        // Halo and add locals horizontally
+        // for (int L = first_valid_layer - 1; L >= 0; --L)
+        // {
+        //     _tree[L]->multipole_to_local(starting_cells_per_dimension, starting_layer);
+        // }
     }
 
 

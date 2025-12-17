@@ -1173,7 +1173,8 @@ class TreeLayer
      *  3. Iterate over parent locals. Shift and add parent locals to all its
      *      child cells on this layer. 
      */
-    void getCoarseLocals(const Kokkos::View<double*[6], memory_space>& child_domain)
+    template <class HaloAoSoA>
+    void sendCoarseLocals(HaloAoSoA& halo_aosoa, const Kokkos::View<double*[6], memory_space>& child_domain)
     {
         // Locals, cell ijk index
         static constexpr std::size_t num_coefficients = (p+1)*(p+1);
@@ -1188,18 +1189,31 @@ class TreeLayer
         auto factor = _tile_reduction_factor;
         auto cell_size = _cell_size;
         Kokkos::Array<double, 3> child_size;
+        Kokkos::Array<double, 3> parent_size;
         for (int i = 0; i < 3; i++)
+        {
             child_size[i] = cell_size[i] / factor;
+            parent_size[i] = cell_size[i] * factor;
+        }
+            
 
         const int children_per_cell = factor * factor * factor;
 
-        std::size_t num_exports = _locals.extent(0) * children_per_cell;
-        Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks(num_exports);
+        std::size_t max_num_exports = _locals.extent(0) * children_per_cell;
+        Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks("ids_ranks", max_num_exports);
         auto id_slice = Cabana::slice<0>(ids_ranks);
         auto rank_slice = Cabana::slice<1>(ids_ranks);
         halo_aosoa_type halo_data = halo_aosoa_type("halo_data", _locals.extent(0));
         auto ijk_slice = Cabana::slice<1>(halo_data);
         auto coefficient_slice = Cabana::slice<0>(halo_data);
+
+        // Map to avoid sending duplicate locals to ranks
+        Kokkos::View<int**, memory_space> l2r_send_map("l2r_send_map", _locals.extent(0), _comm_size);
+        Kokkos::deep_copy(l2r_send_map, 0);
+
+        // Hold size of exports
+        Kokkos::View<int, memory_space> num_exports_d("num_exports_d");
+        Kokkos::deep_copy(num_exports_d, 0);
 
         Kokkos::parallel_for("fill_vert_halo_data",
         Kokkos::RangePolicy<execution_space>(0, ijk2l.capacity()),
@@ -1261,32 +1275,98 @@ class TreeLayer
                         }
                     }
 
-                    id_slice(export_base + c) = local_index;
-                    rank_slice(export_base + c) = owner_rank;
-                    // printf("L%d: pijk:(%d, %d, %d), cijk:(%d, %d, %d)\n",
-                    //     _layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    //     child_ijk[0], child_ijk[1], child_ijk[2]);
+                    auto val = Kokkos::atomic_fetch_add(&l2r_send_map(local_index, owner_rank), 1);
+                    if (val == 0)
+                    {
+                        auto index = Kokkos::atomic_fetch_add(&num_exports_d(), 1);
+                        id_slice(index) = local_index;
+                        rank_slice(index) = owner_rank;
+                        printf("L%d: sending ijk:(%d, %d, %d), to R%d\n",
+                            _layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                            _rank);
+                    }
+                    
                 }
             }
         });
 
-        
-
-
+        int num_exports;
+        Kokkos::deep_copy(num_exports, num_exports_d);
+        ids_ranks.resize(num_exports);
+        id_slice = Cabana::slice<0>(ids_ranks);
+        rank_slice = Cabana::slice<1>(ids_ranks);
 
         // Vertical halo for getting local coefficients from more coarse cells
-        Cabana::Halo<memory_space> halo( _comm, _locals.extent(0), export_ids,
-                                    export_ranks );
+        Cabana::Halo<memory_space> halo( _comm, _locals.extent(0), id_slice,
+                                    rank_slice );
+        std::size_t num_local = halo.numLocal();
         halo_data.resize(halo.numLocal() + halo.numGhost());
         Cabana::gather(halo, halo_data);
-
         ijk_slice = Cabana::slice<1>(halo_data);
         coefficient_slice = Cabana::slice<0>(halo_data);
-        printf("num local: %d, num ghost: %d\n", halo.numLocal(), halo.numGhost() );
-        for (std::size_t i = halo.numLocal(); i < halo.numGhost(); i++)
+
+        halo_aosoa.resize(halo.numGhost());
+        auto gathered_ijk_slice = Cabana::slice<1>(halo_aosoa);
+        auto gathered_coefficient_slice = Cabana::slice<0>(halo_aosoa);
+
+        Kokkos::parallel_for("fill_locals_cells",
+        Kokkos::RangePolicy<execution_space>(num_local, num_local + halo.numGhost()),
+        KOKKOS_LAMBDA(const int hi)
         {
-            // printf("Got pijk(%d, %d, %d)\n", ijk_slice(i, 0), ijk_slice(i, 1), ijk_slice(i, 2));
-        }
+            for (std::size_t i = 0; i < 3; i++)
+                gathered_ijk_slice(hi - num_local, i) = ijk_slice(hi, i);
+            for (std::size_t i = 0; i < num_coefficients; i++)
+            {
+                gathered_coefficient_slice(hi - num_local, i, 0) = coefficient_slice(hi, i, 0);
+                gathered_coefficient_slice(hi - num_local, i, 1) = coefficient_slice(hi, i, 1);
+            }
+        });
+    }
+
+    template <class HaloAoSoA>
+    void addCoarseLocals(HaloAoSoA& halo_data)
+    {
+        auto ijk2l = _ijk2l;
+        auto locals = _locals;
+
+        auto ijk_slice = Cabana::slice<1>(halo_data);
+        auto coefficient_slice = Cabana::slice<0>(halo_data);
+
+        auto factor = _tile_reduction_factor;
+
+        // Iterate through received locals. Translate and add to the correct child cells
+        Kokkos::parallel_for("fill_locals_cells",
+        Kokkos::RangePolicy<execution_space>(0, halo_data.size()),
+        KOKKOS_LAMBDA(const int hi)
+        {
+            printf("L%d: Got pijk(%d, %d, %d)\n", _layer_number, ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2));
+            
+            // Iterate over all children on this layer
+            for (int c = 0; c < factor*factor*factor; ++c)
+            {
+                int di =  c % factor;
+                int dj = (c / factor) % factor;
+                int dk =  c / (factor*factor);
+                
+                Kokkos::Array<std::size_t, 3> cell_ijk = {
+                    ijk_slice(hi, 0) * factor + di,
+                    ijk_slice(hi, 1) * factor + dj,
+                    ijk_slice(hi, 2) * factor + dk
+                };
+                // printf("L%d: R%d: checking cell %d, %d, %d\n", _layer_number, _rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                // Check if this cell is activated
+                auto cell_ijk_exists = ijk2l.exists( cell_ijk );
+                if (cell_ijk_exists)
+                {
+                    auto index = ijk2l.find(cell_ijk);
+                    auto local_index = ijk2l.value_at(index);
+                    printf("L%d: R%d: pijk(%d, %d, %d), ijk(%d, %d, %d)\n", _layer_number, _rank,
+                        ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2),
+                        cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                }
+            }
+        });
+
     }
 
     /**
