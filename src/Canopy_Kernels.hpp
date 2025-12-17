@@ -202,9 +202,9 @@ struct P2M
             Kokkos::RangePolicy<execution_space>( 0, k ),
             KOKKOS_LAMBDA( const int i ) {
                 // Construct coordinates relative to the expansion center.
-                double dx = pos( i, 0 ) - expansion_center(0);
-                double dy = pos( i, 1 ) - expansion_center(1);
-                double dz = pos( i, 2 ) - expansion_center(2);
+                double dx = pos( i, 0 ) - expansion_center[0];
+                double dy = pos( i, 1 ) - expansion_center[1];
+                double dz = pos( i, 2 ) - expansion_center[2];
 
                 double rho, alpha, beta;
                 cart2sph( dx, dy, dz, rho, alpha, beta );

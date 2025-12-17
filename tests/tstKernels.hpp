@@ -885,11 +885,6 @@ void testL2LStruct()
     double rho0, alpha0, beta0;
     Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho0, alpha0, beta0 );
 
-    // Vector from the new local center to the old local center.
-    Kokkos::Array<double, 3> X_0p = { X_0[0] * -1, X_0[1] * -1, X_0[2] * -1 };
-    double rho1, alpha1, beta1;
-    Canopy::Kernel::cart2sph( X_0p[0], X_0p[1], X_0p[2], rho1, alpha1, beta1 );
-
     // Target point X, near new local center
     double X_x = 3.6, X_y = 7.0, X_z = 5.2;
     double r, theta, phi;
@@ -899,11 +894,6 @@ void testL2LStruct()
     double r_p, theta_p, phi_p;
     Canopy::Kernel::cart2sph( X_x - X_0[0], X_y - X_0[1], X_z - X_0[2], r_p,
                               theta_p, phi_p );
-
-    // Vector X - X_0p:
-    double r_p1, theta_p1, phi_p1;
-    Canopy::Kernel::cart2sph( X_x - X_0p[0], X_y - X_0p[1], X_z - X_0p[2], r_p1,
-                              theta_p1, phi_p1 );
 
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
@@ -965,25 +955,17 @@ void testL2LStruct()
         l2l( m2l.coefficients(), X_0 );
 
         // Copy to host
-        auto O_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                           m2l.coefficients() );
         auto L_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                            l2l.coefficients() );
 
         // Perform local to potential conversion to calculate potential at
         // target. Equation 3.59 in Greengard
-        cdouble potential_O = 0.0;
         cdouble potential_L = 0.0;
         for ( int j = 0; j <= p; ++j )
         {
             for ( int k = -j; k <= j; ++k )
             {
                 int idx = Canopy::Kernel::Scalar::index( j, k );
-
-                // Chang eq. 19
-                potential_O +=
-                    O_host( idx ) * Kokkos::pow( r_p, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta_p, phi_p );
 
                 // Cheng eq. 20
                 potential_L += L_host( idx ) * Kokkos::pow( r, j ) *
