@@ -124,7 +124,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     bool run_load_balance = !balanced;
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
-    // Consider all cells when creating locals because we are only testing one layer
+    // Just test single-layer multipole to local conversion.
     layer->multipole_to_local(16, tree->numLayers() - 2);
 
     // Create target points at which to calculate potential directly, omitting
@@ -283,7 +283,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
+            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.7lf, lp: %.7lf\n", points_per_proc, tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
@@ -323,7 +323,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size * 4, leaf_tiles = comm_size * 8;
+    red_factor = comm_size * 2, leaf_tiles = comm_size * 8;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
         num_dim, cells_per_tile, p>(
@@ -394,9 +394,8 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     bool run_load_balance = !balanced;
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
-    // Consider all cells when creating locals because we are only testing one layer
     tree->multipole_to_local();
-    return;
+
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
     int num_target_points = 1;
@@ -553,9 +552,9 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
-            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            //     l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
+            printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
+                target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+                l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
     Kokkos::fence();
 

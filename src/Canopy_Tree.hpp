@@ -462,24 +462,28 @@ class Tree
             printf("No valid multipole layers (need >= 4 cells per dimension)\n");
             return;
         }
-        printf("First starting layer: %d\n", first_valid_layer);
+        printf("First starting layer: %d, starting cpd: %d\n", first_valid_layer, starting_cells_per_dimension);
 
-        // Halo and translate locals vertically
+        // Data structures for haloing and translating locals vertically
         static constexpr std::size_t num_coefficients = (p+1)*(p+1);
         using halo_tuple_type = Cabana::MemberTypes<double[num_coefficients][2], int[3]>;
         using halo_aosoa_type = Cabana::AoSoA<halo_tuple_type, memory_space, 4>;
         halo_aosoa_type halo_data("halo_data", 0);
+
+        // Compute locals at first valid layer
+        _tree[first_valid_layer]->multipole_to_local(starting_cells_per_dimension, starting_layer);
+
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
+            // Get the computed locals at the layer above L (more coarse layer)
             _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L+1]->domains());
-            _tree[L]->addCoarseLocals(halo_data);
-        }
 
-        // Halo and add locals horizontally
-        // for (int L = first_valid_layer - 1; L >= 0; --L)
-        // {
-        //     _tree[L]->multipole_to_local(starting_cells_per_dimension, starting_layer);
-        // }
+            // Add these locals to layer L
+            _tree[L]->addCoarseLocals(halo_data);
+
+            // Compute locals at layer L
+            _tree[L]->multipole_to_local(starting_cells_per_dimension, starting_layer);
+        }
     }
 
 

@@ -1073,16 +1073,16 @@ class TreeLayer
                     //         positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
                     // }
                 }
-                // if (result.success() && layer_number == 0)
-                // {
-                //     printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
-                //         layer_number, rank,
-                //         (unsigned long long)cell_id,
-                //         (unsigned long long)cell_activated_ijk[0],
-                //         (unsigned long long)cell_activated_ijk[1],
-                //         (unsigned long long)cell_activated_ijk[2],
-                //         positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
-                // }
+                if (result.success())
+                {
+                    printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
+                        layer_number, rank,
+                        (unsigned long long)cell_id,
+                        (unsigned long long)cell_activated_ijk[0],
+                        (unsigned long long)cell_activated_ijk[1],
+                        (unsigned long long)cell_activated_ijk[2],
+                        positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
+                }
 
                 // Save the cell the incoming data activates.
                 // The following line appears redundant, but later this
@@ -1113,6 +1113,7 @@ class TreeLayer
         _ijk2l.clear();
         _ijk2l.rehash(allocation_size);
         _locals = Kokkos::View<cdouble*[(p+1)*(p+1)], memory_space>("_locals", allocation_size);
+        Kokkos::deep_copy(_locals, cdouble(0,0));
         _m2l_bounds = Kokkos::View<int*[6], memory_space>("_m2l_bounds", allocation_size);
         
         // Sort the in2out array and by increasing cell_id
@@ -1326,13 +1327,19 @@ class TreeLayer
     template <class HaloAoSoA>
     void addCoarseLocals(HaloAoSoA& halo_data)
     {
+        static constexpr std::size_t num_coefficients = ( p + 1 ) * ( p + 1 );
         auto ijk2l = _ijk2l;
         auto locals = _locals;
 
         auto ijk_slice = Cabana::slice<1>(halo_data);
         auto coefficient_slice = Cabana::slice<0>(halo_data);
 
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto factor = _tile_reduction_factor;
+        auto cell_size = _cell_size;
+        Kokkos::Array<double, 3> parent_cell_size;
+        for (int i = 0; i < 3; i++)
+            parent_cell_size[i] = cell_size[i] * factor;
 
         // Iterate through received locals. Translate and add to the correct child cells
         Kokkos::parallel_for("fill_locals_cells",
@@ -1341,7 +1348,10 @@ class TreeLayer
         {
             printf("L%d: Got pijk(%d, %d, %d)\n", _layer_number, ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2));
             
-            // Iterate over all children on this layer
+            auto parent_cell_center = cellCenter(ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2),
+                low_corner, parent_cell_size);
+
+            // Iterate over all children of this parent
             for (int c = 0; c < factor*factor*factor; ++c)
             {
                 int di =  c % factor;
@@ -1364,8 +1374,33 @@ class TreeLayer
                         ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2),
                         cell_ijk[0], cell_ijk[1], cell_ijk[2]);
                     
-                    // Shift and add the parent cell's locals to this cell's locals
+                    auto child_cell_center = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        low_corner, cell_size);
                     
+                    // Shift and add the parent cell's locals to this cell's locals.
+                    // Start by getting vector from new local center (child cell center, A)
+                    // to old local center (parent cell center, B), which is B - A
+                    Kokkos::Array<double, 3> X_0;
+                    for (int i = 0; i < 3; i++)
+                        X_0[i] = parent_cell_center[i] - child_cell_center[i];
+                    
+                    // Translate locals
+                    Kokkos::Array<cdouble, num_coefficients> L_orig;
+                    Kokkos::Array<cdouble, num_coefficients> L_trans;
+                    for (std::size_t i = 0; i < num_coefficients; i++)
+                    {
+                        L_orig[i].real() = coefficient_slice(hi, i, 0);
+                        L_orig[i].imag() = coefficient_slice(hi, i, 1);
+                    }
+                    Kernel::Scalar::l2l<p>(L_orig, L_trans, X_0);
+
+                    // Add translated locals to cell
+                    for (std::size_t i = 0; i < num_coefficients; i++)
+                    {
+                        locals(local_index, i).real() += L_trans[i].real();
+                        locals(local_index, i).imag() += L_trans[i].imag();
+                    }
+                    // printf("Adding locals from cell ")
                 }
             }
         });
@@ -1504,10 +1539,10 @@ class TreeLayer
         Kokkos::RangePolicy<execution_space>(0, ijk2l.capacity()),
         KOKKOS_LAMBDA(const int ijk2l_index)
         {
-            if (cid2ijk.valid_at(ijk2l_index))
+            if (ijk2l.valid_at(ijk2l_index))
             {
                 // Cell ijk
-                auto cell_ijk = cid2ijk.key_at( ijk2l_index );
+                auto cell_ijk = ijk2l.key_at( ijk2l_index );
 
                 // Cell local index
                 auto local_index = ijk2l.value_at(ijk2l_index);
