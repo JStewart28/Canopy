@@ -1363,6 +1363,9 @@ class TreeLayer
                     printf("L%d: R%d: pijk(%d, %d, %d), ijk(%d, %d, %d)\n", _layer_number, _rank,
                         ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2),
                         cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                    
+                    // Shift and add the parent cell's locals to this cell's locals
+                    
                 }
             }
         });
