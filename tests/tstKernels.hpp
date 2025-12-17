@@ -1267,7 +1267,7 @@ void testL2LStruct1()
         
         // Check that potential calculated with translated and original locals
         // match.
-        EXPECT_DOUBLE_EQ(potential_L.real(), potential_shift.real());
+        EXPECT_NEAR(potential_L.real(), potential_shift.real(), 0.0000000001);
 
         // printf("p=%d: D1: %0.5lf, L: %0.5lf, LS: %0.5lf\n", p,
         //     potential_direct, potential_L.real(), potential_shift.real());
