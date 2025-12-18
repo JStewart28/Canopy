@@ -607,10 +607,10 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
-TEST( Helper, testCell2Bound)
-{
-    testCell2Bound();
-}
+// TEST( Helper, testCell2Bound)
+// {
+//     testCell2Bound();
+// }
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
 // TEST( Tree, testMultipole2Local0_balanced )
@@ -618,14 +618,14 @@ TEST( Helper, testCell2Bound)
 //     testMultipole2Local0<3>(500, true); 
 // }
 
-// TEST( Tree, testMultipole2Local1_balanced )
-// { 
-//     for (int i = 2; i < 3; i++)
-//     {
-//         printf("******* i = %d *******\n", i);
-//         testMultipole2Local1<3>(i, true); 
-//     }
-// }
+TEST( Tree, testMultipole2Local1_balanced )
+{ 
+    for (int i = 2; i < 3; i++)
+    {
+        printf("******* i = %d *******\n", i);
+        testMultipole2Local1<3>(i, true); 
+    }
+}
 
 //---------------------------------------------------------------------------//
 

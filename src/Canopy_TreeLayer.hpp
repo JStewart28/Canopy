@@ -146,28 +146,32 @@ cell2Bound(const int layer, const IjkView ijk,
     // Adjust bounds to current layer
     for (int l = layers_to_top - 2; l >= 0; l--)
     {
-        // Cells per dimension increases by increase factor
         cpd *= cell_incr_factor;
 
-        // Include bounds are exclude bounds from previous layer
-        // multiplied by cell_incr_factor
+        // Scale include bounds
         for (int i = 0; i < 6; i++)
         {
-            include[i] = exclude[i] * cell_incr_factor;
+            include[i] *= cell_incr_factor;
         }
 
-        // Exclude bounds based on cell ijk in this layer
-        for (int i = 0; i < 3; i++)
+        // Compute exclude bounds
+        for (int d = 0; d < 3; d++)
         {
-            exclude[i] = Kokkos::max(ijk(ijk_index, l, i) - 2, 0);
-            exclude[i + 3] = Kokkos::min(ijk(ijk_index, l, i) + 2, cpd);
+            int v = ijk(ijk_index, l, d);
+            exclude[d]     = Kokkos::max(v - 2, 0);
+            exclude[d + 3] = Kokkos::min(v + 3, cpd);
+        }
+
+        for (int d = 0; d < 3; d++)
+        {
+            include[d]     = Kokkos::max(include[d],     exclude[d]);
+            include[d + 3] = Kokkos::min(include[d + 3], exclude[d + 3]);
         }
         if (ijk(ijk_index, l, 0) == 0 && ijk(ijk_index, l, 1) == 0 && ijk(ijk_index, l, 2) == 0)
         printf("L%d: l%d: ijk: (%d, %d, %d), in: (%d, %d, %d)-(%d, %d, %d), ex: (%d, %d, %d)-(%d, %d, %d)\n",
             layer, l, ijk(ijk_index, l, 0), ijk(ijk_index, l, 1), ijk(ijk_index, l, 2),
             include[0], include[1], include[2], include[3], include[4], include[5],
             exclude[0], exclude[1], exclude[2], exclude[3], exclude[4], exclude[5]);
-        // cell2Bound(bounds, cell_ijk, cells_per_dimension, cell_incr_factor)
     }
 
     return Kokkos::pair{include, exclude};
