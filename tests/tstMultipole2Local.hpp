@@ -23,6 +23,21 @@ namespace Test
 
 using cdouble = Kokkos::complex<double>;
 
+void testCell2Bound()
+{
+
+// template <class IjkView>
+// KOKKOS_INLINE_FUNCTION
+// Kokkos::pair<Kokkos::Array<int, 6>, Kokkos::Array<int, 6>>
+// cell2Bound(const int layer, const IjkView ijk,
+//            const int ijk_index,
+//            const int start_cpd,
+//            const int cell_incr_factor,
+//            const int layers_to_top)
+
+
+}
+
 /**
  * Tests that on a single layer, multipole are correctly converted to locals.
  * Process:
@@ -371,11 +386,20 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     cart_coords(0, 0) = -2.9;
     cart_coords(0, 1) = -2.8;
     cart_coords(0, 2) = -2.85;
+    q(0) = 2.0;
 
     // Put second point far away
-    cart_coords(1, 0) = 2.9;
-    cart_coords(1, 1) = 2.8;
-    cart_coords(1, 2) = 2.85;
+    cart_coords(1, 0) = -1.01;
+    cart_coords(1, 1) = 0.91;
+    cart_coords(1, 2) = -0.50;
+    q(1) = 4.0;
+
+    cart_coords(2, 0) = 2.9;
+    cart_coords(2, 1) = 2.8;
+    cart_coords(2, 2) = 2.85;
+    q(2) = 0.0;
+
+    
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
@@ -583,6 +607,10 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
+TEST( Helper, testCell2Bound)
+{
+    testCell2Bound();
+}
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
 // TEST( Tree, testMultipole2Local0_balanced )
@@ -590,14 +618,14 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 //     testMultipole2Local0<3>(500, true); 
 // }
 
-TEST( Tree, testMultipole2Local1_balanced )
-{ 
-    for (int i = 3; i < 4; i++)
-    {
-        printf("******* i = %d *******\n", i);
-        testMultipole2Local1<3>(i, true); 
-    }
-}
+// TEST( Tree, testMultipole2Local1_balanced )
+// { 
+//     for (int i = 2; i < 3; i++)
+//     {
+//         printf("******* i = %d *******\n", i);
+//         testMultipole2Local1<3>(i, true); 
+//     }
+// }
 
 //---------------------------------------------------------------------------//
 
