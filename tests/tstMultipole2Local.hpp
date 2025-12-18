@@ -367,6 +367,16 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
+    // Put first point in the same cell as the target point
+    cart_coords(0, 0) = -2.9;
+    cart_coords(0, 1) = -2.8;
+    cart_coords(0, 2) = -2.85;
+
+    // Put second point far away
+    cart_coords(1, 0) = 2.9;
+    cart_coords(1, 1) = 2.8;
+    cart_coords(1, 2) = 2.85;
+
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
@@ -405,9 +415,9 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
     // Put target point in cell (14, 12, 5)
     // cell: (14, 12, 5) center: (2.44, 1.69, -0.94)
-    target_points(0, 0) = 2.5;
-    target_points(0, 1) = 1.5;
-    target_points(0, 2) = -0.9;
+    target_points(0, 0) = -2.88;
+    target_points(0, 1) = -2.92;
+    target_points(0, 2) = -2.89;
     
     auto target_points_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), target_points);
 
@@ -582,7 +592,11 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testMultipole2Local1_balanced )
 { 
-    testMultipole2Local1<3>(2, true); 
+    for (int i = 3; i < 4; i++)
+    {
+        printf("******* i = %d *******\n", i);
+        testMultipole2Local1<3>(i, true); 
+    }
 }
 
 //---------------------------------------------------------------------------//
