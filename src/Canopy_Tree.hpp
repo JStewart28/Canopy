@@ -471,7 +471,7 @@ class Tree
         halo_aosoa_type halo_data("halo_data", 0);
 
         // Compute locals at first valid layer
-        _tree[first_valid_layer]->multipole_to_local(starting_cells_per_dimension, starting_layer);
+        _tree[first_valid_layer]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
 
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
@@ -482,7 +482,7 @@ class Tree
             _tree[L]->addCoarseLocals(halo_data);
 
             // Compute locals at layer L
-            _tree[L]->multipole_to_local(starting_cells_per_dimension, starting_layer);
+            _tree[L]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
         }
     }
 

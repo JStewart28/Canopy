@@ -90,96 +90,17 @@ position2ijk(Scalar x, Scalar y, Scalar z,
 }
 
 /**
- * Given a cell ijk and number of cells per dimension, compute
- * the lower and upper bounds
- */
-// template <class Integer, class IjkView>
-// KOKKOS_INLINE_FUNCTION
-// void 
-// cell2Bound(Kokkos::pair<Kokkos::Array<Integer, 6>, Kokkos::Array<Integer, 6>>& bounds,
-//            const IjkView cell_ijk,
-//            Integer cells_per_dimension,
-//            Integer cell_incr_factor
-//            )
-// {
-//     // Adjust bounds
-//     for (int i = 0; i < 6; i++)
-//         bounds.first[i] *= cell_incr_factor;
-
-//     for (int i = 0; i < 3; i++)
-//     {
-//         bounds.second[i] = Kokkos::max(cell_ijk[i] - 2, 0);
-//         bounds.second[i + 3] = Kokkos::max(cell_ijk[i] + 3, cells_per_dimension);
-//     }
-// }
-
-/**
  * Given a cell ijk location, inner local cutoff from a more coarse layer
  * in terms of the cell ijk of this layer, and the cells per dimension,
  * return the new outer bounds and inner bounds for the local cutoff.
  */
-template <class IjkView>
 KOKKOS_INLINE_FUNCTION
 Kokkos::pair<Kokkos::Array<int, 6>, Kokkos::Array<int, 6>>
-cell2Bound(const int layer, const IjkView ijk,
-           const int ijk_index,
-           const int start_cpd,
-           const int cell_incr_factor,
-           const int layers_to_top)
-{
-    // Set initial bounds
-    Kokkos::Array<int, 6> include = {0, 0, 0, start_cpd, start_cpd, start_cpd};
-    Kokkos::Array<int, 6> exclude;
-    for (int i = 0; i < 3; i++)
-    {
-        exclude[i] = Kokkos::max(ijk(ijk_index, layers_to_top-1, i) - 2, 0);
-        exclude[i + 3] = Kokkos::min(ijk(ijk_index, layers_to_top-1, i) + 2, start_cpd);
-    }
-    // printf("L%d: first ijk: (%d, %d, %d), in: (%d, %d, %d)-(%d, %d, %d), ex: (%d, %d, %d)-(%d, %d, %d)\n",
-    //         0, ijk(ijk_index, layers_to_top-1, 0), ijk(ijk_index, layers_to_top-1, 1), ijk(ijk_index, layers_to_top-1, 2),
-    //         include[0], include[1], include[2], include[3], include[4], include[5],
-    //         exclude[0], exclude[1], exclude[2], exclude[3], exclude[4], exclude[5]);
-
-    // Save cells per dimension
-    int cpd = start_cpd;
-
-    // Adjust bounds to current layer
-    for (int l = layers_to_top - 2; l >= 0; l--)
-    {
-        // Cells per dimension increases by increase factor
-        cpd *= cell_incr_factor;
-
-        // Include bounds are exclude bounds from previous layer
-        // multiplied by cell_incr_factor
-        for (int i = 0; i < 6; i++)
-        {
-            include[i] = exclude[i] * cell_incr_factor;
-        }
-
-        // Exclude bounds based on cell ijk in this layer
-        for (int i = 0; i < 3; i++)
-        {
-            exclude[i] = Kokkos::max(ijk(ijk_index, l, i) - 2, 0);
-            exclude[i + 3] = Kokkos::min(ijk(ijk_index, l, i) + 2, cpd);
-        }
-        if (ijk(ijk_index, l, 0) == 0 && ijk(ijk_index, l, 1) == 0 && ijk(ijk_index, l, 2) == 0)
-        printf("L%d: l%d: ijk: (%d, %d, %d), in: (%d, %d, %d)-(%d, %d, %d), ex: (%d, %d, %d)-(%d, %d, %d)\n",
-            layer, l, ijk(ijk_index, l, 0), ijk(ijk_index, l, 1), ijk(ijk_index, l, 2),
-            include[0], include[1], include[2], include[3], include[4], include[5],
-            exclude[0], exclude[1], exclude[2], exclude[3], exclude[4], exclude[5]);
-        // cell2Bound(bounds, cell_ijk, cells_per_dimension, cell_incr_factor)
-    }
-
-    return Kokkos::pair{include, exclude};
-}
-
-KOKKOS_INLINE_FUNCTION
-Kokkos::pair<Kokkos::Array<int, 6>, Kokkos::Array<int, 6>>
-cell2BoundTest(Kokkos::Array<int, 3> cell_ijk,
-               const int layer,
-               const int start_layer,
-               const int start_cpd,
-               const int cell_incr_factor)
+cell2Bound(Kokkos::Array<int, 3> cell_ijk,
+            const int layer,
+            const int start_layer,
+            const int start_cpd,
+            const int cell_incr_factor)
 {
     // Number of refinement steps
     const int num_layers = start_layer - layer;
@@ -1361,9 +1282,9 @@ class TreeLayer
                         auto index = Kokkos::atomic_fetch_add(&num_exports_d(), 1);
                         id_slice(index) = local_index;
                         rank_slice(index) = owner_rank;
-                        // printf("L%d: sending ijk:(%d, %d, %d), to R%d\n",
-                        //     _layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        //     _rank);
+                        printf("L%d: sending ijk:(%d, %d, %d), to R%d\n",
+                            _layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                            _rank);
                     }
                     
                 }
@@ -1477,11 +1398,11 @@ class TreeLayer
                         locals(local_index, i).imag() += L_trans[i].imag();
                     }
                     // printf("Adding locals from cell ")
-                    // printf("L%d: R%d: Adding from pijk(%d, %d, %d) to ijk(%d, %d, %d): %.2lf, %.2lf, %.2lf, %.2lf\n", _layer_number, _rank,
-                    //     ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2),
-                    //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    //     locals(local_index, 0).real(), locals(local_index, 1).real(), 
-                    //     locals(local_index, 2).real(), locals(local_index, 3).real());
+                    printf("L%d: R%d: Adding from pijk(%d, %d, %d) to ijk(%d, %d, %d): %.2lf, %.2lf, %.2lf, %.2lf\n", _layer_number, _rank,
+                        ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2),
+                        cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        locals(local_index, 0).real(), locals(local_index, 1).real(), 
+                        locals(local_index, 2).real(), locals(local_index, 3).real());
                 }
             }
         });
@@ -1496,7 +1417,7 @@ class TreeLayer
      *  2) cell0 and cell_other do not touch.
      *  3) The parent cells of cell0 and cell_other do touch.
      */
-    void computeInteractionBounds(int starting_cells_per_dimension, int num_layers)
+    void computeInteractionBounds(int starting_cells_per_dimension, int start_layer)
     {
         // Iterate over cells
         // This only works for one process right now.
@@ -1509,15 +1430,10 @@ class TreeLayer
         auto cid2ijk = _cid2ijk;
         auto ijk2l = _ijk2l;
 
-
         int cells_per_dim = _cells_per_dim;
         int rank = _rank;
         int layer_number = _layer_number;
         int cell_incr_factor = _tile_reduction_factor;
-
-        // Hold cell ijk position at other layers
-        Kokkos::View<int**[3], memory_space> ijk("ijk", _m2l_bounds.extent(0), num_layers - _layer_number);
-        // printf("L%d: ijk view extent: %d, %d, %d\n", _layer_number, ijk.extent(0), ijk.extent(1), ijk.extent(2));
 
         // Per-cell calculation
         Kokkos::parallel_for("multipole_to_local",
@@ -1535,30 +1451,16 @@ class TreeLayer
                 // printf("L%d: ijk: (%d, %d, %d), li: %d\n", layer_number,
                 //     cell_ijk[0], cell_ijk[1], cell_ijk[2], local_index);
 
-                // Fill ijk for this cell
-                for (int d = 0; d < 3; d++)
-                {
-                    ijk(local_index, 0, d) = cell_ijk[d];
-                }
-
                 // if (layer_number == 0)
                 //     printf("L%d: L%d: ijk(%d, %d, %d)\n", layer_number, layer_number,
                 //         ijk(local_index, 0, 0), ijk(local_index, 0, 1), ijk(local_index, 0, 2));
+                // Cast cell_ijk to ints
+                Kokkos::Array<int, 3> cell_ijk_int;
+                for (int i = 0; i < 3; i++)
+                    cell_ijk_int[i] = static_cast<int>(cell_ijk[i]);
 
-                int layers_to_top = num_layers - layer_number;
-
-                for (int l = 1; l < layers_to_top; l++)
-                {
-                    for (int d = 0; d < 3; d++)
-                    {
-                        // Compute parent cells
-                        ijk(local_index, l, d) = Kokkos::floor(ijk(local_index, l-1, d) / cell_incr_factor);
-                    }
-                    // printf("L%d: L%d: cell ijk(%d, %d, %d)\n", layer_number, l,
-                    //     ijk(local_index, l, 0), ijk(local_index, l, 1), ijk(local_index, l, 2));
-                }
-                auto bounds = cell2Bound(layer_number, ijk, local_index, starting_cells_per_dimension,
-                    cell_incr_factor, layers_to_top);
+                auto bounds = cell2Bound(cell_ijk_int, layer_number, start_layer, starting_cells_per_dimension,
+                    cell_incr_factor);
                 
                 // Save include bounds
                 for (int i = 0; i < 6; i++)
@@ -1571,16 +1473,6 @@ class TreeLayer
                 
             }
         });
-
-         // Get cell bounds
-        // auto bounds = cell2Bound()
-        // template <class Integer, class IjkView>
-        // KOKKOS_INLINE_FUNCTION
-        // Kokkos::pair<Kokkos::Array<Integer, 6>, Kokkos::Array<Integer, 6>>
-        // cell2Bound(const IjkView ijk,
-        //         const Integer start_cpd,
-        //         const Integer cell_incr_factor,
-        //         const Integer this_layer)
     }
 
     /**
@@ -1590,7 +1482,7 @@ class TreeLayer
      * Convert the multipole coefficients centered around the other cell to local coefficients
      * centered around this cell.
      */
-    void multipole_to_local(int starting_cells_per_dimension, int num_layers)
+    void multipole_to_local(int starting_cells_per_dimension, int start_layer)
     {
         // This only works for one process right now.
         if (_comm_size != 1)
@@ -1598,7 +1490,7 @@ class TreeLayer
             throw std::runtime_error("multipole_to_local only works for comm_size 1");
         }
 
-        computeInteractionBounds(starting_cells_per_dimension, num_layers);
+        computeInteractionBounds(starting_cells_per_dimension, start_layer);
 
         // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
@@ -1660,10 +1552,10 @@ class TreeLayer
 
                 // Iterate over all cells whose multipoles we must consider.
                 // XXX - Make this a team policy nested for loop
-                printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d\n", layer_number, rank,
-                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    m2l_bounds(local_index, 0), m2l_bounds(local_index, 1), m2l_bounds(local_index, 2),
-                    m2l_bounds(local_index, 3), m2l_bounds(local_index, 4), m2l_bounds(local_index, 5));
+                // printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d\n", layer_number, rank,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     m2l_bounds(local_index, 0), m2l_bounds(local_index, 1), m2l_bounds(local_index, 2),
+                //     m2l_bounds(local_index, 3), m2l_bounds(local_index, 4), m2l_bounds(local_index, 5));
                 for (std::size_t ci = m2l_bounds(local_index, 0); ci < m2l_bounds(local_index, 3); ci++)
                     for (std::size_t cj = m2l_bounds(local_index, 1); cj < m2l_bounds(local_index, 4); cj++)
                         for (std::size_t ck = m2l_bounds(local_index, 2); ck < m2l_bounds(local_index, 5); ck++)
@@ -1694,15 +1586,14 @@ class TreeLayer
                                 // Cell not activated; do not consider
                                 continue;
                             }
-                            // if (rank == 0 && layer_number == 0 && cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
-                            if (rank == 0)
-                            printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
-                                cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
-
+                            
                             // Otherwise get the data
                             auto n_tid = map.queryTile(ci, cj, ck);
                             auto n_ctid = map.cell_local_id(ci, cj, ck);
                             auto neighbor_index = ( n_tid << cell_bits_per_tile ) | ( n_ctid & cell_mask_per_tile );
+
+                            // if (rank == 0)
+
                             
                             // For multipole to local conversion we need the multipole
                             // center relative to the local center
@@ -1735,6 +1626,13 @@ class TreeLayer
                             // Convert to locals
                             Kokkos::Array<cdouble, num_coefficients> L;
                             Kernel::Scalar::m2l<p>(M, L, m2l_vec);
+
+                            if (rank == 0 && cells_per_dim == 4 && cell_ijk[0] == 0 && cell_ijk[1] == 0 && cell_ijk[2] == 0)
+                            {
+                                printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: L: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                                    cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck,
+                                    L[0].real(), L[1].real(), L[2].real());
+                            }
                             
                             // Add contribution to locals for this cell
                             for (std::size_t i = 0; i < num_coefficients; i++)
