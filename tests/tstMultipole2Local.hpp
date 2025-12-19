@@ -25,20 +25,68 @@ using cdouble = Kokkos::complex<double>;
 
 void testCell2Bound()
 {
+    // Define arrays
+    std::array<int, 6> include;
+    std::array<int, 6> exclude;
+    std::array<int, 6> correct_include;
+    std::array<int, 6> correct_exclude;
+
+    // Start layer = layer
     Kokkos::Array<int, 3> cell_ijk = {0, 0, 0};
-    const int layer = 0;
-    const int start_layer = 2;
-    const int start_cpd = 4;
-    const int cell_incr_factor = 2;
+    int layer = 0;
+    int start_layer = 2;
+    int start_cpd = 4;
+    int cell_incr_factor = 2;
 
-    auto bounds = cell2BoundTest(cell_ijk, layer, start_layer,
+    auto bounds = Canopy::cell2BoundTest(cell_ijk, layer, start_layer,
         start_cpd, cell_incr_factor);
-    
-    auto include = bounds.first;
-    auto exclude = bounds.second;
 
-    Kokkos::Array<int, 3> correct_include = {0, 0, 0, 6, 6, 6}
-    Kokkos::Array<int, 3> correct_exclude = {0, 0, 0, 3, 3, 3}
+    for (int i = 0; i < 6; i++)
+    {
+        include[i] = bounds.first[i];
+        exclude[i] = bounds.second[i];
+    }
+
+    correct_include = {0, 0, 0, 6, 6, 6};
+    correct_exclude = {0, 0, 0, 3, 3, 3};
+
+    EXPECT_EQ(include, correct_include);
+    EXPECT_EQ(exclude, correct_exclude);
+
+    // Next test
+    cell_ijk = {8, 12, 12};
+
+    bounds = Canopy::cell2BoundTest(cell_ijk, layer, start_layer,
+        start_cpd, cell_incr_factor);
+
+    for (int i = 0; i < 6; i++)
+    {
+        include[i] = bounds.first[i];
+        exclude[i] = bounds.second[i];
+    }
+
+    correct_include = {4, 8, 8, 14, 16, 16};
+    correct_exclude = {6, 10, 10, 11, 15, 15};
+
+    EXPECT_EQ(include, correct_include);
+    EXPECT_EQ(exclude, correct_exclude);
+
+    // Next test
+    cell_ijk = {10, 7, 3};
+
+    bounds = Canopy::cell2BoundTest(cell_ijk, layer, start_layer,
+        start_cpd, cell_incr_factor);
+
+    for (int i = 0; i < 6; i++)
+    {
+        include[i] = bounds.first[i];
+        exclude[i] = bounds.second[i];
+    }
+
+    correct_include = {6, 2, 0, 16, 12, 8};
+    correct_exclude = {8, 5, 1, 13, 10, 6};
+    // 6	2	0	16	12	8	8	5	1	13	10	6
+
 
     EXPECT_EQ(include, correct_include);
     EXPECT_EQ(exclude, correct_exclude);
