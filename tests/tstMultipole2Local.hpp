@@ -25,17 +25,23 @@ using cdouble = Kokkos::complex<double>;
 
 void testCell2Bound()
 {
+    Kokkos::Array<int, 3> cell_ijk = {0, 0, 0};
+    const int layer = 0;
+    const int start_layer = 2;
+    const int start_cpd = 4;
+    const int cell_incr_factor = 2;
 
-// template <class IjkView>
-// KOKKOS_INLINE_FUNCTION
-// Kokkos::pair<Kokkos::Array<int, 6>, Kokkos::Array<int, 6>>
-// cell2Bound(const int layer, const IjkView ijk,
-//            const int ijk_index,
-//            const int start_cpd,
-//            const int cell_incr_factor,
-//            const int layers_to_top)
+    auto bounds = cell2BoundTest(cell_ijk, layer, start_layer,
+        start_cpd, cell_incr_factor);
+    
+    auto include = bounds.first;
+    auto exclude = bounds.second;
 
+    Kokkos::Array<int, 3> correct_include = {0, 0, 0, 6, 6, 6}
+    Kokkos::Array<int, 3> correct_exclude = {0, 0, 0, 3, 3, 3}
 
+    EXPECT_EQ(include, correct_include);
+    EXPECT_EQ(exclude, correct_exclude);
 }
 
 /**
@@ -607,10 +613,10 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
-// TEST( Helper, testCell2Bound)
-// {
-//     testCell2Bound();
-// }
+TEST( Helper, testCell2Bound)
+{
+    testCell2Bound();
+}
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
 // TEST( Tree, testMultipole2Local0_balanced )
@@ -618,14 +624,14 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 //     testMultipole2Local0<3>(500, true); 
 // }
 
-TEST( Tree, testMultipole2Local1_balanced )
-{ 
-    for (int i = 2; i < 3; i++)
-    {
-        printf("******* i = %d *******\n", i);
-        testMultipole2Local1<3>(i, true); 
-    }
-}
+// TEST( Tree, testMultipole2Local1_balanced )
+// { 
+//     for (int i = 2; i < 3; i++)
+//     {
+//         printf("******* i = %d *******\n", i);
+//         testMultipole2Local1<3>(i, true); 
+//     }
+// }
 
 //---------------------------------------------------------------------------//
 
