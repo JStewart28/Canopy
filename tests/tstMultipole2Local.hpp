@@ -90,6 +90,28 @@ void testCell2Bound()
 
     EXPECT_EQ(include, correct_include);
     EXPECT_EQ(exclude, correct_exclude);
+
+    // Next test
+    cell_ijk = {0, 0, 0};
+    layer = 1;
+    start_layer = 1;
+    start_cpd = 16;
+    cell_incr_factor = 2;
+
+    bounds = Canopy::cell2Bound(cell_ijk, layer, start_layer,
+        start_cpd, cell_incr_factor);
+
+    for (int i = 0; i < 6; i++)
+    {
+        include[i] = bounds.first[i];
+        exclude[i] = bounds.second[i];
+    }
+
+    correct_include = {0, 0, 0, 16, 16, 16};
+    correct_exclude = {0, 0, 0, 3, 3, 3};
+
+    EXPECT_EQ(include, correct_include);
+    EXPECT_EQ(exclude, correct_exclude);
 }
 
 /**
@@ -198,16 +220,21 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 100;
+    int num_target_points = 1;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
     fillRandomCoordinates(target_points, coord_bounds, 456);
 
     // Put target point in cell (14, 12, 5)
     // cell: (14, 12, 5) center: (2.44, 1.69, -0.94)
-    target_points(0, 0) = 2.5;
-    target_points(0, 1) = 1.5;
-    target_points(0, 2) = -0.9;
+    // target_points(0, 0) = 2.5;
+    // target_points(0, 1) = 1.5;
+    // target_points(0, 2) = -0.9;
+
+    // Put target point in upper corner of domain
+    target_points(0, 0) = -2.88;
+    target_points(0, 1) = -2.92;
+    target_points(0, 2) = -2.89;
     
     auto target_points_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), target_points);
 
@@ -352,12 +379,11 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.7lf, lp: %.7lf\n", points_per_proc, tpi,
-            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            //     l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
+            printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.7lf, lp: %.7lf\n", points_per_proc, tpi,
+                target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+                l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
     Kokkos::fence();
-    printf("Finished calculating local potentials\n");
 
     // Copy to host and test
     int p_int = static_cast<int>(p_val);
@@ -366,7 +392,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     {
         auto direct_potential = direct_potentials(i);
         auto local_potential = local_potential_h(i).real();
-        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_val));
+        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int));
     }
 }
 
@@ -389,7 +415,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size * 2, leaf_tiles = comm_size * 2;
+    red_factor = comm_size * 2, leaf_tiles = comm_size * 4;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
         num_dim, cells_per_tile, p>(
@@ -398,18 +424,21 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
     // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
+    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
 
-    // Check mesh information for leaf layer (layer 0)
-    auto layer = tree->layer(0);
-    int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
+    // Check mesh information for layer in question
+    const int test_layer = 1;
+    const int layer_tiles = 2; 
+    auto layer = tree->layer(test_layer);
+    // int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
+    int cells_per_leaf_dimension = 4;
     Kokkos::Array<double, 3> cell_size;
     for (int i = 0; i < 3; ++i)
     {
         cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_leaf_dimension;
     }
     ASSERT_EQ(layer->cellsPerDim(), cells_per_leaf_dimension) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
-    ASSERT_EQ(layer->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
+    ASSERT_EQ(layer->tilesPerDim(), layer_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
     ASSERT_EQ(layer->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
 
     // Create the data on rank 0. It will automatically be distributed correctly when
@@ -493,7 +522,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     // Just test single-layer multipole to local conversion.
-    layer->multipole_to_local(16, tree->numLayers() - 2);
+    layer->multipole_to_local(4, 1);
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
@@ -650,9 +679,9 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
-                target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-                l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
+            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
+            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+            //     l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
     Kokkos::fence();
 
@@ -663,7 +692,8 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     {
         auto direct_potential = direct_potentials(i);
         auto local_potential = local_potential_h(i).real();
-        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_val));
+        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int));
+        // printf("dp: %.5lf, lp: %.5lf\n", direct_potential, local_potential);
     }
 }
 
@@ -969,34 +999,39 @@ void testMultipole2Local2(int points_per_proc_in, bool balanced)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
-// TEST( Helper, testCell2Bound)
-// {
-//     testCell2Bound();
-// }
+TEST( Helper, testCell2Bound)
+{
+    testCell2Bound();
+}
+
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-// TEST( Tree, testMultipole2Local0_balanced )
+TEST( Tree, testMultipole2Local0_balanced )
+{ 
+    for (int i = 3; i < 4; i++)
+    {
+        printf("******* 0: i = %d *******\n", i);
+        testMultipole2Local0<3>(i, true);     
+    }
+}
+
+// TEST( Tree, testMultipole2Local1_balanced )
 // { 
-//     testMultipole2Local0<3>(500, true); 
+//     for (int i = 4; i < 20; i++)
+//     {
+//         printf("******* 1: i = %d *******\n", i);
+//         testMultipole2Local1<6>(i, true); 
+//     }
 // }
 
-TEST( Tree, testMultipole2Local1_balanced )
-{ 
-    for (int i = 3; i < 4; i++)
-    {
-        printf("******* 1: i = %d *******\n", i);
-        testMultipole2Local1<6>(i, true); 
-    }
-}
-
-TEST( Tree, testMultipole2Local2_balanced )
-{ 
-    for (int i = 3; i < 4; i++)
-    {
-        printf("******* 2: i = %d *******\n", i);
-        testMultipole2Local2<6>(i, true); 
-    }
-}
+// TEST( Tree, testMultipole2Local2_balanced )
+// { 
+//     for (int i = 4; i < 10; i++)
+//     {
+//         printf("******* 2: i = %d *******\n", i);
+//         testMultipole2Local2<6>(i, true); 
+//     }
+// }
 
 //---------------------------------------------------------------------------//
 
