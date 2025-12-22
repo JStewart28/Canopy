@@ -138,7 +138,7 @@ void testParticle2Multipole(bool balanced)
     // Check error between translated multipole and direct potentials
     // The error is already mathematically checked in testM2MKernel0,
     // so here we just make sure they are close to each other.
-    int p_int = p;
+    int p_int = static_cast<int>(p);
     double error = Kokkos::pow(10, -p_int);
     EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
         << p << ": Potentials do not match. Tree depth " << tree->numLayers();
