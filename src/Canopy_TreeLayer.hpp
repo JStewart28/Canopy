@@ -619,6 +619,11 @@ class TreeLayer
                     auto zpos = Cabana::get<position_index>(data_tuple, 2);
                     auto cell_ijk_array = position2ijk(xpos, ypos, zpos, low_corner, cell_size);
                    
+                    printf("L%d: R%d: cell(%d, %d, %d) has %d particles\n",
+                        _layer_number, _rank,
+                        cell_ijk_array[0], cell_ijk_array[1], cell_ijk_array[2],
+                        view_size);
+
                     // auto cid = out_id_slice(in_id);
                     // auto cid_index = cid2ijk.find(cid);
 
@@ -831,6 +836,10 @@ class TreeLayer
                     // Get the cell center for multipole calculations using the cid
                     auto cell_ijk = cid2ijk.value_at(index);
                     auto cell_center_array = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2], low_corner, cell_size);
+                    printf("L%d: R%d: cell(%d, %d, %d) has %d children\n",
+                        _layer_number, _rank,
+                        cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        view_size);
                     // printf("R%d: cid: %llu, ijk: %llu, %llu, %llu\n",
                     //     rank,
                     //     (unsigned long long)cid,

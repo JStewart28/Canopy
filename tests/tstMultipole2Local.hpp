@@ -188,6 +188,12 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
+    // Activate cell with the target point
+    cart_coords(0, 0) = -2.9;
+    cart_coords(0, 1) = -2.8;
+    cart_coords(0, 2) = -2.85;
+    q(0) = 0.0;
+
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
@@ -220,7 +226,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 1;
+    int num_target_points = 100;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
     fillRandomCoordinates(target_points, coord_bounds, 456);
@@ -310,6 +316,11 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     auto locals = layer->locals();
     auto ijk2l = layer->cellijk2l();
 
+    // Track which cells are activated in the mesh. If a target point is in a non-
+    // activated cell, skip it when checking pootentials
+    Kokkos::View<int*, TEST_MEMSPACE> is_activated("is_activated", num_target_points);
+    Kokkos::deep_copy(is_activated, 0);
+
     // Device-friendly version of global low corner
     Kokkos::Array<double, 3> global_low_corner_k;
     for (int i = 0; i < 3; i++)
@@ -335,6 +346,9 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             auto cell_exists = ijk2l.exists(target_cell_ijk);
             if (!cell_exists)
                 return;
+
+            // Set cell to activated
+            is_activated(tpi) = 1;
 
              // Center of local expansion is the cell center
             Kokkos::Array<double, 3> l_center;
@@ -386,13 +400,17 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     Kokkos::fence();
 
     // Copy to host and test
+    auto is_activated_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), is_activated);
     int p_int = static_cast<int>(p_val);
     auto local_potential_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), local_potential);
     for (std::size_t i = 0; i < local_potential.extent(0); i++)
     {
+        if (!is_activated_host(i))
+            continue;
+
         auto direct_potential = direct_potentials(i);
         auto local_potential = local_potential_h(i).real();
-        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int));
+        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int+2));
     }
 }
 
@@ -459,7 +477,8 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     {
         coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
     }
-
+    
+    // Kokkos::Array<double, 6> coord_bounds1 = {2.3, 2.3, 2.3, bound_val, bound_val, bound_val};
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
@@ -469,16 +488,28 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     cart_coords(0, 2) = -2.85;
     q(0) = 0.0;
 
-    // Put second point far away
-    cart_coords(1, 0) = -1.01;
-    cart_coords(1, 1) = 0.91;
-    cart_coords(1, 2) = -0.50;
-    q(1) = 0.0;
+    // Insert at (3, 2, 2) on layer 1
+    cart_coords(1, 0) = 2.62;
+    cart_coords(1, 1) = 1.17;
+    cart_coords(1, 2) = 1.30;
+    q(1) = 10.0;
 
+    // Insert at (3, 3, 3) on layer 1
     cart_coords(2, 0) = 2.9;
     cart_coords(2, 1) = 2.8;
     cart_coords(2, 2) = 2.85;
     q(2) = 10.0;
+
+    // Insert at (3, 2, 3) on layer 1
+    cart_coords(3, 0) = 2.9;
+    cart_coords(3, 1) = 1.17;
+    cart_coords(3, 2) = 2.85;
+    q(1) = 10.0;
+
+    // cart_coords(2, 0) = 2.9;
+    // cart_coords(2, 1) = 2.8;
+    // cart_coords(2, 2) = 2.85;
+    // q(2) = 10.0;
 
     // cart_coords(3, 0) = -0.76;
     // cart_coords(3, 1) = -1.47;
@@ -610,6 +641,11 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     auto locals = layer->locals();
     auto ijk2l = layer->cellijk2l();
 
+    // Track which cells are activated in the mesh. If a target point is in a non-
+    // activated cell, skip it when checking pootentials
+    Kokkos::View<int*, TEST_MEMSPACE> is_activated("is_activated", num_target_points);
+    Kokkos::deep_copy(is_activated, 0);
+
     // Device-friendly version of global low corner
     Kokkos::Array<double, 3> global_low_corner_k;
     for (int i = 0; i < 3; i++)
@@ -635,6 +671,9 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
             auto cell_exists = ijk2l.exists(target_cell_ijk);
             if (!cell_exists)
                 return;
+            
+            // Set cell to activated
+            is_activated(tpi) = 1;
 
              // Center of local expansion is the cell center
             Kokkos::Array<double, 3> l_center;
@@ -679,21 +718,34 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
-            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            //     l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
+            printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
+                target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+                l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
         } );
     Kokkos::fence();
 
     // Copy to host and test
+    auto is_activated_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), is_activated);
     int p_int = static_cast<int>(p_val);
     auto local_potential_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), local_potential);
     for (std::size_t i = 0; i < local_potential.extent(0); i++)
     {
+        if (!is_activated_host(i))
+            continue;
+        
+        // Get the cell this point falls into for error printing
+        Kokkos::Array<std::size_t, 3> target_cell_ijk;
+        for (int dim = 0; dim < 3; ++dim)
+        {
+            target_cell_ijk[dim] = static_cast<std::size_t>(
+                Kokkos::floor((target_points_host(i, dim) - global_low_corner[dim]) / cell_size[dim]) );
+        }
+
         auto direct_potential = direct_potentials(i);
         auto local_potential = local_potential_h(i).real();
-        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int));
-        // printf("dp: %.5lf, lp: %.5lf\n", direct_potential, local_potential);
+        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int+2)) << " at cell ijk ("
+            << target_cell_ijk[0] << ", " << target_cell_ijk[1] << ", "
+            << target_cell_ijk[2] << ")";
     }
 }
 
@@ -909,6 +961,11 @@ void testMultipole2Local2(int points_per_proc_in, bool balanced)
     auto locals = layer->locals();
     auto ijk2l = layer->cellijk2l();
 
+    // Track which cells are activated in the mesh. If a target point is in a non-
+    // activated cell, skip it when checking pootentials
+    Kokkos::View<int*, TEST_MEMSPACE> is_activated("is_activated", num_target_points);
+    Kokkos::deep_copy(is_activated, 0);
+
     // Device-friendly version of global low corner
     Kokkos::Array<double, 3> global_low_corner_k;
     for (int i = 0; i < 3; i++)
@@ -934,6 +991,9 @@ void testMultipole2Local2(int points_per_proc_in, bool balanced)
             auto cell_exists = ijk2l.exists(target_cell_ijk);
             if (!cell_exists)
                 return;
+            
+            // Otherwise set cell as activated
+            is_activated(tpi) = 1;
 
              // Center of local expansion is the cell center
             Kokkos::Array<double, 3> l_center;
@@ -985,13 +1045,17 @@ void testMultipole2Local2(int points_per_proc_in, bool balanced)
     Kokkos::fence();
 
     // Copy to host and test
+    auto is_activated_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), is_activated);
     int p_int = static_cast<int>(p_val);
     auto local_potential_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), local_potential);
     for (std::size_t i = 0; i < local_potential.extent(0); i++)
     {
+        if (!is_activated_host(i))
+            continue;
+
         auto direct_potential = direct_potentials(i);
         auto local_potential = local_potential_h(i).real();
-        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_val));
+        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int+1));
     }
 }
 
@@ -1006,23 +1070,23 @@ TEST( Helper, testCell2Bound)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-TEST( Tree, testMultipole2Local0_balanced )
-{ 
-    for (int i = 3; i < 4; i++)
-    {
-        printf("******* 0: i = %d *******\n", i);
-        testMultipole2Local0<3>(i, true);     
-    }
-}
-
-// TEST( Tree, testMultipole2Local1_balanced )
+// TEST( Tree, testMultipole2Local0_balanced )
 // { 
-//     for (int i = 4; i < 20; i++)
+//     for (int i = 400; i < 401; i++)
 //     {
-//         printf("******* 1: i = %d *******\n", i);
-//         testMultipole2Local1<6>(i, true); 
+//         printf("******* 0: i = %d *******\n", i);
+//         testMultipole2Local0<3>(i, true);     
 //     }
 // }
+
+TEST( Tree, testMultipole2Local1_balanced )
+{ 
+    for (int i = 4; i < 20; i++)
+    {
+        printf("******* 1: i = %d *******\n", i);
+        testMultipole2Local1<6>(i, true); 
+    }
+}
 
 // TEST( Tree, testMultipole2Local2_balanced )
 // { 
