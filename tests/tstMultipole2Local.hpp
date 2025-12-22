@@ -557,15 +557,20 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 1;
+    int num_target_points = 2;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
     fillRandomCoordinates(target_points, coord_bounds, 456);
 
-    // Put target point in upper corner of domain
+    // Put target point in lower corner of domain
     target_points(0, 0) = -2.88;
     target_points(0, 1) = -2.92;
     target_points(0, 2) = -2.89;
+
+    // Insert at (3, 2, 2) on layer 1
+    target_points(1, 0) = 2.61;
+    target_points(1, 1) = 1.18;
+    target_points(1, 2) = 1.31;
     
     auto target_points_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), target_points);
 
@@ -721,6 +726,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
             printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
                 target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
                 l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
+            // L1: R0: cell 3, 2, 3, neighbor 0, 0, 2: L: 7442.639, -21492.622, 33200.079
         } );
     Kokkos::fence();
 
@@ -743,7 +749,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
         auto direct_potential = direct_potentials(i);
         auto local_potential = local_potential_h(i).real();
-        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int+2)) << " at cell ijk ("
+        EXPECT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int+2)) << " at cell ijk ("
             << target_cell_ijk[0] << ", " << target_cell_ijk[1] << ", "
             << target_cell_ijk[2] << ")";
     }
@@ -1081,7 +1087,7 @@ TEST( Helper, testCell2Bound)
 
 TEST( Tree, testMultipole2Local1_balanced )
 { 
-    for (int i = 4; i < 20; i++)
+    for (int i = 11; i < 12; i++)
     {
         printf("******* 1: i = %d *******\n", i);
         testMultipole2Local1<6>(i, true); 

@@ -248,8 +248,7 @@ class TreeLayer
         //     _global_high_corner[1] - _global_low_corner[1],
         //     _global_high_corner[2] - _global_low_corner[2],
         //     _tiles_per_dim);
-        // printf("L%d: R%d: global_num_cell: %d, %d, %d\n",  _layer_number, _rank, _global_num_cell[0], _global_num_cell[1], _global_num_cell[2]);
-    
+        
         // sparse partitioner
         float max_workload_coeff = 1.5;
         int workload_num = _cells_per_dim * _cells_per_dim * _cells_per_dim;
@@ -353,6 +352,10 @@ class TreeLayer
         // Set local view index to 0
         _local_view_index = Kokkos::View<std::size_t, memory_space>("local_view_index");
         Kokkos::deep_copy(_local_view_index, 0);
+
+        printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
+            _cells_per_dim, _cell_size[0]);
+    
     }
 
     void updateCellSize()
@@ -1515,6 +1518,8 @@ class TreeLayer
         int cells_per_dim = _cells_per_dim;
         int rank = _rank;
         int layer_number = _layer_number;
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        auto cell_size = _cell_size;
 
         // Per-cell calculation
         Kokkos::parallel_for("multipole_to_local",
@@ -1529,7 +1534,11 @@ class TreeLayer
                 // Cell local index
                 auto local_index = ijk2l.value_at(ijk2l_index);
                 
-                // Index of this cell into sparse array AoSoA
+                // Cell center
+                auto cell_center = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    low_corner, cell_size);
+                
+                // Index into sparse array AoSoA
                 auto tid = map.queryTile(cell_ijk[0], cell_ijk[1], cell_ijk[2]);
                 auto ctid = map.cell_local_id(cell_ijk[0], cell_ijk[1], cell_ijk[2]);
                 auto this_cell_index = ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile );
@@ -1600,6 +1609,8 @@ class TreeLayer
                             auto n_tid = map.queryTile(ci, cj, ck);
                             auto n_ctid = map.cell_local_id(ci, cj, ck);
                             auto neighbor_index = ( n_tid << cell_bits_per_tile ) | ( n_ctid & cell_mask_per_tile );
+                            auto neighbor_cell_center = cellCenter(neighbor_ijk[0], neighbor_ijk[1], neighbor_ijk[2],
+                                low_corner, cell_size);
 
                             // if (rank == 0)
 
@@ -1608,7 +1619,7 @@ class TreeLayer
                             // center relative to the local center
                             Kokkos::Array<double, 3> m2l_vec;
                             for (int i = 0; i < 3; ++i)
-                                m2l_vec[i] = cell_center_slice(neighbor_index, i) - cell_center_slice(this_cell_index, i);
+                                m2l_vec[i] = neighbor_cell_center[i] - cell_center[i];
                             
                             // Multipole coefficients
                             constexpr std::size_t num_coefficients = (p+1)*(p+1);
@@ -1636,10 +1647,14 @@ class TreeLayer
                             Kokkos::Array<cdouble, num_coefficients> L;
                             Kernel::Scalar::m2l<p>(M, L, m2l_vec);
 
-                            if (rank == 0 && cells_per_dim == 4 && cell_ijk[0] == 0 && cell_ijk[1] == 0 && cell_ijk[2] == 0)
+                            if (rank == 0 && cells_per_dim == 4)
                             {
-                                printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: L: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
-                                    cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck,
+                                printf("L%d: R%d: cell %d, %d, %d, c(%.2lf, %.2lf, %.2lf), neighbor %d, %d, %d, nc(%.2lf, %.2lf, %.2lf): m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                                    cell_center_slice(this_cell_index, 0), cell_center_slice(this_cell_index, 1), cell_center_slice(this_cell_index, 2),
+                                    ci, cj, ck,
+                                    cell_center_slice(neighbor_index, 0), cell_center_slice(neighbor_index, 1), cell_center_slice(neighbor_index, 2),
+                                    m2l_vec[0], m2l_vec[1], m2l_vec[2],
                                     L[0].real(), L[1].real(), L[2].real());
                             }
                             

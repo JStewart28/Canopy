@@ -95,7 +95,7 @@ class Tree
     
     void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
     {
-        printf("L%d: cell_per_dim: %d\n", layer_num, cell_per_tile_dim * tiles_per_dim);
+        // printf("L%d: cell_per_dim: %d\n", layer_num, cell_per_tile_dim * tiles_per_dim);
         auto layer = createTreeLayer<tree_type, cell_per_tile_dim>(
             _global_low_corner, _global_high_corner, tiles_per_dim, _tile_reduction_factor, halo_width, layer_num, _comm);
         _tree.push_back(layer);
