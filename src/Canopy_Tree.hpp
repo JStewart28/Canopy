@@ -86,9 +86,6 @@ class Tree
         // Reserve space for 10 layers
         _tree.reserve(10);
 
-        // Reserve space for root layer
-        _M_root = Kokkos::View<cdouble*, memory_space>("_M_root", (p+1) * (p+1));
-
         build();
         
         /*
@@ -249,11 +246,10 @@ class Tree
         //         domains[i][4], domains[i][5]);
         // }
 
-        auto cid2ijk = top_layer->cid2ijk();
-        auto map = *top_layer->map();
-        auto aosoa = top_layer->array()->aosoa();
-        auto cells_activated = cid2ijk.size();
-        auto map_size = cid2ijk.size();
+        auto multipoles = top_layer->multipoles();
+        std::size_t cells_activated = multipoles.size();
+        auto multipole_coefficients_slice = Cabana::slice<0>(multipoles);
+        auto cell_center_slice = Cabana::slice<1>(multipoles);
         
         // printf("R%d: aosoa size: %d, map size: %d\n", _rank, aosoa.size(), map_size);
 
@@ -261,7 +257,7 @@ class Tree
         Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
 
         // Save multipole coefficients.
-        std::size_t num_M = (p+1) * (p+1);
+        static constexpr std::size_t num_M = (p+1) * (p+1);
         Kokkos::View<cdouble*, memory_space> M_children("M_children", num_M * cells_activated);
 
         // Offset for filling M_children.
@@ -280,54 +276,30 @@ class Tree
         static constexpr std::size_t cell_mask_per_tile =
             top_layer_type::cell_mask_per_tile;
 
-        // Iterate over all activiated cells
+        // Iterate over all activated cells
         // int rank = _rank;
         Kokkos::parallel_for(
         "iterate_top_layer",
-        Kokkos::RangePolicy<execution_space>( 0, cid2ijk.capacity() ),
+        Kokkos::RangePolicy<execution_space>( 0, cells_activated ),
         KOKKOS_LAMBDA( const int index ) {
             // printf("R%d: checking index %d\n", rank, index);
-            if ( cid2ijk.valid_at( index ) )
-            {
-                auto cid = cid2ijk.key_at( index );
-                auto cell_ijk = cid2ijk.value_at(index);
-                auto offset = Kokkos::atomic_fetch_add(&idx(), 1);
-                
-                // Get the data tuple from the mesh
-                auto tid = map.queryTile(cell_ijk[0],
-                                        cell_ijk[1],
-                                        cell_ijk[2]);
-                auto ctid = map.cell_local_id(cell_ijk[0],
-                                        cell_ijk[1],
-                                        cell_ijk[2]);       
-                auto tp = aosoa.getTuple(( tid << cell_bits_per_tile ) |
-                                        ( ctid & cell_mask_per_tile ) );
-                
-                // Save the incoming cell center.
-                for (int j = 0; j < 3; ++j)
-                    incoming_cell_centers(offset, j) = Cabana::get<1>(tp, j);
-                
-                // printf("Root: R%d: getting in cell c(%.3lf, %.3lf, %.3lf)\n",
-                //     rank,
-                //     Cabana::get<1>(tp, 0), Cabana::get<1>(tp, 1), Cabana::get<1>(tp, 2));
-                
-                // printf("Root: R%d: cid: %d, tid: %d, ctid: %d, tuple %d, c_ijk(%d, %d, %d)\n", rank, cid,
-                //     tid, ctid,
-                //     ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile ),
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+            
+            // Save the incoming cell center.
+            for (int j = 0; j < 3; ++j)
+                incoming_cell_centers(index, j) = cell_center_slice(index, j);
 
-                // Save multipole coefficients
-                auto offset_M_base = offset * num_M;
-                for (std::size_t j = 0; j < num_M; ++j)
-                {
-                    double real_part = Cabana::get<0>(tp, j, 0);
-                    double imag_part = Cabana::get<0>(tp, j, 1);
-                    M_children(offset_M_base + j) = cdouble(real_part, imag_part);
-                    // printf("Root: R%d: cid: %d, M_notrans(%d): (%0.4lf, %0.4lf)\n",
-                    //     rank, cid,
-                    //     j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
-                }
+            // Save multipole coefficients
+            auto offset_M_base = index * num_M;
+            for (std::size_t j = 0; j < num_M; ++j)
+            {
+                double real_part = multipole_coefficients_slice(index, j, 0);
+                double imag_part = multipole_coefficients_slice(index, j, 1);
+                M_children(offset_M_base + j) = cdouble(real_part, imag_part);
+                // printf("Root: R%d: cid: %d, M_notrans(%d): (%0.4lf, %0.4lf)\n",
+                //     rank, cid,
+                //     j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
             }
+        
         } );
 
         Kokkos::fence();
@@ -365,13 +337,13 @@ class Tree
         Kokkos::deep_copy(_M_root, m2m.coefficients());
 
         // Determine which rank owns the (root layer - 1) tiles
-        std::vector<std::size_t> sendbuf(_comm_size, map_size);
+        std::vector<std::size_t> sendbuf(_comm_size, cells_activated);
         std::vector<std::size_t> recvbuf(_comm_size, 0);
         MPI_Alltoall(sendbuf.data(), 1, MPI_UNSIGNED_LONG_LONG,
                     recvbuf.data(), 1, MPI_UNSIGNED_LONG_LONG,
                     _comm);
 
-        // Now recvbuf[r] contains map_size for rank r.
+        // Now recvbuf[r] contains cells_activated for rank r.
         // Find the rank with a non-zero value.
         int root = -1;
         for (int r = 0; r < _comm_size; ++r)
@@ -403,14 +375,16 @@ class Tree
     {
         // Data comes from externally to populate leaf layer (layer 0)
         migrateParticleData(external_data, run_load_balance);
+
         // if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(external_data, 0, external_data.size());
-        for (std::size_t i = 1; i < _tree.size(); i++)
+        for (std::size_t i = 1; i < 2; i++)
         {
             // if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i, run_load_balance);
         }
         // if (_rank == 0) printf("Starting root layer (%d)...\n", _tree.size());
+        return;
         initializeRootLayer();
     }
 
@@ -441,18 +415,31 @@ class Tree
 
         // All coefficients are haloed, so ids is just the index
         Kokkos::View<int*, memory_space> export_ids("ids", multipoles.size());
-        auto fill_with_index = KOKKOS_LAMBDA(const int i) {export_ids(i) = i;}
         Kokkos::parallel_for(
             "fill_export_ids",
-            Kokkos::RangePolicy<execution_space>(0, export_ids.extent(0)), fill_with_index);
+            Kokkos::RangePolicy<execution_space>(0, export_ids.extent(0)),
+            KOKKOS_LAMBDA(const int i)
+            {
+                export_ids(i) = i;
+            }
+        );
 
-        mapParticles(positions, to_layer_owner, multipoles.size(), to_layer, run_load_balance);
+        mapParticles(positions, export_ranks, multipoles.size(), to_layer, run_load_balance);
+
+        for (int i = 0; i < export_ranks.extent(0); i++)
+            printf("i%d: to R%d, index %d\n", i, export_ranks(i), export_ids(i));
 
         // Create halo
         Cabana::Halo<memory_space> halo( _comm, multipoles.size(), export_ids,
                                     export_ranks );
-        Cabana::migrate( distributor, data );
-        _tree[to_layer]->populateCells(data);
+
+        // Resize multipole AoSoA for gather
+        multipoles.resize(halo.numLocal() + halo.numGhost());
+
+        // Gather
+        Cabana::gather( halo, multipoles );
+
+        _tree[to_layer]->populateCells(multipoles, halo.numLocal(), halo.numLocal() + halo.numGhost());
     }
 
     /**
@@ -546,7 +533,7 @@ class Tree
      */
     std::size_t numLayers() const { return _tree.size() + 1; }
 
-    Kokkos::View<cdouble*, memory_space>& M_root() {return _M_root;}
+    auto M_root() {return _M_root;}
     std::array<double, 3> globalLowCorner() const { return _global_low_corner; }
     std::array<double, 3> globalHighCorner() const { return _global_high_corner; }
 
@@ -570,10 +557,10 @@ class Tree
     std::vector<std::shared_ptr<TreeLayer<tree_type, cell_per_tile_dim>>> _tree;
 
     // Vertical multipole halo for each tree layer
-    std::vector<std::shared_ptr<Cabana::Halo, memory_space>>> _vertical_multipole_halo;
+    std::vector<std::shared_ptr<Cabana::Halo<memory_space>>> _vertical_multipole_halo;
 
     // Vertical local halo for each tree layer
-    std::vector<std::shared_ptr<Cabana::Halo, memory_space>>> _vertical_local_halo;
+    std::vector<std::shared_ptr<Cabana::Halo<memory_space>>> _vertical_local_halo;
 
     // How many tiles per dimension in the leaf layer.
     std::size_t _leaf_tiles_per_dim;
@@ -585,7 +572,7 @@ class Tree
     std::size_t _root_tiles_per_dim;
 
     // Root data
-    Kokkos::View<cdouble*, memory_space> _M_root;
+    Kokkos::View<cdouble[(p+1)*(p+1)], memory_space> _M_root;
 
 };
 

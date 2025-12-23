@@ -361,9 +361,9 @@ class TreeLayer
         // each MPI rank on this layer.
         computeCellInfo();
 
-        // Set local view index to 0
-        _local_view_index = Kokkos::View<std::size_t, memory_space>("local_view_index");
-        Kokkos::deep_copy(_local_view_index, 0);
+        // Set coefficient view index to 0
+        _coefficient_view_index = Kokkos::View<std::size_t, memory_space>("_coefficient_view_index");
+        Kokkos::deep_copy(_coefficient_view_index, 0);
 
         printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
             _cells_per_dim, _cell_size[0]);
@@ -524,54 +524,6 @@ class TreeLayer
     }
 
     /**
-     * Return an AoSoA of cell data, indexed by cell id
-     */
-    data_aosoa_type data()
-    {
-        // int rank = _rank;
-        // int layer_number = _layer_number;
-
-        data_aosoa_type cell_data("cell_data", _cid2ijk.size());
-        Kokkos::View<int, memory_space> idx("idx");
-        Kokkos::deep_copy(idx, 0);
-
-        auto map = *_map_ptr;
-        auto aosoa = _cells_ptr->aosoa();
-        auto cid2ijk = _cid2ijk;
-
-        // printf("R%d: map size: %d\n", rank, cell_ids_map.size());
-
-        // XXX - can this be made more efficient by extracting my SoAs rather than tuples?
-        // int layer_number = _layer_number;
-        Kokkos::parallel_for(
-            "get_data",
-            Kokkos::RangePolicy<execution_space>(0, cid2ijk.capacity()),
-            KOKKOS_LAMBDA(const int index) {
-                if (cid2ijk.valid_at(index))
-                {
-                    auto cell_ijk = cid2ijk.value_at( index );
-                    auto tid = map.queryTile(cell_ijk[0],
-                                            cell_ijk[1],
-                                            cell_ijk[2]);
-                    auto ctid = map.cell_local_id(cell_ijk[0],
-                                            cell_ijk[1],
-                                            cell_ijk[2]);       
-                    auto tp = aosoa.getTuple(( tid << cell_bits_per_tile ) |
-                                            ( ctid & cell_mask_per_tile ) );
-                    int offset = Kokkos::atomic_fetch_add(&idx(), 1);
-                    cell_data.setTuple(offset, tp);
-
-                    // if (layer_number == 0)
-                    //     printf("L%d: R%d: extracting c(%.3lf, %.3lf, %.3lf) into i%d\n", layer_number, rank,
-                    //         Cabana::get<1>(tp, 0), Cabana::get<1>(tp, 1), Cabana::get<1>(tp, 2), offset);
-                }
-            }
-        );
-
-        return cell_data;
-    }
-
-    /**
      * Initialize the leaf layer. This requires different initialization than other layers
      * because data must be converted to multipole coefficients. For all other layers,
      * the data has already been converted.
@@ -601,9 +553,6 @@ class TreeLayer
         auto cell_size = _cell_size;
         auto cid2ijk = _cid2ijk;
 
-        static constexpr std::size_t position_index =
-            std::is_same_v<ParticleAoSoA, data_aosoa_type> ? 1 : 0;
-
         auto positions = Cabana::slice<0>(cell_data);
         auto scalars = Cabana::slice<1>(cell_data);
 
@@ -629,15 +578,15 @@ class TreeLayer
                     // Since all incoming data are in the same cell, these values
                     // will be the same for all threads so only one thread needs to
                     // compute them.
-                    auto xpos = Cabana::get<position_index>(data_tuple, 0);
-                    auto ypos = Cabana::get<position_index>(data_tuple, 1);
-                    auto zpos = Cabana::get<position_index>(data_tuple, 2);
+                    auto xpos = Cabana::get<0>(data_tuple, 0);
+                    auto ypos = Cabana::get<0>(data_tuple, 1);
+                    auto zpos = Cabana::get<0>(data_tuple, 2);
                     auto cell_ijk_array = position2ijk(xpos, ypos, zpos, low_corner, cell_size);
                    
-                    printf("L%d: R%d: cell(%d, %d, %d) has %d particles\n",
-                        _layer_number, _rank,
-                        cell_ijk_array[0], cell_ijk_array[1], cell_ijk_array[2],
-                        view_size);
+                    // printf("L%d: R%d: cell(%d, %d, %d) has %d particles\n",
+                    //     _layer_number, _rank,
+                    //     cell_ijk_array[0], cell_ijk_array[1], cell_ijk_array[2],
+                    //     view_size);
 
                     // auto cid = out_id_slice(in_id);
                     // auto cid_index = cid2ijk.find(cid);
@@ -705,8 +654,9 @@ class TreeLayer
          */
         auto coefficient_view_index = _coefficient_view_index;
         auto ijk2index = _ijk2index;
-        auto multipole_coefficients_slice = Cabana::get<0>(_multipoles);
-        auto cell_center_slice = Cabana::get<1>(_multipoles);
+        auto multipole_coefficients_slice = Cabana::slice<0>(_multipoles);
+        auto cell_center_slice = Cabana::slice<1>(_multipoles);
+
         // auto aosoa = _cells_ptr->aosoa();
         // aosoa.resize(aosoa.capacity());
         // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, _cells_ptr->capacity(), _cells_ptr->size());
@@ -724,7 +674,7 @@ class TreeLayer
                 
                 if (!result.success())
                 {
-                    // printf("Did not add index\n");
+                    printf("Did not insert index\n");
                 }
 
                 // Set multipole coefficients
@@ -741,14 +691,9 @@ class TreeLayer
                 for (int i = 0; i < 3; i++)
                     cell_center_slice(idx, i) = cell_center(i);
 
-                // for (std::size_t j = 0; j < view_size; j++)
-                // {
-                //     printf("R%d: cell(%d, %d, %d): c(%.2lf, %.2lf, %.2lf), p%d(%.2lf, %.2lf, %.2lf), q%d(%.2lf)\n", rank,
-                //         cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //         cell_center(0), cell_center(1), cell_center(2),
-                //         j, positions(j, 0), positions(j, 1), positions(j, 2),
-                //         j, scalars(j));
-                // }
+                // printf("R%d: cell(%d, %d, %d): c(%.2lf, %.2lf, %.2lf)\n", rank,
+                //     cell_ijk(0), cell_ijk(1), cell_ijk(2),
+                //     cell_center(0), cell_center(1), cell_center(2));
 
                 
                 // else
@@ -772,25 +717,26 @@ class TreeLayer
      * xxx
      */
     template <class In2OutMap>
-    void initializeCell(const data_aosoa_type incoming_data, In2OutMap in2out,
+    void initializeCell(const coefficient_aosoa_type incoming_data, In2OutMap in2out,
         const std::size_t start, const std::size_t end)
     {
         if (!(_layer_number > 0))
         {
             throw std::runtime_error("TreeLayer::initializeCell: must be called with _layer_number > 0");
         }
-
+        return;
         int rank = _rank;
         // int layer_number = _layer_number;
         // printf("R%d: leaf cell data from [%d, %d)\n", rank, start, end);
 
         std::size_t view_size = end - start;
-        data_aosoa_type cell_data("cell_data", view_size);
+        coefficient_aosoa_type cell_data("cell_data", view_size);
 
         // The following is needed to retrieve and save cell center
         auto in_id_slice = Cabana::slice<0>(in2out);
         auto out_id_slice = Cabana::slice<1>(in2out);
         Kokkos::View<double[3], memory_space> cell_center("cell_center");
+        Kokkos::View<std::size_t[3], memory_space> cell_ijk("cell_ijk");
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
         auto cid2ijk = _cid2ijk;
@@ -801,7 +747,6 @@ class TreeLayer
 
         // Save cell centers for multipole translations
         Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", view_size);
-
         Kokkos::parallel_for(
             "populate_cell_data",
             Kokkos::RangePolicy<execution_space>( 0, view_size ),
@@ -838,6 +783,7 @@ class TreeLayer
                     //     (unsigned long long)cell_ijk[2]);
                     for (int j = 0; j < 3; ++j)
                     {
+                        cell_ijk(j) = cell_ijk_array[j];
                         cell_center(j) = cell_center_array[j];
                     }
 
@@ -896,8 +842,8 @@ class TreeLayer
         // Set cell data for this cell
         auto coefficient_view_index = _coefficient_view_index;
         auto ijk2index = _ijk2index;
-        auto multipole_coefficients_slice = Cabana::get<0>(_multipoles);
-        auto cell_ijk_slice = Cabana::get<1>(_multipoles);
+        auto multipole_coefficients_slice = Cabana::slice<0>(_multipoles);
+        auto cell_center_slice = Cabana::slice<1>(_multipoles);
         // printf("L%d: R%d: cell aosoa capacity: %d, size: %d\n", _layer_number, _rank, aosoa.capacity(), _cells_ptr->size());
         Kokkos::parallel_for(
             "set_cell_data",
@@ -994,9 +940,11 @@ class TreeLayer
             Kokkos::RangePolicy<execution_space>( 0, num_particles ),
             KOKKOS_LAMBDA( const std::size_t index ) {
 
-                auto pid = index + start;
+                auto pid = start + index;
                 
-                auto cell_activated_ijk = position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
+                auto cell_activated_ijk =
+                    position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
+                                 low_corner, cell_size);
 
                 // if (layer_number == 1)
                 // {
@@ -1051,13 +999,13 @@ class TreeLayer
                 }
                 if (result.success())
                 {
-                    printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
-                        layer_number, rank,
-                        (unsigned long long)cell_id,
-                        (unsigned long long)cell_activated_ijk[0],
-                        (unsigned long long)cell_activated_ijk[1],
-                        (unsigned long long)cell_activated_ijk[2],
-                        positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
+                    // printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
+                    //     layer_number, rank,
+                    //     (unsigned long long)cell_id,
+                    //     (unsigned long long)cell_activated_ijk[0],
+                    //     (unsigned long long)cell_activated_ijk[1],
+                    //     (unsigned long long)cell_activated_ijk[2],
+                    //     positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
                 }
 
                 // Save the cell the incoming data activates.
@@ -1108,21 +1056,21 @@ class TreeLayer
             // Find the start and end indices of each group of incoming data
             // that activate the same cell.
             std::size_t cid = out_id_h(index);
-            std::size_t start = index;
+            std::size_t start_i = index;
             while ((cid == out_id_h(index)) && (index < num_particles))
             {
                 index++;
             }
-            std::size_t end = index;
+            std::size_t end_i = index;
 
             // Now, initialize each cell in this layer one at a time, passing the incoming data
             // AoSoA, the cell id they activate, and the start and end indicies of all
             // incoming data within the cell.
 
             // Leaf data
-            if constexpr (position_index == 0) initializeLeafCell(data_aosoa, in2out, start, end);
+            if constexpr (position_index == 0) initializeLeafCell(data_aosoa, in2out, start_i, end_i);
             // Non-leaf data
-            if constexpr (position_index == 1) initializeCell(data_aosoa, in2out, start, end);
+            if constexpr (position_index == 1) initializeCell(data_aosoa, in2out, start_i, end_i);
         }
 
         // Test optimizing the partition after all cells initialized.
@@ -1153,6 +1101,9 @@ class TreeLayer
     template <class HaloAoSoA>
     void sendCoarseLocals(HaloAoSoA& halo_aosoa, const Kokkos::View<double*[6], memory_space>& child_domain)
     {
+        int rank = _rank;
+        int layer_number = _layer_number;
+
         // Locals, cell ijk index
         static constexpr std::size_t num_coefficients = (p+1)*(p+1);
         using halo_tuple_type = Cabana::MemberTypes<double[num_coefficients][2], int[3]>;
@@ -1259,8 +1210,8 @@ class TreeLayer
                         id_slice(index) = local_index;
                         rank_slice(index) = owner_rank;
                         printf("L%d: sending ijk:(%d, %d, %d), to R%d\n",
-                            _layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                            _rank);
+                            layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                            rank);
                     }
                     
                 }
@@ -1303,6 +1254,9 @@ class TreeLayer
     template <class HaloAoSoA>
     void addCoarseLocals(HaloAoSoA& halo_data)
     {
+        int rank = _rank;
+        int layer_number = _layer_number;
+
         static constexpr std::size_t num_coefficients = ( p + 1 ) * ( p + 1 );
         auto ijk2index = _ijk2index;
         auto locals = _locals;
@@ -1374,7 +1328,7 @@ class TreeLayer
                         locals(local_index, i).imag() += L_trans[i].imag();
                     }
                     // printf("Adding locals from cell ")
-                    printf("L%d: R%d: Adding from pijk(%d, %d, %d) to ijk(%d, %d, %d): %.2lf, %.2lf, %.2lf, %.2lf\n", _layer_number, _rank,
+                    printf("L%d: R%d: Adding from pijk(%d, %d, %d) to ijk(%d, %d, %d): %.2lf, %.2lf, %.2lf, %.2lf\n", layer_number, rank,
                         ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2),
                         cell_ijk[0], cell_ijk[1], cell_ijk[2],
                         locals(local_index, 0).real(), locals(local_index, 1).real(), 
@@ -1741,7 +1695,7 @@ class TreeLayer
     // Map of cell_ijk to its location in the coefficient data structures.
     // Cell ijks are replicated so they do not need to be haloed
     // separately and be re-mapped to coefficients.
-    Kokkos::View<std::size_t, memory_space> coefficient_view_index;
+    Kokkos::View<std::size_t, memory_space> _coefficient_view_index;
     Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space> _ijk2index;
 
     // Multipole coefficients for each cell.
