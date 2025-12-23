@@ -314,7 +314,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
 
     // Get locals
     auto locals = layer->locals();
-    auto ijk2l = layer->cellijk2l();
+    auto ijk2index = layer->cellijk2l();
 
     // Track which cells are activated in the mesh. If a target point is in a non-
     // activated cell, skip it when checking pootentials
@@ -343,7 +343,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             }
 
             // Only continue if this cell exists in the mesh
-            auto cell_exists = ijk2l.exists(target_cell_ijk);
+            auto cell_exists = ijk2index.exists(target_cell_ijk);
             if (!cell_exists)
                 return;
 
@@ -367,10 +367,10 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
                                       target_points(tpi, 2) - l_center[2],
                                       r, theta, phi );
 
-            auto ijk2l_index = ijk2l.find(target_cell_ijk);
-            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2l index: %u\n", tpi,
+            auto ijk2l_index = ijk2index.find(target_cell_ijk);
+            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2index index: %u\n", tpi,
             //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], ijk2l_index);
-            auto local_index = ijk2l.value_at(ijk2l_index);
+            auto local_index = ijk2index.value_at(ijk2l_index);
             // printf("tpi: %d, local index: %lu\n", tpi, local_index);
             // printf("tcell(%d, %d, %d): l(%d): (%.2lf, %.2lf, %.2lf, %.2lf)\n",
             //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
@@ -644,7 +644,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
     // Get locals
     auto locals = layer->locals();
-    auto ijk2l = layer->cellijk2l();
+    auto ijk2index = layer->cellijk2l();
 
     // Track which cells are activated in the mesh. If a target point is in a non-
     // activated cell, skip it when checking pootentials
@@ -673,7 +673,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
             }
 
             // Only continue if this cell exists in the mesh
-            auto cell_exists = ijk2l.exists(target_cell_ijk);
+            auto cell_exists = ijk2index.exists(target_cell_ijk);
             if (!cell_exists)
                 return;
             
@@ -697,10 +697,10 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
                                       target_points(tpi, 2) - l_center[2],
                                       r, theta, phi );
 
-            auto ijk2l_index = ijk2l.find(target_cell_ijk);
-            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2l index: %u\n", tpi,
+            auto ijk2l_index = ijk2index.find(target_cell_ijk);
+            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2index index: %u\n", tpi,
             //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], ijk2l_index);
-            auto local_index = ijk2l.value_at(ijk2l_index);
+            auto local_index = ijk2index.value_at(ijk2l_index);
             // printf("tpi: %d, local index: %lu\n", tpi, local_index);
             // printf("tcell(%d, %d, %d): l(%d): (%.2lf, %.2lf, %.2lf, %.2lf)\n",
             //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
@@ -965,7 +965,7 @@ void testMultipole2Local2(int points_per_proc_in, bool balanced)
     
     // Get locals
     auto locals = layer->locals();
-    auto ijk2l = layer->cellijk2l();
+    auto ijk2index = layer->cellijk2l();
 
     // Track which cells are activated in the mesh. If a target point is in a non-
     // activated cell, skip it when checking pootentials
@@ -994,7 +994,7 @@ void testMultipole2Local2(int points_per_proc_in, bool balanced)
             }
 
             // Only continue if this cell exists in the mesh
-            auto cell_exists = ijk2l.exists(target_cell_ijk);
+            auto cell_exists = ijk2index.exists(target_cell_ijk);
             if (!cell_exists)
                 return;
             
@@ -1018,10 +1018,10 @@ void testMultipole2Local2(int points_per_proc_in, bool balanced)
                                       target_points(tpi, 2) - l_center[2],
                                       r, theta, phi );
 
-            auto ijk2l_index = ijk2l.find(target_cell_ijk);
-            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2l index: %u\n", tpi,
+            auto ijk2l_index = ijk2index.find(target_cell_ijk);
+            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2index index: %u\n", tpi,
             //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], ijk2l_index);
-            auto local_index = ijk2l.value_at(ijk2l_index);
+            auto local_index = ijk2index.value_at(ijk2l_index);
             // printf("tpi: %d, local index: %lu\n", tpi, local_index);
             // printf("tcell(%d, %d, %d): l(%d): (%.2lf, %.2lf, %.2lf, %.2lf)\n",
             //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
