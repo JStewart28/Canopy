@@ -1,3 +1,14 @@
+/****************************************************************************
+ * Copyright (c) 2025 by the Canopy authors                                 *
+ * All rights reserved.                                                     *
+ *                                                                          *
+ * This file is part of the Canopy library. Canopy is distributed under a   *
+ * BSD 3-clause license. For the licensing terms see the LICENSE file in    *
+ * the top-level directory.                                                 *
+ *                                                                          *
+ * SPDX-License-Identifier: BSD-3-Clause                                    *
+ ****************************************************************************/
+
 #ifndef CANOPY_TREE_HPP
 #define CANOPY_TREE_HPP
 
@@ -48,16 +59,14 @@ class Tree
     //! AoSoA related types
     //! MemberType Data types
     //! Cell x/y/z center
-    //! cell ID
-    //! Rank
     static constexpr std::size_t p = ExpansionCutoff;
     using cdouble = Kokkos::complex<double>;
     // MemberType must be trivially copyable, so we cannot use cdouble.
     // Instead, store as two doubles
-    using member_types = Cabana::MemberTypes<double[(p+1)*(p+1)][2], double[3], std::size_t, int>;
+    using member_types = Cabana::MemberTypes<double[(p+1)*(p+1)][2], double[3]>;
     //! AoSoA Tuple type
     using tuple_type = Cabana::Tuple<member_types>;
-    using data_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;
+    using coefficient_aosoa_type = Cabana::AoSoA<member_types, memory_space, cell_per_tile_dim>;
     
     Tree( const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
@@ -395,7 +404,7 @@ class Tree
         // Data comes from externally to populate leaf layer (layer 0)
         migrateParticleData(external_data, run_load_balance);
         // if (_rank == 0) printf("Starting layer 0...\n");
-        _tree[0]->populateCells(external_data);
+        _tree[0]->populateCells(external_data, 0, external_data.size());
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
             // if (_rank == 0) printf("Starting layer %d...\n", i);
@@ -420,17 +429,28 @@ class Tree
     }
 
     /**
-     * Used to internally migrate and aggregate data from one layer to the next.
+     * Used to internally migrate and aggregate mutlipoles from one layer to the next.
      * Use position_slice_id slice for positions.
      */
     void migrateAndSetLayer(int from_layer, int to_layer, bool run_load_balance)
     {
         // Communicate cell data
-        auto data = _tree[from_layer]->data();
-        auto positions = Cabana::slice<1>(data);
-        Kokkos::View<int*, memory_space> to_layer_owner("to_layer_owner", data.size());
-        mapParticles(positions, to_layer_owner, data.size(), to_layer, run_load_balance);
-        Cabana::Distributor<memory_space> distributor(_comm, to_layer_owner);
+        auto multipoles = _tree[from_layer]->multipoles();
+        auto positions = Cabana::slice<1>(multipoles);
+        Kokkos::View<int*, memory_space> export_ranks("export_ranks", multipoles.size());
+
+        // All coefficients are haloed, so ids is just the index
+        Kokkos::View<int*, memory_space> export_ids("ids", multipoles.size());
+        auto fill_with_index = KOKKOS_LAMBDA(const int i) {export_ids(i) = i;}
+        Kokkos::parallel_for(
+            "fill_export_ids",
+            Kokkos::RangePolicy<execution_space>(0, export_ids.extent(0)), fill_with_index);
+
+        mapParticles(positions, to_layer_owner, multipoles.size(), to_layer, run_load_balance);
+
+        // Create halo
+        Cabana::Halo<memory_space> halo( _comm, multipoles.size(), export_ids,
+                                    export_ranks );
         Cabana::migrate( distributor, data );
         _tree[to_layer]->populateCells(data);
     }
@@ -548,6 +568,12 @@ class Tree
 
     // Tree layers.
     std::vector<std::shared_ptr<TreeLayer<tree_type, cell_per_tile_dim>>> _tree;
+
+    // Vertical multipole halo for each tree layer
+    std::vector<std::shared_ptr<Cabana::Halo, memory_space>>> _vertical_multipole_halo;
+
+    // Vertical local halo for each tree layer
+    std::vector<std::shared_ptr<Cabana::Halo, memory_space>>> _vertical_local_halo;
 
     // How many tiles per dimension in the leaf layer.
     std::size_t _leaf_tiles_per_dim;
