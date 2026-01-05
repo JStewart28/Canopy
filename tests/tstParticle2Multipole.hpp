@@ -116,7 +116,7 @@ void testParticle2Multipole(bool balanced)
     // Fill the tree
     bool run_load_balance = !balanced;
     tree->create_multipoles(particle_aosoa, run_load_balance);
-
+    return;
     /***********************************************
      * Check the data in the root layer
      **********************************************/

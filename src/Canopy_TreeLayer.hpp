@@ -539,7 +539,7 @@ class TreeLayer
 
         int rank = _rank;
         int layer_number = _layer_number;
-        // printf("R%d: leaf cell data from [%d, %d)\n", rank, start, end);
+        // printf("L%d: R%d: leaf cell data from [%d, %d)\n", layer_number, rank, start, end);
 
         std::size_t view_size = end - start;
         ParticleAoSoA cell_data("cell_data", view_size);
@@ -691,9 +691,9 @@ class TreeLayer
                 for (int i = 0; i < 3; i++)
                     cell_center_slice(idx, i) = cell_center(i);
 
-                // printf("R%d: cell(%d, %d, %d): c(%.2lf, %.2lf, %.2lf)\n", rank,
-                //     cell_ijk(0), cell_ijk(1), cell_ijk(2),
-                //     cell_center(0), cell_center(1), cell_center(2));
+                // printf("L%d: R%d: inserting cell %d, cell(%d, %d, %d)\n", layer_number, rank, idx,
+                //     cell_ijk(0), cell_ijk(1), cell_ijk(2)
+                //     );
 
                 
                 // else
@@ -724,6 +724,7 @@ class TreeLayer
         {
             throw std::runtime_error("TreeLayer::initializeCell: must be called with _layer_number > 0");
         }
+        printf("L%d: R%d: initializeCell from %d to %d\n", _layer_number, _rank, start, end);
         return;
         int rank = _rank;
         // int layer_number = _layer_number;
@@ -906,6 +907,8 @@ class TreeLayer
         int rank = _rank;
         int layer_number = _layer_number;
 
+        printf("L%d: start/end: %d, %d\n", _layer_number, start, end);
+
         updateCellSize();
 
         std::size_t num_particles = end - start;
@@ -945,6 +948,10 @@ class TreeLayer
                 auto cell_activated_ijk =
                     position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
                                  low_corner, cell_size);
+
+                printf("L%d: indexing incoming data %d, c(%d, %d, %d)\n", layer_number, pid,
+                        cell_activated_ijk[0], cell_activated_ijk[1],
+                        cell_activated_ijk[2]);
 
                 // if (layer_number == 1)
                 // {
@@ -1031,11 +1038,12 @@ class TreeLayer
         // Size the AoSoA based on how many cells have been activated.
         // _cells_ptr->resize( map.sizeCell() );
 
-         // Initialize _ijk2index and _locals to slightly larger than the number of cells activated.
-        // XXX - Do we need to do this overallocation?
-        std::size_t allocation_size = static_cast<std::size_t>(map.sizeCell() * 1.2);
+        // XXX - Do we need to do overallocation?
+        std::size_t allocation_size = static_cast<std::size_t>(cid2ijk.size());
+        printf("L%d: R%d: map size: %d, cid2ijk size: %d\n", _layer_number, _rank, map.sizeCell(), cid2ijk.size());
+        if (_layer_number == 1) return;
         _ijk2index.clear();
-        _ijk2index.rehash(allocation_size);
+        _ijk2index.rehash(allocation_size * 1.2);
         _multipoles = coefficient_aosoa_type("_multipoles", allocation_size);
         _locals = coefficient_aosoa_type("_locals", allocation_size);
         _m2l_bounds = Kokkos::View<int*[6], memory_space>("_m2l_bounds", allocation_size);
@@ -1655,6 +1663,10 @@ class TreeLayer
 
     // Return cell_ijk to index into local view map
     auto cellijk2l() {return _ijk2index;}
+
+    // The number of cells activated in this layer. Can't use the size of local or multipole views
+    // because they may contain ghost elements
+    auto numCells() {return _ijk2index.size();}
 
   private:
     const std::array<double, 3> _global_high_corner;

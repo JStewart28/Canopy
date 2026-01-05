@@ -409,12 +409,16 @@ class Tree
     void migrateAndSetLayer(int from_layer, int to_layer, bool run_load_balance)
     {
         // Communicate cell data
-        auto multipoles = _tree[from_layer]->multipoles();
+        auto f_layer = _tree[from_layer];
+        auto num_cells = f_layer->numCells();
+        auto multipoles = f_layer->multipoles();
         auto positions = Cabana::slice<1>(multipoles);
-        Kokkos::View<int*, memory_space> export_ranks("export_ranks", multipoles.size());
+        Kokkos::View<int*, memory_space> export_ranks("export_ranks", num_cells);
+
+        printf("From layer %d: num cells: %d\n", from_layer, num_cells);
 
         // All coefficients are haloed, so ids is just the index
-        Kokkos::View<int*, memory_space> export_ids("ids", multipoles.size());
+        Kokkos::View<int*, memory_space> export_ids("ids", num_cells);
         Kokkos::parallel_for(
             "fill_export_ids",
             Kokkos::RangePolicy<execution_space>(0, export_ids.extent(0)),
@@ -424,13 +428,13 @@ class Tree
             }
         );
 
-        mapParticles(positions, export_ranks, multipoles.size(), to_layer, run_load_balance);
+        mapParticles(positions, export_ranks, num_cells, to_layer, run_load_balance);
 
         for (int i = 0; i < export_ranks.extent(0); i++)
             printf("i%d: to R%d, index %d\n", i, export_ranks(i), export_ids(i));
 
         // Create halo
-        Cabana::Halo<memory_space> halo( _comm, multipoles.size(), export_ids,
+        Cabana::Halo<memory_space> halo( _comm, num_cells, export_ids,
                                     export_ranks );
 
         // Resize multipole AoSoA for gather
@@ -438,6 +442,8 @@ class Tree
 
         // Gather
         Cabana::gather( halo, multipoles );
+
+        printf("to L%d: multipoles size: %d\n", to_layer, multipoles.size());
 
         _tree[to_layer]->populateCells(multipoles, halo.numLocal(), halo.numLocal() + halo.numGhost());
     }
