@@ -228,6 +228,8 @@ class TreeLayer
 
     using sparse_array_type = Cabana::Grid::Experimental::SparseArray<member_types, memory_space, entity_type,
                                           mesh_type, sparse_map_type>;
+    
+    using index_map_type = Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space>;
 
     //! AoSoA type
     // using aosoa_type = typename sparse_array_type::aosoa_type;
@@ -913,31 +915,33 @@ class TreeLayer
 
         std::size_t num_particles = end - start;
 
-        // Initialize _cid2ijk
-        _cid2ijk.clear();
-        _cid2ijk.rehash(num_particles);
+        // Size _ijk2index to hold the number of incoming particles. This is an overestimate.
+        _ijk2index.clear();
+        _ijk2index.rehash(num_particles);
+        auto ijk2index = _ijk2index;
 
         // If ParticleAoSoA type is data_aosoa_type, then the positions are the second tuple element.
-        // Otherwise they are the first
-        static constexpr std::size_t position_index =
-            std::is_same_v<ParticleAoSoA, coefficient_aosoa_type> ? 1 : 0;
+        // Otherwise they are the first.
+        // If positions are the 2nd element, this is not layer 0 and the first element are multipole coefficients.
+        // Otherwise the values at each particle are the 2nd coefficient. 
+        static constexpr bool is_coeff =
+            std::is_same_v<ParticleAoSoA, coefficient_aosoa_type>;
+
+        static constexpr std::size_t position_index = is_coeff ? 1 : 0;
+        static constexpr std::size_t data_index = is_coeff ? 0 : 1;
         auto positions = Cabana::slice<position_index>(data_aosoa);
+        auto data_slice = Cabana::slice<data_index>(data_aosoa);
 
         auto map = *_map_ptr;
-        auto cid2ijk = _cid2ijk;
 
         auto cell_size = _cell_size;
 
         // Convert std::array to Kokkos::Array
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         
-        // Map for incoming ids (iid) -> the local id cell they are a part of (cid)
-        using map_tuple_type = Cabana::MemberTypes<std::size_t, std::size_t>; 
-        using map_aosoa_type = Cabana::AoSoA<map_tuple_type, memory_space, cell_per_tile_dim>;
-        map_aosoa_type in2out("in2out", num_particles);
-        auto in_id_slice = Cabana::slice<0>(in2out);
-        auto out_id_slice = Cabana::slice<1>(in2out);
-
+        // Register cells in the sparse map and count the number of cells that will
+        // be activated in this layer for sizing data structures. Use the _ijk2index
+        // map as a temporary counter.
         Kokkos::parallel_for(
             "registerSparseMap",
             Kokkos::RangePolicy<execution_space>( 0, num_particles ),
@@ -979,12 +983,9 @@ class TreeLayer
                                          cell_activated_ijk[1],
                                          cell_activated_ijk[2]);
 
-                // Save cell activated ijk
-                auto result = cid2ijk.insert(cell_id,
-                                            Kokkos::Array<std::size_t, 3>{
-                                                cell_activated_ijk[0],
-                                                cell_activated_ijk[1],
-                                                cell_activated_ijk[2]});
+                // Insert into map to count cells activated. Use dummy values
+                // because we will clear the map after this.
+                auto result = ijk2index.insert(cell_activated_ijk, 0);
                 // if (rank == 0)
                 //     printf("R%d: vgid_parent %d, vowner: %d, result: %d key: %" PRIu64 "\n", rank,
                 //         vgid_parent, vert_owner, result.success(), hash_key);
@@ -1014,82 +1015,115 @@ class TreeLayer
                     //     (unsigned long long)cell_activated_ijk[2],
                     //     positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
                 }
-
-                // Save the cell the incoming data activates.
-                // The following line appears redundant, but later this
-                // AoSoA is sorted by cell_id.
-                in_id_slice(pid) = static_cast<std::size_t>(pid);
-                out_id_slice(pid) = static_cast<std::size_t>(cell_id);
             } );
 
         Kokkos::fence();
         
-        // if (_layer_number == 1)
-        //     for (int i = 0; i < num_particles; ++i)
-        //     {
-        //         printf("L%d: R%d: num_p: %d, in2out cell: %d -> %d\n", _layer_number, _rank, num_particles,
-        //             in_id_slice(i), out_id_slice(i));
-        //     }
-        
+        const auto num_cells_activated = ijk2index.size();
 
-        // Allocate memory for the AoSoA which stores cell data
-        // _cells_ptr->reserveFromMap( 1.1 );
-
-        // Size the AoSoA based on how many cells have been activated.
-        // _cells_ptr->resize( map.sizeCell() );
-
-        // XXX - Do we need to do overallocation?
-        std::size_t allocation_size = static_cast<std::size_t>(cid2ijk.size());
-        printf("L%d: R%d: map size: %d, cid2ijk size: %d\n", _layer_number, _rank, map.sizeCell(), cid2ijk.size());
-        if (_layer_number == 1) return;
+        // Clear map to remove dummy values
         _ijk2index.clear();
-        _ijk2index.rehash(allocation_size * 1.2);
-        _multipoles = coefficient_aosoa_type("_multipoles", allocation_size);
-        _locals = coefficient_aosoa_type("_locals", allocation_size);
-        _m2l_bounds = Kokkos::View<int*[6], memory_space>("_m2l_bounds", allocation_size);
+
+        // Size data structures to hold the number of cells activated
+        _multipoles = coefficient_aosoa_type("_multipoles", num_cells_activated);
+        _locals = coefficient_aosoa_type("_locals", num_cells_activated);
+        _m2l_bounds = Kokkos::View<int*[6], memory_space>("_m2l_bounds", num_cells_activated);
         
-        // Sort the in2out array and by increasing cell_id
-        auto sort_data = Cabana::sortByKey( out_id_slice );
-        Cabana::permute( sort_data, in2out );
+        // Now use the incoming data to compute p2m, if layer 0, or m2m, if layer > 0.
+        auto coefficient_view_index = _coefficient_view_index;
+        auto ijk2index = _ijk2index;
+        auto multipole_coefficients_slice = Cabana::slice<0>(_multipoles);
+        auto cell_center_slice = Cabana::slice<1>(_multipoles);
 
-        // Now, all incoming data that is mapped to the same cell in this layer appears next to
-        // each other in the AoSOA.
-        using host_aosoa_type = Cabana::AoSoA<map_tuple_type, Kokkos::HostSpace, cell_per_tile_dim>; // XXX - Set vector size?
-        host_aosoa_type in2out_h("host_cid_pid_map", num_particles);
-        Cabana::deep_copy(in2out_h, in2out);
-        auto out_id_h = Cabana::slice<1>(in2out_h);
-        std::size_t index = 0;
-        while (index < num_particles)
-        {
-            // Find the start and end indices of each group of incoming data
-            // that activate the same cell.
-            std::size_t cid = out_id_h(index);
-            std::size_t start_i = index;
-            while ((cid == out_id_h(index)) && (index < num_particles))
-            {
-                index++;
-            }
-            std::size_t end_i = index;
+        // Define value conflict operator
+        using map_op_type = Kokkos::UnorderedMapInsertOpTypes<index_map_type::value_type, index_map_type::key_type>;
+        using atomic_add_type = typename map_op_type::AtomicAdd;
+        atomic_add_type atomic_add;
 
-            // Now, initialize each cell in this layer one at a time, passing the incoming data
-            // AoSoA, the cell id they activate, and the start and end indicies of all
-            // incoming data within the cell.
+        Kokkos::parallel_for( "set_cell_keys",
+            Kokkos::RangePolicy<execution_space>( 0, num_particles ),
+            KOKKOS_LAMBDA( const std::size_t pnum ) {
 
-            // Leaf data
-            if constexpr (position_index == 0) initializeLeafCell(data_aosoa, in2out, start_i, end_i);
-            // Non-leaf data
-            if constexpr (position_index == 1) initializeCell(data_aosoa, in2out, start_i, end_i);
-        }
+                auto pid = start + pnum;
+                
+                auto cell_activated_ijk =
+                    position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
+                                 low_corner, cell_size);
 
-        // Test optimizing the partition after all cells initialized.
-        // printf("R%d: L%d: sparse map size: %d\n", _rank, _layer_number, map.size());
-        // printf("R%d: sparse map size: %d\n", _rank, map.size());
-        // auto imbalance_factor = _partitioner_ptr->computeImbalanceFactor( _cart_comm );
-        // printf("R%d: L%d: imbalance factor: %0.4lf\n", _rank, _layer_number, imbalance_factor);
-        // if (_layer_number == 0) optimizePartition();
-        // auto imbalance_factor = partitioner_ptr->computeImbalanceFactor( _cart_comm );
-        // printf("R%d: L%d: imbalance factor: %0.4lf\n", imbalance_factor);
+                // Try to insert into map with dummy key
+                auto result = ijk2index.insert(cell_activated_ijk, 0);
+
+                // If the cell is not in the map, update the key with its index into
+                // local/multipole views
+                if (result.success())
+                {
+                    auto index = Kokkos::atomic_fetch_add(&coefficient_view_index(), 1);
+                    ijk2index.insert(cell_activated_ijk, index, atomic_add);
+
+                    // Save cell center
+                    auto cell_center_array = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2], low_corner, cell_size);
+                    for (int i = 0; i < 3; i++)
+                        cell_center_slice(index, i) = cell_center[i];
+                }
+            });
+
+        Kokkos::fence();
+
+        // Now that cell keys are set, we can populate the multipoles
+        static constexpr std::size_t num_coefficients = (p+1) * (p+1);
+        Kokkos::parallel_for( "set_multipoles",
+            Kokkos::RangePolicy<execution_space>( 0, num_particles ),
+            KOKKOS_LAMBDA( const std::size_t pnum ) {
+
+                auto pid = start + pnum;
+                
+                auto cell_activated_ijk =
+                    position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
+                                 low_corner, cell_size);
+
+                // Get the cell key
+                auto map_index = ijk2index.find(cell_activated_ijk);
+                auto cell_index = ijk2index.value_at(map_index);
+
+                // Get cell center
+                Kokkos::Array<double, 3> cell_center;
+                for (int i = 0; i < 3; i++)
+                    cell_center[i] = cell_center_slice(cell_index, i);
+                
+                // Get position
+                Kokkos::Array<double, 3> pos;
+                for (int i = 0; i < 3; i++)
+                    pos[i] = positions( pid, i )
+                
+                // Multipole array
+                Kokkos::Array<cdouble, num_coefficients> M_array;
+                for (std::size_t i = 0; i < num_coefficients; i++)
+                    M_array[i] = cdouble(0.0, 0.0);
+                
+                if constexpr (position_index == 0)
+                {
+                    // This means we are layer 0 and incoming data must be converted to multipoles
+                    double scalar = q(pid);    
+
+                    // Create multipole array
+                    Kokkos::Array<cdouble, ( p + 1 ) * ( p + 1 )> M;
+                    for (int i = 0; i < ( p + 1 ) * ( p + 1 ); i++)
+                        M[i] = cdouble(0.0, 0.0);
+
+                    // Compute multipoles
+                    Canopy::Kernel::Scalar::p2m<p>(pos, scalar, expansion_center, M);
+
+                    // Add this particle's contribution to the total multipoles
+                    for (int i = 0; i < ( p + 1 ) * ( p + 1 ); i++)
+                        Kokkos::atomic_add(&M_view(i), M[i]);
+                }
+                else if constexpr (position_index == 1)
+                {
+                    // This means we are not layer 0 and incoming data must be translated
+                }
+            });
     }
+
 
     /**
      * Figure out which local coefficients from the cells in the layer above we need,
@@ -1666,7 +1700,7 @@ class TreeLayer
 
     // The number of cells activated in this layer. Can't use the size of local or multipole views
     // because they may contain ghost elements
-    auto numCells() {return _ijk2index.size();}
+    auto numCells() {return _coefficient_view_index;}
 
   private:
     const std::array<double, 3> _global_high_corner;
@@ -1708,7 +1742,7 @@ class TreeLayer
     // Cell ijks are replicated so they do not need to be haloed
     // separately and be re-mapped to coefficients.
     Kokkos::View<std::size_t, memory_space> _coefficient_view_index;
-    Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space> _ijk2index;
+    index_map_type _ijk2index;
 
     // Multipole coefficients for each cell.
     coefficient_aosoa_type _multipoles;
