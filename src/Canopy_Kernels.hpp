@@ -147,6 +147,38 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
 KOKKOS_INLINE_FUNCTION
 int index( int n, int m ) { return n * n + ( m + n ); }
 
+template <std::size_t p>
+KOKKOS_INLINE_FUNCTION void
+p2m( const Kokkos::Array<double, 3>& pos,
+     const double scalar,
+     const Kokkos::Array<double, 3>& expansion_center,
+     Kokkos::Array<cdouble, ( p + 1 ) * ( p + 1 )>& M )
+{
+    double dx = pos[0] - expansion_center[0];
+    double dy = pos[1] - expansion_center[1];
+    double dz = pos[2] - expansion_center[2];
+
+    double rho, alpha, beta;
+    cart2sph( dx, dy, dz, rho, alpha, beta );
+
+    // Equation 3.36, Greengard
+    for ( int n = 0; n <= p; ++n )
+    {
+        for ( int m = -n; m <= n; ++m )
+        {
+            int idx = index( n, m );
+            // Equation 3.37, Greengard
+            // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 *
+            // pi ) ));
+            auto val = scalar * Kokkos::pow( rho, n ) *
+                        Ynm( n, -m, alpha, beta ); // / norm;
+            M[idx] += val;
+            // printf("k%d, n%d, m%d setting index: %d\n",
+            //     i, n, m, idx);
+        }
+    }
+}
+
 /**
  * Operator calculates the kernel for scalar-based multipoles
  * and return the multipole coefficient matrix flattened into a
@@ -301,6 +333,60 @@ double compute_J_3_54( int n, int m, int m_p )
     else
     {
         return minus_one_pow( n );
+    }
+}
+
+template <std::size_t p>
+KOKKOS_INLINE_FUNCTION void
+m2m( const Kokkos::Array<cdouble, ( p + 1 ) * ( p + 1 )>& M_orig,
+     const Kokkos::Array<double, 3>& center_orig,
+     Kokkos::Array<cdouble, ( p + 1 ) * ( p + 1 )>& M_new )
+{
+    // Spherical coords for the displacement
+    double rho, alpha, beta;
+    cart2sph( center_orig[0], center_orig[1], center_orig[2], rho, alpha,
+                beta );
+
+    for ( int j = 0; j <= p; ++j )
+    {
+        for ( int k = -j; k <= j; ++k )
+        {
+            cdouble Mjk( 0.0, 0.0 );
+
+            for ( int n = 0; n <= j; ++n )
+            {
+                int j_n = j - n;
+
+                for ( int m = -n; m <= n; ++m )
+                {
+                    int k_m = k - m;
+
+                    // Must satisfy |k_m| <= j_n
+                    // to avoid negative values passed to compute_A.
+                    if ( std::abs( k_m ) > j_n )
+                        continue;
+
+                    int orig_index = index( j_n, k_m );
+                    cdouble O = M_orig[orig_index];
+
+                    // Values for eq 3.57
+                    const double J = compute_J_3_43( m, k_m );
+                    const double A_nm = compute_A( n, m );
+                    const double A_jn_km = compute_A( j_n, k_m );
+                    const double A_jk = compute_A( j, k );
+                    double rho_n = Kokkos::pow( rho, n );
+
+                    // M_child already has its Y_nm normalized. The Ynm
+                    // function performs normalization internally, so we
+                    // need to un-normalize it after calling Ynm to avoid
+                    // double normalization.
+                    auto Y_nm = Ynm( n, -m, alpha, beta );
+                    Mjk += ( O * J * A_nm * A_jn_km * rho_n * Y_nm ) / A_jk;
+                }
+            }
+            int parent_idx = index( j, k );
+            M_new[parent_idx] += Mjk;
+        }
     }
 }
 
