@@ -909,7 +909,7 @@ class TreeLayer
         int rank = _rank;
         int layer_number = _layer_number;
 
-        printf("L%d: start/end: %d, %d\n", _layer_number, start, end);
+        // printf("L%d: start/end: %d, %d\n", _layer_number, start, end);
 
         updateCellSize();
 
@@ -953,9 +953,9 @@ class TreeLayer
                     position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
                                  low_corner, cell_size);
 
-                printf("L%d: indexing incoming data %d, c(%d, %d, %d)\n", layer_number, pid,
-                        cell_activated_ijk[0], cell_activated_ijk[1],
-                        cell_activated_ijk[2]);
+                // printf("L%d: indexing incoming data %d, c(%d, %d, %d)\n", layer_number, pid,
+                //         cell_activated_ijk[0], cell_activated_ijk[1],
+                //         cell_activated_ijk[2]);
 
                 // if (layer_number == 1)
                 // {
@@ -1035,7 +1035,9 @@ class TreeLayer
         auto cell_center_slice = Cabana::slice<1>(_multipoles);
 
         // Define value conflict operator
-        using map_op_type = Kokkos::UnorderedMapInsertOpTypes<typename index_map_type::value_type, typename index_map_type::key_type>;
+        // using value_view_type = Kokkos::View<typename index_map_type::value_type*, memory_space>;
+        using value_view_type = Kokkos::View<std::size_t*, memory_space>;
+        using map_op_type = Kokkos::UnorderedMapInsertOpTypes<value_view_type, std::size_t>;
         using atomic_add_type = typename map_op_type::AtomicAdd;
         atomic_add_type atomic_add;
 
@@ -1153,7 +1155,7 @@ class TreeLayer
                     for (std::size_t i = 0; i < num_coefficients; i++)
                     {
                         M_trans_array[i] = cdouble(0.0, 0.0);
-                        M_orig_array[i] = data_slice(pid, i);
+                        M_orig_array[i] = cdouble(data_slice(pid, i, 0), data_slice(pid, i, 1));
                     }
 
                     // Create Kokkos:Array of vector pointing from child cell center to cell center.
@@ -1751,7 +1753,12 @@ class TreeLayer
 
     // The number of cells activated in this layer. Can't use the size of local or multipole views
     // because they may contain ghost elements
-    auto numCells() {return _coefficient_view_index;}
+    auto numCells()
+    {
+        std::size_t val;
+        Kokkos::deep_copy(val, _coefficient_view_index);
+        return val;
+    }
 
   private:
     const std::array<double, 3> _global_high_corner;

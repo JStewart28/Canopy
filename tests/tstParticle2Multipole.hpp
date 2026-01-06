@@ -116,7 +116,7 @@ void testParticle2Multipole(bool balanced)
     // Fill the tree
     bool run_load_balance = !balanced;
     tree->create_multipoles(particle_aosoa, run_load_balance);
-    return;
+
     /***********************************************
      * Check the data in the root layer
      **********************************************/
@@ -129,6 +129,7 @@ void testParticle2Multipole(bool balanced)
         for ( int k = -j; k <= j; ++k )
         {
             int idx = Canopy::Kernel::Scalar::index( j, k );
+            auto val = m_root_h( idx );
             potential_M +=
                 m_root_h( idx ) / Kokkos::pow( r, j + 1 ) *
                 Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );

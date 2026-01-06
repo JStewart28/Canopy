@@ -233,6 +233,8 @@ class Tree
             throw std::runtime_error("Canopy::Tree::initializeRootLayer: function called with an empty tree.");
         }
 
+        // Initialize _M_root
+        _M_root = Kokkos::View<cdouble[(p+1)*(p+1)], memory_space>("_M_root");
 
         // DEBUG: Set top layer to first layer
         // auto top_layer = _tree[0];
@@ -247,7 +249,7 @@ class Tree
         // }
 
         auto multipoles = top_layer->multipoles();
-        std::size_t cells_activated = multipoles.size();
+        std::size_t cells_activated = top_layer->numCells();
         auto multipole_coefficients_slice = Cabana::slice<0>(multipoles);
         auto cell_center_slice = Cabana::slice<1>(multipoles);
         
@@ -257,8 +259,8 @@ class Tree
         Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
 
         // Save multipole coefficients.
-        static constexpr std::size_t num_M = (p+1) * (p+1);
-        Kokkos::View<cdouble*, memory_space> M_children("M_children", num_M * cells_activated);
+        static constexpr std::size_t num_coefficients = (p+1) * (p+1);
+        Kokkos::View<cdouble*, memory_space> M_children("M_children", num_coefficients * cells_activated);
 
         // Offset for filling M_children.
         Kokkos::View<std::size_t, memory_space> idx("idx");
@@ -289,8 +291,8 @@ class Tree
                 incoming_cell_centers(index, j) = cell_center_slice(index, j);
 
             // Save multipole coefficients
-            auto offset_M_base = index * num_M;
-            for (std::size_t j = 0; j < num_M; ++j)
+            auto offset_M_base = index * num_coefficients;
+            for (std::size_t j = 0; j < num_coefficients; ++j)
             {
                 double real_part = multipole_coefficients_slice(index, j, 0);
                 double imag_part = multipole_coefficients_slice(index, j, 1);
@@ -315,7 +317,7 @@ class Tree
         for (std::size_t i = 0; i < cells_activated; ++i)
         {
             // Create subview of correct multipole coefficients
-            auto sub_M = Kokkos::subview(M_children_h, Kokkos::make_pair(i * num_M, (i+1)*num_M));
+            auto sub_M = Kokkos::subview(M_children_h, Kokkos::make_pair(i * num_coefficients, (i+1)*num_coefficients));
 
             // Create Kokkos:Array of vector pointing from child cell center to cell center.
             Kokkos::Array<double, 3> vector_to_center;
@@ -360,7 +362,7 @@ class Tree
         }
 
         // Now broadcast the data from the root.
-        MPI_Bcast(reinterpret_cast<double*>(_M_root.data()), 2 * num_M, MPI_DOUBLE, root, _comm);
+        MPI_Bcast(reinterpret_cast<double*>(_M_root.data()), 2 * num_coefficients, MPI_DOUBLE, root, _comm);
     }
 
 
@@ -378,13 +380,12 @@ class Tree
 
         // if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(external_data, 0, external_data.size());
-        for (std::size_t i = 1; i < 2; i++)
+        for (std::size_t i = 1; i < _tree.size(); i++)
         {
             // if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i, run_load_balance);
         }
         // if (_rank == 0) printf("Starting root layer (%d)...\n", _tree.size());
-        return;
         initializeRootLayer();
     }
 
@@ -430,8 +431,8 @@ class Tree
 
         mapParticles(positions, export_ranks, num_cells, to_layer, run_load_balance);
 
-        for (int i = 0; i < export_ranks.extent(0); i++)
-            printf("i%d: to R%d, index %d\n", i, export_ranks(i), export_ids(i));
+        // for (int i = 0; i < export_ranks.extent(0); i++)
+        //     printf("i%d: to R%d, index %d\n", i, export_ranks(i), export_ids(i));
 
         // Create halo
         Cabana::Halo<memory_space> halo( _comm, num_cells, export_ids,
@@ -443,7 +444,7 @@ class Tree
         // Gather
         Cabana::gather( halo, multipoles );
 
-        printf("to L%d: multipoles size: %d\n", to_layer, multipoles.size());
+        // printf("to L%d: multipoles size: %d\n", to_layer, multipoles.size());
 
         _tree[to_layer]->populateCells(multipoles, halo.numLocal(), halo.numLocal() + halo.numGhost());
     }
