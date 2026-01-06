@@ -1031,12 +1031,11 @@ class TreeLayer
         
         // Now use the incoming data to compute p2m, if layer 0, or m2m, if layer > 0.
         auto coefficient_view_index = _coefficient_view_index;
-        auto ijk2index = _ijk2index;
         auto multipole_coefficients_slice = Cabana::slice<0>(_multipoles);
         auto cell_center_slice = Cabana::slice<1>(_multipoles);
 
         // Define value conflict operator
-        using map_op_type = Kokkos::UnorderedMapInsertOpTypes<index_map_type::value_type, index_map_type::key_type>;
+        using map_op_type = Kokkos::UnorderedMapInsertOpTypes<typename index_map_type::value_type, typename index_map_type::key_type>;
         using atomic_add_type = typename map_op_type::AtomicAdd;
         atomic_add_type atomic_add;
 
@@ -1063,7 +1062,7 @@ class TreeLayer
                     // Save cell center
                     auto cell_center_array = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2], low_corner, cell_size);
                     for (int i = 0; i < 3; i++)
-                        cell_center_slice(index, i) = cell_center[i];
+                        cell_center_slice(index, i) = cell_center_array[i];
                 }
             });
 
@@ -1071,57 +1070,109 @@ class TreeLayer
 
         // Now that cell keys are set, we can populate the multipoles
         static constexpr std::size_t num_coefficients = (p+1) * (p+1);
-        Kokkos::parallel_for( "set_multipoles",
-            Kokkos::RangePolicy<execution_space>( 0, num_particles ),
-            KOKKOS_LAMBDA( const std::size_t pnum ) {
 
-                auto pid = start + pnum;
-                
-                auto cell_activated_ijk =
-                    position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
-                                 low_corner, cell_size);
+        // We need to separate parallel for loops to correctly lambda capture
+        // the data_slice, which changes depending on if layer 0 or not.
+        if constexpr (position_index == 0)
+        {
+            Kokkos::parallel_for( "set_multipoles_layer0",
+                Kokkos::RangePolicy<execution_space>( 0, num_particles ),
+                KOKKOS_LAMBDA( const std::size_t pnum ) {
 
-                // Get the cell key
-                auto map_index = ijk2index.find(cell_activated_ijk);
-                auto cell_index = ijk2index.value_at(map_index);
+                    auto pid = start + pnum;
+                    
+                    auto cell_activated_ijk =
+                        position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
+                                    low_corner, cell_size);
 
-                // Get cell center
-                Kokkos::Array<double, 3> cell_center;
-                for (int i = 0; i < 3; i++)
-                    cell_center[i] = cell_center_slice(cell_index, i);
-                
-                // Get position
-                Kokkos::Array<double, 3> pos;
-                for (int i = 0; i < 3; i++)
-                    pos[i] = positions( pid, i )
-                
-                // Multipole array
-                Kokkos::Array<cdouble, num_coefficients> M_array;
-                for (std::size_t i = 0; i < num_coefficients; i++)
-                    M_array[i] = cdouble(0.0, 0.0);
-                
-                if constexpr (position_index == 0)
-                {
+                    // Get the cell key
+                    auto map_index = ijk2index.find(cell_activated_ijk);
+                    auto cell_index = ijk2index.value_at(map_index);
+
+                    // Get cell center
+                    Kokkos::Array<double, 3> cell_center;
+                    for (int i = 0; i < 3; i++)
+                        cell_center[i] = cell_center_slice(cell_index, i);
+                    
+                    // Get position
+                    Kokkos::Array<double, 3> pos;
+                    for (int i = 0; i < 3; i++)
+                        pos[i] = positions( pid, i );
+                    
                     // This means we are layer 0 and incoming data must be converted to multipoles
-                    double scalar = q(pid);    
+                    double scalar = data_slice(pid);    
 
                     // Create multipole array
-                    Kokkos::Array<cdouble, ( p + 1 ) * ( p + 1 )> M;
-                    for (int i = 0; i < ( p + 1 ) * ( p + 1 ); i++)
+                    Kokkos::Array<cdouble, num_coefficients> M;
+                    for (std::size_t i = 0; i < num_coefficients; i++)
                         M[i] = cdouble(0.0, 0.0);
 
                     // Compute multipoles
-                    Canopy::Kernel::Scalar::p2m<p>(pos, scalar, expansion_center, M);
+                    Canopy::Kernel::Scalar::p2m<p>(pos, scalar, cell_center, M);
 
                     // Add this particle's contribution to the total multipoles
-                    for (int i = 0; i < ( p + 1 ) * ( p + 1 ); i++)
-                        Kokkos::atomic_add(&M_view(i), M[i]);
-                }
-                else if constexpr (position_index == 1)
-                {
-                    // This means we are not layer 0 and incoming data must be translated
-                }
-            });
+                    for (std::size_t i = 0; i < num_coefficients; i++)
+                    {
+                        Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 0), M[i].real());
+                        Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 1), M[i].imag());
+                    }
+                });
+        }
+
+        else if constexpr (position_index == 1)
+        {
+            Kokkos::parallel_for( "set_multipoles",
+                Kokkos::RangePolicy<execution_space>( 0, num_particles ),
+                KOKKOS_LAMBDA( const std::size_t pnum ) {
+
+                    auto pid = start + pnum;
+                    
+                    auto cell_activated_ijk =
+                        position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
+                                    low_corner, cell_size);
+
+                    // Get the cell key
+                    auto map_index = ijk2index.find(cell_activated_ijk);
+                    auto cell_index = ijk2index.value_at(map_index);
+
+                    // Get cell center
+                    Kokkos::Array<double, 3> cell_center;
+                    for (int i = 0; i < 3; i++)
+                        cell_center[i] = cell_center_slice(cell_index, i);
+                    
+                    // Get position
+                    Kokkos::Array<double, 3> pos;
+                    for (int i = 0; i < 3; i++)
+                        pos[i] = positions( pid, i );
+                    
+                    // This means we are not layer 0 and incoming data are multipoles to be translated
+
+                    // Create arrays
+                    Kokkos::Array<cdouble, num_coefficients> M_orig_array;
+                    Kokkos::Array<cdouble, num_coefficients> M_trans_array;
+                    for (std::size_t i = 0; i < num_coefficients; i++)
+                    {
+                        M_trans_array[i] = cdouble(0.0, 0.0);
+                        M_orig_array[i] = data_slice(pid, i);
+                    }
+
+                    // Create Kokkos:Array of vector pointing from child cell center to cell center.
+                    Kokkos::Array<double, 3> vector_to_center;
+                    Kokkos::Array<double, 3> child_center = {positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 )};
+                    
+                    for (int i = 0; i < 3; i++)
+                        vector_to_center[i] = (cell_center[i] - child_center[i]) * -1;
+
+                    Canopy::Kernel::Scalar::m2m<p>(M_orig_array, vector_to_center, M_trans_array);
+
+                    // Add this multipole's contribution to the total multipoles
+                    for (std::size_t i = 0; i < num_coefficients; i++)
+                    {
+                        Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 0), M_trans_array[i].real());
+                        Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 1), M_trans_array[i].imag());
+                    }
+                });
+        }
     }
 
 
