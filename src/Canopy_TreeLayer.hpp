@@ -953,9 +953,9 @@ class TreeLayer
                     position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
                                  low_corner, cell_size);
 
-                // printf("L%d: indexing incoming data %d, c(%d, %d, %d)\n", layer_number, pid,
-                //         cell_activated_ijk[0], cell_activated_ijk[1],
-                //         cell_activated_ijk[2]);
+                // printf("L%d: incoming data %d: (%.2lf, %.2lf, %.2lf) activates c(%d, %d, %d)\n", layer_number, pid,
+                //     positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
+                //     cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2]);
 
                 // if (layer_number == 1)
                 // {
@@ -1028,11 +1028,14 @@ class TreeLayer
         _multipoles = coefficient_aosoa_type("_multipoles", num_cells_activated);
         _locals = coefficient_aosoa_type("_locals", num_cells_activated);
         _m2l_bounds = Kokkos::View<int*[6], memory_space>("_m2l_bounds", num_cells_activated);
+        Kokkos::deep_copy(_m2l_bounds, 0);
         
         // Now use the incoming data to compute p2m, if layer 0, or m2m, if layer > 0.
         auto coefficient_view_index = _coefficient_view_index;
         auto multipole_coefficients_slice = Cabana::slice<0>(_multipoles);
         auto cell_center_slice = Cabana::slice<1>(_multipoles);
+        Cabana::deep_copy(multipole_coefficients_slice, 0.0);
+        Cabana::deep_copy(cell_center_slice, 0.0);
 
         // Define value conflict operator
         // using value_view_type = Kokkos::View<typename index_map_type::value_type*, memory_space>;
@@ -1077,7 +1080,6 @@ class TreeLayer
         // the data_slice, which changes depending on if layer 0 or not.
         if constexpr (position_index == 0)
         {
-            printf("L%d: p2m\n", _layer_number);
             Kokkos::parallel_for( "set_multipoles_layer0",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -1125,7 +1127,6 @@ class TreeLayer
         else if constexpr (position_index == 1)
         {
             // This means we are not layer 0 and incoming data are multipoles to be translated
-            printf("L%d: m2m\n", _layer_number);
             Kokkos::parallel_for( "set_multipoles",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -1173,6 +1174,13 @@ class TreeLayer
                         Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 0), M_trans_array[i].real());
                         Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 1), M_trans_array[i].imag());
                     }
+
+                    // printf("L%d: M2M in data %d: v2c(%.2lf, %.2lf, %.2lf) M_orig: %.2lf, %.2lf, %.2lf, trans: %.2lf, %.2lf, %.2lf\n", layer_number, pid,
+                    //     vector_to_center[0], vector_to_center[1], vector_to_center[2],
+                    //     M_orig_array[0].real(), M_orig_array[1].real(), M_orig_array[2].real(),
+                    //     multipole_coefficients_slice(cell_index, 0, 0),
+                    //     multipole_coefficients_slice(cell_index, 1, 0),
+                    //     multipole_coefficients_slice(cell_index, 2, 0));
                 });
         }
     }

@@ -416,7 +416,7 @@ class Tree
         auto positions = Cabana::slice<1>(multipoles);
         Kokkos::View<int*, memory_space> export_ranks("export_ranks", num_cells);
 
-        printf("From layer %d: num cells: %d\n", from_layer, num_cells);
+        // printf("From layer %d: num cells: %d\n", from_layer, num_cells);
 
         // All coefficients are haloed, so ids is just the index
         Kokkos::View<int*, memory_space> export_ids("ids", num_cells);

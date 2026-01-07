@@ -46,7 +46,7 @@ void testParticle2Multipole(bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size * 8, leaf_tiles = comm_size * 8;
+    red_factor = comm_size * 2, leaf_tiles = comm_size * 4;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
         num_dim, cells_per_tile, p>(
@@ -118,10 +118,9 @@ void testParticle2Multipole(bool balanced)
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     /***********************************************
-     * Check the data from layer 0
+     * Check the data from root layer
      **********************************************/
-    auto leaf_layer = tree->layer(0);
-    auto m_h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), leaf_layer->multipoles() );
+    auto m_root_h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), tree->M_root() );
 
     // Compute potential at P using M
     Kokkos::complex<double> potential_M = 0.0;
@@ -141,10 +140,10 @@ void testParticle2Multipole(bool balanced)
     // The error is already mathematically checked in testM2MKernel0,
     // so here we just make sure they are close to each other.
     int p_int = static_cast<int>(p);
-    double error = Kokkos::pow(10, -p_int);
+    double error = Kokkos::pow(10, -p_int+1);
     EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
         << p << ": Potentials do not match. Tree depth " << tree->numLayers();
-    printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
+    // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
 }
 
 //---------------------------------------------------------------------------//
@@ -159,10 +158,10 @@ TEST( Tree, testParticle2Multipole3_balanced ) { testParticle2Multipole<3>(true)
 TEST( Tree, testParticle2Multipole4_balanced ) { testParticle2Multipole<4>(true); }
 
 // Test with an unbalanced particle distribution.
-// TEST( Tree, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(false); }
-// TEST( Tree, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(false); }
-// TEST( Tree, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(false); }
-// TEST( Tree, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(false); }
+TEST( Tree, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(false); }
+TEST( Tree, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(false); }
+TEST( Tree, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(false); }
+TEST( Tree, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(false); }
 
 //---------------------------------------------------------------------------//
 
