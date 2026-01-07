@@ -1077,6 +1077,7 @@ class TreeLayer
         // the data_slice, which changes depending on if layer 0 or not.
         if constexpr (position_index == 0)
         {
+            printf("L%d: p2m\n", _layer_number);
             Kokkos::parallel_for( "set_multipoles_layer0",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -1123,6 +1124,8 @@ class TreeLayer
 
         else if constexpr (position_index == 1)
         {
+            // This means we are not layer 0 and incoming data are multipoles to be translated
+            printf("L%d: m2m\n", _layer_number);
             Kokkos::parallel_for( "set_multipoles",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -1146,8 +1149,6 @@ class TreeLayer
                     Kokkos::Array<double, 3> pos;
                     for (int i = 0; i < 3; i++)
                         pos[i] = positions( pid, i );
-                    
-                    // This means we are not layer 0 and incoming data are multipoles to be translated
 
                     // Create arrays
                     Kokkos::Array<cdouble, num_coefficients> M_orig_array;
@@ -1160,10 +1161,9 @@ class TreeLayer
 
                     // Create Kokkos:Array of vector pointing from child cell center to cell center.
                     Kokkos::Array<double, 3> vector_to_center;
-                    Kokkos::Array<double, 3> child_center = {positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 )};
                     
                     for (int i = 0; i < 3; i++)
-                        vector_to_center[i] = (cell_center[i] - child_center[i]) * -1;
+                        vector_to_center[i] = (cell_center[i] - pos[i]) * -1;
 
                     Canopy::Kernel::Scalar::m2m<p>(M_orig_array, vector_to_center, M_trans_array);
 
