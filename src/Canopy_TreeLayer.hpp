@@ -364,8 +364,8 @@ class TreeLayer
         _coefficient_view_index = Kokkos::View<std::size_t, memory_space>("_coefficient_view_index");
         Kokkos::deep_copy(_coefficient_view_index, 0);
 
-        // printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
-        //     _cells_per_dim, _cell_size[0]);
+        printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
+            _cells_per_dim, _cell_size[0]);
     
     }
 

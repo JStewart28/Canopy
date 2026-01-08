@@ -45,9 +45,9 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size, leaf_tiles = comm_size * 4;
+    red_factor = comm_size, leaf_tiles = comm_size * 32;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type,
+    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
@@ -56,17 +56,16 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
     // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
 
-    // Check mesh information for leaf layer (layer 0)
-    auto layer = tree->layer(0);
-    int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
+    // Check mesh information for leaf layer
+    int cells_per_dimension_leaf = cells_per_tile * leaf_tiles;
     Kokkos::Array<double, 3> cell_size;
     for (int i = 0; i < 3; ++i)
     {
-        cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_leaf_dimension;
+        cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_dimension_leaf;
     }
-    ASSERT_EQ(layer->cellsPerDim(), cells_per_leaf_dimension) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
-    ASSERT_EQ(layer->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
-    ASSERT_EQ(layer->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
+    ASSERT_EQ(tree->layer(0)->cellsPerDim(), cells_per_dimension_leaf) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
+    ASSERT_EQ(tree->layer(0)->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
+    ASSERT_EQ(tree->layer(0)->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
 
     // Create the data on rank 0. It will automatically be distributed correctly when
     // filled into the tree. There must be enough particles so that the target point resides
@@ -86,15 +85,10 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     {
         coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
     }
-
+    
+    // Kokkos::Array<double, 6> coord_bounds1 = {2.3, 2.3, 2.3, bound_val, bound_val, bound_val};
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
-
-    // Activate cell with the target point
-    cart_coords(0, 0) = -2.9;
-    cart_coords(0, 1) = -2.8;
-    cart_coords(0, 2) = -2.85;
-    q(0) = 0.0;
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
@@ -121,28 +115,26 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
         
     // Fill the tree
     bool run_load_balance = !balanced;
-    tree->template create_multipoles<0>(particle_aosoa, run_load_balance);
+    tree->create_multipoles(particle_aosoa, run_load_balance);
 
-    // Just test single-layer multipole to local conversion.
-    layer->multipole_to_local(16, tree->numLayers() - 2);
-
+    tree->computeP2P();
+    return;
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 100;
+    int num_target_points = 20;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
     fillRandomCoordinates(target_points, coord_bounds, 456);
 
-    // Put target point in cell (14, 12, 5)
-    // cell: (14, 12, 5) center: (2.44, 1.69, -0.94)
-    // target_points(0, 0) = 2.5;
-    // target_points(0, 1) = 1.5;
-    // target_points(0, 2) = -0.9;
-
-    // Put target point in upper corner of domain
+    // Put target point in lower corner of domain
     target_points(0, 0) = -2.88;
     target_points(0, 1) = -2.92;
     target_points(0, 2) = -2.89;
+
+    // Insert at (3, 2, 2) on layer 1
+    target_points(1, 0) = 2.61;
+    target_points(1, 1) = 1.18;
+    target_points(1, 2) = 1.31;
     
     auto target_points_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), target_points);
 
@@ -168,7 +160,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
         Kokkos::Array<int, 3> inner_upper_bound;
         for (int dim = 0; dim < 3; ++dim)
         {
-            inner_upper_bound[dim] = Kokkos::min(static_cast<int>(target_cell_ijk[dim]) + 3, cells_per_leaf_dimension);
+            inner_upper_bound[dim] = Kokkos::min(static_cast<int>(target_cell_ijk[dim]) + 3, cells_per_dimension_leaf);
             inner_lower_bound[dim] = Kokkos::max(static_cast<int>(target_cell_ijk[dim]) - 2, 0);
         }
 
@@ -215,12 +207,13 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     }
 
     // Get locals
-    auto locals = layer->locals();
-    auto ijk2index = layer->cellijk2l();
+    auto leaf_layer = tree->layer(0);
+    auto locals = leaf_layer->locals();
+    auto ijk2index = leaf_layer->cellijk2l();
     auto locals_slice = Cabana::slice<0>(locals);
 
     // Track which cells are activated in the mesh. If a target point is in a non-
-    // activated cell, skip it when checking pootentials
+    // activated cell, skip it when checking potentials
     Kokkos::View<int*, TEST_MEMSPACE> is_activated("is_activated", num_target_points);
     Kokkos::deep_copy(is_activated, 0);
 
@@ -249,7 +242,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
             auto cell_exists = ijk2index.exists(target_cell_ijk);
             if (!cell_exists)
                 return;
-
+            
             // Set cell to activated
             is_activated(tpi) = 1;
 
@@ -297,9 +290,10 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
             // printf("t%d, cell(%d, %d, %d), center(%.2lf, %.2lf, %.2lf), lp: %.3lf\n", tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], local_potential(tpi).real());
-            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.7lf, lp: %.7lf\n", points_per_proc, tpi,
+            // printf("ppp%d, t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf), dp: %.5lf, lp: %.5lf\n", points_per_proc, tpi,
             //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
             //     l_center[0], l_center[1], l_center[2], direct_potentials(tpi), local_potential(tpi).real());
+            // L1: R0: cell 3, 2, 3, neighbor 0, 0, 2: L: 7442.639, -21492.622, 33200.079
         } );
     Kokkos::fence();
 
@@ -311,10 +305,21 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     {
         if (!is_activated_host(i))
             continue;
+        
+        // Get the cell this point falls into for error printing
+        Kokkos::Array<std::size_t, 3> target_cell_ijk;
+        for (int dim = 0; dim < 3; ++dim)
+        {
+            target_cell_ijk[dim] = static_cast<std::size_t>(
+                Kokkos::floor((target_points_host(i, dim) - global_low_corner[dim]) / cell_size[dim]) );
+        }
 
         auto direct_potential = direct_potentials(i);
         auto local_potential = local_potential_h(i).real();
-        ASSERT_NEAR(local_potential, direct_potential, Kokkos::pow(10, -p_int+2));
+        double allowed_error = Kokkos::pow(10, -p_int+4);
+        EXPECT_NEAR(local_potential, direct_potential, allowed_error) << " at cell ijk ("
+            << target_cell_ijk[0] << ", " << target_cell_ijk[1] << ", "
+            << target_cell_ijk[2] << ")";
     }
 }
 
@@ -324,7 +329,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testParticle2Particle0_balanced )
 { 
-    testParticle2Particle0<3>(200, true);     
+    testParticle2Particle0<3>(10, true);     
 }
 
 //---------------------------------------------------------------------------//

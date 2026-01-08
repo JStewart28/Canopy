@@ -145,7 +145,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = comm_size * 8, leaf_tiles = comm_size * 8;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type,
+    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
@@ -219,7 +219,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
         
     // Fill the tree
     bool run_load_balance = !balanced;
-    tree->template create_multipoles<0>(particle_aosoa, run_load_balance);
+    tree->create_multipoles(particle_aosoa, run_load_balance);
 
     // Just test single-layer multipole to local conversion.
     layer->multipole_to_local(16, tree->numLayers() - 2);
@@ -548,7 +548,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
         
     // Fill the tree
     bool run_load_balance = !balanced;
-    tree->template create_multipoles<0>(particle_aosoa, run_load_balance);
+    tree->create_multipoles(particle_aosoa, run_load_balance);
 
     // Just test single-layer multipole to local conversion.
     tree->multipole_to_local();

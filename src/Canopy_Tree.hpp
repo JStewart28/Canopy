@@ -32,7 +32,7 @@ namespace Canopy
 
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
-template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType,
+template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
 class Tree
 {
@@ -42,7 +42,7 @@ class Tree
     using memory_space = MemorySpace;
 
     //! Self type
-    using tree_type = Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType,
+    using tree_type = Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId,
         NumSpaceDim, CellPerTileDim, ExpansionCutoff>;
 
     //! Memory space size type
@@ -69,6 +69,9 @@ class Tree
     using local_tuple_type = Cabana::Tuple<local_member_types>;
     using multipole_aosoa_type = Cabana::AoSoA<multipole_member_types, memory_space, cell_per_tile_dim>;
     using local_aosoa_type = Cabana::AoSoA<local_member_types, memory_space, cell_per_tile_dim>;
+
+    //! Tuple position in ParticleAoSoAType that holds particle x/y/z position.
+    static constexpr std::size_t position_id = PositionId;
 
     //! Particle data
     using particle_aosoa_type = ParticleAoSoAType;
@@ -380,11 +383,10 @@ class Tree
      * 
      * Assumes x/y/z coordinates are the first tuple element in "data"
      */
-    template <std::size_t position_id>
     void create_multipoles(particle_aosoa_type external_data, bool run_load_balance)
     {
         // Data comes from externally to populate leaf layer (layer 0)
-        migrateParticleData<position_id>(external_data, run_load_balance);
+        migrateParticleData(external_data, run_load_balance);
 
         // Save owned particle data
         _leaf_particles.resize(external_data.size());
@@ -404,7 +406,6 @@ class Tree
     /**
      * Migrate particle data to the rank that owns them at the leaf layer.
      */
-    template<std::size_t position_id>
     void migrateParticleData(particle_aosoa_type& external_data, bool run_load_balance)
     {
         auto positions = Cabana::slice<position_id>(external_data);
@@ -510,7 +511,117 @@ class Tree
 
     void haloParticles()
     {
+        auto leaf_domains = _tree[0]->domains();
+        auto leaf_cell_size = _tree[0]->cellSize();
+        auto positions = Cabana::slice<position_id>(_leaf_particles);
+
+        const int rank = _rank;
+
+        // For particle-to-particle calculations, we need to halo all particles within
+        // 2x cell size in each direction.
+        using domain_type = Kokkos::View<double*[6], memory_space>;
+        domain_type halo_domains("halo_domains", _comm_size);
+        Kokkos::deep_copy(halo_domains, leaf_domains);
+        Kokkos::parallel_for("compute halo domains",
+            Kokkos::RangePolicy<execution_space>(0, _comm_size),
+            KOKKOS_LAMBDA(const int r)
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    halo_domains(r, i) = leaf_domains(r, i) - leaf_cell_size[i] * 2;
+                    halo_domains(r, i+3) = leaf_domains(r, i+3) + leaf_cell_size[i] * 2;
+                }
+                // if (rank == 0) printf("R%d: leaf: (%.2lf, %.2lf, %.2lf) to (%.2lf, %.2lf, %.2lf), halo: (%.2lf, %.2lf, %.2lf) to (%.2lf, %.2lf, %.2lf)\n",
+                //     rank,
+                //     leaf_domains(r, 0), leaf_domains(r, 1), leaf_domains(r, 2), leaf_domains(r, 3), leaf_domains(r, 4), leaf_domains(r, 5),
+                //     halo_domains(r, 0), halo_domains(r, 1), halo_domains(r, 2), halo_domains(r, 3), halo_domains(r, 4), halo_domains(r, 5));
+            }
+        );
+
+        // Iterate over particles. If we have a particle that falls within another ranks' halo
+        // domain, we must halo it.
+
+        // First, count the number of particles that must be haloed.
+        Kokkos::View<std::size_t, memory_space> num_halos("num_halos");
+        Kokkos::deep_copy(num_halos, 0);
+        Kokkos::parallel_for("count halo particles",
+            Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
+            KOKKOS_LAMBDA(const int pid)
+            {
+                const double x = positions(pid, 0);
+                const double y = positions(pid, 1);
+                const double z = positions(pid, 2);
+
+                std::size_t local_count = 0;
+
+                for (std::size_t r = 0; r < 6; r++)
+                {
+                    if (r == rank)
+                        continue;
+
+                    const bool inside =
+                        (x >= halo_domains(r, 0) && x <= halo_domains(r, 3)) &&
+                        (y >= halo_domains(r, 1) && y <= halo_domains(r, 4)) &&
+                        (z >= halo_domains(r, 2) && z <= halo_domains(r, 5));
+
+                    if (inside)
+                        local_count++;        
+                }
+
+                if (local_count > 0)
+                    Kokkos::atomic_add(&num_halos(), local_count);
+            });
+
+        std::size_t num_halos_h;
+        Kokkos::deep_copy(num_halos_h, num_halos);
+
+        printf("R%d: num haloes: %d\n", _rank, num_halos_h);
+
+        // Now save which particles go to which ranks
+        // XXX - optimize this to reduce atomics
+        Kokkos::deep_copy(num_halos, 0);
+        Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks("ids_ranks", num_halos_h);
+        auto id_slice = Cabana::slice<0>(ids_ranks);
+        auto rank_slice = Cabana::slice<1>(ids_ranks);
+        Kokkos::parallel_for("fill halo particles",
+            Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
+            KOKKOS_LAMBDA(const int pid)
+            {
+                const double x = positions(pid, 0);
+                const double y = positions(pid, 1);
+                const double z = positions(pid, 2);
+
+                for (std::size_t r = 0; r < 6; r++)
+                {
+                    if (r == rank)
+                        continue;
+
+                    const bool inside =
+                        (x >= halo_domains(r, 0) && x <= halo_domains(r, 3)) &&
+                        (y >= halo_domains(r, 1) && y <= halo_domains(r, 4)) &&
+                        (z >= halo_domains(r, 2) && z <= halo_domains(r, 5));
+
+                    if (inside)
+                    {
+                        auto index = Kokkos::atomic_fetch_add(&num_halos(), 1);
+                        id_slice(index) = pid;
+                        rank_slice(index) = r;
+                    }
+                }
+            });
         
+        // Now halo the particles
+        Cabana::Halo<memory_space> halo( _comm, num_halos_h, id_slice,
+                                    rank_slice );
+        std::size_t num_local = halo.numLocal();
+        _leaf_particles.resize(halo.numLocal() + halo.numGhost());
+        Cabana::gather(halo, _leaf_particles);
+    }
+
+    void computeP2P()
+    {
+        haloParticles();
+
     }
 
 
@@ -597,9 +708,9 @@ class Tree
     particle_aosoa_type _leaf_particles;
 };
 
-template <class ExecutionSpace, class MemorySpace, class EntityType,
+template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-std::shared_ptr<Tree<ExecutionSpace, MemorySpace, EntityType,
+std::shared_ptr<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId,
     NumSpaceDim, CellPerTileDim, ExpansionCutoff>>
         createTree( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
@@ -607,7 +718,7 @@ std::shared_ptr<Tree<ExecutionSpace, MemorySpace, EntityType,
                     const std::size_t tile_reduction_factor,
                     MPI_Comm comm)
 {
-    return std::make_shared<Tree<ExecutionSpace, MemorySpace, EntityType,
+    return std::make_shared<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId,
         NumSpaceDim, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor,
             comm);
