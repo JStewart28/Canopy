@@ -24,7 +24,10 @@ namespace Test
 
 using cdouble = Kokkos::complex<double>;
 
+using cdouble = Kokkos::complex<double>;
+
 /**
+ * Test that scalar structs are correctly calculated
  * Test that scalar structs are correctly calculated
  */
 void testP2MStruct0()
@@ -123,6 +126,7 @@ void testP2MStruct0()
  * it to another center. Tests against the exact calculation
  * for potential at the translated center.
  */
+void testM2MStruct0()
 void testM2MStruct0()
 {
     const int num_points = 20;
@@ -241,6 +245,7 @@ void testM2MStruct0()
  * a target point and compares the result to the directly calculated potential
  * at the target point.
  */
+void testM2MStruct1()
 void testM2MStruct1()
 {
     const int points_per_section = 200;
@@ -376,6 +381,7 @@ void testM2MStruct1()
 
         // Check error between translated multipole and direct potentials
         // The error is already mathematically checked in testM2MStruct0,
+        // The error is already mathematically checked in testM2MStruct0,
         // so here we just make sure they are close to each other.
         double error = Kokkos::pow( 10, -p + 2 );
         EXPECT_NEAR( potential_direct, potential_M.real(), error )
@@ -491,6 +497,7 @@ void testM2LStruct0()
 
         // Perform local to potential conversion to calculate potential at
         // target. Equation 3.59 in Greengard
+
 
         cdouble potential_L1 = 0.0;
         cdouble potential_O1 = 0.0;

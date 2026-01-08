@@ -1326,6 +1326,150 @@ class TreeLayer
         });
     }
 
+    /**
+     * For each cell, iterate over all cells in its interaction list. These are cells that
+     * are at least two cells away from the cell in question and have not been accounted
+     * for in more coarse layers.
+     * Convert the multipole coefficients centered around the other cell to local coefficients
+     * centered around this cell.
+     */
+    void multipole_to_local(std::size_t outer_cell_cutoff)
+    {
+        // This only works for one process right now.
+        if (_comm_size != 1)
+        {
+            throw std::runtime_error("multipole_to_local only works for comm_size 1");
+        }
+
+        auto locals = _locals;
+        auto map = *_map_ptr;
+        auto aosoa = _cells_ptr->aosoa();
+        auto cid2ijk = _cid2ijk;
+        auto ijk2l = _ijk2l;
+
+        auto m_slice = Cabana::slice<0>(aosoa);
+        auto center_slice = Cabana::slice<1>(aosoa);
+
+        int cells_per_dim = _cells_per_dim;
+        int rank = _rank;
+        int layer_number = _layer_number;
+
+        // Per-cell calculation
+        Kokkos::parallel_for("multipole_to_local",
+        Kokkos::RangePolicy<execution_space>(0, cid2ijk.capacity()),
+        KOKKOS_LAMBDA(const int cid2ijk_index)
+        {
+            if (cid2ijk.valid_at(cid2ijk_index))
+            {
+                // Cell ijk
+                auto cell_ijk = cid2ijk.value_at( cid2ijk_index );
+
+                // Cell local index
+                auto ijk2l_index = ijk2l.find(cell_ijk);
+                auto local_index = ijk2l.value_at(ijk2l_index);
+
+                // Set outer bound - where cells have been accounted for in
+                // more coarse layers
+                Kokkos::Array<int, 3> outer_upper_bound;
+                for (int i = 0; i < 3; i++)
+                    outer_upper_bound[i] = cell_ijk[i] + outer_cell_cutoff; // exclusive
+                Kokkos::Array<int, 3> outer_lower_bound;
+                for (int i = 0; i < 3; i++)
+                    outer_lower_bound[i] = cell_ijk[i] - outer_cell_cutoff; // inclusive
+
+                // Set inner bound - where cells are too close for the local
+                // approximation to be accurate. Inclusive on lower end,
+                // exclusive on upper end
+                Kokkos::Array<int, 3> inner_upper_bound;
+                for (int i = 0; i < 3; i++)
+                    inner_upper_bound[i] = cell_ijk[i] + 3; // +3 because inclusive
+                Kokkos::Array<int, 3> inner_lower_bound;
+                for (int i = 0; i < 3; i++)
+                    inner_lower_bound[i] = cell_ijk[i] - 2; // -2 because exclusive
+                
+                if (rank == 0 && layer_number == 1)
+                printf("L%d: R%d: considering cell %d, %d, %d. outer bounds: (%d, %d, %d), (%d, %d, %d)\n",
+                    layer_number, rank,
+                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
+                    outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2]);
+
+
+                // Iterate over all cells whose multipoles we must consider.
+                // XXX - Make this a team policy nested for loop
+                for (int ci = outer_lower_bound[0]; ci < outer_upper_bound[0]; ci++)
+                    for (int cj = outer_lower_bound[1]; cj < outer_upper_bound[1]; cj++)
+                        for (int ck = outer_lower_bound[2]; ck < outer_upper_bound[2]; ck++)
+                        {
+                            // Only consider cells between our outer lower and inner lower
+                            // or inner upper and outer upper bounds. If inside these bounds,
+                            // skip.
+                            if ((ci >= inner_lower_bound[0] && ci < inner_upper_bound[0]) &&
+                            (cj >= inner_lower_bound[1] && cj < inner_upper_bound[1]) &&
+                            (ck >= inner_lower_bound[2] && ck < inner_upper_bound[2]))
+                            {
+                                continue;
+                            }
+
+                            // if (rank == 0 && layer_number == 1)
+                            // printf("L%d: R%d: cell cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
+                            //     cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
+
+                            // Do not consider cells outside of the domain
+                            if ((ci >= cells_per_dim) || (cj >= cells_per_dim) || (ck >= cells_per_dim) ||
+                                (ci < 0) || (cj < 0) || (ck < 0))
+                                continue;
+                            
+                            if (rank == 0 && layer_number == 1)
+                            printf("L%d: R%d: cell cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
+                                cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
+
+                            continue;
+                            // XXX - for now, we assume this cell is haloed if necessary and
+                            // activated in the sparse map.
+                            auto tid = map.queryTile(ci, cj, ck);
+                            auto ctid = map.cell_local_id(ci, cj, ck);
+
+                            // Check if this cell is activated by checking if it's recorded
+                            // in the cell id to ijk map
+                            auto neighbor_cell_id = map.queryCell(ci, cj, ck);
+                            auto neighbor_activated = cid2ijk.exists(neighbor_cell_id);
+                            if (!neighbor_activated)
+                            {
+                                // Cell not activated; do not consider
+                                continue;
+                            }
+
+                            // Otherwise get the data
+                            auto neighbor_index = ( tid << cell_bits_per_tile ) | ( ctid & cell_mask_per_tile );
+                            
+                            // Multipole expansion center (i.e. cell center)
+                            Kokkos::Array<double, 3> cell_center;
+                            for (int i = 0; i < 3; i++)
+                                cell_center[i] = center_slice(neighbor_index, i);
+                            
+                            // Multipole coefficients
+                            constexpr std::size_t num_coefficients = (p+1)*(p+1);
+                            Kokkos::Array<cdouble, num_coefficients> M;
+                            for (std::size_t i = 0; i < num_coefficients; i++)
+                            {
+                                cdouble val;
+                                val.real() = m_slice(neighbor_index, i, 0);
+                                val.imag() = m_slice(neighbor_index, i, 1);
+                            }
+
+                            // Convert to locals
+                            Kokkos::Array<cdouble, num_coefficients> L;
+                            Kernel::Scalar::m2l<p>(M, L, cell_center);
+                            
+                            // Add contribution to locals for this cell
+                            for (std::size_t i = 0; i < num_coefficients; i++)
+                                locals(local_index, i) = L[i];
+                        }
+            }
+        });
+    }
+
     void printOwnedCells()
     {
         // Test to iterate over call data
