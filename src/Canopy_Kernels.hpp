@@ -35,7 +35,6 @@ namespace Kernel
 {
 
 using cdouble = Kokkos::complex<double>;
-using cdouble = Kokkos::complex<double>;
 constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
 // Cartesian to spherical coorindates: (x, y, z) -> (r,theta,phi)
@@ -747,7 +746,6 @@ struct L2L
                     {
                         // Skip regions where Y_nm is invalid.
                         if ( std::abs( m - k ) > ( n - j ) )
-                        if ( std::abs( m - k ) > ( n - j ) )
                             continue;
 
                         // Numerator
@@ -755,38 +753,25 @@ struct L2L
                         cdouble i_unit( 0.0, 1.0 );
                         auto power = Kokkos::abs( m ) - Kokkos::abs( m - k ) -
                                      Kokkos::abs( k );
-                        auto power = Kokkos::abs( m ) - Kokkos::abs( m - k ) -
-                                     Kokkos::abs( k );
                         auto i_term = Kokkos::pow( i_unit, power );
-                        auto A_nj_mk = compute_A( n - j, m - k );
                         auto A_nj_mk = compute_A( n - j, m - k );
                         auto A_jk = compute_A( j, k );
                         auto Y_nj_mk = Ynm( n - j, m - k, alpha, beta );
                         auto rho_nj = Kokkos::pow( rho, n - j );
-                        auto Y_nj_mk = Ynm( n - j, m - k, alpha, beta );
-                        auto rho_nj = Kokkos::pow( rho, n - j );
 
                         // Denominator
-                        auto sign = ( ( n + j ) % 2 == 0 ) ? 1.0 : -1.0;
                         auto sign = ( ( n + j ) % 2 == 0 ) ? 1.0 : -1.0;
                         auto A_nm = compute_A( n, m );
 
                         // Compute L_jk partial term
                         Ljk += ( O_nm * i_term * A_nj_mk * A_jk * Y_nj_mk *
                                  rho_nj ) /
-                        Ljk += ( O_nm * i_term * A_nj_mk * A_jk * Y_nj_mk *
-                                 rho_nj ) /
                                ( sign * A_nm );
-                        // printf("j: %d, k: %d, n: %d, m: %d, Y: (%.3lf,
-                        // %.3lf), O_nm: (%.3lf, %.3lf), Ljk_piece: (%.3lf,
-                        // %.3lf)\n",
                         // printf("j: %d, k: %d, n: %d, m: %d, Y: (%.3lf,
                         // %.3lf), O_nm: (%.3lf, %.3lf), Ljk_piece: (%.3lf,
                         // %.3lf)\n",
                         //     j, k, n, m,
                         //     Y_nj_mk.real(), Y_nj_mk.imag(),
-                        //     O_nm.real(), O_nm.imag(), Ljk.real(),
-                        //     Ljk.imag());
                         //     O_nm.real(), O_nm.imag(), Ljk.real(),
                         //     Ljk.imag());
                     }

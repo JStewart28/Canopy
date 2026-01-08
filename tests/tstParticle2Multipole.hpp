@@ -65,12 +65,9 @@ void testParticle2Multipole(bool balanced)
     
     double bound_val = 3.0;
     Kokkos::Array<double, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
-    double bound_val = 3.0;
-    Kokkos::Array<double, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
     // If not balanced, fill domain unevenly
     if (!balanced)
     {
-        coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
         coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
     }
 
@@ -96,7 +93,6 @@ void testParticle2Multipole(bool balanced)
 
     // Calculate direct potential.
     // Target point far away from domain so multipole approximation holds.
-    double Px = 15.1, Py = -20.3, Pz = 16.2;
     double Px = 15.1, Py = -20.3, Pz = 16.2;
     double r, theta, phi;
     Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
