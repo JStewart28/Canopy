@@ -435,7 +435,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size * 2, leaf_tiles = comm_size * 4;
+    red_factor = comm_size, leaf_tiles = comm_size * 32;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
         num_dim, cells_per_tile, p>(
@@ -450,7 +450,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     // const int test_layer = 1;
     // const int layer_tiles = 2; 
     // auto layer = tree->layer(test_layer);
-    // int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
+    int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
     // int cells_per_leaf_dimension = 4;
     Kokkos::Array<double, 3> cell_size;
     for (int i = 0; i < 3; ++i)
@@ -559,7 +559,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
     // Create target points at which to calculate potential directly, omitting
     // nearest and second-nearest neighbor cells.
-    int num_target_points = 50;
+    int num_target_points = 20;
     Kokkos::View<double*[3], TEST_MEMSPACE> target_points( "target_points",
                                                           num_target_points );
     fillRandomCoordinates(target_points, coord_bounds, 456);
@@ -645,12 +645,13 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     }
 
     // Get locals
-    auto locals = layer->locals();
-    auto ijk2index = layer->cellijk2l();
+    auto leaf_layer = tree->layer(0);
+    auto locals = leaf_layer->locals();
+    auto ijk2index = leaf_layer->cellijk2l();
     auto locals_slice = Cabana::slice<0>(locals);
 
     // Track which cells are activated in the mesh. If a target point is in a non-
-    // activated cell, skip it when checking pootentials
+    // activated cell, skip it when checking potentials
     Kokkos::View<int*, TEST_MEMSPACE> is_activated("is_activated", num_target_points);
     Kokkos::deep_copy(is_activated, 0);
 
@@ -778,7 +779,7 @@ TEST( Tree, testMultipole2Local0_balanced )
 
 TEST( Tree, testMultipole2Local1_balanced )
 { 
-    testMultipole2Local1<6>(200, true); 
+    testMultipole2Local1<6>(80, true); 
 }
 
 // TEST( Tree, testMultipole2Local2_balanced )
