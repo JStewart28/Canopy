@@ -32,7 +32,7 @@ namespace Canopy
 
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
-template <class ExecutionSpace, class MemorySpace, class EntityType,
+template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
 class Tree
 {
@@ -42,13 +42,11 @@ class Tree
     using memory_space = MemorySpace;
 
     //! Self type
-    using tree_type = Tree<ExecutionSpace, MemorySpace, EntityType,
+    using tree_type = Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType,
         NumSpaceDim, CellPerTileDim, ExpansionCutoff>;
 
     //! Memory space size type
     using size_type = typename memory_space::size_type;
-    //! Array entity type (node, cell, face, edge).
-    using entity_type = EntityType;
     //! Dimension number
     static constexpr std::size_t num_space_dim = NumSpaceDim;
     //! Mesh type
@@ -71,6 +69,9 @@ class Tree
     using local_tuple_type = Cabana::Tuple<local_member_types>;
     using multipole_aosoa_type = Cabana::AoSoA<multipole_member_types, memory_space, cell_per_tile_dim>;
     using local_aosoa_type = Cabana::AoSoA<local_member_types, memory_space, cell_per_tile_dim>;
+
+    //! Particle data
+    using particle_aosoa_type = ParticleAoSoAType;
     
     Tree( const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
@@ -89,6 +90,9 @@ class Tree
 
         // Reserve space for 10 layers
         _tree.reserve(10);
+
+        // Initialize leaf particles
+        _leaf_particles = particle_aosoa_type("_leaf_particles", 0);
 
         build();
         
@@ -376,11 +380,15 @@ class Tree
      * 
      * Assumes x/y/z coordinates are the first tuple element in "data"
      */
-    template <class ParticleAoSoA>
-    void create_multipoles(ParticleAoSoA external_data, bool run_load_balance)
+    template <std::size_t position_id>
+    void create_multipoles(particle_aosoa_type external_data, bool run_load_balance)
     {
         // Data comes from externally to populate leaf layer (layer 0)
-        migrateParticleData(external_data, run_load_balance);
+        migrateParticleData<position_id>(external_data, run_load_balance);
+
+        // Save owned particle data
+        _leaf_particles.resize(external_data.size());
+        Cabana::deep_copy(_leaf_particles, external_data);
 
         // if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(external_data, 0, external_data.size());
@@ -395,12 +403,11 @@ class Tree
 
     /**
      * Migrate particle data to the rank that owns them at the leaf layer.
-     * Positions must be the first AoSoA slice.
      */
-    template <class ParticleAoSoA>
-    void migrateParticleData(ParticleAoSoA& external_data, bool run_load_balance)
+    template<std::size_t position_id>
+    void migrateParticleData(particle_aosoa_type& external_data, bool run_load_balance)
     {
-        auto positions = Cabana::slice<0>(external_data);
+        auto positions = Cabana::slice<position_id>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
         mapParticles(positions, layer_owner, external_data.size(), 0, run_load_balance);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
@@ -408,7 +415,7 @@ class Tree
     }
 
     /**
-     * Used to internally migrate and aggregate mutlipoles from one layer to the next.
+     * Used to internally migrate and aggregate multipoles from one layer to the next.
      * Use position_slice_id slice for positions.
      */
     void migrateAndSetLayer(int from_layer, int to_layer, bool run_load_balance)
@@ -501,6 +508,10 @@ class Tree
         }
     }
 
+    void haloParticles()
+    {
+        
+    }
 
 
     /**
@@ -582,6 +593,8 @@ class Tree
     // Root data
     Kokkos::View<cdouble[(p+1)*(p+1)], memory_space> _M_root;
 
+    // Leaf particles
+    particle_aosoa_type _leaf_particles;
 };
 
 template <class ExecutionSpace, class MemorySpace, class EntityType,

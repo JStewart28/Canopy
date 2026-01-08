@@ -48,7 +48,7 @@ void testParticle2Multipole(bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = comm_size * 2, leaf_tiles = comm_size * 4;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, Cabana::Grid::Cell,
+    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
@@ -115,7 +115,7 @@ void testParticle2Multipole(bool balanced)
         
     // Fill the tree
     bool run_load_balance = !balanced;
-    tree->create_multipoles(particle_aosoa, run_load_balance);
+    tree->template create_multipoles<0>(particle_aosoa, run_load_balance);
 
     /***********************************************
      * Check the data from root layer

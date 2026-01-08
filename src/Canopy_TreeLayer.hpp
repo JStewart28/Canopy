@@ -213,8 +213,8 @@ class TreeLayer
     using multipole_aosoa_type = typename TreeType::multipole_aosoa_type;
     using local_aosoa_type = typename TreeType::local_aosoa_type;
 
-
-    using entity_type = typename TreeType::entity_type;
+    //! Particle data
+    using particle_aosoa_type = typename TreeType::particle_aosoa_type;
 
     using mesh_type = typename TreeType::mesh_type;
 
@@ -229,15 +229,9 @@ class TreeLayer
         sparse_map_type::cell_mask_per_tile;
 
    using sparse_layout_type =
-        Cabana::Grid::Experimental::SparseArrayLayout<multipole_member_types, entity_type, mesh_type, sparse_map_type>;
-
-    using sparse_array_type = Cabana::Grid::Experimental::SparseArray<multipole_member_types, memory_space, entity_type,
-                                          mesh_type, sparse_map_type>;
+        Cabana::Grid::Experimental::SparseArrayLayout<multipole_member_types, Cabana::Grid::Node, mesh_type, sparse_map_type>;
     
     using index_map_type = Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space>;
-
-    //! AoSoA type
-    // using aosoa_type = typename sparse_array_type::aosoa_type;
     
     TreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
@@ -357,9 +351,7 @@ class TreeLayer
         
         // initializeRecPartition(sparse_map);
         _layout_ptr =
-            Cabana::Grid::Experimental::createSparseArrayLayout<multipole_member_types>( local_grid, *_map_ptr, entity_type() );
-        _cells_ptr = Cabana::Grid::Experimental::createSparseArray<memory_space>(
-            std::string( "cell_array" ), *_layout_ptr );
+            Cabana::Grid::Experimental::createSparseArrayLayout<multipole_member_types>( local_grid, *_map_ptr, Cabana::Grid::Node() );
         
         // Store cell size
         updateCellSize();
@@ -379,7 +371,7 @@ class TreeLayer
 
     void updateCellSize()
     {
-        auto local_grid = _cells_ptr->layout().localGrid();
+        auto local_grid = _layout_ptr->localGrid();
         auto sparse_mesh = local_grid->globalGrid().globalMesh();
         _cell_size = {sparse_mesh.cellSize( 0 ), sparse_mesh.cellSize( 1 ), sparse_mesh.cellSize( 2 )};
     }
@@ -1326,38 +1318,6 @@ class TreeLayer
         });
     }
 
-    void printOwnedCells()
-    {
-        // Test to iterate over call data
-        int rank = _rank;
-        auto array = *_cells_ptr;
-        auto cell_ids_map = _cid2ijk;
-        // printf("R%d: amp size: %d, capacity: %d\n", rank, cell_ids_map.size(), cell_ids_map.capacity());
-        Kokkos::View<int, memory_space> valid("valid");
-        Kokkos::deep_copy(valid, 0);
-        Kokkos::parallel_for(
-        "iterate cell data",
-        Kokkos::RangePolicy<execution_space>( 0, cell_ids_map.capacity() ),
-        KOKKOS_LAMBDA( const int index ) {
-            if ( cell_ids_map.valid_at( index ) )
-            {
-                auto ids = cell_ids_map.value_at( index ); // pair(tid, cid)
-                auto tkey = cell_ids_map.key_at( index ); // cglid
-                // if (rank == 0) printf("R%d: valid tid, key: %d, %d\n", rank, tid, tkey);
-                
-                double x = array.template get<0>( ids[0], ids[1], 0 );
-                double y = array.template get<0>( ids[0], ids[1],  1 );
-                double z = array.template get<0>( ids[0], ids[1],  2 );
-                int val = array.template get<1>( ids[0], ids[1]);
-                printf("R%d: val: %d, x/y/z: %0.3lf, %0.3lf, %0.3lf\n", rank, val, x, y, z);
-                Kokkos::atomic_fetch_add(&valid(), 1);
-            }
-        } );
-        int v;
-        Kokkos::deep_copy(v, valid);
-        if (v == 0) printf("R%d: No cells to print.\n", rank);
-    }
-
     int rank() const { return _rank; }
     int layerNumber() const { return _layer_number; }
 
@@ -1370,7 +1330,6 @@ class TreeLayer
     auto num_owned_tile() const {return _num_owned_tile_view;}
 
     std::shared_ptr<sparse_layout_type> layout() {return _layout_ptr;}
-    std::shared_ptr<sparse_array_type> array() {return _cells_ptr;}
     std::shared_ptr<sparse_map_type> map() {return _map_ptr;}
     int cellsPerDim() const {return _cells_per_dim;}
     int tilesPerDim() const {return _tiles_per_dim;}
@@ -1428,7 +1387,6 @@ class TreeLayer
     std::shared_ptr<sparse_partitioner_type> _partitioner_ptr;
     std::shared_ptr<sparse_layout_type> _layout_ptr;
     std::shared_ptr<sparse_map_type> _map_ptr;
-    std::shared_ptr<sparse_array_type> _cells_ptr;
 
     // Map of cell id (cid, unique per process) to cell ijk position.
     // Cabana supports ijk -> cid but not the inverse.
