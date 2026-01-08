@@ -446,20 +446,16 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
     // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
 
-    // Check mesh information for layer in question
-    // const int test_layer = 1;
-    // const int layer_tiles = 2; 
-    // auto layer = tree->layer(test_layer);
-    int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
-    // int cells_per_leaf_dimension = 4;
+    // Check mesh information for leaf layer
+    int cells_per_dimension_leaf = cells_per_tile * leaf_tiles;
     Kokkos::Array<double, 3> cell_size;
     for (int i = 0; i < 3; ++i)
     {
-        cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_leaf_dimension;
+        cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_dimension_leaf;
     }
-    // ASSERT_EQ(layer->cellsPerDim(), cells_per_leaf_dimension) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
-    // ASSERT_EQ(layer->tilesPerDim(), layer_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
-    // ASSERT_EQ(layer->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
+    ASSERT_EQ(tree->layer(0)->cellsPerDim(), cells_per_dimension_leaf) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
+    ASSERT_EQ(tree->layer(0)->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
+    ASSERT_EQ(tree->layer(0)->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
 
     // Create the data on rank 0. It will automatically be distributed correctly when
     // filled into the tree. There must be enough particles so that the target point resides
@@ -598,7 +594,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
         Kokkos::Array<int, 3> inner_upper_bound;
         for (int dim = 0; dim < 3; ++dim)
         {
-            inner_upper_bound[dim] = Kokkos::min(static_cast<int>(target_cell_ijk[dim]) + 3, cells_per_leaf_dimension);
+            inner_upper_bound[dim] = Kokkos::min(static_cast<int>(target_cell_ijk[dim]) + 3, cells_per_dimension_leaf);
             inner_lower_bound[dim] = Kokkos::max(static_cast<int>(target_cell_ijk[dim]) - 2, 0);
         }
 

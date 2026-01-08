@@ -372,8 +372,8 @@ class TreeLayer
         _coefficient_view_index = Kokkos::View<std::size_t, memory_space>("_coefficient_view_index");
         Kokkos::deep_copy(_coefficient_view_index, 0);
 
-        printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
-            _cells_per_dim, _cell_size[0]);
+        // printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
+        //     _cells_per_dim, _cell_size[0]);
     
     }
 
@@ -546,8 +546,8 @@ class TreeLayer
     template <class ParticleAoSoA>
     void populateCells(const ParticleAoSoA data_aosoa, const std::size_t start, const std::size_t end)
     {
-        int rank = _rank;
-        int layer_number = _layer_number;
+        // int rank = _rank;
+        // int layer_number = _layer_number;
 
         // printf("L%d: start/end: %d, %d\n", _layer_number, start, end);
 
@@ -849,8 +849,8 @@ class TreeLayer
      */
     void sendCoarseLocals(local_aosoa_type& halo_aosoa, const Kokkos::View<double*[6], memory_space>& child_domain)
     {
-        int rank = _rank;
-        int layer_number = _layer_number;
+        // int rank = _rank;
+        // int layer_number = _layer_number;
 
         // Locals, cell ijk index
         static constexpr std::size_t num_coefficients = (p+1)*(p+1);
@@ -915,10 +915,10 @@ class TreeLayer
                     int dj = (c / factor) % factor;
                     int dk =  c / (factor*factor);
                     
-                    Kokkos::Array<int,3> child_ijk = {
-                        cell_ijk[0] * factor + di,
-                        cell_ijk[1] * factor + dj,
-                        cell_ijk[2] * factor + dk
+                    Kokkos::Array<std::size_t, 3> child_ijk = {
+                        static_cast<std::size_t>(cell_ijk[0] * factor + di),
+                        static_cast<std::size_t>(cell_ijk[1] * factor + dj),
+                        static_cast<std::size_t>(cell_ijk[2] * factor + dk)
                     };
 
                     auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
@@ -991,8 +991,8 @@ class TreeLayer
 
     void addCoarseLocals(local_aosoa_type& parent_locals)
     {
-        int rank = _rank;
-        int layer_number = _layer_number;
+        // int rank = _rank;
+        // int layer_number = _layer_number;
 
         static constexpr std::size_t num_coefficients = ( p + 1 ) * ( p + 1 );
         auto ijk2index = _ijk2index;
@@ -1027,9 +1027,9 @@ class TreeLayer
                 int dk =  c / (factor*factor);
                 
                 Kokkos::Array<std::size_t, 3> cell_ijk = {
-                    parent_ijk_slice(hi, 0) * factor + di,
-                    parent_ijk_slice(hi, 1) * factor + dj,
-                    parent_ijk_slice(hi, 2) * factor + dk
+                    static_cast<std::size_t>(parent_ijk_slice(hi, 0) * factor + di),
+                    static_cast<std::size_t>(parent_ijk_slice(hi, 1) * factor + dj),
+                    static_cast<std::size_t>(parent_ijk_slice(hi, 2) * factor + dk)
                 };
                 // printf("L%d: R%d: checking cell %d, %d, %d\n", _layer_number, _rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
                 // Check if this cell is activated
@@ -1096,8 +1096,8 @@ class TreeLayer
         auto m2l_bounds = _m2l_bounds;
         auto ijk2index = _ijk2index;
 
-        int cells_per_dim = _cells_per_dim;
-        int rank = _rank;
+        // int cells_per_dim = _cells_per_dim;
+        // int rank = _rank;
         int layer_number = _layer_number;
         int cell_incr_factor = _tile_reduction_factor;
 
@@ -1170,8 +1170,8 @@ class TreeLayer
         auto l_cell_ijk_slice = Cabana::slice<1>(_locals);
 
         int cells_per_dim = _cells_per_dim;
-        int rank = _rank;
-        int layer_number = _layer_number;
+        // int rank = _rank;
+        // int layer_number = _layer_number;
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
 

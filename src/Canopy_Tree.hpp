@@ -276,11 +276,11 @@ class Tree
             domain_center[d] = _global_low_corner[d] + 0.5 * (_global_high_corner[d] - _global_low_corner[d]);
 
         // Properties of top layer
-        using top_layer_type = typename decltype(top_layer)::element_type;
-        static constexpr std::size_t cell_bits_per_tile =
-            top_layer_type::cell_bits_per_tile;
-        static constexpr std::size_t cell_mask_per_tile =
-            top_layer_type::cell_mask_per_tile;
+        // using top_layer_type = typename decltype(top_layer)::element_type;
+        // static constexpr std::size_t cell_bits_per_tile =
+        //     top_layer_type::cell_bits_per_tile;
+        // static constexpr std::size_t cell_mask_per_tile =
+        //     top_layer_type::cell_mask_per_tile;
 
         // Iterate over all activated cells
         // int rank = _rank;
@@ -480,7 +480,7 @@ class Tree
             printf("No valid multipole layers (need >= 4 cells per dimension)\n");
             return;
         }
-        printf("First starting layer: %d, starting cpd: %d\n", first_valid_layer, starting_cells_per_dimension);
+        // printf("First starting layer: %d, starting cpd: %d\n", first_valid_layer, starting_cells_per_dimension);
 
         // Data structures for haloing and translating locals vertically
         local_aosoa_type halo_data("halo_data", 0);
