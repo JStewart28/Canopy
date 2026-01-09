@@ -35,8 +35,8 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     int comm_size;
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
-    // Create a tree of depth 3.
-    using particle_tuple_type = Cabana::MemberTypes<double[3], double, double>;
+    // Create a tree of depth 3. pos/charge/potential/global particle id
+    using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
     using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
     std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
     std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
@@ -105,6 +105,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
     auto potential_slice_host = Cabana::slice<2>(particle_aosoa_host);
+    auto id_slice_host = Cabana::slice<3>(particle_aosoa_host);
     Cabana::deep_copy(potential_slice_host, 0.0);
 
     // Fill the particles into the AoSoA
@@ -118,6 +119,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
             pos_slice_host(i, j) = cart_coords_h(i, j);
         }
         scalar_slice_host(i) = q_h(i);
+        id_slice_host(i) = i;
         // printf("R%d: initial particle: p(%0.3lf, %0.3lf, %0.3lf), q(%0.3lf)\n", rank,
         //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
     }
@@ -134,9 +136,16 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 
     // Gather all particles from the tree back to rank 0 for testing
     auto tree_particles = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
-    Kokkos::View<int*, memory_space> send_to("layer_owner", tree->numOwnedParticles());
-    Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
-    Cabana::migrate( distributor, particle_aosoa_host );
+    Kokkos::View<int*, memory_space> send_to("send_to", tree->numOwnedParticles());
+    Kokkos::deep_copy(send_to, 0);
+    Cabana::Distributor<MemorySpace> distributor(_comm, send_to);
+    Cabana::migrate( distributor, tree_particles );
+
+    // Sort the particles by increasing cell_id
+    auto tree_id_slice = Cabana::slice<3>(tree_particles);
+    auto sort_data = Cabana::sortByKey( tree_id_slice );
+    Cabana::permute( sort_data, tree_particles );
+    tree_id_slice = Cabana::slice<3>(tree_particles);
 
     // Iterate over particles and calculate potential
     auto owned_points = particle_aosoa_host.size();
@@ -150,7 +159,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
         for (int dim = 0; dim < 3; ++dim)
         {
             this_cell_ijk[dim] = static_cast<std::size_t>(
-                Kokkos::floor((cart_coords_h(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
+                Kokkos::floor((pos_slice_host(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
         }
         printf("this_pid(%d): (%d, %d, %d)\n", this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2]);
 
@@ -177,7 +186,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
             for (int dim = 0; dim < 3; ++dim)
             {
                 cell_ijk[dim] = static_cast<int>(
-                    Kokkos::floor((cart_coords_h(other_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
+                    Kokkos::floor((pos_slice_host(other_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
             }
 
             // Only consider cells inside the inner local bound
@@ -186,25 +195,23 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
             (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
             {
                 printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
-                double dx = cart_coords_h(other_pid, 0) - cart_coords_h( this_pid, 0 );
-                double dy = cart_coords_h(other_pid, 1) - cart_coords_h( this_pid, 1 );
-                double dz = cart_coords_h(other_pid, 2) - cart_coords_h( this_pid, 2 );
+                double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
+                double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
+                double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
                 double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
                 direct_potentials(this_pid) += q_h( other_pid ) / dist;        
             }            
         }
     }
 
-    // Get potentials from mesh
-    auto mesh_particles = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
-    auto mesh_potentials = Cabana::slice<2>(mesh_particles);
-
     int p_int = static_cast<int>(p_val);
     for (int i = 0; i < num_points; i++)
     {
         auto direct_potential = direct_potentials(i);
-        auto mesh_potential = mesh_potentials(i);
+        auto particle_id = 
+        auto mesh_potential = potential_slice_host(i);
         double allowed_error = Kokkos::pow(10, -p_int);
+        EXPECT_EQ()
         // EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at point " << i;
         printf("i%d: direct: %.6lf, mesh: %.6lf\n", i, direct_potential, mesh_potential);
     }
