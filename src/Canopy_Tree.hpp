@@ -620,11 +620,16 @@ class Tree
         // Save owned and ghost information
         _owned_particles = halo.numLocal();
         _ghost_particles = halo.numGhost();
+        // _owned_particles = _leaf_particles.size();
+        // _ghost_particles = 0;
+        printf("num local: %d, ghost: %d\n", _owned_particles, _ghost_particles);
     }
 
     void computeP2P()
     {
         haloParticles();
+        return;
+        const int rank = _rank;
 
         // XXX How should scalar slice id be set and potential slice
 
@@ -639,6 +644,8 @@ class Tree
 
         auto total_particles = _leaf_particles.size();
         auto owned_particles = _owned_particles;
+
+        printf("R%d: total: %d, owned: %d\n", _rank, total_particles, owned_particles);
 
         // All pairs approach to calculating potential between particles within
         // the inner M2L bounds at the leaf layer. Lower bound is inclusive.
@@ -657,6 +664,7 @@ class Tree
             const double zi = positions(i,2);
 
             auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
+            printf("R%d: this_ijk(%d, %d, %d)\n", rank, ijk_i[0], ijk_i[1], ijk_i[2]);
 
             Kokkos::Array<int,3> lower, upper;
             for (int d = 0; d < 3; ++d) {
@@ -682,7 +690,10 @@ class Tree
                         ijk_j[1] < lower[1] || ijk_j[1] >= upper[1] ||
                         ijk_j[2] < lower[2] || ijk_j[2] >= upper[2])
                         return;
-
+                    
+                    printf("R%d: this_ijk(%d, %d, %d), other_ijk(%d, %d, %d)\n", rank,
+                        ijk_i[0], ijk_i[1], ijk_i[2],
+                        ijk_j[0], ijk_j[1], ijk_j[2]);
                     const double dx = xi - positions(j,0);
                     const double dy = yi - positions(j,1);
                     const double dz = zi - positions(j,2);
@@ -739,6 +750,9 @@ class Tree
     std::size_t numLayers() const { return _tree.size() + 1; }
 
     auto M_root() {return _M_root;}
+    auto particles() {return _leaf_particles;}
+    auto numOwnedParticles() {return _owned_particles;}
+    auto numGhostParticles() {return _ghost_particles;}
     std::array<double, 3> globalLowCorner() const { return _global_low_corner; }
     std::array<double, 3> globalHighCorner() const { return _global_high_corner; }
 
