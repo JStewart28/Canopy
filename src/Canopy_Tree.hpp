@@ -616,12 +616,87 @@ class Tree
         std::size_t num_local = halo.numLocal();
         _leaf_particles.resize(halo.numLocal() + halo.numGhost());
         Cabana::gather(halo, _leaf_particles);
+
+        // Save owned and ghost information
+        _owned_particles = halo.numLocal();
+        _ghost_particles = halo.numGhost();
     }
 
     void computeP2P()
     {
         haloParticles();
 
+        // XXX How should scalar slice id be set and potential slice
+
+        auto positions = Cabana::slice<position_id>(_leaf_particles);
+        auto scalars = Cabana::slice<1>(_leaf_particles);
+        auto potentials = Cabana::slice<2>(_leaf_particles);
+        Cabana::deep_copy(potentials, 0.0);
+
+        auto cell_size = _tree[0]->cellSize();
+        auto cells_per_dim = _tree[0]->cellsPerDim();
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+
+        auto total_particles = _leaf_particles.size();
+        auto owned_particles = _owned_particles;
+
+        // All pairs approach to calculating potential between particles within
+        // the inner M2L bounds at the leaf layer. Lower bound is inclusive.
+        using team_policy = Kokkos::TeamPolicy<execution_space>;
+        using member_type = team_policy::member_type;
+
+        team_policy policy(owned_particles, Kokkos::AUTO);
+
+        Kokkos::parallel_for("Leaf direct potentials (team)", policy,
+            KOKKOS_LAMBDA(const member_type& team)
+        {
+            const int i = team.league_rank();
+
+            const double xi = positions(i,0);
+            const double yi = positions(i,1);
+            const double zi = positions(i,2);
+
+            auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
+
+            Kokkos::Array<int,3> lower, upper;
+            for (int d = 0; d < 3; ++d) {
+                lower[d] = Kokkos::max(int(ijk_i[d]) - 2, 0);
+                upper[d] = Kokkos::min(int(ijk_i[d]) + 3, cells_per_dim);
+            }
+
+            double phi = 0.0;
+
+            Kokkos::parallel_reduce(
+                Kokkos::TeamThreadRange(team, total_particles),
+                [&](const int j, double& lsum)
+                {
+                    if (j == i) return;
+
+                    auto ijk_j = position2ijk(
+                        positions(j,0),
+                        positions(j,1),
+                        positions(j,2),
+                        low_corner, cell_size);
+
+                    if (ijk_j[0] < lower[0] || ijk_j[0] >= upper[0] ||
+                        ijk_j[1] < lower[1] || ijk_j[1] >= upper[1] ||
+                        ijk_j[2] < lower[2] || ijk_j[2] >= upper[2])
+                        return;
+
+                    const double dx = xi - positions(j,0);
+                    const double dy = yi - positions(j,1);
+                    const double dz = zi - positions(j,2);
+                    const double r  = sqrt(dx*dx + dy*dy + dz*dz);
+
+                    lsum += scalars(j) / r;
+                },
+                phi
+            );
+
+            Kokkos::single(Kokkos::PerTeam(team), [&](){
+                potentials(i) += phi;
+            });
+        });
     }
 
 
@@ -706,6 +781,8 @@ class Tree
 
     // Leaf particles
     particle_aosoa_type _leaf_particles;
+    std::size_t _owned_particles = 0;
+    std::size_t _ghost_particles = 0;
 };
 
 template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
