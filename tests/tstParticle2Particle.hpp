@@ -72,7 +72,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     // in a cell that has been activated in the mesh. This won't be a problem in the
     // "real" code because we only evaluate locals where cells are activated.
     int points_per_proc = points_per_proc_in;
-    int num_points = (rank == 0) ? (comm_size * points_per_proc) : 0;
+    int num_points = (rank == 0) ? (points_per_proc) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -135,10 +135,16 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     tree->computeP2P();
 
     // Gather all particles from the tree back to rank 0 for testing
-    auto tree_particles = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
-    Kokkos::View<int*, memory_space> send_to("send_to", tree->numOwnedParticles());
+    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
+    particle_aosoa_type tree_particles("tree_particles", tmp.size());
+    Cabana::deep_copy(tree_particles, tmp);
+
+    // Remove ghost particles
+    tree_particles.resize(tree->numOwnedParticles());
+    
+    Kokkos::View<int*, TEST_MEMSPACE> send_to("send_to", tree->numOwnedParticles());
     Kokkos::deep_copy(send_to, 0);
-    Cabana::Distributor<MemorySpace> distributor(_comm, send_to);
+    Cabana::Distributor<TEST_MEMSPACE> distributor(MPI_COMM_WORLD, send_to);
     Cabana::migrate( distributor, tree_particles );
 
     // Sort the particles by increasing cell_id
@@ -146,6 +152,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     auto sort_data = Cabana::sortByKey( tree_id_slice );
     Cabana::permute( sort_data, tree_particles );
     tree_id_slice = Cabana::slice<3>(tree_particles);
+    auto tree_potentials = Cabana::slice<2>(tree_particles);
 
     // Iterate over particles and calculate potential
     auto owned_points = particle_aosoa_host.size();
@@ -161,7 +168,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
             this_cell_ijk[dim] = static_cast<std::size_t>(
                 Kokkos::floor((pos_slice_host(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
         }
-        printf("this_pid(%d): (%d, %d, %d)\n", this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2]);
+        // printf("this_pid(%d): (%d, %d, %d)\n", this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2]);
 
         // Set inner bound - where cells are too close for the local
         // approximation to be accurate. Inclusive on lower end,
@@ -194,7 +201,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
             (cell_ijk[1] >= inner_lower_bound[1] && cell_ijk[1] < inner_upper_bound[1]) &&
             (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
             {
-                printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
                 double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
                 double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
                 double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
@@ -208,10 +215,9 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     for (int i = 0; i < num_points; i++)
     {
         auto direct_potential = direct_potentials(i);
-        auto particle_id = 
-        auto mesh_potential = potential_slice_host(i);
+        auto mesh_potential = tree_potentials(i);
         double allowed_error = Kokkos::pow(10, -p_int);
-        EXPECT_EQ()
+        // EXPECT_EQ()
         // EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at point " << i;
         printf("i%d: direct: %.6lf, mesh: %.6lf\n", i, direct_potential, mesh_potential);
     }
@@ -223,7 +229,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testParticle2Particle0_balanced )
 { 
-    testParticle2Particle0<3>(2, true);     
+    testParticle2Particle0<3>(200, true);     
 }
 
 //---------------------------------------------------------------------------//

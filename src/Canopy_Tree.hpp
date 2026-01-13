@@ -606,12 +606,13 @@ class Tree
                         auto index = Kokkos::atomic_fetch_add(&num_halos(), 1);
                         id_slice(index) = pid;
                         rank_slice(index) = r;
+                        printf("R%d: sending pid %d to R%d\n", rank, pid, r);
                     }
                 }
             });
         
         // Now halo the particles
-        Cabana::Halo<memory_space> halo( _comm, num_halos_h, id_slice,
+        Cabana::Halo<memory_space> halo( _comm, _leaf_particles.size(), id_slice,
                                     rank_slice );
         std::size_t num_local = halo.numLocal();
         _leaf_particles.resize(halo.numLocal() + halo.numGhost());
@@ -622,13 +623,13 @@ class Tree
         _ghost_particles = halo.numGhost();
         // _owned_particles = _leaf_particles.size();
         // _ghost_particles = 0;
-        printf("num local: %d, ghost: %d\n", _owned_particles, _ghost_particles);
+        printf("R%d: num local: %d, ghost: %d, lp size: %d\n", _rank, _owned_particles, _ghost_particles, _leaf_particles.size());
     }
 
     void computeP2P()
     {
         haloParticles();
-        return;
+
         const int rank = _rank;
 
         // XXX How should scalar slice id be set and potential slice
@@ -664,7 +665,7 @@ class Tree
             const double zi = positions(i,2);
 
             auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
-            printf("R%d: this_ijk(%d, %d, %d)\n", rank, ijk_i[0], ijk_i[1], ijk_i[2]);
+            // printf("R%d: this_ijk(%d, %d, %d)\n", rank, ijk_i[0], ijk_i[1], ijk_i[2]);
 
             Kokkos::Array<int,3> lower, upper;
             for (int d = 0; d < 3; ++d) {
@@ -706,6 +707,8 @@ class Tree
 
             Kokkos::single(Kokkos::PerTeam(team), [&](){
                 potentials(i) += phi;
+                printf("R%d: this_ijk(%d, %d, %d): potentials(%d) += %.2lf\n", rank,
+                    ijk_i[0], ijk_i[1], ijk_i[2], i, phi);
             });
         });
     }
