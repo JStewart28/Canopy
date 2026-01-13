@@ -190,12 +190,6 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
-    // Activate cell with the target point
-    // cart_coords(0, 0) = -2.9;
-    // cart_coords(0, 1) = -2.8;
-    // cart_coords(0, 2) = -2.85;
-    // q(0) = 0.0;
-
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
@@ -215,8 +209,6 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
         }
         scalar_slice_host(i) = q_h(i);
         id_slice_host(i) = i;
-        // printf("R%d: initial particle: p(%0.3lf, %0.3lf, %0.3lf), q(%0.3lf)\n", rank,
-        //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
     }
 
     // Calculate potentials directly, considering all particles in cells more than 2 cells away
@@ -235,7 +227,6 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             this_cell_ijk[dim] = static_cast<std::size_t>(
                 Kokkos::floor((pos_slice_host(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
         }
-        // printf("this_pid(%d): (%d, %d, %d)\n", this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2]);
 
         // Set inner bound - where cells are too close for the local
         // approximation to be accurate. Inclusive on lower end,
@@ -270,12 +261,10 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             {
                 continue;
             }
-            // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
             double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
             double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
             double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
             double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
-            // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
             direct_potentials(this_pid) += q_h( other_pid ) / dist;        
         }
     }
@@ -343,11 +332,6 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             for (int i = 0; i < 3; i++)
                 l_center[i] = global_low_corner_k[i] + (static_cast<double>(target_cell_ijk[i]) + 0.5) * cell_size[i];
 
-            // printf("t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf)\n", tpi,
-            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            //     l_center[0], l_center[1], l_center[2]);
-
-
             // Convert target point to spherical coordinates relative to local center
             double r, theta, phi;
             Canopy::Kernel::cart2sph( tree_particle_positions(tpi, 0) - l_center[0],
@@ -356,14 +340,8 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
                                       r, theta, phi );
 
             auto ijk2l_index = ijk2index.find(target_cell_ijk);
-            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2index index: %u\n", tpi,
-            //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], ijk2l_index);
             auto local_index = ijk2index.value_at(ijk2l_index);
-            // printf("tpi: %d, local index: %lu\n", tpi, local_index);
-            // printf("tcell(%d, %d, %d): l(%d): (%.2lf, %.2lf, %.2lf, %.2lf)\n",
-            //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            //         local_index, locals(local_index, 0).real(), locals(local_index, 1).real(),
-            //         locals(local_index, 2).real(), locals(local_index, 3).real());
+
             // Calculate potential using locals
             cdouble accumulator(0.0, 0.0);
             for ( int j = 0; j <= p_val; ++j )
@@ -462,12 +440,6 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
-    // Activate cell with the target point
-    // cart_coords(0, 0) = -2.9;
-    // cart_coords(0, 1) = -2.8;
-    // cart_coords(0, 2) = -2.85;
-    // q(0) = 0.0;
-
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
@@ -487,8 +459,6 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
         }
         scalar_slice_host(i) = q_h(i);
         id_slice_host(i) = i;
-        // printf("R%d: initial particle: p(%0.3lf, %0.3lf, %0.3lf), q(%0.3lf)\n", rank,
-        //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
     }
 
     // Calculate potentials directly, considering all particles in cells more than 2 cells away
@@ -615,11 +585,6 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
             for (int i = 0; i < 3; i++)
                 l_center[i] = global_low_corner_k[i] + (static_cast<double>(target_cell_ijk[i]) + 0.5) * cell_size[i];
 
-            // printf("t%d, ijk(%d, %d, %d), c(%.2lf, %.2lf, %.2lf)\n", tpi,
-            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            //     l_center[0], l_center[1], l_center[2]);
-
-
             // Convert target point to spherical coordinates relative to local center
             double r, theta, phi;
             Canopy::Kernel::cart2sph( tree_particle_positions(tpi, 0) - l_center[0],
@@ -628,14 +593,8 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
                                       r, theta, phi );
 
             auto ijk2l_index = ijk2index.find(target_cell_ijk);
-            // printf("tpi: %d, target_cell_ijk: (%lu, %lu, %lu) ijk2index index: %u\n", tpi,
-            //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2], ijk2l_index);
             auto local_index = ijk2index.value_at(ijk2l_index);
-            // printf("tpi: %d, local index: %lu\n", tpi, local_index);
-            // printf("tcell(%d, %d, %d): l(%d): (%.2lf, %.2lf, %.2lf, %.2lf)\n",
-            //         target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            //         local_index, locals(local_index, 0).real(), locals(local_index, 1).real(),
-            //         locals(local_index, 2).real(), locals(local_index, 3).real());
+
             // Calculate potential using locals
             cdouble accumulator(0.0, 0.0);
             for ( int j = 0; j <= p_val; ++j )
