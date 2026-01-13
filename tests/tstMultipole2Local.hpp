@@ -145,7 +145,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = comm_size * 8, leaf_tiles = comm_size * 8;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0,
+    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
@@ -437,7 +437,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = comm_size, leaf_tiles = comm_size * 32;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type,
+    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     

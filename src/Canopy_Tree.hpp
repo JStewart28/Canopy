@@ -33,6 +33,7 @@ namespace Canopy
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
 template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
+            std::size_t InDataId, std::size_t OutDataId,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
 class Tree
 {
@@ -42,7 +43,7 @@ class Tree
     using memory_space = MemorySpace;
 
     //! Self type
-    using tree_type = Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId,
+    using tree_type = Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
         NumSpaceDim, CellPerTileDim, ExpansionCutoff>;
 
     //! Memory space size type
@@ -72,6 +73,12 @@ class Tree
 
     //! Tuple position in ParticleAoSoAType that holds particle x/y/z position.
     static constexpr std::size_t position_id = PositionId;
+
+    //! Tuple position in ParticleAoSoAType that holds input data
+    static constexpr std::size_t in_data_id = InDataId;
+
+    //! Tuple position in ParticleAoSoAType that holds output data
+    static constexpr std::size_t out_data_id = OutDataId;
 
     //! Particle data
     using particle_aosoa_type = ParticleAoSoAType;
@@ -600,7 +607,7 @@ class Tree
                         auto index = Kokkos::atomic_fetch_add(&num_halos(), 1);
                         id_slice(index) = pid;
                         rank_slice(index) = r;
-                        printf("R%d: sending pid %d to R%d\n", rank, pid, r);
+                        // printf("R%d: sending pid %d to R%d\n", rank, pid, r);
                     }
                 }
             });
@@ -629,8 +636,8 @@ class Tree
         // XXX How should scalar slice id be set and potential slice
 
         auto positions = Cabana::slice<position_id>(_leaf_particles);
-        auto scalars = Cabana::slice<1>(_leaf_particles);
-        auto potentials = Cabana::slice<2>(_leaf_particles);
+        auto scalars = Cabana::slice<in_data_id>(_leaf_particles);
+        auto potentials = Cabana::slice<out_data_id>(_leaf_particles);
         Cabana::deep_copy(potentials, 0.0);
 
         auto cell_size = _tree[0]->cellSize();
@@ -795,8 +802,9 @@ class Tree
 };
 
 template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
+          std::size_t InDataId, std::size_t OutDataId,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-std::shared_ptr<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId,
+std::shared_ptr<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
     NumSpaceDim, CellPerTileDim, ExpansionCutoff>>
         createTree( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
@@ -804,7 +812,7 @@ std::shared_ptr<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId,
                     const std::size_t tile_reduction_factor,
                     MPI_Comm comm)
 {
-    return std::make_shared<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId,
+    return std::make_shared<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
         NumSpaceDim, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor,
             comm);
