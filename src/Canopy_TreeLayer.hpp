@@ -25,6 +25,7 @@
 #include <mpi.h>
 
 #include <limits>
+#include <climits>
 
 namespace Canopy
 {
@@ -182,6 +183,28 @@ cell2Bound(Kokkos::Array<int, 3> cell_ijk,
     return Kokkos::pair{include, exclude};
 }
 
+// Reduction struct used to create multipole halo outer bounds 
+struct MinMax6
+{
+  int v[6];
+
+  KOKKOS_INLINE_FUNCTION
+  void init()
+  {
+    v[0] = v[1] = v[2] = INT_MAX;
+    v[3] = v[4] = v[5] = INT_MIN;
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  void join( const MinMax6& rhs )
+  {
+    for ( int d = 0; d < 3; ++d )
+      v[d] = v[d] < rhs.v[d] ? v[d] : rhs.v[d];
+
+    for ( int d = 3; d < 6; ++d )
+      v[d] = v[d] > rhs.v[d] ? v[d] : rhs.v[d];
+  }
+};
 
 
 template <class TreeType, std::size_t CellPerTileDim>
@@ -1078,15 +1101,18 @@ class TreeLayer
      */
     void computeInteractionBounds(int starting_cells_per_dimension, int start_layer)
     {
-        // Iterate over cells
-        // This only works for one process right now.
-        if (_comm_size != 1)
-        {
-            throw std::runtime_error("multipole_to_local only works for comm_size 1");
-        }
-        // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
+        // Initialize _mhalo_outer_bound
+        _mhalo_outer_bound = Kokkos::View<int[6], memory_space>("_mhalo_outer_bound");
+        
         auto m2l_bounds = _m2l_bounds;
         auto ijk2index = _ijk2index;
+        auto mhalo_outer_bound = _mhalo_outer_bound;
+
+        // Set outermost bounds to a high value
+        auto min_subview = Kokkos::subview( mhalo_outer_bound, Kokkos::make_pair( 0, 3 ) );
+        auto max_subview = Kokkos::subview( mhalo_outer_bound, Kokkos::make_pair( 3, 6 ) );
+        Kokkos::deep_copy(min_subview, INT_MAX);
+        Kokkos::deep_copy(max_subview, INT_MIN);
 
         // int cells_per_dim = _cells_per_dim;
         // int rank = _rank;
@@ -1123,13 +1149,43 @@ class TreeLayer
                 for (int i = 0; i < 6; i++)
                     m2l_bounds(index, i) = bounds.first[i];
 
-                // printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
-                //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     bounds.first[0], bounds.first[1], bounds.first[2],
-                //     bounds.first[3], bounds.first[4], bounds.first[5]);
+                printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
+                    layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    bounds.first[0], bounds.first[1], bounds.first[2],
+                    bounds.first[3], bounds.first[4], bounds.first[5]);
                 
             }
         });
+      
+        MinMax6 result;
+        Kokkos::parallel_reduce(
+        "ComputeHaloBounds",
+        Kokkos::RangePolicy<execution_space>(0, m2l_bounds.extent(0)),
+            KOKKOS_LAMBDA ( const int i, MinMax6& local )
+            {
+                for ( int d = 0; d < 3; ++d )
+                local.v[d] = local.v[d] < m2l_bounds(i,d)
+                            ? local.v[d]
+                            : m2l_bounds(i,d);
+
+                for ( int d = 3; d < 6; ++d )
+                local.v[d] = local.v[d] > m2l_bounds(i,d)
+                            ? local.v[d]
+                            : m2l_bounds(i,d);
+            },
+            result
+            );
+        Kokkos::fence();
+
+        auto host_bounds = Kokkos::create_mirror_view(mhalo_outer_bound);
+
+        for ( int d = 0; d < 6; ++d )
+            host_bounds(d) = result.v[d];
+
+        Kokkos::deep_copy(mhalo_outer_bound, host_bounds);
+        printf("L%d: R%d: mhalo bounds: (%d, %d, %d), (%d, %d, %d)\n", _layer_number, _rank,
+            host_bounds(0), host_bounds(1), host_bounds(2), 
+            host_bounds(3), host_bounds(4), host_bounds(5));
     }
 
     /**
@@ -1142,12 +1198,12 @@ class TreeLayer
     void multipole_to_local(int starting_cells_per_dimension, int start_layer)
     {
         // This only works for one process right now.
+        computeInteractionBounds(starting_cells_per_dimension, start_layer);
+      
         if (_comm_size != 1)
         {
             throw std::runtime_error("multipole_to_local only works for comm_size 1");
         }
-
-        computeInteractionBounds(starting_cells_per_dimension, start_layer);
 
         // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
@@ -1410,6 +1466,10 @@ class TreeLayer
     // Indices 0, 1, 2 = lower bound, inclusive
     // Indices 3, 4, 5 = upper bound, exclusive
     Kokkos::View<int*[6], memory_space> _m2l_bounds;
+
+    // The outer bound for haloing multipoles within the same layer.
+    // This is the outermost of the outer bounds in _m2l_bounds.
+    Kokkos::View<int[6], memory_space> _mhalo_outer_bound;
 };
 
 template <class TreeType, std::size_t CellPerTileDim>
