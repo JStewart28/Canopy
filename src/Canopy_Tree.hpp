@@ -77,10 +77,10 @@ class Tree
     using particle_aosoa_type = ParticleAoSoAType;
     
     Tree( const std::array<double, 3>& global_low_corner,
-            const std::array<double, 3>& global_high_corner,
-            const std::size_t leaf_tiles_per_dim,
-            const std::size_t tile_reduction_factor,
-            MPI_Comm comm )
+          const std::array<double, 3>& global_high_corner,
+          const std::size_t leaf_tiles_per_dim,
+          const std::size_t tile_reduction_factor,
+          MPI_Comm comm )
         : _global_low_corner( global_low_corner )
         , _global_high_corner( global_high_corner )
         , _leaf_tiles_per_dim( leaf_tiles_per_dim )
@@ -93,9 +93,6 @@ class Tree
 
         // Reserve space for 10 layers
         _tree.reserve(10);
-
-        // Initialize leaf particles
-        _leaf_particles = particle_aosoa_type("_leaf_particles", 0);
 
         build();
         
@@ -383,17 +380,14 @@ class Tree
      * 
      * Assumes x/y/z coordinates are the first tuple element in "data"
      */
-    void create_multipoles(particle_aosoa_type external_data, bool run_load_balance)
+    void create_multipoles(particle_aosoa_type& external_data, bool run_load_balance)
     {
         // Data comes from externally to populate leaf layer (layer 0)
-        migrateParticleData(external_data, run_load_balance);
-
-        // Save owned particle data
-        _leaf_particles.resize(external_data.size());
-        Cabana::deep_copy(_leaf_particles, external_data);
+        _leaf_particles = external_data;
+        migrateParticleData(_leaf_particles, run_load_balance);
 
         // if (_rank == 0) printf("Starting layer 0...\n");
-        _tree[0]->populateCells(external_data, 0, external_data.size());
+        _tree[0]->populateCells(_leaf_particles, 0, _leaf_particles.size());
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
             // if (_rank == 0) printf("Starting layer %d...\n", i);
@@ -575,7 +569,7 @@ class Tree
         std::size_t num_halos_h;
         Kokkos::deep_copy(num_halos_h, num_halos);
 
-        printf("R%d: num haloes: %d\n", _rank, num_halos_h);
+        // printf("R%d: num haloes: %d\n", _rank, num_halos_h);
 
         // Now save which particles go to which ranks
         // XXX - optimize this to reduce atomics
@@ -623,14 +617,14 @@ class Tree
         _ghost_particles = halo.numGhost();
         // _owned_particles = _leaf_particles.size();
         // _ghost_particles = 0;
-        printf("R%d: num local: %d, ghost: %d, lp size: %d\n", _rank, _owned_particles, _ghost_particles, _leaf_particles.size());
+        // printf("R%d: num local: %d, ghost: %d, lp size: %d\n", _rank, _owned_particles, _ghost_particles, _leaf_particles.size());
     }
 
     void computeP2P()
     {
         haloParticles();
 
-        const int rank = _rank;
+        // const int rank = _rank;
 
         // XXX How should scalar slice id be set and potential slice
 
@@ -646,7 +640,7 @@ class Tree
         auto total_particles = _leaf_particles.size();
         auto owned_particles = _owned_particles;
 
-        printf("R%d: total: %d, owned: %d\n", _rank, total_particles, owned_particles);
+        // printf("R%d: total: %d, owned: %d\n", _rank, total_particles, owned_particles);
 
         // All pairs approach to calculating potential between particles within
         // the inner M2L bounds at the leaf layer. Lower bound is inclusive.
@@ -692,9 +686,9 @@ class Tree
                         ijk_j[2] < lower[2] || ijk_j[2] >= upper[2])
                         return;
                     
-                    printf("R%d: this_ijk(%d, %d, %d), other_ijk(%d, %d, %d)\n", rank,
-                        ijk_i[0], ijk_i[1], ijk_i[2],
-                        ijk_j[0], ijk_j[1], ijk_j[2]);
+                    // printf("R%d: this_ijk(%d, %d, %d), other_ijk(%d, %d, %d)\n", rank,
+                    //     ijk_i[0], ijk_i[1], ijk_i[2],
+                    //     ijk_j[0], ijk_j[1], ijk_j[2]);
                     const double dx = xi - positions(j,0);
                     const double dy = yi - positions(j,1);
                     const double dz = zi - positions(j,2);
@@ -707,8 +701,6 @@ class Tree
 
             Kokkos::single(Kokkos::PerTeam(team), [&](){
                 potentials(i) += phi;
-                printf("R%d: this_ijk(%d, %d, %d): potentials(%d) += %.2lf\n", rank,
-                    ijk_i[0], ijk_i[1], ijk_i[2], i, phi);
             });
         });
     }

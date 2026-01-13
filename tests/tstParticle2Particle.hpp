@@ -26,7 +26,6 @@ using cdouble = Kokkos::complex<double>;
 /**
  * Tests that particle-to-particle potentials are calculated correctly at the leaf layer.
  */
-template <std::size_t p_val>
 void testParticle2Particle0(int points_per_proc_in, bool balanced)
 {
     int rank;
@@ -43,7 +42,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
-    static constexpr std::size_t p = p_val;
+    static constexpr std::size_t p = 2;
     std::size_t leaf_tiles, red_factor;
     red_factor = comm_size, leaf_tiles = comm_size * 4;
     if (red_factor < 2) red_factor = 2;
@@ -124,38 +123,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
         //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
     }
 
-    // // Copy to device
-    auto particle_aosoa =
-        Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
-        
-    // Fill the tree
-    bool run_load_balance = !balanced;
-    tree->create_multipoles(particle_aosoa, run_load_balance);
-
-    tree->computeP2P();
-
-    // Gather all particles from the tree back to rank 0 for testing
-    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
-    particle_aosoa_type tree_particles("tree_particles", tmp.size());
-    Cabana::deep_copy(tree_particles, tmp);
-
-    // Remove ghost particles
-    tree_particles.resize(tree->numOwnedParticles());
-    
-    Kokkos::View<int*, TEST_MEMSPACE> send_to("send_to", tree->numOwnedParticles());
-    Kokkos::deep_copy(send_to, 0);
-    Cabana::Distributor<TEST_MEMSPACE> distributor(MPI_COMM_WORLD, send_to);
-    Cabana::migrate( distributor, tree_particles );
-
-    // Sort the particles by increasing cell_id
-    auto tree_id_slice = Cabana::slice<3>(tree_particles);
-    auto sort_data = Cabana::sortByKey( tree_id_slice );
-    Cabana::permute( sort_data, tree_particles );
-    tree_id_slice = Cabana::slice<3>(tree_particles);
-    auto tree_potentials = Cabana::slice<2>(tree_particles);
-
     // Iterate over particles and calculate potential
-    auto owned_points = particle_aosoa_host.size();
     Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
                                                           num_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
@@ -206,20 +174,51 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
                 double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
                 double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
                 double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
+                // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
                 direct_potentials(this_pid) += q_h( other_pid ) / dist;        
             }            
         }
     }
 
-    int p_int = static_cast<int>(p_val);
+    // Copy to device
+    auto particle_aosoa =
+        Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
+        
+    // Fill the tree. This migrates particles to their correct rank.
+    bool run_load_balance = !balanced;
+    tree->create_multipoles(particle_aosoa, run_load_balance);
+
+    tree->computeP2P();
+
+    // Gather all particles from the tree back to rank 0 for testing
+    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
+    particle_aosoa_type tree_particles("tree_particles", tmp.size());
+    Cabana::deep_copy(tree_particles, tmp);
+
+    // Remove ghost particles
+    tree_particles.resize(tree->numOwnedParticles());
+    
+    // Send particles back to rank 0 for testing
+    Kokkos::View<int*, TEST_MEMSPACE> send_to("send_to", tree->numOwnedParticles());
+    Kokkos::deep_copy(send_to, 0);
+    Cabana::Distributor<TEST_MEMSPACE> distributor(MPI_COMM_WORLD, send_to);
+    Cabana::migrate( distributor, tree_particles );
+
+    // Sort the particles by increasing cell_id
+    auto tree_id_slice = Cabana::slice<3>(tree_particles);
+    auto sort_data = Cabana::sortByKey( tree_id_slice );
+    Cabana::permute( sort_data, tree_particles );
+    tree_id_slice = Cabana::slice<3>(tree_particles);
+    auto tree_potentials = Cabana::slice<2>(tree_particles);
+
     for (int i = 0; i < num_points; i++)
     {
         auto direct_potential = direct_potentials(i);
+        // auto particle_id = tree_id_slice(i);
         auto mesh_potential = tree_potentials(i);
-        double allowed_error = Kokkos::pow(10, -p_int);
-        // EXPECT_EQ()
-        // EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at point " << i;
-        printf("i%d: direct: %.6lf, mesh: %.6lf\n", i, direct_potential, mesh_potential);
+        double allowed_error = Kokkos::pow(10, -9);
+        EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << i;
+        // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }
 }
 
@@ -229,7 +228,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testParticle2Particle0_balanced )
 { 
-    testParticle2Particle0<3>(200, true);     
+    testParticle2Particle0(500, true);     
 }
 
 //---------------------------------------------------------------------------//
