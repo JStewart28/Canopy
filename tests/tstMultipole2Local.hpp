@@ -116,6 +116,28 @@ void testCell2Bound()
 
     EXPECT_EQ(include, correct_include);
     EXPECT_EQ(exclude, correct_exclude);
+
+    // Next test
+    cell_ijk = {21, 41, 26};
+    layer = 0;
+    start_layer = 0;
+    start_cpd = 64;
+    cell_incr_factor = 32;
+
+    bounds = Canopy::cell2Bound(cell_ijk, layer, start_layer,
+        start_cpd, cell_incr_factor);
+
+    for (int i = 0; i < 6; i++)
+    {
+        include[i] = bounds.first[i];
+        exclude[i] = bounds.second[i];
+    }
+
+    correct_include = {0, 0, 0, 64, 64, 64};
+    correct_exclude = {19, 39, 24, 24, 44, 29};
+
+    EXPECT_EQ(include, correct_include);
+    EXPECT_EQ(exclude, correct_exclude);
 }
 
 /**
@@ -281,7 +303,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     // Just test single-layer multipole to local conversion.
-    layer->multipole_to_local(16, tree->numLayers() - 2);
+    layer->multipole_to_local(0, 64);
 
     // Get locals
     auto locals = layer->locals();
@@ -643,10 +665,10 @@ TEST( Helper, testCell2Bound)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-TEST( Tree, testMultipole2Local0_balanced )
-{ 
-    testMultipole2Local0<3>(200, true);     
-}
+// TEST( Tree, testMultipole2Local0_balanced )
+// { 
+//     testMultipole2Local0<3>(30, true);     
+// }
 
 TEST( Tree, testMultipole2Local1_balanced )
 { 

@@ -494,7 +494,10 @@ class Tree
         // Data structures for haloing and translating locals vertically
         local_aosoa_type halo_data("halo_data", 0);
 
+        printf("R%d: first valid layer: %d, starting cpd: %d\n", _rank, first_valid_layer, starting_cells_per_dimension);
+
         // Compute locals at first valid layer
+        _tree[first_valid_layer]->haloMultipoles();
         _tree[first_valid_layer]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
 
         for (int L = first_valid_layer - 1; L >= 0; --L)
@@ -506,6 +509,7 @@ class Tree
             _tree[L]->addCoarseLocals(halo_data);
 
             // Compute locals at layer L
+            _tree[L]->haloMultipoles();
             _tree[L]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
         }
     }

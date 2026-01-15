@@ -410,7 +410,7 @@ class TreeLayer
     }
 
      /*!
-      \brief Populate _domains, _num_owned_tile_view, and _tile_offsets_view using the current
+      \brief Populate _domains, _num_owned_cell_view, and _cell_offsets_view using the current
       partition.
     */
     void computeCellInfo()
@@ -420,8 +420,8 @@ class TreeLayer
         auto current_partition = _partitioner_ptr->getCurrentPartition();
 
         // Allocate vectors
-        std::vector<Kokkos::Array<int, 3>> tile_offsets_vec(_comm_size);
-        std::vector<Kokkos::Array<int, 3>> num_owned_tile_vec(_comm_size);
+        std::vector<Kokkos::Array<int, 3>> cell_offsets_vec(_comm_size);
+        std::vector<Kokkos::Array<int, 3>> num_owned_cell_vec(_comm_size);
         std::vector<Kokkos::Array<double, 6>> domains_vec(_comm_size);
 
         for (int rank = 0; rank < _comm_size; ++rank)
@@ -430,8 +430,8 @@ class TreeLayer
             MPI_Cart_coords(_cart_comm, rank, 3, coords);
 
             Kokkos::Array<double, 6> domain;
-            Kokkos::Array<int, 3> tile_offsets;
-            Kokkos::Array<int, 3> tiles_owned;
+            Kokkos::Array<int, 3> cell_offsets;
+            Kokkos::Array<int, 3> cells_owned;
             for (int d = 0; d < 3; ++d)
             {
                 int tile_start = current_partition[d][coords[d]];
@@ -446,21 +446,21 @@ class TreeLayer
                 domain[d + 3] = global_min + tile_end   * tile_width;
 
                 // Set cells owned: (cells per tile) * (tiles owned) 
-                tiles_owned[d] = (tile_end - tile_start);
+                cells_owned[d] = (tile_end - tile_start) * cell_per_tile_dim;
                 // Set cell offset: (tile_start) * (cells per tile)
                 // No owned cells in this dimension = offset is invalid, set to -1
-                if (tiles_owned[d] == 0)
+                if (cells_owned[d] == 0)
                 {
                     // Set all offsets to -1 and cells owned to 0
                     for (int j = 0; j < 3; ++j)
                     {
-                        tile_offsets[j] = -1;
-                        tiles_owned[j] = 0;
+                        cell_offsets[j] = -1;
+                        cells_owned[j] = 0;
                     }
                     break;
                 }
                 else
-                    tile_offsets[d] = tile_start;
+                    cell_offsets[d] = tile_start * cell_per_tile_dim;
 
             }
             // if (_rank == 0) printf("L%d: R%d: i(%d, %d), j(%d, %d), k(%d, %d)\n", _layer_number, rank, 
@@ -469,16 +469,16 @@ class TreeLayer
             //     current_partition[2][coords[2]], current_partition[2][coords[2] + 1]);
 
             domains_vec[rank] = domain;
-            num_owned_tile_vec[rank] = tiles_owned;
-            tile_offsets_vec[rank] = tile_offsets;
+            num_owned_cell_vec[rank] = cells_owned;
+            cell_offsets_vec[rank] = cell_offsets;
             // if (_rank == 0) printf("L%d: R%d: tiles owned: (%d, %d, %d), offset: (%d, %d, %d)\n",
             //     _layer_number, rank, tiles_owned[0], tiles_owned[1], tiles_owned[2],
             //     tile_offsets[0], tile_offsets[1], tile_offsets[2]); 
         }
 
         // Convert vectors to views and save
-        _tile_offsets_view = vec2view<memory_space>(tile_offsets_vec, "_tile_offsets_view");
-        _num_owned_tile_view = vec2view<memory_space>(num_owned_tile_vec, "_num_owned_tile_view");
+        _cell_offsets_view = vec2view<memory_space>(cell_offsets_vec, "_cell_offsets_view");
+        _num_owned_cell_view = vec2view<memory_space>(num_owned_cell_vec, "_num_owned_cell_view");
         _domains = vec2view<memory_space>(domains_vec, "_domains");
 
         // for (std::size_t i = 0; i < _domains.size(); ++i)
@@ -571,8 +571,16 @@ class TreeLayer
         std::size_t num_particles = end - start;
 
         // Size _ijk2index to hold the number of incoming particles. This is an overestimate.
+        // Assuming the particles are evenly distributed, size _ijk2index to hold the number of
+        // incoming particles * the communicator size on layers > 0. This is the number of activated
+        // cells for layers > 0. At layer 0, assume the number of incoming particles >> the number of
+        // incoming particles, and size to the number of incoming particles. We need this overestimate
+        // to hold ijk2index maps of ghosted cells.
         _ijk2index.clear();
-        _ijk2index.rehash(num_particles);
+        if (_layer_number == 0)
+            _ijk2index.rehash(num_particles);
+        else
+            _ijk2index.rehash(num_particles * _comm_size);
         auto ijk2index = _ijk2index;
 
         // If ParticleAoSoA type is data_aosoa_type, then the positions are the second tuple element.
@@ -887,7 +895,8 @@ class TreeLayer
             parent_size[i] = cell_size[i] * factor;
         }
             
-
+        // Should be comm_size
+        const int child_domain_extent = child_domain.extent(0);
         const int children_per_cell = factor * factor * factor;
 
         std::size_t max_num_exports = num_cells * children_per_cell;
@@ -940,7 +949,7 @@ class TreeLayer
 
                     int owner_rank = -1;
 
-                    for (int r = 0; r < child_domain.extent(0); ++r)
+                    for (int r = 0; r < child_domain_extent; ++r)
                     {
                         if ( child_center[0] >= child_domain(r, 0) &&
                             child_center[0] <  child_domain(r, 3) &&
@@ -1101,6 +1110,7 @@ class TreeLayer
      */
     void computeInteractionBounds(int starting_cells_per_dimension, int start_layer)
     {
+        printf("L%d: R%d: starting layer: %d, start cp: %d\n", _layer_number, _rank, start_layer, starting_cells_per_dimension);
         // Initialize _mhalo_outer_bound
         _mhalo_outer_bound = Kokkos::View<int[6], memory_space>("_mhalo_outer_bound");
         
@@ -1189,6 +1199,118 @@ class TreeLayer
     }
 
     /**
+     * Halo multipoles across the same layer based on the absolute outer multipole bounds.
+     * Add halo multipole coefficients to _multipoles and add haloed cell ijks to _ijk2index.
+     */
+    void haloMultipoles()
+    {
+        // Communicate _mhalo_outer_bound to each rank so we know who we need to send to.
+        // Allocate view to store data from other ranks
+        Kokkos::View<int*[6], memory_space> all_mhalo_outer_bounds("all_mhalo_outer_bounds", _comm_size);
+
+        // Ensure data is ready before MPI
+        Kokkos::fence();
+
+        // Each rank sends 6 ints, receives comm_size * 6 ints
+        MPI_Allgather(_mhalo_outer_bound.data(), 6, MPI_INT,
+            all_mhalo_outer_bounds.data(), 6, MPI_INT, _comm);
+
+        // Ensure MPI is finished before using results
+        Kokkos::fence();
+
+        int rank = _rank;
+        int comm_size = _comm_size;
+        int layer_number = _layer_number;
+
+        // Locals, cell ijk index
+        static constexpr std::size_t num_coefficients = (p+1)*(p+1);
+
+        const auto num_cells = numCells();
+
+        auto ijk2index = _ijk2index;
+
+        // For cell center calculations
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        auto cell_size = _cell_size;
+            
+        std::size_t max_num_exports = num_cells * _comm_size;
+        Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks("ids_ranks", max_num_exports);
+        auto id_slice = Cabana::slice<0>(ids_ranks);
+        auto rank_slice = Cabana::slice<1>(ids_ranks);
+        auto cell_center_slice = Cabana::slice<1>(_multipoles);
+        auto coefficient_slice = Cabana::slice<0>(_multipoles);
+
+        // Hold size of exports
+        Kokkos::View<int, memory_space> counter("counter");
+        Kokkos::deep_copy(counter, 0);
+
+        Kokkos::parallel_for("fill_horz_multipole_halo_data",
+        Kokkos::RangePolicy<execution_space>(0, num_cells),
+        KOKKOS_LAMBDA(const int m_index)
+        {
+            // Convert cell center to cell ijk
+            auto cell_ijk = position2ijk(cell_center_slice( m_index, 0 ), cell_center_slice( m_index, 1 ), cell_center_slice( m_index, 2 ),
+                low_corner, cell_size);
+
+            // Check if this cell center is within a rank's halo bound
+            for (int r = 0; r < comm_size; ++r)
+            {
+                if (rank == r)
+                    continue;
+
+                if ( cell_ijk[0] >= all_mhalo_outer_bounds(r, 0) &&
+                    cell_ijk[0] <  all_mhalo_outer_bounds(r, 3) &&
+                    cell_ijk[1] >= all_mhalo_outer_bounds(r, 1) &&
+                    cell_ijk[1] <  all_mhalo_outer_bounds(r, 4) &&
+                    cell_ijk[2] >= all_mhalo_outer_bounds(r, 2) &&
+                    cell_ijk[2] <  all_mhalo_outer_bounds(r, 5) )
+                {
+                    auto index = Kokkos::atomic_fetch_add(&counter(), 1);
+                    id_slice(index) = m_index;
+                    rank_slice(index) = r;
+                    printf("L%d: R%d: sending ijk:(%d, %d, %d), to R%d\n",
+                        layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        rank);
+                }
+            }
+        });
+
+        int num_exports;
+        Kokkos::deep_copy(num_exports, counter);
+        ids_ranks.resize(num_exports);
+        id_slice = Cabana::slice<0>(ids_ranks);
+        rank_slice = Cabana::slice<1>(ids_ranks);
+
+        // Create halo
+        Cabana::Halo<memory_space> halo( _comm, num_cells, id_slice,
+                                    rank_slice );
+        _num_local_multipoles = halo.numLocal();
+        _num_ghost_multipoles = halo.numGhost();
+        _multipoles.resize(_num_local_multipoles + _num_ghost_multipoles);
+        Cabana::gather(halo, _multipoles);
+        
+        // Add haloed multipole data to _ijk2index map.
+        cell_center_slice = Cabana::slice<1>(_multipoles);
+        coefficient_slice = Cabana::slice<0>(_multipoles);
+        Kokkos::parallel_for("add_haloed_multipoles_to_ijk2index",
+        Kokkos::RangePolicy<execution_space>(_num_local_multipoles, _num_ghost_multipoles),
+        KOKKOS_LAMBDA(const int m_index)
+        {
+            // Convert cell center to cell ijk
+            auto cell_ijk = position2ijk(cell_center_slice( m_index, 0 ), cell_center_slice( m_index, 1 ), cell_center_slice( m_index, 2 ),
+                low_corner, cell_size);
+
+            // Insert into map
+            auto result = ijk2index.insert(cell_ijk, m_index);
+            
+            if (!result.success())
+            {
+                printf("L%d: R%d: Error inserting haloed multipole!\n", layer_number, rank);
+            }
+        });
+    }
+
+    /**
      * For each cell, iterate over all cells in its interaction list. These are cells that
      * are at least two cells away from the cell in question and have not been accounted
      * for in more coarse layers.
@@ -1199,11 +1321,6 @@ class TreeLayer
     {
         // This only works for one process right now.
         computeInteractionBounds(starting_cells_per_dimension, start_layer);
-      
-        if (_comm_size != 1)
-        {
-            throw std::runtime_error("multipole_to_local only works for comm_size 1");
-        }
 
         // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
@@ -1382,8 +1499,8 @@ class TreeLayer
      * Each entry in the returned vector is (x_start, y_start, z_start, x_end, y_end, z_end)
      */
     auto domains() const {return _domains;}
-    auto tile_offsets() const {return _tile_offsets_view;}
-    auto num_owned_tile() const {return _num_owned_tile_view;}
+    auto cell_offsets() const {return _cell_offsets_view;}
+    auto num_owned_cell() const {return _num_owned_cell_view;}
 
     std::shared_ptr<sparse_layout_type> layout() {return _layout_ptr;}
     std::shared_ptr<sparse_map_type> map() {return _map_ptr;}
@@ -1429,8 +1546,8 @@ class TreeLayer
 
     // Information about which processes own which other
     // section of the sparse mesh
-    Kokkos::View<int*[3], memory_space> _tile_offsets_view;
-    Kokkos::View<int*[3], memory_space> _num_owned_tile_view;
+    Kokkos::View<int*[3], memory_space> _cell_offsets_view;
+    Kokkos::View<int*[3], memory_space> _num_owned_cell_view;
     Kokkos::View<double*[6], memory_space> _domains;
 
     // Partitioner parameters
@@ -1456,9 +1573,13 @@ class TreeLayer
 
     // Multipole coefficients for each cell.
     multipole_aosoa_type _multipoles;
+    std::size_t _num_local_multipoles;
+    std::size_t _num_ghost_multipoles;
 
     // Local coefficients for each cell.
     local_aosoa_type _locals;
+    std::size_t _num_local_locals;
+    std::size_t _num_ghost_locals;
 
     // For each cell, the subset of the domain, in i/j/k indices for cells in this layer,
     // where the contribution from cells outside of these bounds have already been
