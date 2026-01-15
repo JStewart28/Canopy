@@ -915,8 +915,8 @@ class TreeLayer
         Kokkos::deep_copy(num_exports_d, 0);
 
         Kokkos::parallel_for("fill_vert_halo_data",
-        Kokkos::RangePolicy<execution_space>(0, ijk2index.capacity()),
-        KOKKOS_LAMBDA(const int ijk2l_index)
+        Kokkos::RangePolicy<execution_space>(0, _locals.size()),
+        KOKKOS_LAMBDA(const int index)
         {
             if (ijk2index.valid_at(ijk2l_index))
             {
@@ -989,6 +989,8 @@ class TreeLayer
                                     rank_slice );
         std::size_t num_local = halo.numLocal();
         _locals.resize(halo.numLocal() + halo.numGhost());
+        _num_local_locals = halo.numLocal();
+        _num_ghost_locals = halo.numGhost();
         Cabana::gather(halo, _locals);
 
         halo_aosoa.resize(halo.numGhost());
@@ -1159,10 +1161,10 @@ class TreeLayer
                 for (int i = 0; i < 6; i++)
                     m2l_bounds(index, i) = bounds.first[i];
 
-                printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
-                    layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    bounds.first[0], bounds.first[1], bounds.first[2],
-                    bounds.first[3], bounds.first[4], bounds.first[5]);
+                // printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
+                //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     bounds.first[0], bounds.first[1], bounds.first[2],
+                //     bounds.first[3], bounds.first[4], bounds.first[5]);
                 
             }
         });
@@ -1293,7 +1295,7 @@ class TreeLayer
         cell_center_slice = Cabana::slice<1>(_multipoles);
         coefficient_slice = Cabana::slice<0>(_multipoles);
         Kokkos::parallel_for("add_haloed_multipoles_to_ijk2index",
-        Kokkos::RangePolicy<execution_space>(_num_local_multipoles, _num_ghost_multipoles),
+        Kokkos::RangePolicy<execution_space>(_num_local_multipoles, _num_local_multipoles + _num_ghost_multipoles),
         KOKKOS_LAMBDA(const int m_index)
         {
             // Convert cell center to cell ijk
@@ -1308,6 +1310,7 @@ class TreeLayer
                 printf("L%d: R%d: Error inserting haloed multipole!\n", layer_number, rank);
             }
         });
+        printf("R%d: finished haloMultipoles\n", _rank);
     }
 
     /**
@@ -1319,8 +1322,9 @@ class TreeLayer
      */
     void multipole_to_local(int starting_cells_per_dimension, int start_layer)
     {
-        // This only works for one process right now.
         computeInteractionBounds(starting_cells_per_dimension, start_layer);
+
+        haloMultipoles();
 
         // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
@@ -1342,152 +1346,144 @@ class TreeLayer
 
         // Per-cell calculation
         Kokkos::parallel_for("multipole_to_local",
-        Kokkos::RangePolicy<execution_space>(0, ijk2index.capacity()),
-        KOKKOS_LAMBDA(const int ijk2l_index)
-        {
-            if (ijk2index.valid_at(ijk2l_index))
+        Kokkos::RangePolicy<execution_space>(0, _num_local_multipoles),
+        KOKKOS_LAMBDA(const int index)
+        {            
+            // Get cell ijk from cell center
+            auto cell_ijk = position2ijk(m_cell_center_slice( index, 0 ), m_cell_center_slice( index, 1 ), m_cell_center_slice( index, 2 ),
+                                 low_corner, cell_size);
+
+            // Set inner bound - where cells are too close for the local
+            // approximation to be accurate. Inclusive on lower end,
+            // exclusive on upper end
+            Kokkos::Array<std::size_t, 3> inner_lower_bound;
+            Kokkos::Array<std::size_t, 3> inner_upper_bound;
+            for (int i = 0; i < 3; i++)
             {
-                // Cell ijk
-                auto cell_ijk = ijk2index.key_at( ijk2l_index );
-
-                // Cell index in local and multipole structures
-                auto index = ijk2index.value_at(ijk2l_index);
-                
-                // Cell center
-                auto cell_center = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    low_corner, cell_size);
-                
-                // Set inner bound - where cells are too close for the local
-                // approximation to be accurate. Inclusive on lower end,
-                // exclusive on upper end
-                Kokkos::Array<std::size_t, 3> inner_lower_bound;
-                Kokkos::Array<std::size_t, 3> inner_upper_bound;
-                for (int i = 0; i < 3; i++)
-                {
-                    inner_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + 3, cells_per_dim);
-                    inner_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - 2, 0);
-                }
-
-                // Set cell center in locals data structure
-                for (int i = 0; i < 3; i++)
-                    l_cell_ijk_slice(index, i) = cell_ijk[i];
-    
-                // if (rank == 0 && layer_number == 0)
-                // printf("L%d: R%d: considering cell %d, %d, %d, o: (%d, %d, %d), (%d, %d, %d), i: (%d, %d, %d), (%d, %d, %d)\n",
-                //     layer_number, rank,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
-                //     outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
-                //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
-                //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
-                // if (rank == 0)
-                // printf("L%d: R%d: considering cell %d, %d, %d, center(%.2lf, %.2lf, %.2lf)\n",
-                //     layer_number, rank,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     cell_center_slice(this_cell_index, 0), cell_center_slice(this_cell_index, 1), cell_center_slice(this_cell_index, 2));
-
-                // Iterate over all cells whose multipoles we must consider.
-                // XXX - Make this a team policy nested for loop
-                // printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d\n", layer_number, rank,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     m2l_bounds(local_index, 0), m2l_bounds(local_index, 1), m2l_bounds(local_index, 2),
-                //     m2l_bounds(local_index, 3), m2l_bounds(local_index, 4), m2l_bounds(local_index, 5));
-                for (std::size_t ci = m2l_bounds(index, 0); ci < m2l_bounds(index, 3); ci++)
-                    for (std::size_t cj = m2l_bounds(index, 1); cj < m2l_bounds(index, 4); cj++)
-                        for (std::size_t ck = m2l_bounds(index, 2); ck < m2l_bounds(index, 5); ck++)
-                        {
-                            // Only consider cells between our outer lower and inner lower
-                            // or inner upper and outer upper bounds. If inside these bounds,
-                            // skip.
-                            // if (rank == 0)
-                            // printf("L%d: R%d: cell %d, %d, %d, checking neighbor %d, %d, %d\n", layer_number, rank,
-                            //     cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
-
-                            if ((ci >= inner_lower_bound[0] && ci < inner_upper_bound[0]) &&
-                            (cj >= inner_lower_bound[1] && cj < inner_upper_bound[1]) &&
-                            (ck >= inner_lower_bound[2] && ck < inner_upper_bound[2]))
-                            {
-                                continue;
-                            }
-                            // printf("Here\n");
-                            // Check if this cell is activated by checking if it's recorded
-                            // in the cell id to local index map.
-                            // XXX - for now, we assume this cell is haloed if necessary and
-                            // activated in the sparse map.
-                            Kokkos::Array<std::size_t, 3> neighbor_ijk = {ci, cj, ck};                   
-                            auto neighbor_activated = ijk2index.exists(neighbor_ijk);
-        
-                            if (!neighbor_activated)
-                            {
-                                // Cell not activated; do not consider
-                                continue;
-                            }
-                            
-                            // Otherwise get the data
-                            auto map_index = ijk2index.find(neighbor_ijk);
-                            auto neighbor_index = ijk2index.value_at(map_index);
-                            auto neighbor_cell_center = cellCenter(neighbor_ijk[0], neighbor_ijk[1], neighbor_ijk[2],
-                                low_corner, cell_size);
-
-                            // if (rank == 0)
-
-                            
-                            // For multipole to local conversion we need the multipole
-                            // center relative to the local center
-                            Kokkos::Array<double, 3> m2l_vec;
-                            for (int i = 0; i < 3; ++i)
-                                m2l_vec[i] = neighbor_cell_center[i] - cell_center[i];
-                            
-                            // Multipole coefficients
-                            constexpr std::size_t num_coefficients = (p+1)*(p+1);
-                            Kokkos::Array<cdouble, num_coefficients> M;
-                            for (std::size_t i = 0; i < num_coefficients; i++)
-                            {
-                                M[i].real() = m_slice(neighbor_index, i, 0);
-                                M[i].imag() = m_slice(neighbor_index, i, 1);
-                            }
-
-                            // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
-                            // {
-                            //     // if( ci == 5 && cj == 15 && ck == 9)
-                            //     // {
-                            //         for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
-                            //         {
-                            //             printf("L%d: R%d: ncell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
-                            //                 ci, cj, ck, lid,
-                            //                 m_slice(neighbor_index, lid, 0), m_slice(neighbor_index, lid, 1));
-                            //         }
-                            //     // }
-                            // }
-
-                            // Convert to locals
-                            Kokkos::Array<cdouble, num_coefficients> L;
-                            Kernel::Scalar::m2l<p>(M, L, m2l_vec);
-
-                            // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d, nc(%.2lf, %.2lf, %.2lf): m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
-                            //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                            //     ci, cj, ck,
-                            //     m_cell_center_slice(neighbor_index, 0), m_cell_center_slice(neighbor_index, 1), m_cell_center_slice(neighbor_index, 2),
-                            //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
-                            //     L[0].real(), L[1].real(), L[2].real());
-                            
-                            // Add contribution to locals for this cell
-                            for (std::size_t i = 0; i < num_coefficients; i++)
-                            {
-                                l_slice(index, i, 0) += L[i].real();
-                                l_slice(index, i, 1) += L[i].imag();
-                            }
-                        }
-                // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
-                // {
-                //     for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
-                //     {
-                //         printf("L%d: R%d: cell(%d, %d, %d): locals(%d): (%.3lf, %.3lf)\n", layer_number, rank,
-                //             cell_ijk[0], cell_ijk[1], cell_ijk[2], lid,
-                //             locals(local_index, lid).real(), locals(local_index, lid).imag());
-                //     }
-                // }
+                inner_upper_bound[i] = Kokkos::min(static_cast<int>(cell_ijk[i]) + 3, cells_per_dim);
+                inner_lower_bound[i] = Kokkos::max(static_cast<int>(cell_ijk[i]) - 2, 0);
             }
+
+            // Set cell center in locals data structure
+            for (int i = 0; i < 3; i++)
+                l_cell_ijk_slice(index, i) = cell_ijk[i];
+
+            // if (rank == 0 && layer_number == 0)
+            // printf("L%d: R%d: considering cell %d, %d, %d, o: (%d, %d, %d), (%d, %d, %d), i: (%d, %d, %d), (%d, %d, %d)\n",
+            //     layer_number, rank,
+            //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+            //     outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
+            //     outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
+            //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
+            //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
+            // if (rank == 0)
+            // printf("L%d: R%d: considering cell %d, %d, %d, center(%.2lf, %.2lf, %.2lf)\n",
+            //     layer_number, rank,
+            //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+            //     cell_center_slice(this_cell_index, 0), cell_center_slice(this_cell_index, 1), cell_center_slice(this_cell_index, 2));
+
+            // Iterate over all cells whose multipoles we must consider.
+            // XXX - Make this a team policy nested for loop
+            // printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d\n", layer_number, rank,
+            //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+            //     m2l_bounds(local_index, 0), m2l_bounds(local_index, 1), m2l_bounds(local_index, 2),
+            //     m2l_bounds(local_index, 3), m2l_bounds(local_index, 4), m2l_bounds(local_index, 5));
+            for (std::size_t ci = m2l_bounds(index, 0); ci < m2l_bounds(index, 3); ci++)
+                for (std::size_t cj = m2l_bounds(index, 1); cj < m2l_bounds(index, 4); cj++)
+                    for (std::size_t ck = m2l_bounds(index, 2); ck < m2l_bounds(index, 5); ck++)
+                    {
+                        // Only consider cells between our outer lower and inner lower
+                        // or inner upper and outer upper bounds. If inside these bounds,
+                        // skip.
+                        // if (rank == 0)
+                        // printf("L%d: R%d: cell %d, %d, %d, checking neighbor %d, %d, %d\n", layer_number, rank,
+                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
+
+                        if ((ci >= inner_lower_bound[0] && ci < inner_upper_bound[0]) &&
+                        (cj >= inner_lower_bound[1] && cj < inner_upper_bound[1]) &&
+                        (ck >= inner_lower_bound[2] && ck < inner_upper_bound[2]))
+                        {
+                            continue;
+                        }
+                        // printf("Here\n");
+                        // Check if this cell is activated by checking if it's recorded
+                        // in the cell id to local index map.
+                        // XXX - for now, we assume this cell is haloed if necessary and
+                        // activated in the sparse map.
+                        Kokkos::Array<std::size_t, 3> neighbor_ijk = {ci, cj, ck};                   
+                        auto neighbor_activated = ijk2index.exists(neighbor_ijk);
+                        // printf("L%d: R%d: ijk(%d, %d, %d), neighbor(%d, %d, %d), activated: %d\n", _layer_number, _rank,
+                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck, neighbor_activated);
+                        if (!neighbor_activated)
+                        {
+                            // Cell not activated; do not consider
+                            continue;
+                        }
+                        
+                        // Otherwise get the data
+                        auto map_index = ijk2index.find(neighbor_ijk);
+                        auto neighbor_index = ijk2index.value_at(map_index);
+                        auto neighbor_cell_center = cellCenter(neighbor_ijk[0], neighbor_ijk[1], neighbor_ijk[2],
+                            low_corner, cell_size);
+
+                        // if (rank == 0)
+
+                        
+                        // For multipole to local conversion we need the multipole
+                        // center relative to the local center
+                        Kokkos::Array<double, 3> m2l_vec;
+                        for (int i = 0; i < 3; ++i)
+                            m2l_vec[i] = neighbor_cell_center[i] - m_cell_center_slice(index, i);
+                        
+                        // Multipole coefficients
+                        constexpr std::size_t num_coefficients = (p+1)*(p+1);
+                        Kokkos::Array<cdouble, num_coefficients> M;
+                        for (std::size_t i = 0; i < num_coefficients; i++)
+                        {
+                            M[i].real() = m_slice(neighbor_index, i, 0);
+                            M[i].imag() = m_slice(neighbor_index, i, 1);
+                        }
+
+                        // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
+                        // {
+                        //     // if( ci == 5 && cj == 15 && ck == 9)
+                        //     // {
+                        //         for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
+                        //         {
+                        //             printf("L%d: R%d: ncell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
+                        //                 ci, cj, ck, lid,
+                        //                 m_slice(neighbor_index, lid, 0), m_slice(neighbor_index, lid, 1));
+                        //         }
+                        //     // }
+                        // }
+
+                        // Convert to locals
+                        Kokkos::Array<cdouble, num_coefficients> L;
+                        Kernel::Scalar::m2l<p>(M, L, m2l_vec);
+
+                        // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d, nc(%.2lf, %.2lf, %.2lf): m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        //     ci, cj, ck,
+                        //     m_cell_center_slice(neighbor_index, 0), m_cell_center_slice(neighbor_index, 1), m_cell_center_slice(neighbor_index, 2),
+                        //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
+                        //     L[0].real(), L[1].real(), L[2].real());
+                        
+                        // Add contribution to locals for this cell
+                        for (std::size_t i = 0; i < num_coefficients; i++)
+                        {
+                            l_slice(index, i, 0) += L[i].real();
+                            l_slice(index, i, 1) += L[i].imag();
+                        }
+                    }
+            // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
+            // {
+            //     for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
+            //     {
+            //         printf("L%d: R%d: cell(%d, %d, %d): locals(%d): (%.3lf, %.3lf)\n", layer_number, rank,
+            //             cell_ijk[0], cell_ijk[1], cell_ijk[2], lid,
+            //             locals(local_index, lid).real(), locals(local_index, lid).imag());
+            //     }
+            // }
         });
     }
 

@@ -497,11 +497,11 @@ class Tree
         printf("R%d: first valid layer: %d, starting cpd: %d\n", _rank, first_valid_layer, starting_cells_per_dimension);
 
         // Compute locals at first valid layer
-        _tree[first_valid_layer]->haloMultipoles();
         _tree[first_valid_layer]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
 
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
+            printf("R%d: Starting layer %d...\n", _rank, L);
             // Get the computed locals at the layer above L (more coarse layer)
             _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L+1]->domains());
 
@@ -509,7 +509,7 @@ class Tree
             _tree[L]->addCoarseLocals(halo_data);
 
             // Compute locals at layer L
-            _tree[L]->haloMultipoles();
+            printf("R%d: Starting layer %d m2l...\n", _rank, L);
             _tree[L]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
         }
     }
