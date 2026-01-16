@@ -918,63 +918,52 @@ class TreeLayer
         Kokkos::RangePolicy<execution_space>(0, _locals.size()),
         KOKKOS_LAMBDA(const int index)
         {
-            if (ijk2index.valid_at(ijk2l_index))
+            // Each thread sets (local_index + _tile_reduction_factor^3)
+            // part of export data because each cell has _tile_reduction_factor^3
+            // children
+            const int export_base = index * children_per_cell;
+            for (int c = 0; c < factor*factor*factor; ++c)
             {
-                // Cell ijk
-                auto cell_ijk = ijk2index.key_at( ijk2l_index );
+                int di =  c % factor;
+                int dj = (c / factor) % factor;
+                int dk =  c / (factor*factor);
+                
+                Kokkos::Array<std::size_t, 3> child_ijk = {
+                    static_cast<std::size_t>(cell_ijk_slice(index, 0) * factor + di),
+                    static_cast<std::size_t>(cell_ijk_slice(index, 1) * factor + dj),
+                    static_cast<std::size_t>(cell_ijk_slice(index, 2) * factor + dk)
+                };
 
-                // Cell center
-                auto cell_center = cellCenter(cell_ijk[0], cell_ijk[1], cell_ijk[2], low_corner, cell_size);
+                auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
 
-                // Cell local index
-                auto local_index = ijk2index.value_at(ijk2l_index);
+                int owner_rank = -1;
 
-                // Each thread sets (local_index + _tile_reduction_factor^3)
-                // part of export data because each cell has _tile_reduction_factor^3
-                // children
-                const int export_base = local_index * children_per_cell;
-                for (int c = 0; c < factor*factor*factor; ++c)
+                for (int r = 0; r < child_domain_extent; ++r)
                 {
-                    int di =  c % factor;
-                    int dj = (c / factor) % factor;
-                    int dk =  c / (factor*factor);
-                    
-                    Kokkos::Array<std::size_t, 3> child_ijk = {
-                        static_cast<std::size_t>(cell_ijk[0] * factor + di),
-                        static_cast<std::size_t>(cell_ijk[1] * factor + dj),
-                        static_cast<std::size_t>(cell_ijk[2] * factor + dk)
-                    };
-
-                    auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
-
-                    int owner_rank = -1;
-
-                    for (int r = 0; r < child_domain_extent; ++r)
+                    if ( child_center[0] >= child_domain(r, 0) &&
+                        child_center[0] <  child_domain(r, 3) &&
+                        child_center[1] >= child_domain(r, 1) &&
+                        child_center[1] <  child_domain(r, 4) &&
+                        child_center[2] >= child_domain(r, 2) &&
+                        child_center[2] <  child_domain(r, 5) )
                     {
-                        if ( child_center[0] >= child_domain(r, 0) &&
-                            child_center[0] <  child_domain(r, 3) &&
-                            child_center[1] >= child_domain(r, 1) &&
-                            child_center[1] <  child_domain(r, 4) &&
-                            child_center[2] >= child_domain(r, 2) &&
-                            child_center[2] <  child_domain(r, 5) )
-                        {
-                            owner_rank = r;
-                            break;
-                        }
+                        owner_rank = r;
+                        break;
                     }
-
-                    auto val = Kokkos::atomic_fetch_add(&l2r_send_map(local_index, owner_rank), 1);
-                    if (val == 0)
-                    {
-                        auto index = Kokkos::atomic_fetch_add(&num_exports_d(), 1);
-                        id_slice(index) = local_index;
-                        rank_slice(index) = owner_rank;
-                        // printf("L%d: sending ijk:(%d, %d, %d), to R%d\n",
-                        //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        //     rank);
-                    }
-                    
                 }
+
+                auto val = Kokkos::atomic_fetch_add(&l2r_send_map(index, owner_rank), 1);
+                if (val == 0)
+                {
+                    auto index = Kokkos::atomic_fetch_add(&num_exports_d(), 1);
+                    id_slice(index) = index;
+                    rank_slice(index) = owner_rank;
+                    // printf("L%d: sending ijk:(%d, %d, %d), to R%d\n",
+                    //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    //     rank);
+                }
+                
+            
             }
         });
 

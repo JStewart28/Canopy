@@ -556,7 +556,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     tree->multipole_to_local();
-    return;
+    // return;
 
     // Get locals at leaf layer
     auto layer = tree->layer(0);
