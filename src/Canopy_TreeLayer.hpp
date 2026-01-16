@@ -184,25 +184,45 @@ cell2Bound(Kokkos::Array<int, 3> cell_ijk,
 }
 
 // Reduction struct used to create multipole halo outer bounds 
+// POD accumulator
 struct MinMax6
 {
   int v[6];
+};
+
+// Reduction functor
+template <class ViewType>
+struct HaloBoundsReduce
+{
+  ViewType m2l_bounds;
+
+  using value_type = MinMax6;
 
   KOKKOS_INLINE_FUNCTION
-  void init()
+  void init(value_type& dst) const
   {
-    v[0] = v[1] = v[2] = INT_MAX;
-    v[3] = v[4] = v[5] = INT_MIN;
+    dst.v[0] = dst.v[1] = dst.v[2] = INT_MAX;
+    dst.v[3] = dst.v[4] = dst.v[5] = INT_MIN;
   }
 
   KOKKOS_INLINE_FUNCTION
-  void join( const MinMax6& rhs )
+  void join(value_type& dst, const value_type& src) const
   {
-    for ( int d = 0; d < 3; ++d )
-      v[d] = v[d] < rhs.v[d] ? v[d] : rhs.v[d];
+    for (int d = 0; d < 3; ++d)
+      dst.v[d] = dst.v[d] < src.v[d] ? dst.v[d] : src.v[d];
 
-    for ( int d = 3; d < 6; ++d )
-      v[d] = v[d] > rhs.v[d] ? v[d] : rhs.v[d];
+    for (int d = 3; d < 6; ++d)
+      dst.v[d] = dst.v[d] > src.v[d] ? dst.v[d] : src.v[d];
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  void operator()(const int i, value_type& local) const
+  {
+    for (int d = 0; d < 3; ++d)
+      local.v[d] = local.v[d] < m2l_bounds(i,d) ? local.v[d] : m2l_bounds(i,d);
+
+    for (int d = 3; d < 6; ++d)
+      local.v[d] = local.v[d] > m2l_bounds(i,d) ? local.v[d] : m2l_bounds(i,d);
   }
 };
 
@@ -921,7 +941,7 @@ class TreeLayer
             // Each thread sets (local_index + _tile_reduction_factor^3)
             // part of export data because each cell has _tile_reduction_factor^3
             // children
-            const int export_base = index * children_per_cell;
+            // const int export_base = index * children_per_cell;
             for (int c = 0; c < factor*factor*factor; ++c)
             {
                 int di =  c % factor;
@@ -1101,7 +1121,6 @@ class TreeLayer
      */
     void computeInteractionBounds(int starting_cells_per_dimension, int start_layer)
     {
-        printf("L%d: R%d: starting layer: %d, start cp: %d\n", _layer_number, _rank, start_layer, starting_cells_per_dimension);
         // Initialize _mhalo_outer_bound
         _mhalo_outer_bound = Kokkos::View<int[6], memory_space>("_mhalo_outer_bound");
         
@@ -1150,43 +1169,34 @@ class TreeLayer
                 for (int i = 0; i < 6; i++)
                     m2l_bounds(index, i) = bounds.first[i];
 
-                // printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
-                //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     bounds.first[0], bounds.first[1], bounds.first[2],
-                //     bounds.first[3], bounds.first[4], bounds.first[5]);
+                printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
+                    layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    bounds.first[0], bounds.first[1], bounds.first[2],
+                    bounds.first[3], bounds.first[4], bounds.first[5]);
                 
             }
         });
       
         MinMax6 result;
+
         Kokkos::parallel_reduce(
         "ComputeHaloBounds",
         Kokkos::RangePolicy<execution_space>(0, m2l_bounds.extent(0)),
-            KOKKOS_LAMBDA ( const int i, MinMax6& local )
-            {
-                for ( int d = 0; d < 3; ++d )
-                local.v[d] = local.v[d] < m2l_bounds(i,d)
-                            ? local.v[d]
-                            : m2l_bounds(i,d);
-
-                for ( int d = 3; d < 6; ++d )
-                local.v[d] = local.v[d] > m2l_bounds(i,d)
-                            ? local.v[d]
-                            : m2l_bounds(i,d);
-            },
-            result
-            );
-        Kokkos::fence();
+        HaloBoundsReduce<decltype(m2l_bounds)>{m2l_bounds},
+        result
+        );
 
         auto host_bounds = Kokkos::create_mirror_view(mhalo_outer_bound);
-
-        for ( int d = 0; d < 6; ++d )
+        for (int d = 0; d < 6; ++d)
             host_bounds(d) = result.v[d];
 
         Kokkos::deep_copy(mhalo_outer_bound, host_bounds);
-        printf("L%d: R%d: mhalo bounds: (%d, %d, %d), (%d, %d, %d)\n", _layer_number, _rank,
-            host_bounds(0), host_bounds(1), host_bounds(2), 
+
+        printf("L%d: R%d: mhalo bounds: (%d, %d, %d), (%d, %d, %d)\n",
+            _layer_number, _rank,
+            host_bounds(0), host_bounds(1), host_bounds(2),
             host_bounds(3), host_bounds(4), host_bounds(5));
+
     }
 
     /**
@@ -1243,6 +1253,9 @@ class TreeLayer
             auto cell_ijk = position2ijk(cell_center_slice( m_index, 0 ), cell_center_slice( m_index, 1 ), cell_center_slice( m_index, 2 ),
                 low_corner, cell_size);
 
+            printf("L%d: R%d: checking if multipole(%d, %d, %d) needs to be haloed\n",
+                layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+
             // Check if this cell center is within a rank's halo bound
             for (int r = 0; r < comm_size; ++r)
             {
@@ -1259,9 +1272,9 @@ class TreeLayer
                     auto index = Kokkos::atomic_fetch_add(&counter(), 1);
                     id_slice(index) = m_index;
                     rank_slice(index) = r;
-                    printf("L%d: R%d: sending ijk:(%d, %d, %d), to R%d\n",
+                    printf("L%d: R%d: sending multipole ijk:(%d, %d, %d), to R%d\n",
                         layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        rank);
+                        r);
                 }
             }
         });
@@ -1299,7 +1312,6 @@ class TreeLayer
                 printf("L%d: R%d: Error inserting haloed multipole!\n", layer_number, rank);
             }
         });
-        printf("R%d: finished haloMultipoles\n", _rank);
     }
 
     /**
@@ -1328,8 +1340,8 @@ class TreeLayer
         auto l_cell_ijk_slice = Cabana::slice<1>(_locals);
 
         int cells_per_dim = _cells_per_dim;
-        // int rank = _rank;
-        // int layer_number = _layer_number;
+        int rank = _rank;
+        int layer_number = _layer_number;
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
 
@@ -1450,12 +1462,11 @@ class TreeLayer
                         Kokkos::Array<cdouble, num_coefficients> L;
                         Kernel::Scalar::m2l<p>(M, L, m2l_vec);
 
-                        // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d, nc(%.2lf, %.2lf, %.2lf): m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
-                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        //     ci, cj, ck,
-                        //     m_cell_center_slice(neighbor_index, 0), m_cell_center_slice(neighbor_index, 1), m_cell_center_slice(neighbor_index, 2),
-                        //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
-                        //     L[0].real(), L[1].real(), L[2].real());
+                        printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                            cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                            ci, cj, ck,
+                            m2l_vec[0], m2l_vec[1], m2l_vec[2],
+                            L[0].real(), L[1].real(), L[2].real());
                         
                         // Add contribution to locals for this cell
                         for (std::size_t i = 0; i < num_coefficients; i++)
@@ -1464,15 +1475,6 @@ class TreeLayer
                             l_slice(index, i, 1) += L[i].imag();
                         }
                     }
-            // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
-            // {
-            //     for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
-            //     {
-            //         printf("L%d: R%d: cell(%d, %d, %d): locals(%d): (%.3lf, %.3lf)\n", layer_number, rank,
-            //             cell_ijk[0], cell_ijk[1], cell_ijk[2], lid,
-            //             locals(local_index, lid).real(), locals(local_index, lid).imag());
-            //     }
-            // }
         });
     }
 
