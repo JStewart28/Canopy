@@ -418,7 +418,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size, leaf_tiles = comm_size * 32;
+    red_factor = comm_size, leaf_tiles = 32;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
@@ -461,6 +461,17 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
 
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
+
+    if (rank == 0)
+    {
+        cart_coords(0, 0) = -2.8;
+        cart_coords(0, 1) = -2.7;
+        cart_coords(0, 2) = -2.6;
+
+        cart_coords(1, 0) = 2.8;
+        cart_coords(1, 1) = 2.9;
+        cart_coords(1, 2) = 2.6;
+    }
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
@@ -635,6 +646,10 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
                 }
             }
             tree_potentials(tpi) = accumulator.real();
+            printf("R%d: tree particle(%d, %d, %d), locals: %0.3lf, %.3lf, %.3lf, val: %.3lf\n", rank,
+                target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+                locals_slice(local_index, 0, 0), locals_slice(local_index, 1, 0), locals_slice(local_index, 2, 0), tree_potentials(tpi));
+
         } );
     Kokkos::fence();
     
@@ -642,8 +657,8 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     int p_int = static_cast<int>(p_val);
 
     auto tree_particles_h = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree_particles);
-    auto pid_h = Cabana::slice<3>(tree_particles);
-    auto p_pot = Cabana::slice<2>(tree_particles);
+    auto pid_h = Cabana::slice<3>(tree_particles_h);
+    auto p_pot = Cabana::slice<2>(tree_particles_h);
     
     for (int i = 0; i < owned_points; i++)
     {
@@ -673,7 +688,7 @@ TEST( Helper, testCell2Bound)
 
 TEST( Tree, testMultipole2Local1_balanced )
 { 
-    testMultipole2Local1<6>(10, true); 
+    testMultipole2Local1<6>(2, true); 
 }
 
 //---------------------------------------------------------------------------//

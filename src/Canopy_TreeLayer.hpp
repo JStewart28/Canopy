@@ -581,8 +581,8 @@ class TreeLayer
     template <class ParticleAoSoA>
     void populateCells(const ParticleAoSoA data_aosoa, const std::size_t start, const std::size_t end)
     {
-        // int rank = _rank;
-        // int layer_number = _layer_number;
+        int rank = _rank;
+        int layer_number = _layer_number;
 
         // printf("L%d: start/end: %d, %d\n", _layer_number, start, end);
 
@@ -690,13 +690,11 @@ class TreeLayer
                 }
                 if (result.success())
                 {
-                    // printf("Insert: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
-                    //     layer_number, rank,
-                    //     (unsigned long long)cell_id,
-                    //     (unsigned long long)cell_activated_ijk[0],
-                    //     (unsigned long long)cell_activated_ijk[1],
-                    //     (unsigned long long)cell_activated_ijk[2],
-                    //     positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
+                    printf("L%d: R%d: insert ijk(%llu, %llu, %llu)\n",
+                        layer_number, rank,
+                        (unsigned long long)cell_activated_ijk[0],
+                        (unsigned long long)cell_activated_ijk[1],
+                        (unsigned long long)cell_activated_ijk[2]);
                 }
             } );
 
@@ -892,8 +890,8 @@ class TreeLayer
      */
     void sendCoarseLocals(local_aosoa_type& halo_aosoa, const Kokkos::View<double*[6], memory_space>& child_domain)
     {
-        // int rank = _rank;
-        // int layer_number = _layer_number;
+        int rank = _rank;
+        int layer_number = _layer_number;
 
         // Locals, cell ijk index
         static constexpr std::size_t num_coefficients = (p+1)*(p+1);
@@ -978,9 +976,9 @@ class TreeLayer
                     auto index = Kokkos::atomic_fetch_add(&num_exports_d(), 1);
                     id_slice(index) = index;
                     rank_slice(index) = owner_rank;
-                    // printf("L%d: sending ijk:(%d, %d, %d), to R%d\n",
-                    //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    //     rank);
+                    // printf("L%d: R%d: sending local ijk:(%d, %d, %d), to R%d\n",
+                    //     layer_number, rank, cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),
+                    //     owner_rank);
                 }
                 
             
@@ -1026,8 +1024,8 @@ class TreeLayer
 
     void addCoarseLocals(local_aosoa_type& parent_locals)
     {
-        // int rank = _rank;
-        // int layer_number = _layer_number;
+        int rank = _rank;
+        int layer_number = _layer_number;
 
         static constexpr std::size_t num_coefficients = ( p + 1 ) * ( p + 1 );
         auto ijk2index = _ijk2index;
@@ -1049,7 +1047,7 @@ class TreeLayer
         Kokkos::RangePolicy<execution_space>(0, parent_locals.size()),
         KOKKOS_LAMBDA(const int hi)
         {
-            // printf("L%d: Got pijk(%d, %d, %d)\n", _layer_number, ijk_slice(hi, 0), ijk_slice(hi, 1), ijk_slice(hi, 2));
+            // printf("L%d: R%d: Got plocal(%d, %d, %d)\n", layer_number, rank, parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2));
             
             auto parent_cell_center = cellCenter(parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2),
                 low_corner, parent_cell_size);
@@ -1169,10 +1167,10 @@ class TreeLayer
                 for (int i = 0; i < 6; i++)
                     m2l_bounds(index, i) = bounds.first[i];
 
-                printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
-                    layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    bounds.first[0], bounds.first[1], bounds.first[2],
-                    bounds.first[3], bounds.first[4], bounds.first[5]);
+                // printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
+                //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     bounds.first[0], bounds.first[1], bounds.first[2],
+                //     bounds.first[3], bounds.first[4], bounds.first[5]);
                 
             }
         });
@@ -1192,7 +1190,7 @@ class TreeLayer
 
         Kokkos::deep_copy(mhalo_outer_bound, host_bounds);
 
-        printf("L%d: R%d: mhalo bounds: (%d, %d, %d), (%d, %d, %d)\n",
+        if (layer_number == 4) printf("L%d: R%d: mhalo bounds: (%d, %d, %d), (%d, %d, %d)\n",
             _layer_number, _rank,
             host_bounds(0), host_bounds(1), host_bounds(2),
             host_bounds(3), host_bounds(4), host_bounds(5));
@@ -1253,8 +1251,8 @@ class TreeLayer
             auto cell_ijk = position2ijk(cell_center_slice( m_index, 0 ), cell_center_slice( m_index, 1 ), cell_center_slice( m_index, 2 ),
                 low_corner, cell_size);
 
-            printf("L%d: R%d: checking if multipole(%d, %d, %d) needs to be haloed\n",
-                layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+            // printf("L%d: R%d: checking if multipole(%d, %d, %d) needs to be haloed\n",
+            //     layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
 
             // Check if this cell center is within a rank's halo bound
             for (int r = 0; r < comm_size; ++r)
@@ -1462,7 +1460,7 @@ class TreeLayer
                         Kokkos::Array<cdouble, num_coefficients> L;
                         Kernel::Scalar::m2l<p>(M, L, m2l_vec);
 
-                        printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                        if (layer_number == 4) printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
                             cell_ijk[0], cell_ijk[1], cell_ijk[2],
                             ci, cj, ck,
                             m2l_vec[0], m2l_vec[1], m2l_vec[2],
