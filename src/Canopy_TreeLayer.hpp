@@ -1504,7 +1504,7 @@ class TreeLayer
     auto m2l_bounds() {return _m2l_bounds;}
 
     // Return cell_ijk to index into local view map
-    auto cellijk2l() {return _ijk2index;}
+    auto cellijk2i() {return _ijk2index;}
 
     // The number of cells activated in this layer. Can't use the size of local or multipole views
     // because they may contain ghost elements

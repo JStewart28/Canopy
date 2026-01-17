@@ -307,7 +307,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
 
     // Get locals
     auto locals = layer->locals();
-    auto ijk2index = layer->cellijk2l();
+    auto ijk2index = layer->cellijk2i();
     auto locals_slice = Cabana::slice<0>(locals);
 
     // Get particles
@@ -573,12 +573,11 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     tree->multipole_to_local();
-    // return;
 
     // Get locals at leaf layer
     auto layer = tree->layer(0);
     auto locals = layer->locals();
-    auto ijk2index = layer->cellijk2l();
+    auto ijk2index = layer->cellijk2i();
     auto locals_slice = Cabana::slice<0>(locals);
 
     // Get particles
