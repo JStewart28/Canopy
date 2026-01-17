@@ -690,11 +690,11 @@ class TreeLayer
                 }
                 if (result.success())
                 {
-                    printf("L%d: R%d: insert ijk(%llu, %llu, %llu)\n",
-                        layer_number, rank,
-                        (unsigned long long)cell_activated_ijk[0],
-                        (unsigned long long)cell_activated_ijk[1],
-                        (unsigned long long)cell_activated_ijk[2]);
+                    // printf("L%d: R%d: insert ijk(%llu, %llu, %llu)\n",
+                    //     layer_number, rank,
+                    //     (unsigned long long)cell_activated_ijk[0],
+                    //     (unsigned long long)cell_activated_ijk[1],
+                    //     (unsigned long long)cell_activated_ijk[2]);
                 }
             } );
 
@@ -1190,10 +1190,10 @@ class TreeLayer
 
         Kokkos::deep_copy(mhalo_outer_bound, host_bounds);
 
-        if (layer_number == 4) printf("L%d: R%d: mhalo bounds: (%d, %d, %d), (%d, %d, %d)\n",
-            _layer_number, _rank,
-            host_bounds(0), host_bounds(1), host_bounds(2),
-            host_bounds(3), host_bounds(4), host_bounds(5));
+        // if (layer_number == 4) printf("L%d: R%d: mhalo bounds: (%d, %d, %d), (%d, %d, %d)\n",
+        //     _layer_number, _rank,
+        //     host_bounds(0), host_bounds(1), host_bounds(2),
+        //     host_bounds(3), host_bounds(4), host_bounds(5));
 
     }
 
@@ -1270,9 +1270,9 @@ class TreeLayer
                     auto index = Kokkos::atomic_fetch_add(&counter(), 1);
                     id_slice(index) = m_index;
                     rank_slice(index) = r;
-                    printf("L%d: R%d: sending multipole ijk:(%d, %d, %d), to R%d\n",
-                        layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        r);
+                    // printf("L%d: R%d: sending multipole ijk:(%d, %d, %d), to R%d\n",
+                    //     layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    //     r);
                 }
             }
         });
@@ -1460,11 +1460,11 @@ class TreeLayer
                         Kokkos::Array<cdouble, num_coefficients> L;
                         Kernel::Scalar::m2l<p>(M, L, m2l_vec);
 
-                        if (layer_number == 4) printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
-                            cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                            ci, cj, ck,
-                            m2l_vec[0], m2l_vec[1], m2l_vec[2],
-                            L[0].real(), L[1].real(), L[2].real());
+                        // if (layer_number == 4) printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        //     ci, cj, ck,
+                        //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
+                        //     L[0].real(), L[1].real(), L[2].real());
                         
                         // Add contribution to locals for this cell
                         for (std::size_t i = 0; i < num_coefficients; i++)

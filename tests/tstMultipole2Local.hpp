@@ -303,7 +303,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     // Just test single-layer multipole to local conversion.
-    layer->multipole_to_local(0, 64);
+    tree->multipole_to_local();
 
     // Get locals
     auto locals = layer->locals();
@@ -381,6 +381,11 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
                 }
             }
             tree_potentials(tpi) = accumulator.real();
+            // printf("R%d: tree particle(%d, %d, %d), locals: %0.3lf, %.3lf, %.3lf, tp(%d): %.3lf\n", rank,
+            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+            //     locals_slice(local_index, 0, 0), locals_slice(local_index, 1, 0), locals_slice(local_index, 2, 0),
+            //     tpi, tree_potentials(tpi));
+
         } );
     Kokkos::fence();
     
@@ -388,16 +393,16 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     int p_int = static_cast<int>(p_val);
 
     auto tree_particles_h = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree_particles);
-    auto pid_h = Cabana::slice<3>(tree_particles);
-    auto p_pot = Cabana::slice<2>(tree_particles);
+    auto pid_h = Cabana::slice<3>(tree_particles_h);
+    auto p_pot = Cabana::slice<2>(tree_particles_h);
     
-    for (int i = 0; i < owned_points; i++)
+    for (int i = 0; i < tree_particles_h.size(); i++)
     {
         auto particle_id = pid_h(i);
         auto particle_potential = p_pot(i);
         auto direct_potential = direct_potentials(particle_id);
-        ASSERT_NEAR(particle_potential, direct_potential, Kokkos::pow(10, -p_int+2));
-        // printf("R%d: particle %d: direct: %.5lf, tree: %.5lf\n", rank, particle_id, particle_potential, direct_potential);
+        ASSERT_NEAR(particle_potential, direct_potential, Kokkos::pow(10, -p_int+3));
+        // printf("R%d: i%d: particle %d: direct: %.5lf, tree: %.5lf\n", rank, i, particle_id, particle_potential, direct_potential);
     }
 }
 
@@ -418,7 +423,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size, leaf_tiles = 32;
+    red_factor = comm_size, leaf_tiles = 16 * comm_size;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
@@ -553,6 +558,7 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
             // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
             direct_potentials(this_pid) += q_h( other_pid ) / dist;        
         }
+        // printf("R%d: dp%d: %.4lf\n", rank, this_pid, direct_potentials(this_pid));
     }
 
     // Send direct_potentials view to all ranks so they can check it against their points    
@@ -646,9 +652,10 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
                 }
             }
             tree_potentials(tpi) = accumulator.real();
-            printf("R%d: tree particle(%d, %d, %d), locals: %0.3lf, %.3lf, %.3lf, val: %.3lf\n", rank,
-                target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-                locals_slice(local_index, 0, 0), locals_slice(local_index, 1, 0), locals_slice(local_index, 2, 0), tree_potentials(tpi));
+            // printf("R%d: tree particle(%d, %d, %d), locals: %0.3lf, %.3lf, %.3lf, tp(%d): %.3lf\n", rank,
+            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
+            //     locals_slice(local_index, 0, 0), locals_slice(local_index, 1, 0), locals_slice(local_index, 2, 0),
+            //     tpi, tree_potentials(tpi));
 
         } );
     Kokkos::fence();
@@ -660,13 +667,13 @@ void testMultipole2Local1(int points_per_proc_in, bool balanced)
     auto pid_h = Cabana::slice<3>(tree_particles_h);
     auto p_pot = Cabana::slice<2>(tree_particles_h);
     
-    for (int i = 0; i < owned_points; i++)
+    for (int i = 0; i < tree_particles_h.size(); i++)
     {
         auto particle_id = pid_h(i);
         auto particle_potential = p_pot(i);
         auto direct_potential = direct_potentials(particle_id);
         ASSERT_NEAR(particle_potential, direct_potential, Kokkos::pow(10, -p_int+3));
-        // printf("R%d: particle %d: direct: %.5lf, tree: %.5lf\n", rank, particle_id, particle_potential, direct_potential);
+        // printf("R%d: i%d: particle %d: direct: %.5lf, tree: %.5lf\n", rank, i, particle_id, particle_potential, direct_potential);
     }
 }
 
@@ -681,14 +688,14 @@ TEST( Helper, testCell2Bound)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-// TEST( Tree, testMultipole2Local0_balanced )
-// { 
-//     testMultipole2Local0<3>(30, true);     
-// }
+TEST( Tree, testMultipole2Local0_balanced )
+{ 
+    testMultipole2Local0<3>(30, true);     
+}
 
 TEST( Tree, testMultipole2Local1_balanced )
 { 
-    testMultipole2Local1<6>(2, true); 
+    testMultipole2Local1<6>(200, true); 
 }
 
 //---------------------------------------------------------------------------//
