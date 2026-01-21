@@ -538,6 +538,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
             (cell_ijk[1] >= inner_lower_bound[1] && cell_ijk[1] < inner_upper_bound[1]) &&
             (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
             {
+                printf("P%d: Skipping near particle %d\n", this_pid, other_pid);
                 continue;
             }
             // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
@@ -710,12 +711,12 @@ TEST( M2L, single_layer )
 
 TEST( M2L, multi_layer_no_solver_l2p )
 { 
-    testMultipole2Local1<6>(6, 0, true); 
+    testMultipole2Local1<6>(50, 0, true); 
 }
 
 TEST( M2L, multi_layer_with_solver_l2p )
 { 
-    testMultipole2Local1<6>(6, 1, true); 
+    testMultipole2Local1<6>(50, 1, true); 
 }
 
 //---------------------------------------------------------------------------//
