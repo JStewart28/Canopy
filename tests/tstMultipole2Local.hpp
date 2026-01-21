@@ -898,7 +898,7 @@ TEST( Helper, testCell2Bound)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-// TEST( Tree, testMultipole2Local0_balanced )
+TEST( Tree, testMultipole2Local0_balanced )
 { 
     testMultipole2Local0<3>(30, true);     
 }
