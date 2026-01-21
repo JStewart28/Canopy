@@ -590,17 +590,20 @@ class TreeLayer
 
         std::size_t num_particles = end - start;
 
-        // Size _ijk2index to hold the number of incoming particles. This is an overestimate.
-        // Assuming the particles are evenly distributed, size _ijk2index to hold the number of
-        // incoming particles * the communicator size on layers > 0. This is the number of activated
-        // cells for layers > 0. At layer 0, assume the number of incoming particles >> the number of
-        // incoming particles, and size to the number of incoming particles. We need this overestimate
-        // to hold ijk2index maps of ghosted cells.
+        // Size _ijk2index to hold the number of incoming particles. This is an
+        // overestimate. Assuming the particles are evenly distributed, size
+        // _ijk2index to hold the number of incoming particles * the
+        // communicator size on layers > 0. This is the number of activated
+        // cells for layers > 0. At layer 0, assume the number of incoming
+        // particles >> the number of incoming particles, and size to the number
+        // of incoming particles. We need this overestimate to hold ijk2index
+        // maps of ghosted cells.
+        // XXX - size this correctly
         _ijk2index.clear();
-        if (_layer_number == 0)
-            _ijk2index.rehash(num_particles);
+        if ( _layer_number == 0 )
+            _ijk2index.rehash( _cells_per_dim * _cells_per_dim * _cells_per_dim );
         else
-            _ijk2index.rehash(num_particles * _comm_size);
+            _ijk2index.rehash( num_particles * _comm_size );
         auto ijk2index = _ijk2index;
 
         // If ParticleAoSoA type is data_aosoa_type, then the positions are the second tuple element.

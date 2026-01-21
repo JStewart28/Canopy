@@ -138,17 +138,6 @@ void testSolver(int points_per_proc_in, bool balanced)
         }
         // printf("this_pid(%d): (%d, %d, %d)\n", this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2]);
 
-        // Set inner bound - where cells are too close for the local
-        // approximation to be accurate. Inclusive on lower end,
-        // exclusive on upper end
-        Kokkos::Array<int, 3> inner_lower_bound;
-        Kokkos::Array<int, 3> inner_upper_bound;
-        for (int dim = 0; dim < 3; ++dim)
-        {
-            inner_upper_bound[dim] = Kokkos::min(static_cast<int>(this_cell_ijk[dim]) + 3, cells_per_dimension_leaf);
-            inner_lower_bound[dim] = Kokkos::max(static_cast<int>(this_cell_ijk[dim]) - 2, 0);
-        }
-
         // Iterate over all particles inserted into the mesh. If it falls into a cell
         // within 2 cells of the target point's cell, skip it. If not, add its contribution
         // to the potential at the target point.
@@ -228,7 +217,7 @@ void testSolver(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testSolver_balanced )
 { 
-    testSolver<5>(200, true);     
+    testSolver<5>(200, true);
 }
 
 //---------------------------------------------------------------------------//

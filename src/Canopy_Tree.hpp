@@ -397,6 +397,9 @@ class Tree
         auto out_data_slice = Cabana::slice<out_data_id>(_leaf_particles);
         Cabana::deep_copy(out_data_slice, 0.0);
 
+        // Owned particles are the number of leaf particles
+        _owned_particles = _leaf_particles.size();
+
         // if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(_leaf_particles, 0, _leaf_particles.size());
         for (std::size_t i = 1; i < _tree.size(); i++)
@@ -636,8 +639,11 @@ class Tree
      */
     void computeL2P()
     {
+        int rank = _rank;
+
         auto particle_positions = Cabana::slice<position_id>(_leaf_particles);
         auto particle_potentials = Cabana::slice<out_data_id>(_leaf_particles);
+        auto particle_id = Cabana::slice<3>(_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
@@ -699,10 +705,8 @@ class Tree
                 }
             }
             particle_potentials(tpi) += accumulator.real();
-            // printf("R%d: tree particle(%d, %d, %d), locals: %0.3lf, %.3lf, %.3lf, tp(%d): %.3lf\n", rank,
-            //     target_cell_ijk[0], target_cell_ijk[1], target_cell_ijk[2],
-            //     locals_slice(local_index, 0, 0), locals_slice(local_index, 1, 0), locals_slice(local_index, 2, 0),
-            //     tpi, tree_potentials(tpi));
+            // printf("R%d: pid %d: potential: %.3lf\n", rank,
+            //     particle_id(tpi), particle_potentials(tpi));
 
         } );
         Kokkos::fence();
