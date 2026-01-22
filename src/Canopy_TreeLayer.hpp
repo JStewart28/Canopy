@@ -407,7 +407,7 @@ class TreeLayer
         _coefficient_view_index = Kokkos::View<std::size_t, memory_space>("_coefficient_view_index");
         Kokkos::deep_copy(_coefficient_view_index, 0);
 
-        printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
+        if (_rank == 0) printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
             _cells_per_dim, _cell_size[0]);
     
     }
@@ -507,6 +507,12 @@ class TreeLayer
         //         printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", _layer_number,
         //             i, _domains(i, 0), _domains(i, 1), _domains(i, 2), _domains(i, 3),
         //             _domains(i, 4), _domains(i, 5));
+        // }
+        // for (std::size_t i = 0; i < _cell_offsets_view.extent(0); ++i)
+        // {
+        //     if (_rank == 0)
+        //         printf("L%d: R%d: cell offset(%d, %d, %d)\n", _layer_number,
+        //             i, _cell_offsets_view(i, 0), _cell_offsets_view(i, 1), _cell_offsets_view(i, 2));
         // }
     }
 
@@ -693,11 +699,11 @@ class TreeLayer
                 }
                 if (result.success())
                 {
-                    // printf("L%d: R%d: insert ijk(%llu, %llu, %llu)\n",
-                    //     layer_number, rank,
-                    //     (unsigned long long)cell_activated_ijk[0],
-                    //     (unsigned long long)cell_activated_ijk[1],
-                    //     (unsigned long long)cell_activated_ijk[2]);
+                    printf("L%d: R%d: insert ijk(%llu, %llu, %llu)\n",
+                        layer_number, rank,
+                        (unsigned long long)cell_activated_ijk[0],
+                        (unsigned long long)cell_activated_ijk[1],
+                        (unsigned long long)cell_activated_ijk[2]);
                 }
             } );
 
@@ -935,6 +941,17 @@ class TreeLayer
         Kokkos::View<int, memory_space> num_exports_d("num_exports_d");
         Kokkos::deep_copy(num_exports_d, 0);
 
+        if (_rank == 0)
+        {
+            printf("Child domains:\n");
+            for(int i = 0; i < _comm_size; i++)
+            {
+                printf("R%d domain: (%.3lf, %.3lf, %.3lf) (%.3lf, %.3lf, %.3lf)\n",
+                    i, child_domain(i, 0), child_domain(i, 1), child_domain(i, 2),
+                    child_domain(i, 3), child_domain(i, 4), child_domain(i, 5));
+            }
+        }
+
         Kokkos::parallel_for("fill_vert_halo_data",
         Kokkos::RangePolicy<execution_space>(0, _locals.size()),
         KOKKOS_LAMBDA(const int index)
@@ -957,6 +974,13 @@ class TreeLayer
 
                 auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
 
+                if (cell_ijk_slice(index, 0) == 24 && cell_ijk_slice(index, 1) == 30 && cell_ijk_slice(index, 2) == 13)
+                {
+                    printf("L%d: R%d: p(%d, %d, %d), child(%d, %d, %d) cent(%.3lf, %.3lf, %.3lf)\n", layer_number, rank,
+                        cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),
+                        child_ijk[0], child_ijk[1], child_ijk[2],
+                        child_center[0], child_center[1], child_center[2]);
+                }
                 int owner_rank = -1;
 
                 for (int r = 0; r < child_domain_extent; ++r)
@@ -979,9 +1003,9 @@ class TreeLayer
                     auto index = Kokkos::atomic_fetch_add(&num_exports_d(), 1);
                     id_slice(index) = index;
                     rank_slice(index) = owner_rank;
-                    // printf("L%d: R%d: sending local ijk:(%d, %d, %d), to R%d\n",
-                    //     layer_number, rank, cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),
-                    //     owner_rank);
+                    printf("L%d: R%d: sending local ijk:(%d, %d, %d), to R%d\n",
+                        layer_number, rank, cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),
+                        owner_rank);
                 }
                 
             
@@ -1050,7 +1074,7 @@ class TreeLayer
         Kokkos::RangePolicy<execution_space>(0, parent_locals.size()),
         KOKKOS_LAMBDA(const int hi)
         {
-            // printf("L%d: R%d: Got plocal(%d, %d, %d)\n", layer_number, rank, parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2));
+            printf("L%d: R%d: Got plocal(%d, %d, %d)\n", layer_number, rank, parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2));
             
             auto parent_cell_center = cellCenter(parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2),
                 low_corner, parent_cell_size);
@@ -1067,7 +1091,7 @@ class TreeLayer
                     static_cast<std::size_t>(parent_ijk_slice(hi, 1) * factor + dj),
                     static_cast<std::size_t>(parent_ijk_slice(hi, 2) * factor + dk)
                 };
-                // printf("L%d: R%d: checking cell %d, %d, %d\n", _layer_number, _rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                if (parent_ijk_slice(hi, 0) == 24 && parent_ijk_slice(hi, 1) == 30 && parent_ijk_slice(hi, 2) == 13) printf("L%d: R%d: checking cell %d, %d, %d\n", _layer_number, _rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
                 // Check if this cell is activated
                 auto cell_ijk_exists = ijk2index.exists( cell_ijk );
                 if (cell_ijk_exists)
@@ -1102,11 +1126,11 @@ class TreeLayer
                         coefficient_slice(local_index, i, 1) += L_trans[i].imag();
                     }
                     // printf("Adding locals from cell ")
-                    // printf("L%d: R%d: Adding from pijk(%d, %d, %d) to ijk(%d, %d, %d): %.2lf, %.2lf, %.2lf, %.2lf\n", layer_number, rank,
-                    //     parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2),
-                    //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    //     coefficient_slice(local_index, 0, 0), coefficient_slice(local_index, 1, 0), 
-                    //     coefficient_slice(local_index, 2, 0), coefficient_slice(local_index, 3, 0));
+                    printf("L%d: R%d: Adding from pijk(%d, %d, %d) to ijk(%d, %d, %d): %.2lf, %.2lf, %.2lf, %.2lf\n", layer_number, rank,
+                        parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2),
+                        cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        coefficient_slice(local_index, 0, 0), coefficient_slice(local_index, 1, 0), 
+                        coefficient_slice(local_index, 2, 0), coefficient_slice(local_index, 3, 0));
                 }
             }
         });
@@ -1273,9 +1297,9 @@ class TreeLayer
                     auto index = Kokkos::atomic_fetch_add(&counter(), 1);
                     id_slice(index) = m_index;
                     rank_slice(index) = r;
-                    // printf("L%d: R%d: sending multipole ijk:(%d, %d, %d), to R%d\n",
-                    //     layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    //     r);
+                    printf("L%d: R%d: sending multipole ijk:(%d, %d, %d), to R%d\n",
+                        layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                        r);
                 }
             }
         });
@@ -1463,11 +1487,11 @@ class TreeLayer
                         Kokkos::Array<cdouble, num_coefficients> L;
                         Kernel::Scalar::m2l<p>(M, L, m2l_vec);
 
-                        // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
-                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        //     ci, cj, ck,
-                        //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
-                        //     L[0].real(), L[1].real(), L[2].real());
+                        printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                            cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                            ci, cj, ck,
+                            m2l_vec[0], m2l_vec[1], m2l_vec[2],
+                            L[0].real(), L[1].real(), L[2].real());
                         
                         // Add contribution to locals for this cell
                         for (std::size_t i = 0; i < num_coefficients; i++)
