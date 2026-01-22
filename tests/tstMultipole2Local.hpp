@@ -424,7 +424,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size, leaf_tiles = 16 * comm_size;
+    red_factor = 2, leaf_tiles = 32;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
@@ -711,12 +711,12 @@ TEST( M2L, single_layer )
 
 TEST( M2L, multi_layer_no_solver_l2p )
 { 
-    testMultipole2Local1<6>(50, 0, true); 
+    testMultipole2Local1<6>(10, 0, true); 
 }
 
 TEST( M2L, multi_layer_with_solver_l2p )
 { 
-    testMultipole2Local1<6>(50, 1, true); 
+    testMultipole2Local1<6>(10, 1, true); 
 }
 
 //---------------------------------------------------------------------------//

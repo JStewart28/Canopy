@@ -1463,7 +1463,7 @@ class TreeLayer
                         Kokkos::Array<cdouble, num_coefficients> L;
                         Kernel::Scalar::m2l<p>(M, L, m2l_vec);
 
-                        // if (layer_number == 4) printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                        // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
                         //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
                         //     ci, cj, ck,
                         //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
@@ -1568,7 +1568,6 @@ class TreeLayer
     local_aosoa_type _locals;
     std::size_t _num_local_locals;
     std::size_t _num_ghost_locals;
-
     // For each cell, the subset of the domain, in i/j/k indices for cells in this layer,
     // where the contribution from cells outside of these bounds have already been
     // accounted for in more coarse layers.

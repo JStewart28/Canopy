@@ -515,6 +515,17 @@ class Tree
             // Compute locals at layer L
             _tree[L]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
         }
+
+        auto leaf_locals = _tree[0]->locals();
+        auto locals = Cabana::slice<0>(leaf_locals);
+        auto cell_ijks = Cabana::slice<1>(leaf_locals);
+        printf("R%d: num local locals: %d\n", _rank, _tree[0]->numCells());
+        for (int i = 0; i < _tree[0]->numCells(); i++)
+        {
+            printf("R%d: ijk(%d, %d, %d): l: %.2lf, %.2lf, %.2lf\n", _rank,
+                cell_ijks(i, 0), cell_ijks(i, 1), cell_ijks(i, 2),
+                locals(i, 0, 0), locals(i, 1, 0), locals(i, 2, 0));
+        }
     }
 
     void haloParticles()
