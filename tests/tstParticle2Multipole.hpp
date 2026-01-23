@@ -21,6 +21,12 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
+using cdouble = Kokkos::complex<double>;
+
+// pos/charge/potential/global particle id
+using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
+using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
+
 /**
  * Rank 0 creates all the data. Each rank gets two particles.
  * All ranks insert into the tree.
@@ -29,7 +35,7 @@ namespace Test
  * at the leaf layer.
  */
 template <std::size_t p_val>
-void testParticle2Multipole(bool balanced)
+void testParticle2Multipole(int points_per_proc_in, bool balanced)
 {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -38,15 +44,13 @@ void testParticle2Multipole(bool balanced)
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     // Create a tree of at least depth 3 for any number of processes
-    using particle_tuple_type = Cabana::MemberTypes<double[3], double>;
-    using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
     std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
     std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size, leaf_tiles = comm_size * 32;
+    red_factor = 2, leaf_tiles = 32;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
@@ -58,10 +62,11 @@ void testParticle2Multipole(bool balanced)
     // ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Tree depth must be at least 3.\n";
     
     // Create the data
-    int num_points = (rank == 0) ? (comm_size * 500) : 0;
+     int total_points = points_per_proc_in;
+    int owned_points = (rank == 0) ? (total_points) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
-                                                          num_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
+                                                          owned_points );
+    Kokkos::View<double*, TEST_MEMSPACE> q( "q", owned_points );
     
     double bound_val = 3.0;
     Kokkos::Array<double, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
@@ -73,22 +78,26 @@ void testParticle2Multipole(bool balanced)
 
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
-    fillRandomScalar(q, charge_bounds, 123);
+    fillRandomScalar(q, charge_bounds, 321);
 
-    Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
+    Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
+    auto potential_slice_host = Cabana::slice<2>(particle_aosoa_host);
+    auto id_slice_host = Cabana::slice<3>(particle_aosoa_host);
+    Cabana::deep_copy(potential_slice_host, 0.0);
 
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
     auto q_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
-    for (int i = 0; i < num_points; ++i)
+    for (int i = 0; i < owned_points; ++i)
     {
         for (int j = 0; j < 3; ++j)
         {
             pos_slice_host(i, j) = cart_coords_h(i, j);
         }
         scalar_slice_host(i) = q_h(i);
+        id_slice_host(i) = i;
     }
 
     // Calculate direct potential.
@@ -97,7 +106,7 @@ void testParticle2Multipole(bool balanced)
     double r, theta, phi;
     Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
     double potential_direct = 0.0;
-    for (std::size_t i = 0; i < num_points; ++i)
+    for (std::size_t i = 0; i < owned_points; ++i)
     {
         double dx = Px - pos_slice_host( i, 0 );
         double dy = Py - pos_slice_host( i, 1 );
@@ -143,7 +152,7 @@ void testParticle2Multipole(bool balanced)
     double error = Kokkos::pow(10, -p_int+1);
     EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
         << p << ": Potentials do not match. Tree depth " << tree->numLayers();
-    // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
+    printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
 }
 
 //---------------------------------------------------------------------------//
@@ -152,16 +161,16 @@ void testParticle2Multipole(bool balanced)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-TEST( Tree, testParticle2Multipole1_balanced ) { testParticle2Multipole<1>(true); }
-TEST( Tree, testParticle2Multipole2_balanced ) { testParticle2Multipole<2>(true); }
-TEST( Tree, testParticle2Multipole3_balanced ) { testParticle2Multipole<3>(true); }
-TEST( Tree, testParticle2Multipole4_balanced ) { testParticle2Multipole<4>(true); }
+TEST( Tree, testParticle2Multipole1_balanced ) { testParticle2Multipole<1>(38, true); }
+TEST( Tree, testParticle2Multipole2_balanced ) { testParticle2Multipole<2>(38, true); }
+TEST( Tree, testParticle2Multipole3_balanced ) { testParticle2Multipole<3>(38, true); }
+TEST( Tree, testParticle2Multipole4_balanced ) { testParticle2Multipole<6>(38, true); }
 
 // Test with an unbalanced particle distribution.
-TEST( Tree, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(false); }
-TEST( Tree, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(false); }
-TEST( Tree, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(false); }
-TEST( Tree, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(false); }
+TEST( Tree, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(38, false); }
+TEST( Tree, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(38, false); }
+TEST( Tree, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(38, false); }
+TEST( Tree, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(38, false); }
 
 //---------------------------------------------------------------------------//
 
