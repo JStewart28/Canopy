@@ -161,16 +161,16 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-TEST( Tree, testParticle2Multipole1_balanced ) { testParticle2Multipole<1>(38, true); }
-TEST( Tree, testParticle2Multipole2_balanced ) { testParticle2Multipole<2>(38, true); }
-TEST( Tree, testParticle2Multipole3_balanced ) { testParticle2Multipole<3>(38, true); }
-TEST( Tree, testParticle2Multipole4_balanced ) { testParticle2Multipole<6>(38, true); }
+TEST( Tree, testParticle2Multipole1_balanced ) { testParticle2Multipole<1>(5000, true); }
+TEST( Tree, testParticle2Multipole2_balanced ) { testParticle2Multipole<2>(5000, true); }
+TEST( Tree, testParticle2Multipole3_balanced ) { testParticle2Multipole<3>(5000, true); }
+TEST( Tree, testParticle2Multipole4_balanced ) { testParticle2Multipole<6>(5000, true); }
 
 // Test with an unbalanced particle distribution.
-TEST( Tree, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(38, false); }
-TEST( Tree, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(38, false); }
-TEST( Tree, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(38, false); }
-TEST( Tree, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(38, false); }
+TEST( Tree, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(5000, false); }
+TEST( Tree, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(5000, false); }
+TEST( Tree, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(5000, false); }
+TEST( Tree, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(5000, false); }
 
 //---------------------------------------------------------------------------//
 
