@@ -534,13 +534,13 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
             }
 
             // Only consider cells outside the inner local bound
-            if ((cell_ijk[0] >= inner_lower_bound[0] && cell_ijk[0] < inner_upper_bound[0]) &&
-            (cell_ijk[1] >= inner_lower_bound[1] && cell_ijk[1] < inner_upper_bound[1]) &&
-            (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
-            {
-                printf("P%d: Skipping near particle %d\n", this_pid, other_pid);
-                continue;
-            }
+            // if ((cell_ijk[0] >= inner_lower_bound[0] && cell_ijk[0] < inner_upper_bound[0]) &&
+            // (cell_ijk[1] >= inner_lower_bound[1] && cell_ijk[1] < inner_upper_bound[1]) &&
+            // (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
+            // {
+            //     printf("P%d: Skipping near particle %d\n", this_pid, other_pid);
+            //     continue;
+            // }
             // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
             double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
             double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
@@ -688,8 +688,8 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
         auto direct_potential = direct_potentials(particle_id);
         auto mesh_potential = tree_potentials(i);
         double allowed_error = Kokkos::pow(10, -p_int+3);
-        // EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
-        printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
+        EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
+        // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }
 }
 
@@ -711,12 +711,12 @@ TEST( Helper, testCell2Bound)
 
 TEST( M2L, multi_layer_no_solver_l2p )
 { 
-    testMultipole2Local1<6>(5, 0, true); 
+    testMultipole2Local1<6>(38, 0, true); 
 }
 
 // TEST( M2L, multi_layer_with_solver_l2p )
 // { 
-//     testMultipole2Local1<6>(5, 1, true); 
+//     testMultipole2Local1<6>(300, 1, true); 
 // }
 
 //---------------------------------------------------------------------------//

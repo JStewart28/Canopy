@@ -507,7 +507,7 @@ class Tree
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
             // Get the computed locals at the layer above L (more coarse layer)
-            _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L+1]->domains());
+            _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L]->domains());
 
             // Add these locals to layer L
             _tree[L]->addCoarseLocals(halo_data);
@@ -519,13 +519,13 @@ class Tree
         auto leaf_locals = _tree[0]->locals();
         auto locals = Cabana::slice<0>(leaf_locals);
         auto cell_ijks = Cabana::slice<1>(leaf_locals);
-        printf("R%d: num local locals: %d\n", _rank, _tree[0]->numCells());
-        for (int i = 0; i < _tree[0]->numCells(); i++)
-        {
-            printf("R%d: ijk(%d, %d, %d): l: %.2lf, %.2lf, %.2lf\n", _rank,
-                cell_ijks(i, 0), cell_ijks(i, 1), cell_ijks(i, 2),
-                locals(i, 0, 0), locals(i, 1, 0), locals(i, 2, 0));
-        }
+        // printf("R%d: num local locals: %d\n", _rank, _tree[0]->numCells());
+        // for (int i = 0; i < _tree[0]->numCells(); i++)
+        // {
+        //     printf("R%d: ijk(%d, %d, %d): l: %.2lf, %.2lf, %.2lf\n", _rank,
+        //         cell_ijks(i, 0), cell_ijks(i, 1), cell_ijks(i, 2),
+        //         locals(i, 0, 0), locals(i, 1, 0), locals(i, 2, 0));
+        // }
     }
 
     void haloParticles()
