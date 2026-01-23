@@ -407,8 +407,8 @@ class TreeLayer
         _coefficient_view_index = Kokkos::View<std::size_t, memory_space>("_coefficient_view_index");
         Kokkos::deep_copy(_coefficient_view_index, 0);
 
-        if (_rank == 0) printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
-            _cells_per_dim, _cell_size[0]);
+        // if (_rank == 0) printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
+        //     _cells_per_dim, _cell_size[0]);
     
     }
 
@@ -501,13 +501,13 @@ class TreeLayer
         _num_owned_cell_view = vec2view<memory_space>(num_owned_cell_vec, "_num_owned_cell_view");
         _domains = vec2view<memory_space>(domains_vec, "_domains");
 
-        for (std::size_t i = 0; i < _domains.extent(0); ++i)
-        {
-            if (_rank == 0)
-                printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", _layer_number,
-                    i, _domains(i, 0), _domains(i, 1), _domains(i, 2), _domains(i, 3),
-                    _domains(i, 4), _domains(i, 5));
-        }
+        // for (std::size_t i = 0; i < _domains.extent(0); ++i)
+        // {
+        //     if (_rank == 0)
+        //         printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", _layer_number,
+        //             i, _domains(i, 0), _domains(i, 1), _domains(i, 2), _domains(i, 3),
+        //             _domains(i, 4), _domains(i, 5));
+        // }
         // for (std::size_t i = 0; i < _cell_offsets_view.extent(0); ++i)
         // {
         //     if (_rank == 0)
@@ -777,6 +777,7 @@ class TreeLayer
         // the data_slice, which changes depending on if layer 0 or not.
         if constexpr (position_index == 0)
         {
+            auto id_slice = Cabana::slice<3>(data_aosoa);
             Kokkos::parallel_for( "set_multipoles_layer0",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -818,6 +819,13 @@ class TreeLayer
                         Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 0), M[i].real());
                         Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 1), M[i].imag());
                     }
+
+                    // printf("L%d: R%d: insert ijk(%llu, %llu, %llu) from p(%.3lf, %.3lf, %.3lf), pid %d\n",
+                    // layer_number, rank,
+                    // (unsigned long long)cell_activated_ijk[0],
+                    // (unsigned long long)cell_activated_ijk[1],
+                    // (unsigned long long)cell_activated_ijk[2],
+                    // positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ), id_slice(pid));
                 });
         }
 
@@ -975,7 +983,7 @@ class TreeLayer
 
                 auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
 
-                // if (cell_ijk_slice(index, 0) == 24 && cell_ijk_slice(index, 1) == 30 && cell_ijk_slice(index, 2) == 13)
+                // if (cell_ijk_slice(index, 0) == 10 && cell_ijk_slice(index, 1) == 17 && cell_ijk_slice(index, 2) == 2)
                 // {
                 //     printf("L%d: R%d: p(%d, %d, %d), child(%d, %d, %d) cent(%.3lf, %.3lf, %.3lf)\n", layer_number, rank,
                 //         cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),

@@ -468,6 +468,21 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
+    // if (rank == 0)
+    // {
+    //     /*
+    //     L0: R0: insert ijk(12, 19, 2) from p(-1.788, -1.157, -2.739), pid 7						
+    //     L0: R0: insert ijk(10, 17, 2) from p(-1.973, -1.372, -2.778), pid 37						
+    //     */
+    //    cart_coords(0, 0) = -1.788;
+    //    cart_coords(0, 1) = -1.157;
+    //    cart_coords(0, 2) = -2.739;
+
+    //    cart_coords(1, 0) = -1.973;
+    //    cart_coords(1, 1) = -1.372;
+    //    cart_coords(1, 2) = -2.778;
+    // }
+
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
@@ -534,13 +549,13 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
             }
 
             // Only consider cells outside the inner local bound
-            // if ((cell_ijk[0] >= inner_lower_bound[0] && cell_ijk[0] < inner_upper_bound[0]) &&
-            // (cell_ijk[1] >= inner_lower_bound[1] && cell_ijk[1] < inner_upper_bound[1]) &&
-            // (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
-            // {
-            //     printf("P%d: Skipping near particle %d\n", this_pid, other_pid);
-            //     continue;
-            // }
+            if ((cell_ijk[0] >= inner_lower_bound[0] && cell_ijk[0] < inner_upper_bound[0]) &&
+            (cell_ijk[1] >= inner_lower_bound[1] && cell_ijk[1] < inner_upper_bound[1]) &&
+            (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
+            {
+                // printf("P%d: Skipping near particle %d\n", this_pid, other_pid);
+                continue;
+            }
             // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
             double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
             double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
@@ -704,20 +719,20 @@ TEST( Helper, testCell2Bound)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-// TEST( M2L, single_layer )
-// { 
-//     testMultipole2Local0<3>(30, true);     
-// }
+TEST( M2L, single_layer )
+{ 
+    testMultipole2Local0<3>(30, true);     
+}
 
 TEST( M2L, multi_layer_no_solver_l2p )
 { 
-    testMultipole2Local1<6>(38, 0, true); 
+    testMultipole2Local1<6>(300, 0, true); 
 }
 
-// TEST( M2L, multi_layer_with_solver_l2p )
-// { 
-//     testMultipole2Local1<6>(300, 1, true); 
-// }
+TEST( M2L, multi_layer_with_solver_l2p )
+{ 
+    testMultipole2Local1<6>(300, 1, true); 
+}
 
 //---------------------------------------------------------------------------//
 

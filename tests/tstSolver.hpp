@@ -119,12 +119,12 @@ void testSolver(int points_per_proc_in, bool balanced)
     for (int this_pid = 0; this_pid < owned_points; this_pid++)
     {
         // Get the cell this point falls into
-        Kokkos::Array<std::size_t, 3> this_cell_ijk;
-        for (int dim = 0; dim < 3; ++dim)
-        {
-            this_cell_ijk[dim] = static_cast<std::size_t>(
-                Kokkos::floor((pos_slice_host(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
-        }
+        // Kokkos::Array<std::size_t, 3> this_cell_ijk;
+        // for (int dim = 0; dim < 3; ++dim)
+        // {
+        //     this_cell_ijk[dim] = static_cast<std::size_t>(
+        //         Kokkos::floor((pos_slice_host(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
+        // }
         // printf("this_pid(%d): (%d, %d, %d)\n", this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2]);
 
         // Iterate over all particles inserted into the mesh. If it falls into a cell
@@ -135,12 +135,12 @@ void testSolver(int points_per_proc_in, bool balanced)
             if (this_pid == other_pid)
                 continue;
 
-            Kokkos::Array<int, 3> cell_ijk;
-            for (int dim = 0; dim < 3; ++dim)
-            {
-                cell_ijk[dim] = static_cast<int>(
-                    Kokkos::floor((pos_slice_host(other_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
-            }
+            // Kokkos::Array<int, 3> cell_ijk;
+            // for (int dim = 0; dim < 3; ++dim)
+            // {
+            //     cell_ijk[dim] = static_cast<int>(
+            //         Kokkos::floor((pos_slice_host(other_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
+            // }
             
             // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
             double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
