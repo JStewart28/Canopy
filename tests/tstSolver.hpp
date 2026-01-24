@@ -185,15 +185,15 @@ void testSolver(int points_per_proc_in, bool balanced)
     auto tree_id_slice = Cabana::slice<3>(tree_particles);
     auto sort_data = Cabana::sortByKey( tree_id_slice );
     Cabana::permute( sort_data, tree_particles );
-    tree_id_slice = Cabana::slice<3>(tree_particles);
-    auto tree_potentials = Cabana::slice<2>(tree_particles);
+    auto tree_id_slice_h = Cabana::slice<3>(tree_particles);
+    auto tree_potentials_h = Cabana::slice<2>(tree_particles);
 
     int p_int = static_cast<int>(p);
     for (int i = 0; i < owned_points; i++)
     {
-        auto particle_id = tree_id_slice(i);
+        auto particle_id = tree_id_slice_h(i);
         auto direct_potential = direct_potentials(particle_id);
-        auto mesh_potential = tree_potentials(i);
+        auto mesh_potential = tree_potentials_h(i);
         double allowed_error = Kokkos::pow(10, -p_int+3);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
         // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
@@ -206,7 +206,7 @@ void testSolver(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testSolver_balanced )
 { 
-    testSolver<5>(50, true);
+    testSolver<5>(100, true);
 }
 
 //---------------------------------------------------------------------------//
