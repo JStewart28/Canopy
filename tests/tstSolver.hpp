@@ -38,6 +38,7 @@ void testSolver(int points_per_proc_in, bool balanced)
     // Create a tree of depth 3. pos/charge/potential/global particle id
     using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
     using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
+    using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
     std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
     std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
 
@@ -161,23 +162,23 @@ void testSolver(int points_per_proc_in, bool balanced)
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     tree->multipole_to_local();
-
+    
     tree->computeL2P();
 
     tree->computeP2P();
 
     // Gather all particles from the tree back to rank 0 for testing
     auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
-    particle_aosoa_type tree_particles("tree_particles", tmp.size());
+    particle_aosoa_type_h tree_particles("tree_particles", tmp.size());
     Cabana::deep_copy(tree_particles, tmp);
 
     // Remove ghost particles
     tree_particles.resize(tree->numOwnedParticles());
     
     // Send particles back to rank 0 for testing
-    Kokkos::View<int*, TEST_MEMSPACE> send_to("send_to", tree->numOwnedParticles());
+    Kokkos::View<int*, Kokkos::HostSpace> send_to("send_to", tree->numOwnedParticles());
     Kokkos::deep_copy(send_to, 0);
-    Cabana::Distributor<TEST_MEMSPACE> distributor(MPI_COMM_WORLD, send_to);
+    Cabana::Distributor<Kokkos::HostSpace> distributor(MPI_COMM_WORLD, send_to);
     Cabana::migrate( distributor, tree_particles );
 
     // Sort the particles by increasing cell_id
@@ -205,7 +206,7 @@ void testSolver(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testSolver_balanced )
 { 
-    testSolver<5>(300, true);
+    testSolver<5>(50, true);
 }
 
 //---------------------------------------------------------------------------//

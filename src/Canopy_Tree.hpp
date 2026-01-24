@@ -326,7 +326,7 @@ class Tree
         auto M_children_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), M_children);
 
         // Create objects needed for translation of multipole coefficients.
-        Canopy::Kernel::Scalar::M2M<memory_space, execution_space> m2m( p );
+        Canopy::Kernel::Scalar::M2M<Kokkos::HostSpace, execution_space> m2m( p );
 
         // Iterate over each incoming data.
         for (std::size_t i = 0; i < cells_activated; ++i)
@@ -507,18 +507,21 @@ class Tree
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
             // Get the computed locals at the layer above L (more coarse layer)
+            printf("L%d: R%d: sendCoarseLocals\n", L, _rank);
             _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L]->domains());
 
             // Add these locals to layer L
+            printf("L%d: R%d: addCoarseLocals\n", L, _rank);
             _tree[L]->addCoarseLocals(halo_data);
 
             // Compute locals at layer L
+            printf("L%d: R%d: multipole_to_local\n", L, _rank);
             _tree[L]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
         }
 
-        auto leaf_locals = _tree[0]->locals();
-        auto locals = Cabana::slice<0>(leaf_locals);
-        auto cell_ijks = Cabana::slice<1>(leaf_locals);
+        // auto leaf_locals = _tree[0]->locals();
+        // auto locals = Cabana::slice<0>(leaf_locals);
+        // auto cell_ijks = Cabana::slice<1>(leaf_locals);
         // printf("R%d: num local locals: %d\n", _rank, _tree[0]->numCells());
         // for (int i = 0; i < _tree[0]->numCells(); i++)
         // {

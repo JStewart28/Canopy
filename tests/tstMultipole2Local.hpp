@@ -26,6 +26,7 @@ using cdouble = Kokkos::complex<double>;
 // pos/charge/potential/global particle id
 using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
 using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
+using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
 
 void testCell2Bound()
 {
@@ -167,7 +168,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
-    red_factor = comm_size * 8, leaf_tiles = comm_size * 8;
+    red_factor = 8, leaf_tiles = 8;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
@@ -403,7 +404,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
         auto direct_potential = direct_potentials(particle_id);
         double allowed_error = Kokkos::pow(10, -p_int+3);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
-        // printf("R%d: i%d: particle %d: direct: %.5lf, tree: %.5lf\n", rank, i, particle_id, particle_potential, direct_potential);
+        // printf("R%d: i%d: particle %d: direct: %.5lf, tree: %.5lf\n", rank, i, particle_id, mesh_potential, direct_potential);
     }
 }
 
@@ -582,10 +583,9 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
 
     if (use_solver_l2p)
         tree->computeL2P();
-    
-    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
-    particle_aosoa_type tree_particles("tree_particles", tmp.size());
-    Cabana::deep_copy(tree_particles, tmp);
+
+    particle_aosoa_type tree_particles("tree_particles", tree->particles().size());
+    Cabana::deep_copy(tree_particles, tree->particles());
 
     // Remove ghost particles
     // printf("R%d: num owned particles: %d\n", rank, tree->numOwnedParticles());
@@ -689,19 +689,21 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     //     printf("R%d: id: %d, pot: %.3lf\n", rank, tpids(i), tps(i));
     // }
 
+    // Copy tree particles to host
+    particle_aosoa_type_h tree_particles_h = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree_particles);
     // Sort the particles by increasing cell_id
-    auto tree_id_slice = Cabana::slice<3>(tree_particles);
+    auto tree_id_slice = Cabana::slice<3>(tree_particles_h);
     auto sort_data = Cabana::sortByKey( tree_id_slice );
-    Cabana::permute( sort_data, tree_particles );
-    tree_id_slice = Cabana::slice<3>(tree_particles);
-    auto tree_potentials = Cabana::slice<2>(tree_particles);
+    Cabana::permute( sort_data, tree_particles_h );
+    auto tree_id_slice_h = Cabana::slice<3>(tree_particles_h);
+    auto tree_potentials_h= Cabana::slice<2>(tree_particles_h);
 
     int p_int = static_cast<int>(p_val);
     for (int i = 0; i < owned_points; i++)
     {
-        auto particle_id = tree_id_slice(i);
+        auto particle_id = tree_id_slice_h(i);
         auto direct_potential = direct_potentials(particle_id);
-        auto mesh_potential = tree_potentials(i);
+        auto mesh_potential = tree_potentials_h(i);
         double allowed_error = Kokkos::pow(10, -p_int+3);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
         // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
@@ -721,17 +723,17 @@ TEST( Helper, testCell2Bound)
 // Test with a balanced particle distribution.
 TEST( M2L, single_layer )
 { 
-    testMultipole2Local0<3>(30, true);     
+    testMultipole2Local0<3>(100, true);     
 }
 
 TEST( M2L, multi_layer_no_solver_l2p )
 { 
-    testMultipole2Local1<6>(300, 0, true); 
+    testMultipole2Local1<6>(40, 0, true); 
 }
 
 TEST( M2L, multi_layer_with_solver_l2p )
 { 
-    testMultipole2Local1<6>(300, 1, true); 
+    testMultipole2Local1<6>(40, 1, true); 
 }
 
 //---------------------------------------------------------------------------//

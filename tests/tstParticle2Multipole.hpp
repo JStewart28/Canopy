@@ -152,7 +152,7 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     double error = Kokkos::pow(10, -p_int+1);
     EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
         << p << ": Potentials do not match. Tree depth " << tree->numLayers();
-    printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
+    // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
 }
 
 //---------------------------------------------------------------------------//

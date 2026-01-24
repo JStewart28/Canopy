@@ -36,27 +36,27 @@ namespace Canopy
  * Convert a std::vector to a Kokkos::View
  */
 template <class MemorySpace, class ElementType>
-Kokkos::View<typename ElementType::value_type**, MemorySpace>
-vec2view(const std::vector<ElementType>& vector, const std::string& label)
+Kokkos::View<typename ElementType::value_type*[
+                 std::tuple_size<ElementType>::value],
+             MemorySpace>
+vec2view(const std::vector<ElementType>& vec, const std::string& label)
 {
     using value_type = typename ElementType::value_type;
-    const std::size_t num_elements = vector.size();
-    constexpr std::size_t element_size = std::tuple_size<ElementType>::value;
+    constexpr std::size_t N = std::tuple_size<ElementType>::value;
+    const std::size_t num = vec.size();
 
-    // Create a host view
-    Kokkos::View<value_type**, Kokkos::HostSpace> host_view(label, num_elements, element_size);
+    // Allocate the destination view in the target memory space.
+    Kokkos::View<value_type*[N], MemorySpace> device_view(label, num);
 
-    // Copy vector data into the host view
-    for (std::size_t i = 0; i < num_elements; ++i)
-    {
-        for (std::size_t j = 0; j < element_size; ++j)
-        {
-            host_view(i, j) = vector[i][j];
-        }
-    }
+    auto host_mirror = Kokkos::create_mirror_view(device_view);
+
+    // Fill mirror from std::vector
+    for (std::size_t i = 0; i < num; ++i)
+        for (std::size_t j = 0; j < N; ++j)
+            host_mirror(i, j) = vec[i][j];
 
     // Copy to device
-    auto device_view = Kokkos::create_mirror_view_and_copy(MemorySpace(), host_view);
+    Kokkos::deep_copy(device_view, host_mirror);
 
     return device_view;
 }
@@ -777,7 +777,7 @@ class TreeLayer
         // the data_slice, which changes depending on if layer 0 or not.
         if constexpr (position_index == 0)
         {
-            auto id_slice = Cabana::slice<3>(data_aosoa);
+            // auto id_slice = Cabana::slice<3>(data_aosoa);
             Kokkos::parallel_for( "set_multipoles_layer0",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -1241,17 +1241,29 @@ class TreeLayer
     {
         // Communicate _mhalo_outer_bound to each rank so we know who we need to send to.
         // Allocate view to store data from other ranks
-        Kokkos::View<int*[6], memory_space> all_mhalo_outer_bounds("all_mhalo_outer_bounds", _comm_size);
+        Kokkos::View<int*[6], Kokkos::HostSpace> all_mhalo_outer_bounds_h("all_mhalo_outer_bounds", _comm_size);
 
-        // Ensure data is ready before MPI
-        Kokkos::fence();
+        // Host buffer 
+        auto h_send = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), _mhalo_outer_bound);
 
-        // Each rank sends 6 ints, receives comm_size * 6 ints
-        MPI_Allgather(_mhalo_outer_bound.data(), 6, MPI_INT,
-            all_mhalo_outer_bounds.data(), 6, MPI_INT, _comm);
+        // MPI on host data
+        MPI_Allgather(h_send.data(), 6, MPI_INT,
+                      all_mhalo_outer_bounds_h.data(), 6, MPI_INT, _comm);
 
-        // Ensure MPI is finished before using results
-        Kokkos::fence();
+        // Copy back to device
+        auto all_mhalo_outer_bounds = Kokkos::create_mirror_view_and_copy(memory_space(), all_mhalo_outer_bounds_h);
+
+        // if(_rank == 0)
+        // {   
+        //     Kokkos::parallel_for("print",
+        //     Kokkos::RangePolicy<execution_space>(0, _comm_size),
+        //     KOKKOS_LAMBDA(const int i)
+        //     {
+        //             printf("bounds R%d: (%d, %d, %d) (%d, %d, %d)\n",
+        //                 i, all_mhalo_outer_bounds(i, 0), all_mhalo_outer_bounds(i, 1), all_mhalo_outer_bounds(i, 2),
+        //                 all_mhalo_outer_bounds(i, 4), all_mhalo_outer_bounds(i, 5), all_mhalo_outer_bounds(i, 6));
+        //     });
+        // }
 
         int rank = _rank;
         int comm_size = _comm_size;
@@ -1287,7 +1299,7 @@ class TreeLayer
             auto cell_ijk = position2ijk(cell_center_slice( m_index, 0 ), cell_center_slice( m_index, 1 ), cell_center_slice( m_index, 2 ),
                 low_corner, cell_size);
 
-            // printf("L%d: R%d: checking if multipole(%d, %d, %d) needs to be haloed\n",
+            // printf("L%d: R%d: ff multipole(%d, %d, %d) needs to be haloed\n",
             //     layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
 
             // Check if this cell center is within a rank's halo bound
@@ -1312,6 +1324,7 @@ class TreeLayer
                 }
             }
         });
+        Kokkos::fence();
 
         int num_exports;
         Kokkos::deep_copy(num_exports, counter);
@@ -1346,6 +1359,7 @@ class TreeLayer
                 printf("L%d: R%d: Error inserting haloed multipole!\n", layer_number, rank);
             }
         });
+        Kokkos::fence();
     }
 
     /**

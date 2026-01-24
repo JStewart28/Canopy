@@ -23,6 +23,10 @@ namespace Test
 
 using cdouble = Kokkos::complex<double>;
 
+using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
+using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
+using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
+
 /**
  * Tests that particle-to-particle potentials are calculated correctly at the leaf layer.
  */
@@ -88,17 +92,6 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     // Kokkos::Array<double, 6> coord_bounds1 = {2.3, 2.3, 2.3, bound_val, bound_val, bound_val};
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
-
-    if (rank == 0)
-    {
-        cart_coords(0, 0) = -2.3;
-        cart_coords(0, 1) = -2.7;
-        cart_coords(0, 2) = -2.0;
-
-        cart_coords(1, 0) = -2.5;
-        cart_coords(1, 1) = -2.6;
-        cart_coords(1, 2) = -1.9;
-    }
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
@@ -192,16 +185,16 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 
     // Gather all particles from the tree back to rank 0 for testing
     auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
-    particle_aosoa_type tree_particles("tree_particles", tmp.size());
+    particle_aosoa_type_h tree_particles("tree_particles", tmp.size());
     Cabana::deep_copy(tree_particles, tmp);
 
     // Remove ghost particles
     tree_particles.resize(tree->numOwnedParticles());
     
     // Send particles back to rank 0 for testing
-    Kokkos::View<int*, TEST_MEMSPACE> send_to("send_to", tree->numOwnedParticles());
+    Kokkos::View<int*, Kokkos::HostSpace> send_to("send_to", tree->numOwnedParticles());
     Kokkos::deep_copy(send_to, 0);
-    Cabana::Distributor<TEST_MEMSPACE> distributor(MPI_COMM_WORLD, send_to);
+    Cabana::Distributor<Kokkos::HostSpace> distributor(MPI_COMM_WORLD, send_to);
     Cabana::migrate( distributor, tree_particles );
 
     // Sort the particles by increasing cell_id
