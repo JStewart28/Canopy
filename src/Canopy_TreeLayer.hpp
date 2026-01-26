@@ -511,8 +511,9 @@ class TreeLayer
         // for (std::size_t i = 0; i < _cell_offsets_view.extent(0); ++i)
         // {
         //     if (_rank == 0)
-        //         printf("L%d: R%d: cell offset(%d, %d, %d)\n", _layer_number,
-        //             i, _cell_offsets_view(i, 0), _cell_offsets_view(i, 1), _cell_offsets_view(i, 2));
+        //         printf("L%d: R%d: cell offset(%d, %d, %d), owned(%d, %d, %d)\n", _layer_number,
+        //             i, _cell_offsets_view(i, 0), _cell_offsets_view(i, 1), _cell_offsets_view(i, 2),
+        //             _num_owned_cell_view(i, 0), _num_owned_cell_view(i, 1), _num_owned_cell_view(i, 2));
         // }
     }
 
