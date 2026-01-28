@@ -534,6 +534,7 @@ class Tree
     void haloParticles()
     {
         auto leaf_cell_size = _tree[0]->cellSize();
+        auto leaf_cell_per_dim = _tree[0]->cellsPerDim();
         auto cell_base = _tree[0]->cell_offsets();
         auto cell_offsets = _tree[0]->num_owned_cell();
         auto positions = Cabana::slice<position_id>(_leaf_particles);
@@ -541,9 +542,12 @@ class Tree
         auto particle_ids = Cabana::slice<3>(_leaf_particles);
 
         const int rank = _rank;
+        const int comm_size = _comm_size;
+
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
         // For particle-to-particle calculations, we need to halo all particles within
-        // 2x cell size in each direction.
+        // two cells in each direction.
         using domain_type = Kokkos::View<int*[6], memory_space>;
         domain_type halo_domains("halo_domains", _comm_size);
         Kokkos::parallel_for("compute halo domains",
@@ -552,18 +556,29 @@ class Tree
             {
                 for (int i = 0; i < 3; i++)
                 {
-                    int rank_min = Kokkos::min(cell_base(r, i) - 2, 0);
-                    int rank_max = Kokkos::max(cell_base(r, i) + cell_offsets(r, i) + 3, cells_per_dim);
+                    int rank_min = Kokkos::max(cell_base(r, i) - 2, 0);
+                    int rank_max = Kokkos::min(cell_base(r, i) + cell_offsets(r, i) + 3, leaf_cell_per_dim);
 
                     halo_domains(r, i) = rank_min;
                     halo_domains(r, i+3) = rank_max;
                 }
+                
                 // if (rank == 0) printf("R%d: leaf: (%.2lf, %.2lf, %.2lf) to (%.2lf, %.2lf, %.2lf), halo: (%.2lf, %.2lf, %.2lf) to (%.2lf, %.2lf, %.2lf)\n",
                 //     rank,
                 //     leaf_domains(r, 0), leaf_domains(r, 1), leaf_domains(r, 2), leaf_domains(r, 3), leaf_domains(r, 4), leaf_domains(r, 5),
                 //     halo_domains(r, 0), halo_domains(r, 1), halo_domains(r, 2), halo_domains(r, 3), halo_domains(r, 4), halo_domains(r, 5));
             }
         );
+
+        // if (rank == 0)
+        // {
+        //     for (int r = 0; r < _comm_size; r++)
+        //     {
+        //         printf("R%d: domain: (%d, %d, %d), (%d, %d, %d)\n", r,
+        //             halo_domains(r, 0), halo_domains(r, 1), halo_domains(r, 2),
+        //             halo_domains(r, 3), halo_domains(r, 4), halo_domains(r, 5));
+        //     }
+        // }
 
         // Iterate over particles. If we have a particle that falls within another ranks' halo
         // domain, we must halo it.
@@ -579,19 +594,19 @@ class Tree
                 const double y = positions(pid, 1);
                 const double z = positions(pid, 2);
 
-                auto cell_ijk = 
+                auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
 
                 std::size_t local_count = 0;
 
-                for (std::size_t r = 0; r < 6; r++)
+                for (std::size_t r = 0; r < comm_size; r++)
                 {
                     if (r == rank)
                         continue;
 
                     const bool inside =
-                        (x >= halo_domains(r, 0) && x <= halo_domains(r, 3)) &&
-                        (y >= halo_domains(r, 1) && y <= halo_domains(r, 4)) &&
-                        (z >= halo_domains(r, 2) && z <= halo_domains(r, 5));
+                        (cell_ijk[0] >= halo_domains(r, 0) && cell_ijk[0] < halo_domains(r, 3)) &&
+                        (cell_ijk[1] >= halo_domains(r, 1) && cell_ijk[1] < halo_domains(r, 4)) &&
+                        (cell_ijk[2] >= halo_domains(r, 2) && cell_ijk[2] < halo_domains(r, 5));
 
                     if (inside)
                         local_count++;        
@@ -619,18 +634,20 @@ class Tree
                 const double x = positions(pid, 0);
                 const double y = positions(pid, 1);
                 const double z = positions(pid, 2);
+                auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
 
-                // if (particle_ids(pid) == 178) printf("R%d: checking p%d\n", rank, particle_ids(pid));
+                // if (particle_ids(pid) == 178) printf("R%d: checking p%d: (%d, %d, %d)\n", rank, particle_ids(pid),
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2]);
 
-                for (std::size_t r = 0; r < 6; r++)
+                for (std::size_t r = 0; r < comm_size; r++)
                 {
                     if (r == rank)
                         continue;
 
                     const bool inside =
-                        (x >= halo_domains(r, 0) && x <= halo_domains(r, 3)) &&
-                        (y >= halo_domains(r, 1) && y <= halo_domains(r, 4)) &&
-                        (z >= halo_domains(r, 2) && z <= halo_domains(r, 5));
+                        (cell_ijk[0] >= halo_domains(r, 0) && cell_ijk[0] < halo_domains(r, 3)) &&
+                        (cell_ijk[1] >= halo_domains(r, 1) && cell_ijk[1] < halo_domains(r, 4)) &&
+                        (cell_ijk[2] >= halo_domains(r, 2) && cell_ijk[2] < halo_domains(r, 5));
 
                     if (inside)
                     {
@@ -638,7 +655,7 @@ class Tree
                         id_slice(index) = pid;
                         rank_slice(index) = r;
                         // if (particle_ids(pid) == 178) printf("R%d: sending pid %d to R%d\n", rank, pid, r);
-                    }
+                    }   
                 }
             });
         
@@ -764,8 +781,8 @@ class Tree
             Cabana::FullNeighborTag{}, positions, 0, total_particles,
             neighborhood_radius );
         
-        if (rank == 0) printf("cell size: %.3lf, %.3lf, %.3lf, radius: %.3lf\n",
-            cell_size[0], cell_size[1], cell_size[2], neighborhood_radius);
+        // if (rank == 0) printf("cell size: %.3lf, %.3lf, %.3lf, radius: %.3lf\n",
+        //     cell_size[0], cell_size[1], cell_size[2], neighborhood_radius);
 
 
         using list_type = decltype(neighbor_list);
@@ -803,12 +820,12 @@ class Tree
 
                 auto ijk_n = position2ijk(xn, yn, zn, low_corner, cell_size);
 
-                if (pids(my_id) == 326) printf("R%d: ? p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
-                    rank, pids(my_id), xi, yi, zi,
-                    pids(neighbor_id), xn, yn, zn);
-                if (pids(my_id) == 326) printf("R%d: ? p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
-                    rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
-                    pids(neighbor_id), ijk_n[0], ijk_n[1], ijk_n[2]);
+                // if (pids(my_id) == 326) printf("R%d: ? p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
+                //     rank, pids(my_id), xi, yi, zi,
+                //     pids(neighbor_id), xn, yn, zn);
+                // if (pids(my_id) == 326) printf("R%d: ? p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
+                //     rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
+                //     pids(neighbor_id), ijk_n[0], ijk_n[1], ijk_n[2]);
 
 
                 // Check that our neighbor particle's cell is within 2 cells
@@ -817,12 +834,12 @@ class Tree
                     ijk_n[2] < lower[2] || ijk_n[2] >= upper[2])
                         continue;
                 
-                if (pids(my_id) == 326) printf("R%d: p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
-                    rank, pids(my_id), xi, yi, zi,
-                    pids(neighbor_id), xn, yn, zn);
-                if (pids(my_id) == 326) printf("R%d: p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
-                    rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
-                    pids(neighbor_id), ijk_n[0], ijk_n[1], ijk_n[2]);
+                // if (pids(my_id) == 326) printf("R%d: p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
+                //     rank, pids(my_id), xi, yi, zi,
+                //     pids(neighbor_id), xn, yn, zn);
+                // if (pids(my_id) == 326) printf("R%d: p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
+                //     rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
+                //     pids(neighbor_id), ijk_n[0], ijk_n[1], ijk_n[2]);
 
                 const double dx = xi - xn;
                 const double dy = yi - yn;

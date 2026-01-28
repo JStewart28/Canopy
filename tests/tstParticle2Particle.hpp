@@ -93,16 +93,16 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
-    if (rank == 0)
-    {
-        cart_coords(0, 0) = 1.0;
-        cart_coords(0, 1) = 1.0;
-        cart_coords(0, 2) = 1.0;
+    // if (rank == 0)
+    // {
+    //     cart_coords(0, 0) = 1.0;
+    //     cart_coords(0, 1) = 1.0;
+    //     cart_coords(0, 2) = 1.0;
 
-        cart_coords(1, 0) = 1.0 + (3.0/16.0);
-        cart_coords(1, 1) = 1.0 + (3.0/16.0);;
-        cart_coords(1, 2) = 1.0 + (3.0/16.0);;
-    }
+    //     cart_coords(1, 0) = 1.0 + (3.0/16.0);
+    //     cart_coords(1, 1) = 1.0 + (3.0/16.0);;
+    //     cart_coords(1, 2) = 1.0 + (3.0/16.0);;
+    // }
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
@@ -180,12 +180,12 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
                 double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
                 // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
                 direct_potentials(this_pid) += q_h( other_pid ) / dist;       
-                if (this_pid == 326) printf("R%d: correct p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
-                    rank, this_pid, pos_slice_host( this_pid, 0 ), pos_slice_host( this_pid, 1 ), pos_slice_host( this_pid, 2 ),
-                    other_pid, pos_slice_host( other_pid, 0 ), pos_slice_host( other_pid, 1 ), pos_slice_host( other_pid, 2 ));
-                if (this_pid == 326) printf("R%d: correct p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
-                    rank, this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2],
-                    other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+                // if (this_pid == 326) printf("R%d: correct p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
+                //     rank, this_pid, pos_slice_host( this_pid, 0 ), pos_slice_host( this_pid, 1 ), pos_slice_host( this_pid, 2 ),
+                //     other_pid, pos_slice_host( other_pid, 0 ), pos_slice_host( other_pid, 1 ), pos_slice_host( other_pid, 2 ));
+                // if (this_pid == 326) printf("R%d: correct p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
+                //     rank, this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2],
+                //     other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
             }            
         }
     }
@@ -228,7 +228,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
         auto mesh_potential = tree_potentials(i);
         double allowed_error = Kokkos::pow(10, -9);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << i;
-        if (particle_id == 326) printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
+        // if (particle_id == 326) printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }
 }
 
