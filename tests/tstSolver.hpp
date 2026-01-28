@@ -23,14 +23,11 @@ namespace Test
 
 using cdouble = Kokkos::complex<double>;
 
-using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
-using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
-using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
-
 /**
  * Tests that particle-to-particle potentials are calculated correctly at the leaf layer.
  */
-void testParticle2Particle0(int points_per_proc_in, bool balanced)
+template <std::size_t p>
+void testSolver(int points_per_proc_in, bool balanced)
 {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -41,14 +38,14 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     // Create a tree of depth 3. pos/charge/potential/global particle id
     using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
     using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
+    using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
     std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
     std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
 
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
-    static constexpr std::size_t p = 2;
     std::size_t leaf_tiles, red_factor;
-    red_factor = 2, leaf_tiles = 16;
+    red_factor = 2, leaf_tiles = 64;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
@@ -74,11 +71,11 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     // filled into the tree. There must be enough particles so that the target point resides
     // in a cell that has been activated in the mesh. This won't be a problem in the
     // "real" code because we only evaluate locals where cells are activated.
-    int points_per_proc = points_per_proc_in;
-    int num_points = (rank == 0) ? (points_per_proc) : 0;
+    int total_points = points_per_proc_in;
+    int owned_points = (rank == 0) ? (total_points) : 0;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
-                                                          num_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
+                                                          owned_points );
+    Kokkos::View<double*, TEST_MEMSPACE> q( "q", owned_points );
     
     Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
     double bound_val = 3.0;
@@ -93,18 +90,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
-    // if (rank == 0)
-    // {
-    //     cart_coords(0, 0) = 1.0;
-    //     cart_coords(0, 1) = 1.0;
-    //     cart_coords(0, 2) = 1.0;
-
-    //     cart_coords(1, 0) = 1.0 + (3.0/16.0);
-    //     cart_coords(1, 1) = 1.0 + (3.0/16.0);;
-    //     cart_coords(1, 2) = 1.0 + (3.0/16.0);;
-    // }
-
-    Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
+    Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
     auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
     auto potential_slice_host = Cabana::slice<2>(particle_aosoa_host);
@@ -115,7 +101,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
     auto q_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
 
-    for (int i = 0; i < num_points; ++i)
+    for (int i = 0; i < owned_points; ++i)
     {
         for (int j = 0; j < 3; ++j)
         {
@@ -129,64 +115,41 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 
     // Iterate over particles and calculate potential
     Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
-                                                          num_points );
+                                                          owned_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
-    for (int this_pid = 0; this_pid < num_points; this_pid++)
+    for (int this_pid = 0; this_pid < owned_points; this_pid++)
     {
         // Get the cell this point falls into
-        Kokkos::Array<std::size_t, 3> this_cell_ijk;
-        for (int dim = 0; dim < 3; ++dim)
-        {
-            this_cell_ijk[dim] = static_cast<std::size_t>(
-                Kokkos::floor((pos_slice_host(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
-        }
+        // Kokkos::Array<std::size_t, 3> this_cell_ijk;
+        // for (int dim = 0; dim < 3; ++dim)
+        // {
+        //     this_cell_ijk[dim] = static_cast<std::size_t>(
+        //         Kokkos::floor((pos_slice_host(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
+        // }
         // printf("this_pid(%d): (%d, %d, %d)\n", this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2]);
-
-        // Set inner bound - where cells are too close for the local
-        // approximation to be accurate. Inclusive on lower end,
-        // exclusive on upper end
-        Kokkos::Array<int, 3> inner_lower_bound;
-        Kokkos::Array<int, 3> inner_upper_bound;
-        for (int dim = 0; dim < 3; ++dim)
-        {
-            inner_upper_bound[dim] = Kokkos::min(static_cast<int>(this_cell_ijk[dim]) + 3, cells_per_dimension_leaf);
-            inner_lower_bound[dim] = Kokkos::max(static_cast<int>(this_cell_ijk[dim]) - 2, 0);
-        }
 
         // Iterate over all particles inserted into the mesh. If it falls into a cell
         // within 2 cells of the target point's cell, skip it. If not, add its contribution
         // to the potential at the target point.
-        for (int other_pid = 0; other_pid < num_points; other_pid++)
+        for (int other_pid = 0; other_pid < owned_points; other_pid++)
         {
             if (this_pid == other_pid)
                 continue;
 
-            Kokkos::Array<int, 3> cell_ijk;
-            for (int dim = 0; dim < 3; ++dim)
-            {
-                cell_ijk[dim] = static_cast<int>(
-                    Kokkos::floor((pos_slice_host(other_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
-            }
-
-            // Only consider cells inside the inner local bound
-            if ((cell_ijk[0] >= inner_lower_bound[0] && cell_ijk[0] < inner_upper_bound[0]) &&
-            (cell_ijk[1] >= inner_lower_bound[1] && cell_ijk[1] < inner_upper_bound[1]) &&
-            (cell_ijk[2] >= inner_lower_bound[2] && cell_ijk[2] < inner_upper_bound[2]))
-            {
-                // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
-                double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
-                double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
-                double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
-                double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
-                // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
-                direct_potentials(this_pid) += q_h( other_pid ) / dist;       
-                // if (this_pid == 326) printf("R%d: correct p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
-                //     rank, this_pid, pos_slice_host( this_pid, 0 ), pos_slice_host( this_pid, 1 ), pos_slice_host( this_pid, 2 ),
-                //     other_pid, pos_slice_host( other_pid, 0 ), pos_slice_host( other_pid, 1 ), pos_slice_host( other_pid, 2 ));
-                // if (this_pid == 326) printf("R%d: correct p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
-                //     rank, this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2],
-                //     other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
-            }            
+            // Kokkos::Array<int, 3> cell_ijk;
+            // for (int dim = 0; dim < 3; ++dim)
+            // {
+            //     cell_ijk[dim] = static_cast<int>(
+            //         Kokkos::floor((pos_slice_host(other_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
+            // }
+            
+            // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+            double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
+            double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
+            double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
+            double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
+            // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
+            direct_potentials(this_pid) += q_h( other_pid ) / dist;        
         }
     }
 
@@ -197,6 +160,10 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     // Fill the tree. This migrates particles to their correct rank.
     bool run_load_balance = !balanced;
     tree->create_multipoles(particle_aosoa, run_load_balance);
+
+    tree->multipole_to_local();
+    
+    tree->computeL2P();
 
     tree->computeP2P();
 
@@ -218,17 +185,18 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     auto tree_id_slice = Cabana::slice<3>(tree_particles);
     auto sort_data = Cabana::sortByKey( tree_id_slice );
     Cabana::permute( sort_data, tree_particles );
-    tree_id_slice = Cabana::slice<3>(tree_particles);
-    auto tree_potentials = Cabana::slice<2>(tree_particles);
+    auto tree_id_slice_h = Cabana::slice<3>(tree_particles);
+    auto tree_potentials_h = Cabana::slice<2>(tree_particles);
 
-    for (int i = 0; i < num_points; i++)
+    int p_int = static_cast<int>(p);
+    for (int i = 0; i < owned_points; i++)
     {
-        auto direct_potential = direct_potentials(i);
-        auto particle_id = tree_id_slice(i);
-        auto mesh_potential = tree_potentials(i);
-        double allowed_error = Kokkos::pow(10, -9);
-        EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << i;
-        // if (particle_id == 326) printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
+        auto particle_id = tree_id_slice_h(i);
+        auto direct_potential = direct_potentials(particle_id);
+        auto mesh_potential = tree_potentials_h(i);
+        double allowed_error = Kokkos::pow(10, -p_int+3);
+        EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
+        // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }
 }
 
@@ -236,9 +204,9 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
-TEST( Tree, testParticle2Particle0_balanced )
+TEST( Tree, testSolver_balanced )
 { 
-    testParticle2Particle0(500, true);     
+    testSolver<5>(100, true);
 }
 
 //---------------------------------------------------------------------------//

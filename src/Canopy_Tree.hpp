@@ -326,7 +326,7 @@ class Tree
         auto M_children_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), M_children);
 
         // Create objects needed for translation of multipole coefficients.
-        Canopy::Kernel::Scalar::M2M<memory_space, execution_space> m2m( p );
+        Canopy::Kernel::Scalar::M2M<Kokkos::HostSpace, execution_space> m2m( p );
 
         // Iterate over each incoming data.
         for (std::size_t i = 0; i < cells_activated; ++i)
@@ -392,6 +392,13 @@ class Tree
         // Data comes from externally to populate leaf layer (layer 0)
         _leaf_particles = external_data;
         migrateParticleData(_leaf_particles, run_load_balance);
+
+        // Set out data to 0
+        auto out_data_slice = Cabana::slice<out_data_id>(_leaf_particles);
+        Cabana::deep_copy(out_data_slice, 0.0);
+
+        // Owned particles are the number of leaf particles
+        _owned_particles = _leaf_particles.size();
 
         // if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(_leaf_particles, 0, _leaf_particles.size());
@@ -500,44 +507,78 @@ class Tree
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
             // Get the computed locals at the layer above L (more coarse layer)
-            _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L+1]->domains());
+            printf("L%d: R%d: sendCoarseLocals\n", L, _rank);
+            _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L]->domains());
 
             // Add these locals to layer L
+            printf("L%d: R%d: addCoarseLocals\n", L, _rank);
             _tree[L]->addCoarseLocals(halo_data);
 
             // Compute locals at layer L
+            printf("L%d: R%d: multipole_to_local\n", L, _rank);
             _tree[L]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
         }
+
+        // auto leaf_locals = _tree[0]->locals();
+        // auto locals = Cabana::slice<0>(leaf_locals);
+        // auto cell_ijks = Cabana::slice<1>(leaf_locals);
+        // printf("R%d: num local locals: %d\n", _rank, _tree[0]->numCells());
+        // for (int i = 0; i < _tree[0]->numCells(); i++)
+        // {
+        //     printf("R%d: ijk(%d, %d, %d): l: %.2lf, %.2lf, %.2lf\n", _rank,
+        //         cell_ijks(i, 0), cell_ijks(i, 1), cell_ijks(i, 2),
+        //         locals(i, 0, 0), locals(i, 1, 0), locals(i, 2, 0));
+        // }
     }
 
     void haloParticles()
     {
-        auto leaf_domains = _tree[0]->domains();
         auto leaf_cell_size = _tree[0]->cellSize();
+        auto leaf_cell_per_dim = _tree[0]->cellsPerDim();
+        auto cell_base = _tree[0]->cell_offsets();
+        auto cell_offsets = _tree[0]->num_owned_cell();
         auto positions = Cabana::slice<position_id>(_leaf_particles);
 
+        auto particle_ids = Cabana::slice<3>(_leaf_particles);
+
         const int rank = _rank;
+        const int comm_size = _comm_size;
+
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
         // For particle-to-particle calculations, we need to halo all particles within
-        // 2x cell size in each direction.
-        using domain_type = Kokkos::View<double*[6], memory_space>;
+        // two cells in each direction.
+        using domain_type = Kokkos::View<int*[6], memory_space>;
         domain_type halo_domains("halo_domains", _comm_size);
-        Kokkos::deep_copy(halo_domains, leaf_domains);
         Kokkos::parallel_for("compute halo domains",
             Kokkos::RangePolicy<execution_space>(0, _comm_size),
             KOKKOS_LAMBDA(const int r)
             {
                 for (int i = 0; i < 3; i++)
                 {
-                    halo_domains(r, i) = leaf_domains(r, i) - leaf_cell_size[i] * 2;
-                    halo_domains(r, i+3) = leaf_domains(r, i+3) + leaf_cell_size[i] * 2;
+                    int rank_min = Kokkos::max(cell_base(r, i) - 2, 0);
+                    int rank_max = Kokkos::min(cell_base(r, i) + cell_offsets(r, i) + 3, leaf_cell_per_dim);
+
+                    halo_domains(r, i) = rank_min;
+                    halo_domains(r, i+3) = rank_max;
                 }
+                
                 // if (rank == 0) printf("R%d: leaf: (%.2lf, %.2lf, %.2lf) to (%.2lf, %.2lf, %.2lf), halo: (%.2lf, %.2lf, %.2lf) to (%.2lf, %.2lf, %.2lf)\n",
                 //     rank,
                 //     leaf_domains(r, 0), leaf_domains(r, 1), leaf_domains(r, 2), leaf_domains(r, 3), leaf_domains(r, 4), leaf_domains(r, 5),
                 //     halo_domains(r, 0), halo_domains(r, 1), halo_domains(r, 2), halo_domains(r, 3), halo_domains(r, 4), halo_domains(r, 5));
             }
         );
+
+        // if (rank == 0)
+        // {
+        //     for (int r = 0; r < _comm_size; r++)
+        //     {
+        //         printf("R%d: domain: (%d, %d, %d), (%d, %d, %d)\n", r,
+        //             halo_domains(r, 0), halo_domains(r, 1), halo_domains(r, 2),
+        //             halo_domains(r, 3), halo_domains(r, 4), halo_domains(r, 5));
+        //     }
+        // }
 
         // Iterate over particles. If we have a particle that falls within another ranks' halo
         // domain, we must halo it.
@@ -553,17 +594,19 @@ class Tree
                 const double y = positions(pid, 1);
                 const double z = positions(pid, 2);
 
+                auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
+
                 std::size_t local_count = 0;
 
-                for (std::size_t r = 0; r < 6; r++)
+                for (std::size_t r = 0; r < comm_size; r++)
                 {
                     if (r == rank)
                         continue;
 
                     const bool inside =
-                        (x >= halo_domains(r, 0) && x <= halo_domains(r, 3)) &&
-                        (y >= halo_domains(r, 1) && y <= halo_domains(r, 4)) &&
-                        (z >= halo_domains(r, 2) && z <= halo_domains(r, 5));
+                        (cell_ijk[0] >= halo_domains(r, 0) && cell_ijk[0] < halo_domains(r, 3)) &&
+                        (cell_ijk[1] >= halo_domains(r, 1) && cell_ijk[1] < halo_domains(r, 4)) &&
+                        (cell_ijk[2] >= halo_domains(r, 2) && cell_ijk[2] < halo_domains(r, 5));
 
                     if (inside)
                         local_count++;        
@@ -591,24 +634,28 @@ class Tree
                 const double x = positions(pid, 0);
                 const double y = positions(pid, 1);
                 const double z = positions(pid, 2);
+                auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
 
-                for (std::size_t r = 0; r < 6; r++)
+                // if (particle_ids(pid) == 178) printf("R%d: checking p%d: (%d, %d, %d)\n", rank, particle_ids(pid),
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+
+                for (std::size_t r = 0; r < comm_size; r++)
                 {
                     if (r == rank)
                         continue;
 
                     const bool inside =
-                        (x >= halo_domains(r, 0) && x <= halo_domains(r, 3)) &&
-                        (y >= halo_domains(r, 1) && y <= halo_domains(r, 4)) &&
-                        (z >= halo_domains(r, 2) && z <= halo_domains(r, 5));
+                        (cell_ijk[0] >= halo_domains(r, 0) && cell_ijk[0] < halo_domains(r, 3)) &&
+                        (cell_ijk[1] >= halo_domains(r, 1) && cell_ijk[1] < halo_domains(r, 4)) &&
+                        (cell_ijk[2] >= halo_domains(r, 2) && cell_ijk[2] < halo_domains(r, 5));
 
                     if (inside)
                     {
                         auto index = Kokkos::atomic_fetch_add(&num_halos(), 1);
                         id_slice(index) = pid;
                         rank_slice(index) = r;
-                        // printf("R%d: sending pid %d to R%d\n", rank, pid, r);
-                    }
+                        // if (particle_ids(pid) == 178) printf("R%d: sending pid %d to R%d\n", rank, pid, r);
+                    }   
                 }
             });
         
@@ -627,18 +674,97 @@ class Tree
         // printf("R%d: num local: %d, ghost: %d, lp size: %d\n", _rank, _owned_particles, _ghost_particles, _leaf_particles.size());
     }
 
+    /**
+     * Take the locals from the leaf layer and convert them into potentials at each particle
+     */
+    void computeL2P()
+    {
+        int rank = _rank;
+
+        auto particle_positions = Cabana::slice<position_id>(_leaf_particles);
+        auto particle_potentials = Cabana::slice<out_data_id>(_leaf_particles);
+        auto particle_id = Cabana::slice<3>(_leaf_particles);
+
+        auto cell_size = _tree[0]->cellSize();
+        auto cells_per_dim = _tree[0]->cellsPerDim();
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+
+        auto ijk2index = _tree[0]->cellijk2i();
+
+        auto locals_slice = Cabana::slice<0>(_tree[0]->locals());
+
+        // Iterate over points and use locals to calculate potential
+        Kokkos::parallel_for(
+        "populate_local_potential",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, _leaf_particles.size() ),
+        KOKKOS_LAMBDA( const int tpi ) {
+
+            // Get the cell this point falls into
+            Kokkos::Array<std::size_t, 3> target_cell_ijk;
+            for (int dim = 0; dim < 3; ++dim)
+            {
+                target_cell_ijk[dim] = static_cast<std::size_t>(
+                    Kokkos::floor((particle_positions(tpi, dim) - low_corner[dim]) / cell_size[dim]) );
+            }
+
+            // Only continue if this cell exists in the mesh.
+            // It always should.
+            auto cell_exists = ijk2index.exists(target_cell_ijk);
+            if (!cell_exists)
+                return;
+
+             // Center of local expansion is the cell center
+            Kokkos::Array<double, 3> l_center;
+            for (int i = 0; i < 3; i++)
+                l_center[i] = low_corner[i] + (static_cast<double>(target_cell_ijk[i]) + 0.5) * cell_size[i];
+
+            // Convert target point to spherical coordinates relative to local center
+            double r, theta, phi;
+            Canopy::Kernel::cart2sph( particle_positions(tpi, 0) - l_center[0],
+                                      particle_positions(tpi, 1) - l_center[1],
+                                      particle_positions(tpi, 2) - l_center[2],
+                                      r, theta, phi );
+
+            auto ijk2l_index = ijk2index.find(target_cell_ijk);
+            auto local_index = ijk2index.value_at(ijk2l_index);
+
+            // Calculate potential using locals
+            cdouble accumulator(0.0, 0.0);
+            for ( int j = 0; j <= p; ++j )
+            {
+                for ( int k = -j; k <= j; ++k )
+                {
+                    int idx = Canopy::Kernel::Scalar::index( j, k );
+
+                    /* Target point 1 calculations */
+                    // Greengard eq. 3.59
+                    cdouble val = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
+                    accumulator +=
+                        val * Kokkos::pow( r, j ) *
+                        Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                }
+            }
+            particle_potentials(tpi) += accumulator.real();
+            // printf("R%d: pid %d: potential: %.3lf\n", rank,
+            //     particle_id(tpi), particle_potentials(tpi));
+
+        } );
+        Kokkos::fence();
+    }
+
     void computeP2P()
     {
         haloParticles();
 
-        // const int rank = _rank;
+        const int rank = _rank;
 
         // XXX How should scalar slice id be set and potential slice
 
         auto positions = Cabana::slice<position_id>(_leaf_particles);
         auto scalars = Cabana::slice<in_data_id>(_leaf_particles);
         auto potentials = Cabana::slice<out_data_id>(_leaf_particles);
-        Cabana::deep_copy(potentials, 0.0);
+
+        auto pids = Cabana::slice<3>(_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
@@ -646,70 +772,86 @@ class Tree
 
         auto total_particles = _leaf_particles.size();
         auto owned_particles = _owned_particles;
+        
+        // Find neighbor particles that are within 3 cells width of each other. 
+        // We need to use 3 cell width to ensure that for a particle in any given cell,
+        // all particles within cells up to 2 cells away are considered.
+        double neighborhood_radius = Kokkos::max(Kokkos::max(cell_size[0], cell_size[1]), cell_size[2]) * 3 * Kokkos::sqrt(3.0);
+        auto neighbor_list = Cabana::Experimental::makeNeighborList(
+            Cabana::FullNeighborTag{}, positions, 0, total_particles,
+            neighborhood_radius );
+        
+        // if (rank == 0) printf("cell size: %.3lf, %.3lf, %.3lf, radius: %.3lf\n",
+        //     cell_size[0], cell_size[1], cell_size[2], neighborhood_radius);
 
-        // printf("R%d: total: %d, owned: %d\n", _rank, total_particles, owned_particles);
 
-        // All pairs approach to calculating potential between particles within
-        // the inner M2L bounds at the leaf layer. Lower bound is inclusive.
-        using team_policy = Kokkos::TeamPolicy<execution_space>;
-        using member_type = team_policy::member_type;
+        using list_type = decltype(neighbor_list);
 
-        team_policy policy(owned_particles, Kokkos::AUTO);
+        Kokkos::parallel_for("compute_P2P", Kokkos::RangePolicy<execution_space>(0, owned_particles), 
+            KOKKOS_LAMBDA(int my_id) {
 
-        Kokkos::parallel_for("Leaf direct potentials (team)", policy,
-            KOKKOS_LAMBDA(const member_type& team)
-        {
-            const int i = team.league_rank();
-
-            const double xi = positions(i,0);
-            const double yi = positions(i,1);
-            const double zi = positions(i,2);
+            const double xi = positions(my_id,0);
+            const double yi = positions(my_id,1);
+            const double zi = positions(my_id,2);
 
             auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
-            // printf("R%d: this_ijk(%d, %d, %d)\n", rank, ijk_i[0], ijk_i[1], ijk_i[2]);
 
+            // Cell bounds for this particle
             Kokkos::Array<int,3> lower, upper;
             for (int d = 0; d < 3; ++d) {
                 lower[d] = Kokkos::max(int(ijk_i[d]) - 2, 0);
                 upper[d] = Kokkos::min(int(ijk_i[d]) + 3, cells_per_dim);
             }
 
+            int num_neighbors = Cabana::NeighborList<list_type>::numNeighbor(neighbor_list, my_id);
+            // if (num_neighbors > 0) printf("R%d: p%d: num n: %d\n", rank, pids(my_id), num_neighbors);
+        
+            // if (pids(my_id) == 326) printf("R%d: correct p%d: cell(%d, %d, %d)\n",
+            //     rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
+            //     other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+
             double phi = 0.0;
+            for (int j = 0; j < num_neighbors; j++) {
+                int neighbor_id = Cabana::NeighborList<list_type>::getNeighbor(neighbor_list, my_id, j);
 
-            Kokkos::parallel_reduce(
-                Kokkos::TeamThreadRange(team, total_particles),
-                [&](const int j, double& lsum)
-                {
-                    if (j == i) return;
+                const double xn = positions(neighbor_id,0);
+                const double yn = positions(neighbor_id,1);
+                const double zn = positions(neighbor_id,2);
 
-                    auto ijk_j = position2ijk(
-                        positions(j,0),
-                        positions(j,1),
-                        positions(j,2),
-                        low_corner, cell_size);
+                auto ijk_n = position2ijk(xn, yn, zn, low_corner, cell_size);
 
-                    if (ijk_j[0] < lower[0] || ijk_j[0] >= upper[0] ||
-                        ijk_j[1] < lower[1] || ijk_j[1] >= upper[1] ||
-                        ijk_j[2] < lower[2] || ijk_j[2] >= upper[2])
-                        return;
-                    
-                    // printf("R%d: this_ijk(%d, %d, %d), other_ijk(%d, %d, %d)\n", rank,
-                    //     ijk_i[0], ijk_i[1], ijk_i[2],
-                    //     ijk_j[0], ijk_j[1], ijk_j[2]);
-                    const double dx = xi - positions(j,0);
-                    const double dy = yi - positions(j,1);
-                    const double dz = zi - positions(j,2);
-                    const double r  = sqrt(dx*dx + dy*dy + dz*dz);
+                // if (pids(my_id) == 326) printf("R%d: ? p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
+                //     rank, pids(my_id), xi, yi, zi,
+                //     pids(neighbor_id), xn, yn, zn);
+                // if (pids(my_id) == 326) printf("R%d: ? p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
+                //     rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
+                //     pids(neighbor_id), ijk_n[0], ijk_n[1], ijk_n[2]);
 
-                    lsum += scalars(j) / r;
-                },
-                phi
-            );
 
-            Kokkos::single(Kokkos::PerTeam(team), [&](){
-                potentials(i) += phi;
-            });
+                // Check that our neighbor particle's cell is within 2 cells
+                if (ijk_n[0] < lower[0] || ijk_n[0] >= upper[0] ||
+                    ijk_n[1] < lower[1] || ijk_n[1] >= upper[1] ||
+                    ijk_n[2] < lower[2] || ijk_n[2] >= upper[2])
+                        continue;
+                
+                // if (pids(my_id) == 326) printf("R%d: p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
+                //     rank, pids(my_id), xi, yi, zi,
+                //     pids(neighbor_id), xn, yn, zn);
+                // if (pids(my_id) == 326) printf("R%d: p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
+                //     rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
+                //     pids(neighbor_id), ijk_n[0], ijk_n[1], ijk_n[2]);
+
+                const double dx = xi - xn;
+                const double dy = yi - yn;
+                const double dz = zi - zn;
+                const double r  = sqrt(dx*dx + dy*dy + dz*dz);
+
+                phi += scalars(neighbor_id) / r;
+            }
+
+            potentials(my_id) += phi;
         });
+        Kokkos::fence();
     }
 
 

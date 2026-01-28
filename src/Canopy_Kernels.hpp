@@ -206,7 +206,7 @@ struct P2M
     auto coefficients() { return _M; }
 
     /**
-     * Clear coefficents
+     * Clear coefficients
      */
     void clear() { Kokkos::deep_copy( _M, cdouble( 0.0, 0.0 ) ); }
 
