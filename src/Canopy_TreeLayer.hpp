@@ -373,6 +373,8 @@ class TreeLayer
      */
     void initialize()
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::initialize");
+
         // mesh/grid related initialization
         auto global_mesh = Cabana::Grid::createSparseGlobalMesh(
             _global_low_corner, _global_high_corner, _global_num_cell );
@@ -422,6 +424,8 @@ class TreeLayer
     template <class ParticlePositions>
     void optimizePartition(ParticlePositions positions, std::size_t num_particles)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::optimizePartition");
+
         _partitioner_ptr->optimizePartition( positions, num_particles, _global_low_corner,
             _cell_size[0], _comm);
 
@@ -524,6 +528,8 @@ class TreeLayer
     template <class ViewType, class PositionSliceType>
     void mapParticles(const PositionSliceType& positions, ViewType& particle_ranks, const int particle_num)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::mapParticles");
+
         using mem_space = typename ViewType::memory_space;
         using exec_space = typename ViewType::execution_space;
 
@@ -588,6 +594,8 @@ class TreeLayer
     template <class ParticleAoSoA>
     void populateCells(const ParticleAoSoA data_aosoa, const std::size_t start, const std::size_t end)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::populateCells");
+
         int rank = _rank;
         int layer_number = _layer_number;
 
@@ -909,6 +917,8 @@ class TreeLayer
      */
     void sendCoarseLocals(local_aosoa_type& halo_aosoa, const Kokkos::View<double*[6], memory_space>& child_domain)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::sendCoarseLocals");
+
         int rank = _rank;
         int layer_number = _layer_number;
 
@@ -1044,7 +1054,7 @@ class TreeLayer
         auto gathered_ijk_slice = Cabana::slice<1>(halo_aosoa);
         auto gathered_coefficient_slice = Cabana::slice<0>(halo_aosoa);
 
-        Kokkos::parallel_for("fill_locals_cells",
+        Kokkos::parallel_for("fill_haloed_locals",
         Kokkos::RangePolicy<execution_space>(num_local, num_local + halo.numGhost()),
         KOKKOS_LAMBDA(const int hi)
         {
@@ -1061,6 +1071,8 @@ class TreeLayer
 
     void addCoarseLocals(local_aosoa_type& parent_locals)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::addCoarseLocals");
+
         int rank = _rank;
         int layer_number = _layer_number;
 
@@ -1156,6 +1168,8 @@ class TreeLayer
      */
     void computeInteractionBounds(int starting_cells_per_dimension, int start_layer)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::computeInteractionBounds");
+
         // Initialize _mhalo_outer_bound
         _mhalo_outer_bound = Kokkos::View<int[6], memory_space>("_mhalo_outer_bound");
         
@@ -1175,7 +1189,7 @@ class TreeLayer
         int cell_incr_factor = _tile_reduction_factor;
 
         // Per-cell calculation
-        Kokkos::parallel_for("multipole_to_local",
+        Kokkos::parallel_for("interaction bounds",
         Kokkos::RangePolicy<execution_space>(0, ijk2index.capacity()),
         KOKKOS_LAMBDA(const int ijk2index_index)
         {
@@ -1215,7 +1229,7 @@ class TreeLayer
         MinMax6 result;
 
         Kokkos::parallel_reduce(
-        "ComputeHaloBounds",
+        "compute_halo_bounds",
         Kokkos::RangePolicy<execution_space>(0, m2l_bounds.extent(0)),
         HaloBoundsReduce<decltype(m2l_bounds)>{m2l_bounds},
         result
@@ -1240,6 +1254,8 @@ class TreeLayer
      */
     void haloMultipoles()
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::haloMultipoles");
+
         // Communicate _mhalo_outer_bound to each rank so we know who we need to send to.
         // Allocate view to store data from other ranks
         Kokkos::View<int*[6], Kokkos::HostSpace> all_mhalo_outer_bounds_h("all_mhalo_outer_bounds", _comm_size);
@@ -1372,6 +1388,8 @@ class TreeLayer
      */
     void multipole_to_local(int starting_cells_per_dimension, int start_layer)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::multipole_to_local");
+
         computeInteractionBounds(starting_cells_per_dimension, start_layer);
 
         haloMultipoles();
@@ -1395,7 +1413,7 @@ class TreeLayer
         auto cell_size = _cell_size;
 
         // Per-cell calculation
-        Kokkos::parallel_for("multipole_to_local",
+        Kokkos::parallel_for("Canopy::TreeLayer::multipole_to_local loop",
         Kokkos::RangePolicy<execution_space>(0, _num_local_multipoles),
         KOKKOS_LAMBDA(const int index)
         {            

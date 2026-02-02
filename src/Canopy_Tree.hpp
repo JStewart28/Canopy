@@ -163,6 +163,8 @@ class Tree
     void mapParticles(const PositionSliceType& positions, ViewType& particle_ranks,
                       const std::size_t particle_num, const int layer, const bool run_load_balance)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::mapParticles");
+
         using mem_space = typename ViewType::memory_space;
         using exec_space = typename ViewType::execution_space;
 
@@ -190,7 +192,7 @@ class Tree
         Kokkos::deep_copy(is_out_of_bounds, 0);
 
         Kokkos::parallel_for(
-            "mapParticles",
+            "Canopy::Tree::mapParticles loop",
             Kokkos::RangePolicy<exec_space>(0, particle_num),
             KOKKOS_LAMBDA(const int i) {
                 double xpos = positions(i, 0);
@@ -240,6 +242,8 @@ class Tree
     */
     void initializeRootLayer()
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::initializeRootLayer");
+
         // One rank holds all the data in the layer below the root because
         // there is only one tile per dimensions and therefore no
         // distributed partitioning.
@@ -296,7 +300,7 @@ class Tree
         // Iterate over all activated cells
         // int rank = _rank;
         Kokkos::parallel_for(
-        "iterate_top_layer",
+        "Canopy::Tree::initializeRootLayer loop",
         Kokkos::RangePolicy<execution_space>( 0, cells_activated ),
         KOKKOS_LAMBDA( const int index ) {
             // printf("R%d: checking index %d\n", rank, index);
@@ -389,6 +393,8 @@ class Tree
      */
     void create_multipoles(particle_aosoa_type& external_data, bool run_load_balance)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::create_multipoles");
+
         // Data comes from externally to populate leaf layer (layer 0)
         _leaf_particles = external_data;
         migrateParticleData(_leaf_particles, run_load_balance);
@@ -416,6 +422,8 @@ class Tree
      */
     void migrateParticleData(particle_aosoa_type& external_data, bool run_load_balance)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::migrateParticleData");
+
         auto positions = Cabana::slice<position_id>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
         mapParticles(positions, layer_owner, external_data.size(), 0, run_load_balance);
@@ -429,6 +437,8 @@ class Tree
      */
     void migrateAndSetLayer(int from_layer, int to_layer, bool run_load_balance)
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::migrateAndSetLayer");
+
         // Communicate cell data
         auto f_layer = _tree[from_layer];
         auto num_cells = f_layer->numCells();
@@ -475,6 +485,8 @@ class Tree
      */
     void multipole_to_local()
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::multipole_to_local");
+
         int starting_layer = static_cast<int>(_tree.size()) - 1;
 
         // Find the first valid layer
@@ -533,6 +545,8 @@ class Tree
 
     void haloParticles()
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::haloParticles");
+
         auto leaf_cell_size = _tree[0]->cellSize();
         auto leaf_cell_per_dim = _tree[0]->cellsPerDim();
         auto cell_base = _tree[0]->cell_offsets();
@@ -550,7 +564,7 @@ class Tree
         // two cells in each direction.
         using domain_type = Kokkos::View<int*[6], memory_space>;
         domain_type halo_domains("halo_domains", _comm_size);
-        Kokkos::parallel_for("compute halo domains",
+        Kokkos::parallel_for("Canopy::Tree::compute halo domains",
             Kokkos::RangePolicy<execution_space>(0, _comm_size),
             KOKKOS_LAMBDA(const int r)
             {
@@ -586,7 +600,7 @@ class Tree
         // First, count the number of particles that must be haloed.
         Kokkos::View<std::size_t, memory_space> num_halos("num_halos");
         Kokkos::deep_copy(num_halos, 0);
-        Kokkos::parallel_for("count halo particles",
+        Kokkos::parallel_for("Canopy::Tree::count halo particles",
             Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
             KOKKOS_LAMBDA(const int pid)
             {
@@ -627,7 +641,7 @@ class Tree
         Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks("ids_ranks", num_halos_h);
         auto id_slice = Cabana::slice<0>(ids_ranks);
         auto rank_slice = Cabana::slice<1>(ids_ranks);
-        Kokkos::parallel_for("fill halo particles",
+        Kokkos::parallel_for("Canopy::Tree::fill halo particles",
             Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
             KOKKOS_LAMBDA(const int pid)
             {
@@ -679,6 +693,8 @@ class Tree
      */
     void computeL2P()
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::computeL2P");
+
         int rank = _rank;
 
         auto particle_positions = Cabana::slice<position_id>(_leaf_particles);
@@ -695,7 +711,7 @@ class Tree
 
         // Iterate over points and use locals to calculate potential
         Kokkos::parallel_for(
-        "populate_local_potential",
+        "Canopy::Tree::populate_local_potential",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, _leaf_particles.size() ),
         KOKKOS_LAMBDA( const int tpi ) {
 
@@ -754,6 +770,8 @@ class Tree
 
     void computeP2P()
     {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::computeP2P");
+
         haloParticles();
 
         const int rank = _rank;
@@ -787,7 +805,7 @@ class Tree
 
         using list_type = decltype(neighbor_list);
 
-        Kokkos::parallel_for("compute_P2P", Kokkos::RangePolicy<execution_space>(0, owned_particles), 
+        Kokkos::parallel_for("Canopy::Tree::compute_P2P loop", Kokkos::RangePolicy<execution_space>(0, owned_particles), 
             KOKKOS_LAMBDA(int my_id) {
 
             const double xi = positions(my_id,0);
@@ -853,37 +871,6 @@ class Tree
         });
         Kokkos::fence();
     }
-
-
-    /**
-     * Computes the interaction list for each cell in the tree.
-     * 
-     * The interaction list of cell0 is the set of all cells such that:
-     *  1) cell0 and cell_other are on the same layer of the tree.
-     *  2) cell0 and cell_other do not touch.
-     *  3) The parent cells of cell0 and cell_other do touch.
-     */
-    void computeInteractionList()
-    {
-        // At the root layer, we assume all cells touch all other cells.
-        // In other words, these cells are all in each other's neighbor
-        // list, not interaction list.
-        
-    }
-    /**
-     * Computes the neighbor list for each cell in the tree.
-     * 
-     * The neighbor list of cell0 is the set of all cells such that:
-     *  1) cell0 and cell_other are on the same layer of the tree.
-     *  2) cell0 and cell_other directly border each other.
-     */
-    void computeNeighborList()
-    {
-        // At the root layer, all cells are neighbors with one another
-        // Otherwise, neighbor cells are cells that are +-1 in each
-        // dimension in cell_ijk locations.
-    } 
-
 
     int rank() const { return _rank; }
 
