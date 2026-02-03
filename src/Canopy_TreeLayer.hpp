@@ -922,11 +922,7 @@ class TreeLayer
         const int rank = _rank;
         const int layer_number = _layer_number;
         const int comm_size = _comm_size;
-
-        // Locals, cell ijk index
-        static constexpr std::size_t num_coefficients = (p+1)*(p+1);
-
-        const auto num_cells = numCells();
+        const int num_cells = static_cast<int>(numCells());
 
         auto ijk2index = _ijk2index;
         auto locals = _locals;
@@ -954,8 +950,7 @@ class TreeLayer
 
         using md_policy = Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<2>>;
         Kokkos::parallel_for("fill_vert_halo_data",
-            md_policy(_locals.size(), children_per_cell),
-            Kokkos::RangePolicy<execution_space>(0, _locals.size()),
+            md_policy({{0, 0}}, {{num_cells, children_per_cell}}),
             KOKKOS_LAMBDA(const int index, const int c)
         {
             int di =  c % factor;
@@ -997,7 +992,7 @@ class TreeLayer
         // Count the number of exports (non-zero values in id2rank)
         std::size_t num_exports = 0;
         Kokkos::parallel_reduce("count_nonzero_id2rank",
-            md_policy(id2rank.extent(0), id2rank.extent(1)),
+            md_policy({{0, 0}}, {{num_cells, comm_size}}),
             KOKKOS_LAMBDA(const int i, const int j, std::size_t& lsum) {
             lsum += (id2rank(i, j) != 0);
             },
@@ -1046,6 +1041,7 @@ class TreeLayer
         auto gathered_ijk_slice = Cabana::slice<1>(halo_aosoa);
         auto gathered_coefficient_slice = Cabana::slice<0>(halo_aosoa);
 
+        const auto num_coefficients = (p+1) * (p+1);
         Kokkos::parallel_for("fill_haloed_locals",
         Kokkos::RangePolicy<execution_space>(num_local, num_local + halo.numGhost()),
         KOKKOS_LAMBDA(const int hi)
