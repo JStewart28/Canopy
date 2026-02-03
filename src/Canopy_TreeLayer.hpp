@@ -919,8 +919,9 @@ class TreeLayer
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::sendCoarseLocals");
 
-        int rank = _rank;
-        int layer_number = _layer_number;
+        const int rank = _rank;
+        const int layer_number = _layer_number;
+        const int comm_size = _comm_size;
 
         // Locals, cell ijk index
         static constexpr std::size_t num_coefficients = (p+1)*(p+1);
@@ -935,108 +936,99 @@ class TreeLayer
         auto factor = _tile_reduction_factor;
         auto cell_size = _cell_size;
         Kokkos::Array<double, 3> child_size;
-        Kokkos::Array<double, 3> parent_size;
+        // Kokkos::Array<double, 3> parent_size;
         for (int i = 0; i < 3; i++)
         {
             child_size[i] = cell_size[i] / factor;
-            parent_size[i] = cell_size[i] * factor;
+            // parent_size[i] = cell_size[i] * factor;
         }
-            
-        // Should be comm_size
-        const int child_domain_extent = child_domain.extent(0);
+
         const int children_per_cell = factor * factor * factor;
 
-        std::size_t max_num_exports = num_cells * children_per_cell;
-        Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks("ids_ranks", max_num_exports);
-        auto id_slice = Cabana::slice<0>(ids_ranks);
-        auto rank_slice = Cabana::slice<1>(ids_ranks);
+        // Map locals to ranks
+        Kokkos::View<int**, memory_space> id2rank("id2rank", _locals.size(), _comm_size);
+        Kokkos::deep_copy(id2rank, 0);
+
         auto cell_ijk_slice = Cabana::slice<1>(_locals);
         auto coefficient_slice = Cabana::slice<0>(_locals);
 
-        // Map to avoid sending duplicate locals to ranks
-        Kokkos::View<int**, memory_space> l2r_send_map("l2r_send_map", num_cells, _comm_size);
-        Kokkos::deep_copy(l2r_send_map, 0);
-
-        // Hold size of exports
-        Kokkos::View<int, memory_space> num_exports_d("num_exports_d");
-        Kokkos::deep_copy(num_exports_d, 0);
-
-        // if (_rank == 0)
-        // {
-        //     printf("Child domains:\n");
-        //     for(int i = 0; i < _comm_size; i++)
-        //     {
-        //         printf("L%d: R%d domain: (%.3lf, %.3lf, %.3lf) (%.3lf, %.3lf, %.3lf)\n", _layer_number-1,
-        //             i, child_domain(i, 0), child_domain(i, 1), child_domain(i, 2),
-        //             child_domain(i, 3), child_domain(i, 4), child_domain(i, 5));
-        //     }
-        // }
-
+        using md_policy = Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<2>>;
         Kokkos::parallel_for("fill_vert_halo_data",
-        Kokkos::RangePolicy<execution_space>(0, _locals.size()),
-        KOKKOS_LAMBDA(const int index)
+            md_policy(_locals.size(), children_per_cell),
+            Kokkos::RangePolicy<execution_space>(0, _locals.size()),
+            KOKKOS_LAMBDA(const int index, const int c)
         {
-            // Each thread sets (local_index + _tile_reduction_factor^3)
-            // part of export data because each cell has _tile_reduction_factor^3
-            // children
-            // const int export_base = index * children_per_cell;
-            for (int c = 0; c < factor*factor*factor; ++c)
-            {
-                int di =  c % factor;
-                int dj = (c / factor) % factor;
-                int dk =  c / (factor*factor);
-                
-                Kokkos::Array<std::size_t, 3> child_ijk = {
-                    static_cast<std::size_t>(cell_ijk_slice(index, 0) * factor + di),
-                    static_cast<std::size_t>(cell_ijk_slice(index, 1) * factor + dj),
-                    static_cast<std::size_t>(cell_ijk_slice(index, 2) * factor + dk)
-                };
-
-                auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
-
-                // if (cell_ijk_slice(index, 0) == 10 && cell_ijk_slice(index, 1) == 17 && cell_ijk_slice(index, 2) == 2)
-                // {
-                //     printf("L%d: R%d: p(%d, %d, %d), child(%d, %d, %d) cent(%.3lf, %.3lf, %.3lf)\n", layer_number, rank,
-                //         cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),
-                //         child_ijk[0], child_ijk[1], child_ijk[2],
-                //         child_center[0], child_center[1], child_center[2]);
-                // }
-                int owner_rank = -1;
-
-                for (int r = 0; r < child_domain_extent; ++r)
-                {
-                    if ( child_center[0] >= child_domain(r, 0) &&
-                        child_center[0] <  child_domain(r, 3) &&
-                        child_center[1] >= child_domain(r, 1) &&
-                        child_center[1] <  child_domain(r, 4) &&
-                        child_center[2] >= child_domain(r, 2) &&
-                        child_center[2] <  child_domain(r, 5) )
-                    {
-                        owner_rank = r;
-                        break;
-                    }
-                }
-
-                auto val = Kokkos::atomic_fetch_add(&l2r_send_map(index, owner_rank), 1);
-                if (val == 0)
-                {
-                    auto index = Kokkos::atomic_fetch_add(&num_exports_d(), 1);
-                    id_slice(index) = index;
-                    rank_slice(index) = owner_rank;
-                    // printf("L%d: R%d: sending local ijk:(%d, %d, %d), to R%d\n",
-                    //     layer_number, rank, cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),
-                    //     owner_rank);
-                }
-                
+            int di =  c % factor;
+            int dj = (c / factor) % factor;
+            int dk =  c / (factor*factor);
             
+            Kokkos::Array<std::size_t, 3> child_ijk = {
+                static_cast<std::size_t>(cell_ijk_slice(index, 0) * factor + di),
+                static_cast<std::size_t>(cell_ijk_slice(index, 1) * factor + dj),
+                static_cast<std::size_t>(cell_ijk_slice(index, 2) * factor + dk)
+            };
+
+            auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
+
+            // if (cell_ijk_slice(index, 0) == 10 && cell_ijk_slice(index, 1) == 17 && cell_ijk_slice(index, 2) == 2)
+            // {
+            //     printf("L%d: R%d: p(%d, %d, %d), child(%d, %d, %d) cent(%.3lf, %.3lf, %.3lf)\n", layer_number, rank,
+            //         cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),
+            //         child_ijk[0], child_ijk[1], child_ijk[2],
+            //         child_center[0], child_center[1], child_center[2]);
+            // }
+            int owner_rank = -1;
+
+            for (int r = 0; r < comm_size; ++r)
+            {
+                if ( child_center[0] >= child_domain(r, 0) &&
+                    child_center[0] <  child_domain(r, 3) &&
+                    child_center[1] >= child_domain(r, 1) &&
+                    child_center[1] <  child_domain(r, 4) &&
+                    child_center[2] >= child_domain(r, 2) &&
+                    child_center[2] <  child_domain(r, 5) )
+                {
+                    Kokkos::atomic_store(&id2rank(index, r), 1);
+                    return;
+                }
             }
         });
 
-        int num_exports;
-        Kokkos::deep_copy(num_exports, num_exports_d);
-        ids_ranks.resize(num_exports);
-        id_slice = Cabana::slice<0>(ids_ranks);
-        rank_slice = Cabana::slice<1>(ids_ranks);
+        // Count the number of exports (non-zero values in id2rank)
+        std::size_t num_exports = 0;
+        Kokkos::parallel_reduce("count_nonzero_id2rank",
+            md_policy(id2rank.extent(0), id2rank.extent(1)),
+            KOKKOS_LAMBDA(const int i, const int j, std::size_t& lsum) {
+            lsum += (id2rank(i, j) != 0);
+            },
+            num_exports
+        );
+
+        Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks("ids_ranks", num_exports);
+        auto id_slice = Cabana::slice<0>(ids_ranks);
+        auto rank_slice = Cabana::slice<1>(ids_ranks);
+       
+        Kokkos::parallel_scan(
+        "pack_exports_scan",
+        Kokkos::RangePolicy<execution_space>(0, id2rank.size()),
+        KOKKOS_LAMBDA(const int idx, std::size_t& update, const bool final_pass)
+        {
+            const int a = idx / comm_size;
+            const int b = idx - a * comm_size;
+
+            const int flag = id2rank(a, b); // 0 or 1
+            const std::size_t inc = (flag != 0);
+
+            const std::size_t pos = update;
+
+            update += inc;
+
+            if (final_pass && inc)
+            {
+                rank_slice(pos) = b;
+                id_slice(pos) = a;
+            }
+        });
 
         // Vertical halo for getting local coefficients from more coarse cells
         Cabana::Halo<memory_space> halo( _comm, num_cells, id_slice,
