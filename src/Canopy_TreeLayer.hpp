@@ -1206,10 +1206,10 @@ class TreeLayer
                 for (int i = 0; i < 6; i++)
                     m2l_bounds(index, i) = bounds.first[i];
 
-                printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
-                    layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    bounds.first[0], bounds.first[1], bounds.first[2],
-                    bounds.first[3], bounds.first[4], bounds.first[5]);
+                // printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
+                //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     bounds.first[0], bounds.first[1], bounds.first[2],
+                //     bounds.first[3], bounds.first[4], bounds.first[5]);
                 
             }
         });
@@ -1405,12 +1405,12 @@ class TreeLayer
         double neighborhood_radius = Kokkos::sqrt(
             Kokkos::pow(5.0*_cell_size[0], 2) +
             Kokkos::pow(5.0*_cell_size[1], 2) +
-            Kokkos::pow(5.0*_cell_size[2], 2)) + 0.0001;
+            Kokkos::pow(5.0*_cell_size[2], 2)) + 0.00001;
         auto neighbor_list = Cabana::Experimental::makeNeighborList(
             Cabana::FullNeighborTag{}, m_cell_center_slice, 0, _multipoles.size(),
-            10.0 );
+            neighborhood_radius );
         using list_type = decltype(neighbor_list);
-        printf("L%d: R%d: nr: %0.3lf\n", _layer_number, _rank, neighborhood_radius);
+        // printf("L%d: R%d: nr: %0.3lf\n", _layer_number, _rank, neighborhood_radius);
 
         // Per-cell calculation
         Kokkos::parallel_for("Canopy::TreeLayer::multipole_to_local loop",
@@ -1437,16 +1437,19 @@ class TreeLayer
                 l_cell_ijk_slice(index, i) = cell_ijk[i];
 
             // Iterate over neighbor cells
-            int num_neighbors = Cabana::NeighborList<list_type>::numNeighbor(neighbor_list, index);
+            const int num_neighbors = Cabana::NeighborList<list_type>::numNeighbor(neighbor_list, index);
+            printf("L%d: R%d: cpd: %d, m %d/%d, c(%d, %d, %d): num_n: %d\n", layer_number, rank, cells_per_dim,
+                index, _num_local_multipoles,
+                cell_ijk[0], cell_ijk[1], cell_ijk[2], num_neighbors);
             for (int j = 0; j < num_neighbors; j++) {
                 const int neighbor_id = Cabana::NeighborList<list_type>::getNeighbor(neighbor_list, index, j);
 
                 auto neighbor_cell_ijk = position2ijk(m_cell_center_slice(neighbor_id,0),
                     m_cell_center_slice(neighbor_id,1), m_cell_center_slice(neighbor_id,2), low_corner, cell_size);
 
-                printf("L%d: R%d: B cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
-                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    neighbor_cell_ijk[0], neighbor_cell_ijk[1], neighbor_cell_ijk[2]);
+                // printf("L%d: R%d: j%d/%d c(%d, %d, %d) neighbor (%d, %d, %d)?\n", layer_number, rank, j, num_neighbors,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     neighbor_cell_ijk[0], neighbor_cell_ijk[1], neighbor_cell_ijk[2]);
 
                 // Check the bounds of this neighbor
                 const bool in_outer =
@@ -1461,7 +1464,7 @@ class TreeLayer
 
                 if (!in_outer || in_inner)
                 {
-                    return;
+                    continue;
                 }
                 // if (rank == 0 && layer_number == 0)
                 // printf("L%d: R%d: considering cell %d, %d, %d, o: (%d, %d, %d), (%d, %d, %d), i: (%d, %d, %d), (%d, %d, %d)\n",
@@ -1512,11 +1515,11 @@ class TreeLayer
                 Kokkos::Array<cdouble, num_coefficients> L;
                 Kernel::Scalar::m2l<p>(M, L, m2l_vec);
 
-                printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
-                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    neighbor_cell_ijk[0], neighbor_cell_ijk[1], neighbor_cell_ijk[2],
-                    m2l_vec[0], m2l_vec[1], m2l_vec[2],
-                    L[0].real(), L[1].real(), L[2].real());
+                // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     neighbor_cell_ijk[0], neighbor_cell_ijk[1], neighbor_cell_ijk[2],
+                //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
+                //     L[0].real(), L[1].real(), L[2].real());
                 
                 // Add contribution to locals for this cell
                 for (std::size_t i = 0; i < num_coefficients; i++)
