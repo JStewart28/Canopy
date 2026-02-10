@@ -1440,17 +1440,19 @@ class TreeLayer
 
             // Iterate over all cells whose multipoles we must consider.
             // XXX - Make this a team policy nested for loop
-            int m_cells = 1;
+            int m_ocells = 1;
+            int m_icells = 1;
             for (int i = 0; i < 3; i++)
             {
                 int outer_diff = m2l_bounds(index, i+3) - m2l_bounds(index, i);
                 int inner_diff = inner_upper_bound[i] - inner_lower_bound[i];
-                m_cells *= (outer_diff - inner_diff);
+                m_ocells *= outer_diff;
+                m_icells *= inner_diff;
             }
-            printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d, count: %d\n", layer_number, rank,
+            printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d, oc: %d, ic: %d\n", layer_number, rank,
                 cell_ijk[0], cell_ijk[1], cell_ijk[2],
                 m2l_bounds(index, 0), m2l_bounds(index, 1), m2l_bounds(index, 2),
-                m2l_bounds(index, 3), m2l_bounds(index, 4), m2l_bounds(index, 5), m_cells);
+                m2l_bounds(index, 3), m2l_bounds(index, 4), m2l_bounds(index, 5), m_ocells, m_icells);
             for (std::size_t ci = m2l_bounds(index, 0); ci < m2l_bounds(index, 3); ci++)
                 for (std::size_t cj = m2l_bounds(index, 1); cj < m2l_bounds(index, 4); cj++)
                     for (std::size_t ck = m2l_bounds(index, 2); ck < m2l_bounds(index, 5); ck++)
