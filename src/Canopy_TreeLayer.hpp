@@ -1206,10 +1206,10 @@ class TreeLayer
                 for (int i = 0; i < 6; i++)
                     m2l_bounds(index, i) = bounds.first[i];
 
-                // printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
-                //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     bounds.first[0], bounds.first[1], bounds.first[2],
-                //     bounds.first[3], bounds.first[4], bounds.first[5]);
+                printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
+                    layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    bounds.first[0], bounds.first[1], bounds.first[2],
+                    bounds.first[3], bounds.first[4], bounds.first[5]);
                 
             }
         });
@@ -1440,10 +1440,10 @@ class TreeLayer
 
             // Iterate over all cells whose multipoles we must consider.
             // XXX - Make this a team policy nested for loop
-            // printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d\n", layer_number, rank,
-            //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-            //     m2l_bounds(local_index, 0), m2l_bounds(local_index, 1), m2l_bounds(local_index, 2),
-            //     m2l_bounds(local_index, 3), m2l_bounds(local_index, 4), m2l_bounds(local_index, 5));
+            printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d\n", layer_number, rank,
+                cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                m2l_bounds(index, 0), m2l_bounds(index, 1), m2l_bounds(index, 2),
+                m2l_bounds(index, 3), m2l_bounds(index, 4), m2l_bounds(index, 5));
             for (std::size_t ci = m2l_bounds(index, 0); ci < m2l_bounds(index, 3); ci++)
                 for (std::size_t cj = m2l_bounds(index, 1); cj < m2l_bounds(index, 4); cj++)
                     for (std::size_t ck = m2l_bounds(index, 2); ck < m2l_bounds(index, 5); ck++)

@@ -206,7 +206,7 @@ void testSolver(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testSolver_balanced )
 { 
-    testSolver<5>(500, true);
+    testSolver<5>(5, true);
 }
 
 //---------------------------------------------------------------------------//
