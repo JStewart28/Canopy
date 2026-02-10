@@ -45,7 +45,7 @@ void testSolver(int points_per_proc_in, bool balanced)
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
     std::size_t leaf_tiles, red_factor;
-    red_factor = 2, leaf_tiles = 64;
+    red_factor = 2, leaf_tiles = 16;
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
@@ -206,7 +206,7 @@ void testSolver(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testSolver_balanced )
 { 
-    testSolver<5>(500, true);
+    testSolver<8>(4000, true);
 }
 
 //---------------------------------------------------------------------------//
