@@ -1400,6 +1400,18 @@ class TreeLayer
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
 
+        // Compute neighbor list of cells within the outer cutoff
+        // We look at most 10 cells in each dimension
+        double neighborhood_radius = Kokkos::sqrt(
+            Kokkos::pow(5.0*_cell_size[0], 2) +
+            Kokkos::pow(5.0*_cell_size[1], 2) +
+            Kokkos::pow(5.0*_cell_size[2], 2)) + 0.0001;
+        auto neighbor_list = Cabana::Experimental::makeNeighborList(
+            Cabana::FullNeighborTag{}, m_cell_center_slice, 0, _multipoles.size(),
+            10.0 );
+        using list_type = decltype(neighbor_list);
+        printf("L%d: R%d: nr: %0.3lf\n", _layer_number, _rank, neighborhood_radius);
+
         // Per-cell calculation
         Kokkos::parallel_for("Canopy::TreeLayer::multipole_to_local loop",
         Kokkos::RangePolicy<execution_space>(0, _num_local_multipoles),
@@ -1424,121 +1436,95 @@ class TreeLayer
             for (int i = 0; i < 3; i++)
                 l_cell_ijk_slice(index, i) = cell_ijk[i];
 
-            // if (rank == 0 && layer_number == 0)
-            // printf("L%d: R%d: considering cell %d, %d, %d, o: (%d, %d, %d), (%d, %d, %d), i: (%d, %d, %d), (%d, %d, %d)\n",
-            //     layer_number, rank,
-            //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-            //     outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
-            //     outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
-            //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
-            //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
-            // if (rank == 0)
-            // printf("L%d: R%d: considering cell %d, %d, %d, center(%.2lf, %.2lf, %.2lf)\n",
-            //     layer_number, rank,
-            //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-            //     cell_center_slice(this_cell_index, 0), cell_center_slice(this_cell_index, 1), cell_center_slice(this_cell_index, 2));
+            // Iterate over neighbor cells
+            int num_neighbors = Cabana::NeighborList<list_type>::numNeighbor(neighbor_list, index);
+            for (int j = 0; j < num_neighbors; j++) {
+                const int neighbor_id = Cabana::NeighborList<list_type>::getNeighbor(neighbor_list, index, j);
 
-            // Iterate over all cells whose multipoles we must consider.
-            // XXX - Make this a team policy nested for loop
-            int m_ocells = 1;
-            int m_icells = 1;
-            for (int i = 0; i < 3; i++)
-            {
-                int outer_diff = m2l_bounds(index, i+3) - m2l_bounds(index, i);
-                int inner_diff = inner_upper_bound[i] - inner_lower_bound[i];
-                m_ocells *= outer_diff;
-                m_icells *= inner_diff;
+                auto neighbor_cell_ijk = position2ijk(m_cell_center_slice(neighbor_id,0),
+                    m_cell_center_slice(neighbor_id,1), m_cell_center_slice(neighbor_id,2), low_corner, cell_size);
+
+                printf("L%d: R%d: B cell %d, %d, %d, neighbor %d, %d, %d\n", layer_number, rank,
+                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    neighbor_cell_ijk[0], neighbor_cell_ijk[1], neighbor_cell_ijk[2]);
+
+                // Check the bounds of this neighbor
+                const bool in_outer =
+                    (neighbor_cell_ijk[0] >= m2l_bounds(index,0) && neighbor_cell_ijk[0] < m2l_bounds(index,3)) &&
+                    (neighbor_cell_ijk[1] >= m2l_bounds(index,1) && neighbor_cell_ijk[1] < m2l_bounds(index,4)) &&
+                    (neighbor_cell_ijk[2] >= m2l_bounds(index,2) && neighbor_cell_ijk[2] < m2l_bounds(index,5));
+
+                const bool in_inner =
+                    (neighbor_cell_ijk[0] >= inner_lower_bound[0] && neighbor_cell_ijk[0] < inner_upper_bound[0]) &&
+                    (neighbor_cell_ijk[1] >= inner_lower_bound[1] && neighbor_cell_ijk[1] < inner_upper_bound[1]) &&
+                    (neighbor_cell_ijk[2] >= inner_lower_bound[2] && neighbor_cell_ijk[2] < inner_upper_bound[2]);
+
+                if (!in_outer || in_inner)
+                {
+                    return;
+                }
+                // if (rank == 0 && layer_number == 0)
+                // printf("L%d: R%d: considering cell %d, %d, %d, o: (%d, %d, %d), (%d, %d, %d), i: (%d, %d, %d), (%d, %d, %d)\n",
+                //     layer_number, rank,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
+                //     outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
+                //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
+                //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
+                // if (rank == 0)
+                // printf("L%d: R%d: considering cell %d, %d, %d, center(%.2lf, %.2lf, %.2lf)\n",
+                //     layer_number, rank,
+                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                //     cell_center_slice(this_cell_index, 0), cell_center_slice(this_cell_index, 1), cell_center_slice(this_cell_index, 2));
+
+                        
+                    
+                
+                // For multipole to local conversion we need the multipole
+                // center relative to the local center
+                Kokkos::Array<double, 3> m2l_vec;
+                for (int i = 0; i < 3; ++i)
+                    m2l_vec[i] = m_cell_center_slice(neighbor_id, i) - m_cell_center_slice(index, i);
+                
+                // Multipole coefficients
+                constexpr std::size_t num_coefficients = (p+1)*(p+1);
+                Kokkos::Array<cdouble, num_coefficients> M;
+                for (std::size_t i = 0; i < num_coefficients; i++)
+                {
+                    M[i].real() = m_slice(neighbor_id, i, 0);
+                    M[i].imag() = m_slice(neighbor_id, i, 1);
+                }
+
+                // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
+                // {
+                //     // if( ci == 5 && cj == 15 && ck == 9)
+                //     // {
+                //         for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
+                //         {
+                //             printf("L%d: R%d: ncell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
+                //                 ci, cj, ck, lid,
+                //                 m_slice(neighbor_id, lid, 0), m_slice(neighbor_id, lid, 1));
+                //         }
+                //     // }
+                // }
+
+                // Convert to locals
+                Kokkos::Array<cdouble, num_coefficients> L;
+                Kernel::Scalar::m2l<p>(M, L, m2l_vec);
+
+                printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
+                    cell_ijk[0], cell_ijk[1], cell_ijk[2],
+                    neighbor_cell_ijk[0], neighbor_cell_ijk[1], neighbor_cell_ijk[2],
+                    m2l_vec[0], m2l_vec[1], m2l_vec[2],
+                    L[0].real(), L[1].real(), L[2].real());
+                
+                // Add contribution to locals for this cell
+                for (std::size_t i = 0; i < num_coefficients; i++)
+                {
+                    l_slice(index, i, 0) += L[i].real();
+                    l_slice(index, i, 1) += L[i].imag();
+                }
             }
-            printf("L%d: R%d: c(%d, %d, %d) Bounds: %d, %d, %d to %d, %d, %d, oc: %d, ic: %d\n", layer_number, rank,
-                cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                m2l_bounds(index, 0), m2l_bounds(index, 1), m2l_bounds(index, 2),
-                m2l_bounds(index, 3), m2l_bounds(index, 4), m2l_bounds(index, 5), m_ocells, m_icells);
-            for (std::size_t ci = m2l_bounds(index, 0); ci < m2l_bounds(index, 3); ci++)
-                for (std::size_t cj = m2l_bounds(index, 1); cj < m2l_bounds(index, 4); cj++)
-                    for (std::size_t ck = m2l_bounds(index, 2); ck < m2l_bounds(index, 5); ck++)
-                    {
-                        // Only consider cells between our outer lower and inner lower
-                        // or inner upper and outer upper bounds. If inside these bounds,
-                        // skip.
-                        // if (rank == 0)
-                        // printf("L%d: R%d: cell %d, %d, %d, checking neighbor %d, %d, %d\n", layer_number, rank,
-                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck);
-
-                        if ((ci >= inner_lower_bound[0] && ci < inner_upper_bound[0]) &&
-                        (cj >= inner_lower_bound[1] && cj < inner_upper_bound[1]) &&
-                        (ck >= inner_lower_bound[2] && ck < inner_upper_bound[2]))
-                        {
-                            continue;
-                        }
-                        // printf("Here\n");
-                        // Check if this cell is activated by checking if it's recorded
-                        // in the cell id to local index map.
-                        // XXX - for now, we assume this cell is haloed if necessary and
-                        // activated in the sparse map.
-                        Kokkos::Array<std::size_t, 3> neighbor_ijk = {ci, cj, ck};                   
-                        auto neighbor_activated = ijk2index.exists(neighbor_ijk);
-                        // printf("L%d: R%d: ijk(%d, %d, %d), neighbor(%d, %d, %d), activated: %d\n", _layer_number, _rank,
-                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2], ci, cj, ck, neighbor_activated);
-                        if (!neighbor_activated)
-                        {
-                            // Cell not activated; do not consider
-                            continue;
-                        }
-                        
-                        // Otherwise get the data
-                        auto map_index = ijk2index.find(neighbor_ijk);
-                        auto neighbor_index = ijk2index.value_at(map_index);
-                        auto neighbor_cell_center = cellCenter(neighbor_ijk[0], neighbor_ijk[1], neighbor_ijk[2],
-                            low_corner, cell_size);
-
-                        // if (rank == 0)
-
-                        
-                        // For multipole to local conversion we need the multipole
-                        // center relative to the local center
-                        Kokkos::Array<double, 3> m2l_vec;
-                        for (int i = 0; i < 3; ++i)
-                            m2l_vec[i] = neighbor_cell_center[i] - m_cell_center_slice(index, i);
-                        
-                        // Multipole coefficients
-                        constexpr std::size_t num_coefficients = (p+1)*(p+1);
-                        Kokkos::Array<cdouble, num_coefficients> M;
-                        for (std::size_t i = 0; i < num_coefficients; i++)
-                        {
-                            M[i].real() = m_slice(neighbor_index, i, 0);
-                            M[i].imag() = m_slice(neighbor_index, i, 1);
-                        }
-
-                        // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
-                        // {
-                        //     // if( ci == 5 && cj == 15 && ck == 9)
-                        //     // {
-                        //         for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
-                        //         {
-                        //             printf("L%d: R%d: ncell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
-                        //                 ci, cj, ck, lid,
-                        //                 m_slice(neighbor_index, lid, 0), m_slice(neighbor_index, lid, 1));
-                        //         }
-                        //     // }
-                        // }
-
-                        // Convert to locals
-                        Kokkos::Array<cdouble, num_coefficients> L;
-                        Kernel::Scalar::m2l<p>(M, L, m2l_vec);
-
-                        // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
-                        //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                        //     ci, cj, ck,
-                        //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
-                        //     L[0].real(), L[1].real(), L[2].real());
-                        
-                        // Add contribution to locals for this cell
-                        for (std::size_t i = 0; i < num_coefficients; i++)
-                        {
-                            l_slice(index, i, 0) += L[i].real();
-                            l_slice(index, i, 1) += L[i].imag();
-                        }
-                    }
         });
     }
 
