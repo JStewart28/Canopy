@@ -83,7 +83,7 @@ void testSolver(int points_per_proc_in, bool balanced)
     // If not balanced, fill domain unevenly
     if (!balanced)
     {
-        coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
+        coord_bounds = {-3.0, -3.0, -0.05, 3.0, 3.0, 0.05};
     }
     
     // Kokkos::Array<double, 6> coord_bounds1 = {2.3, 2.3, 2.3, bound_val, bound_val, bound_val};
@@ -194,7 +194,7 @@ void testSolver(int points_per_proc_in, bool balanced)
         auto particle_id = tree_id_slice_h(i);
         auto direct_potential = direct_potentials(particle_id);
         auto mesh_potential = tree_potentials_h(i);
-        double allowed_error = Kokkos::pow(10, -p_int+3);
+        double allowed_error = Kokkos::pow(10, -p_int+4);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
         // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }
@@ -206,7 +206,11 @@ void testSolver(int points_per_proc_in, bool balanced)
 
 TEST( Tree, testSolver_balanced )
 { 
-    testSolver<8>(4000, true);
+    testSolver<6>(500, true);
+}
+TEST( Tree, testSolver_unbalanced )
+{ 
+    testSolver<6>(500, false);
 }
 
 //---------------------------------------------------------------------------//

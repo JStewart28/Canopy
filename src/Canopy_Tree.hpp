@@ -132,26 +132,16 @@ class Tree
         std::size_t next_layer_tiles_per_dim = _leaf_tiles_per_dim;
         add_layer(next_layer_tiles_per_dim, 2, layer_num++);
 
-        // auto leaf_tiles_per_dim = _next_layer_tiles_per_dim;
-
         // Calculate the depth of the tree
         int depth = 0;
-        // if (_rank == 0) printf("R%d: Layer %d: tiles: %d, root tiles: %d\n", _rank, depth, next_layer_tiles_per_dim, _root_tiles_per_dim);
         while (next_layer_tiles_per_dim > _root_tiles_per_dim)
         {
-            // printf("R%d: next: %d, root: %d\n", _rank, next_layer_tiles_per_dim, _root_tiles_per_dim);
             depth++;
             next_layer_tiles_per_dim = static_cast<std::size_t>(next_layer_tiles_per_dim / _tile_reduction_factor);
             if (next_layer_tiles_per_dim == 0) next_layer_tiles_per_dim = 1;
-            // if (_rank == 0) printf("R%d: Layer %d: tiles: %d\n", _rank, layer_num, next_layer_tiles_per_dim);
             add_layer(next_layer_tiles_per_dim, 2, layer_num++);
             
         }
-        // printf("R%d: created tree of depth %d\n", _rank, _tree.size());
-        // if (_rank == 0) printf("R%d: num_p: %d, reduct fac: %d, input root: %d, leaf_t: %d, root_t: %d, depth: %d\n",
-        //     _rank, _num_particles, _tile_reduction_factor, _root_tiles_per_dim, leaf_tiles_per_dim, _next_layer_tiles_per_dim, depth);
-
-
     }
 
     /**
@@ -177,13 +167,7 @@ class Tree
 
         // Get all rank domains on host
         auto domain_bounds = tree_layer->domains();
-        int comm_size = _comm_size;
-        // for (std::size_t i = 0; i < domains_host.size(); ++i)
-        // {
-        //     if (_rank == 0) printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", layer,
-        //         i, domains_host[i][0], domains_host[i][1], domains_host[i][2], domains_host[i][3],
-        //         domains_host[i][4], domains_host[i][5]);
-        // }
+        const int comm_size = _comm_size;
 
         // Flag for cell centers that may be outside of the domain.
         // This will happen if the domain does not have integer-value
@@ -195,19 +179,19 @@ class Tree
             "Canopy::Tree::mapParticles loop",
             Kokkos::RangePolicy<exec_space>(0, particle_num),
             KOKKOS_LAMBDA(const int i) {
-                double xpos = positions(i, 0);
-                double ypos = positions(i, 1);
-                double zpos = positions(i, 2);
+                const double xpos = positions(i, 0);
+                const double ypos = positions(i, 1);
+                const double zpos = positions(i, 2);
 
                 // Linear search: check each rank domain
                 for (int r = 0; r < comm_size; ++r)
                 {
-                    double x_lo = domain_bounds(r, 0);
-                    double y_lo = domain_bounds(r, 1);
-                    double z_lo = domain_bounds(r, 2);
-                    double x_hi = domain_bounds(r, 3);
-                    double y_hi = domain_bounds(r, 4);
-                    double z_hi = domain_bounds(r, 5);
+                    const double x_lo = domain_bounds(r, 0);
+                    const double y_lo = domain_bounds(r, 1);
+                    const double z_lo = domain_bounds(r, 2);
+                    const double x_hi = domain_bounds(r, 3);
+                    const double y_hi = domain_bounds(r, 4);
+                    const double z_hi = domain_bounds(r, 5);
 
                     // Non-inclusive upper bound
                     if (xpos >= x_lo && xpos < x_hi &&
@@ -256,24 +240,13 @@ class Tree
         _M_root = Kokkos::View<cdouble[(p+1)*(p+1)], memory_space>("_M_root");
 
         // DEBUG: Set top layer to first layer
-        // auto top_layer = _tree[0];
         auto top_layer = _tree.back();
-
-        // auto domains = top_layer->domains();
-        // for (std::size_t i = 0; i < domains.size(); ++i)
-        // {
-        //     if (_rank == 0) printf("R%d: [%d, %d, %d] to [%d, %d, %d]\n",
-        //         i, domains[i][0], domains[i][1], domains[i][2], domains[i][3],
-        //         domains[i][4], domains[i][5]);
-        // }
 
         auto multipoles = top_layer->multipoles();
         std::size_t cells_activated = top_layer->numCells();
         auto multipole_coefficients_slice = Cabana::slice<0>(multipoles);
         auto cell_center_slice = Cabana::slice<1>(multipoles);
         
-        // printf("R%d: aosoa size: %d, map size: %d\n", _rank, aosoa.size(), map_size);
-
         // Save cell centers for multipole translations
         Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
 
@@ -290,15 +263,7 @@ class Tree
         for (int d = 0; d < 3; ++d)
             domain_center[d] = _global_low_corner[d] + 0.5 * (_global_high_corner[d] - _global_low_corner[d]);
 
-        // Properties of top layer
-        // using top_layer_type = typename decltype(top_layer)::element_type;
-        // static constexpr std::size_t cell_bits_per_tile =
-        //     top_layer_type::cell_bits_per_tile;
-        // static constexpr std::size_t cell_mask_per_tile =
-        //     top_layer_type::cell_mask_per_tile;
-
         // Iterate over all activated cells
-        // int rank = _rank;
         Kokkos::parallel_for(
         "Canopy::Tree::initializeRootLayer loop",
         Kokkos::RangePolicy<execution_space>( 0, cells_activated ),
@@ -316,9 +281,6 @@ class Tree
                 double real_part = multipole_coefficients_slice(index, j, 0);
                 double imag_part = multipole_coefficients_slice(index, j, 1);
                 M_children(offset_M_base + j) = cdouble(real_part, imag_part);
-                // printf("Root: R%d: cid: %d, M_notrans(%d): (%0.4lf, %0.4lf)\n",
-                //     rank, cid,
-                //     j, Cabana::get<0>(tp, j, 0), Cabana::get<0>(tp, j, 1));
             }
         
         } );
@@ -346,10 +308,6 @@ class Tree
             for (int j = 0; j < 3; ++j)
                 vector_to_center[j] = (domain_center[j] - child_center[j])*-1;
 
-            // printf("R%d: center: %0.3lf, %0.3lf, %0.3lf, vec to center: %0.3lf, %0.3lf, %0.3lf\n", rank,
-            //     domain_center[0], domain_center[1], domain_center[2],
-            //     vector_to_center[0], vector_to_center[1], vector_to_center[2]);
-            
             // Translate and add coefficients.
             m2m(sub_M, vector_to_center);
         }
@@ -406,14 +364,11 @@ class Tree
         // Owned particles are the number of leaf particles
         _owned_particles = _leaf_particles.size();
 
-        // if (_rank == 0) printf("Starting layer 0...\n");
         _tree[0]->populateCells(_leaf_particles, 0, _leaf_particles.size());
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
-            // if (_rank == 0) printf("Starting layer %d...\n", i);
             migrateAndSetLayer(i-1, i, run_load_balance);
         }
-        // if (_rank == 0) printf("Starting root layer (%d)...\n", _tree.size());
         initializeRootLayer();
     }
 
@@ -461,9 +416,6 @@ class Tree
 
         mapParticles(positions, export_ranks, num_cells, to_layer, run_load_balance);
 
-        // for (int i = 0; i < export_ranks.extent(0); i++)
-        //     printf("i%d: to R%d, index %d\n", i, export_ranks(i), export_ids(i));
-
         // Create halo
         Cabana::Halo<memory_space> halo( _comm, num_cells, export_ids,
                                     export_ranks );
@@ -473,8 +425,6 @@ class Tree
 
         // Gather
         Cabana::gather( halo, multipoles );
-
-        // printf("to L%d: multipoles size: %d\n", to_layer, multipoles.size());
 
         _tree[to_layer]->populateCells(multipoles, halo.numLocal(), halo.numLocal() + halo.numGhost());
     }
@@ -487,7 +437,7 @@ class Tree
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::Tree::multipole_to_local");
 
-        int starting_layer = static_cast<int>(_tree.size()) - 1;
+        const int starting_layer = static_cast<int>(_tree.size()) - 1;
 
         // Find the first valid layer
         int first_valid_layer = -1;
@@ -508,7 +458,6 @@ class Tree
             printf("No valid multipole layers (need >= 4 cells per dimension)\n");
             return;
         }
-        // printf("First starting layer: %d, starting cpd: %d\n", first_valid_layer, starting_cells_per_dimension);
 
         // Data structures for haloing and translating locals vertically
         local_aosoa_type halo_data("halo_data", 0);
@@ -519,28 +468,14 @@ class Tree
         for (int L = first_valid_layer - 1; L >= 0; --L)
         {
             // Get the computed locals at the layer above L (more coarse layer)
-            printf("L%d: R%d: sendCoarseLocals\n", L, _rank);
             _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L]->domains());
 
             // Add these locals to layer L
-            printf("L%d: R%d: addCoarseLocals\n", L, _rank);
             _tree[L]->addCoarseLocals(halo_data);
 
             // Compute locals at layer L
-            printf("L%d: R%d: multipole_to_local\n", L, _rank);
             _tree[L]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
         }
-
-        // auto leaf_locals = _tree[0]->locals();
-        // auto locals = Cabana::slice<0>(leaf_locals);
-        // auto cell_ijks = Cabana::slice<1>(leaf_locals);
-        // printf("R%d: num local locals: %d\n", _rank, _tree[0]->numCells());
-        // for (int i = 0; i < _tree[0]->numCells(); i++)
-        // {
-        //     printf("R%d: ijk(%d, %d, %d): l: %.2lf, %.2lf, %.2lf\n", _rank,
-        //         cell_ijks(i, 0), cell_ijks(i, 1), cell_ijks(i, 2),
-        //         locals(i, 0, 0), locals(i, 1, 0), locals(i, 2, 0));
-        // }
     }
 
     void haloParticles()
@@ -576,23 +511,8 @@ class Tree
                     halo_domains(r, i) = rank_min;
                     halo_domains(r, i+3) = rank_max;
                 }
-                
-                // if (rank == 0) printf("R%d: leaf: (%.2lf, %.2lf, %.2lf) to (%.2lf, %.2lf, %.2lf), halo: (%.2lf, %.2lf, %.2lf) to (%.2lf, %.2lf, %.2lf)\n",
-                //     rank,
-                //     leaf_domains(r, 0), leaf_domains(r, 1), leaf_domains(r, 2), leaf_domains(r, 3), leaf_domains(r, 4), leaf_domains(r, 5),
-                //     halo_domains(r, 0), halo_domains(r, 1), halo_domains(r, 2), halo_domains(r, 3), halo_domains(r, 4), halo_domains(r, 5));
             }
         );
-
-        // if (rank == 0)
-        // {
-        //     for (int r = 0; r < _comm_size; r++)
-        //     {
-        //         printf("R%d: domain: (%d, %d, %d), (%d, %d, %d)\n", r,
-        //             halo_domains(r, 0), halo_domains(r, 1), halo_domains(r, 2),
-        //             halo_domains(r, 3), halo_domains(r, 4), halo_domains(r, 5));
-        //     }
-        // }
 
         // Iterate over particles. If we have a particle that falls within another ranks' halo
         // domain, we must halo it.
@@ -633,8 +553,6 @@ class Tree
         std::size_t num_halos_h;
         Kokkos::deep_copy(num_halos_h, num_halos);
 
-        // printf("R%d: num haloes: %d\n", _rank, num_halos_h);
-
         // Now save which particles go to which ranks
         // XXX - optimize this to reduce atomics
         Kokkos::deep_copy(num_halos, 0);
@@ -649,9 +567,6 @@ class Tree
                 const double y = positions(pid, 1);
                 const double z = positions(pid, 2);
                 auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
-
-                // if (particle_ids(pid) == 178) printf("R%d: checking p%d: (%d, %d, %d)\n", rank, particle_ids(pid),
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2]);
 
                 for (std::size_t r = 0; r < comm_size; r++)
                 {
@@ -668,7 +583,6 @@ class Tree
                         auto index = Kokkos::atomic_fetch_add(&num_halos(), 1);
                         id_slice(index) = pid;
                         rank_slice(index) = r;
-                        // if (particle_ids(pid) == 178) printf("R%d: sending pid %d to R%d\n", rank, pid, r);
                     }   
                 }
             });
@@ -683,9 +597,6 @@ class Tree
         // Save owned and ghost information
         _owned_particles = halo.numLocal();
         _ghost_particles = halo.numGhost();
-        // _owned_particles = _leaf_particles.size();
-        // _ghost_particles = 0;
-        // printf("R%d: num local: %d, ghost: %d, lp size: %d\n", _rank, _owned_particles, _ghost_particles, _leaf_particles.size());
     }
 
     /**
@@ -695,7 +606,7 @@ class Tree
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::Tree::computeL2P");
 
-        int rank = _rank;
+        // int rank = _rank;
 
         auto particle_positions = Cabana::slice<position_id>(_leaf_particles);
         auto particle_potentials = Cabana::slice<out_data_id>(_leaf_particles);
@@ -761,8 +672,6 @@ class Tree
                 }
             }
             particle_potentials(tpi) += accumulator.real();
-            // printf("R%d: pid %d: potential: %.3lf\n", rank,
-            //     particle_id(tpi), particle_potentials(tpi));
 
         } );
         Kokkos::fence();
@@ -774,15 +683,9 @@ class Tree
 
         haloParticles();
 
-        const int rank = _rank;
-
-        // XXX How should scalar slice id be set and potential slice
-
         auto positions = Cabana::slice<position_id>(_leaf_particles);
         auto scalars = Cabana::slice<in_data_id>(_leaf_particles);
         auto potentials = Cabana::slice<out_data_id>(_leaf_particles);
-
-        auto pids = Cabana::slice<3>(_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
@@ -794,14 +697,10 @@ class Tree
         // Find neighbor particles that are within 3 cells width of each other. 
         // We need to use 3 cell width to ensure that for a particle in any given cell,
         // all particles within cells up to 2 cells away are considered.
-        double neighborhood_radius = Kokkos::max(Kokkos::max(cell_size[0], cell_size[1]), cell_size[2]) * 3 * Kokkos::sqrt(3.0);
+        const double neighborhood_radius = Kokkos::max(Kokkos::max(cell_size[0], cell_size[1]), cell_size[2]) * 3 * Kokkos::sqrt(3.0);
         auto neighbor_list = Cabana::Experimental::makeNeighborList(
             Cabana::FullNeighborTag{}, positions, 0, total_particles,
             neighborhood_radius );
-        
-        // if (rank == 0) printf("cell size: %.3lf, %.3lf, %.3lf, radius: %.3lf\n",
-        //     cell_size[0], cell_size[1], cell_size[2], neighborhood_radius);
-
 
         using list_type = decltype(neighbor_list);
 
@@ -822,12 +721,6 @@ class Tree
             }
 
             int num_neighbors = Cabana::NeighborList<list_type>::numNeighbor(neighbor_list, my_id);
-            // if (num_neighbors > 0) printf("R%d: p%d: num n: %d\n", rank, pids(my_id), num_neighbors);
-        
-            // if (pids(my_id) == 326) printf("R%d: correct p%d: cell(%d, %d, %d)\n",
-            //     rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
-            //     other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
-
             double phi = 0.0;
             for (int j = 0; j < num_neighbors; j++) {
                 int neighbor_id = Cabana::NeighborList<list_type>::getNeighbor(neighbor_list, my_id, j);
@@ -838,27 +731,12 @@ class Tree
 
                 auto ijk_n = position2ijk(xn, yn, zn, low_corner, cell_size);
 
-                // if (pids(my_id) == 326) printf("R%d: ? p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
-                //     rank, pids(my_id), xi, yi, zi,
-                //     pids(neighbor_id), xn, yn, zn);
-                // if (pids(my_id) == 326) printf("R%d: ? p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
-                //     rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
-                //     pids(neighbor_id), ijk_n[0], ijk_n[1], ijk_n[2]);
-
-
                 // Check that our neighbor particle's cell is within 2 cells
                 if (ijk_n[0] < lower[0] || ijk_n[0] >= upper[0] ||
                     ijk_n[1] < lower[1] || ijk_n[1] >= upper[1] ||
                     ijk_n[2] < lower[2] || ijk_n[2] >= upper[2])
                         continue;
                 
-                // if (pids(my_id) == 326) printf("R%d: p%d: (%.3lf, %.3lf, %.3lf), np%d: (%.3lf, %.3lf, %.3lf)\n",
-                //     rank, pids(my_id), xi, yi, zi,
-                //     pids(neighbor_id), xn, yn, zn);
-                // if (pids(my_id) == 326) printf("R%d: p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
-                //     rank, pids(my_id), ijk_i[0], ijk_i[1], ijk_i[2],
-                //     pids(neighbor_id), ijk_n[0], ijk_n[1], ijk_n[2]);
-
                 const double dx = xi - xn;
                 const double dy = yi - yn;
                 const double dz = zi - zn;

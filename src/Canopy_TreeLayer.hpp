@@ -299,11 +299,6 @@ class TreeLayer
             _cells_per_dim,
             _cells_per_dim
             };
-        // printf("L%d: R%d: high-low: %0.2lf, %0.2lf, %0.2lf, _tiles_per_dim: %d\n", _layer_number, _rank,
-        //     _global_high_corner[0] - _global_low_corner[0],
-        //     _global_high_corner[1] - _global_low_corner[1],
-        //     _global_high_corner[2] - _global_low_corner[2],
-        //     _tiles_per_dim);
         
         // sparse partitioner
         float max_workload_coeff = 1.5;
@@ -315,7 +310,6 @@ class TreeLayer
             _global_num_cell, _max_optimize_iteration );
         auto ranks_per_dim =
             _partitioner_ptr->ranksPerDimension( comm, _global_num_cell );
-        // if (_rank == 0) printf("R%d: ranks per dim: %d, %d, %d\n", rank, ranks_per_dim[0], ranks_per_dim[1], ranks_per_dim[2]);
         std::array<int, 3> periodic_dims = { 0, 0, 0 };
 
         // rank-related information
@@ -330,7 +324,7 @@ class TreeLayer
         int dims[3];
         int periods[3];
         int cart_coords[3];
-        MPI_Cart_get(_cart_comm, 3, dims, periods, cart_coords); // dims will contain [x, y, z] counts
+        MPI_Cart_get(_cart_comm, 3, dims, periods, cart_coords);
 
         // Function to compute 1D tile partitioning
         auto compute_partition = [](int total_tiles, int num_parts) {
@@ -345,26 +339,9 @@ class TreeLayer
         std::vector<int> y_partition = compute_partition(_tiles_per_dim, dims[1]);
         std::vector<int> z_partition = compute_partition(_tiles_per_dim, dims[2]);
 
-        /*!
-        \brief From Cabana docs: Initialize the tile partition; partition in each dimension
-        has the form [0, p_1, ..., p_n, total_tile_num], so the partition
-        would be [0, p_1), [p_1, p_2) ... [p_n, total_tile_num]
-        \param rec_partition_i partition array in dimension i
-        \param rec_partition_j partition array in dimension j
-        \param rec_partition_k partition array in dimension k
-        */
         _partitioner_ptr->initializeRecPartition(x_partition, y_partition, z_partition);
 
         initialize();
-        /*
-        Steps:
-        1. Initially partition based on the 2D partition of the surface.
-        2. Register sparse grid using positions.
-        3. Optimize partitioner.
-        4. Re-register sparse grid.
-        5. Use Distributor to send particles to their rank of ownership in the new partition.
-        6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
-        */
     }
 
     /**
@@ -389,10 +366,6 @@ class TreeLayer
             Cabana::Grid::createSparseMap<memory_space, double, cell_per_tile_dim>( global_mesh, 1.2 );
         // Save sparse map as shared pointer
         _map_ptr = std::make_shared<sparse_map_type>(sparse_map);
-
-        // printf("R%d: global num cell x/y/z: %d, %d, %d\n", _rank, global_mesh->globalNumCell( Cabana::Grid::Dim::I ),
-        //   global_mesh->globalNumCell( Cabana::Grid::Dim::J ),
-        //   global_mesh->globalNumCell( Cabana::Grid::Dim::K ));
         
         // initializeRecPartition(sparse_map);
         _layout_ptr =
@@ -408,10 +381,6 @@ class TreeLayer
         // Set coefficient view index to 0
         _coefficient_view_index = Kokkos::View<std::size_t, memory_space>("_coefficient_view_index");
         Kokkos::deep_copy(_coefficient_view_index, 0);
-
-        // if (_rank == 0) printf("L%d: R%d: cell_per_dim: %d, size: %.3lf\n",  _layer_number, _rank,
-        //     _cells_per_dim, _cell_size[0]);
-    
     }
 
     void updateCellSize()
@@ -487,38 +456,16 @@ class TreeLayer
                     cell_offsets[d] = tile_start * cell_per_tile_dim;
 
             }
-            // if (_rank == 0) printf("L%d: R%d: i(%d, %d), j(%d, %d), k(%d, %d)\n", _layer_number, rank, 
-            //     current_partition[0][coords[0]], current_partition[0][coords[0] + 1],
-            //     current_partition[1][coords[1]], current_partition[1][coords[1] + 1],
-            //     current_partition[2][coords[2]], current_partition[2][coords[2] + 1]);
 
             domains_vec[rank] = domain;
             num_owned_cell_vec[rank] = cells_owned;
             cell_offsets_vec[rank] = cell_offsets;
-            // if (_rank == 0) printf("L%d: R%d: tiles owned: (%d, %d, %d), offset: (%d, %d, %d)\n",
-            //     _layer_number, rank, tiles_owned[0], tiles_owned[1], tiles_owned[2],
-            //     tile_offsets[0], tile_offsets[1], tile_offsets[2]); 
         }
 
         // Convert vectors to views and save
         _cell_offsets_view = vec2view<memory_space>(cell_offsets_vec, "_cell_offsets_view");
         _num_owned_cell_view = vec2view<memory_space>(num_owned_cell_vec, "_num_owned_cell_view");
         _domains = vec2view<memory_space>(domains_vec, "_domains");
-
-        // for (std::size_t i = 0; i < _domains.extent(0); ++i)
-        // {
-        //     if (_rank == 0)
-        //         printf("L%d: R%d: [%0.3lf, %0.3lf, %0.3lf] to [%0.3lf, %0.3lf, %0.3lf]\n", _layer_number,
-        //             i, _domains(i, 0), _domains(i, 1), _domains(i, 2), _domains(i, 3),
-        //             _domains(i, 4), _domains(i, 5));
-        // }
-        // for (std::size_t i = 0; i < _cell_offsets_view.extent(0); ++i)
-        // {
-        //     if (_rank == 0)
-        //         printf("L%d: R%d: cell offset(%d, %d, %d), owned(%d, %d, %d)\n", _layer_number,
-        //             i, _cell_offsets_view(i, 0), _cell_offsets_view(i, 1), _cell_offsets_view(i, 2),
-        //             _num_owned_cell_view(i, 0), _num_owned_cell_view(i, 1), _num_owned_cell_view(i, 2));
-        // }
     }
 
     /**
@@ -596,8 +543,8 @@ class TreeLayer
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::populateCells");
 
-        int rank = _rank;
-        int layer_number = _layer_number;
+        // int rank = _rank;
+        // int layer_number = _layer_number;
 
         // printf("L%d: start/end: %d, %d\n", _layer_number, start, end);
 
@@ -652,28 +599,7 @@ class TreeLayer
                 
                 auto cell_activated_ijk =
                     position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
-                                 low_corner, cell_size);
-
-                // printf("L%d: incoming data %d: (%.2lf, %.2lf, %.2lf) activates c(%d, %d, %d)\n", layer_number, pid,
-                //     positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
-                //     cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2]);
-
-                // if (layer_number == 1)
-                // {
-                //     printf("L%d: R%d: pos: %.1lf, %.1lf, %.1lf, ijk: %llu, %llu, %llu, cell size: %0.3lf\n",
-                //         layer_number, rank,
-                //         positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
-                //         (unsigned long long)cell_activated_ijk[0],
-                //         (unsigned long long)cell_activated_ijk[1],
-                //         (unsigned long long)cell_activated_ijk[2], cell_size[0]);
-                // }
-                // 5, 14, 9
-                // if (cell_activated_ijk[0] == 5 && cell_activated_ijk[1] == 14 && cell_activated_ijk[2] == 9)
-                // {
-                //     printf("Skipping cell 5, 14, 9\n");
-                //     return;
-                // }
-                   
+                                 low_corner, cell_size);                   
 
                 // Register cell in sparse map for load balancing
                 map.insertCell( cell_activated_ijk[0], cell_activated_ijk[1],
@@ -687,33 +613,13 @@ class TreeLayer
                 // Insert into map to count cells activated. Use dummy values
                 // because we will clear the map after this.
                 auto result = ijk2index.insert(cell_activated_ijk, 0);
-                // if (rank == 0)
-                //     printf("R%d: vgid_parent %d, vowner: %d, result: %d key: %" PRIu64 "\n", rank,
-                //         vgid_parent, vert_owner, result.success(), hash_key);
                 if (!result.success())
                 {
                     // Getting here means some particles activate the same cell.
-                    // if (layer_number == 0)
-                    // {
-                    //     auto ccenter = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2],
-                    //         low_corner, cell_size);
-                    //     printf("Same cell activated: L%d: R%d: cid: %llu, ijk: %llu, %llu, %llu from p(%.2lf, %.2lf, %.2lf)\n",
-                    //         layer_number, rank,
-                    //         (unsigned long long)cell_id,
-                    //         (unsigned long long)cell_activated_ijk[0],
-                    //         (unsigned long long)cell_activated_ijk[1],
-                    //         (unsigned long long)cell_activated_ijk[2],
-                    //         positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
-                    // }
                 }
                 if (result.success())
                 {
-                    // printf("L%d: R%d: insert ijk(%llu, %llu, %llu) from p(%.3lf, %.3lf, %.3lf), pid %d\n",
-                    //     layer_number, rank,
-                    //     (unsigned long long)cell_activated_ijk[0],
-                    //     (unsigned long long)cell_activated_ijk[1],
-                    //     (unsigned long long)cell_activated_ijk[2],
-                    //     positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ));
+                    // Getting here means the cell has not been activated.
                 }
             } );
 
@@ -786,7 +692,6 @@ class TreeLayer
         // the data_slice, which changes depending on if layer 0 or not.
         if constexpr (position_index == 0)
         {
-            // auto id_slice = Cabana::slice<3>(data_aosoa);
             Kokkos::parallel_for( "set_multipoles_layer0",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -828,13 +733,6 @@ class TreeLayer
                         Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 0), M[i].real());
                         Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 1), M[i].imag());
                     }
-
-                    // printf("L%d: R%d: insert ijk(%llu, %llu, %llu) from p(%.3lf, %.3lf, %.3lf), pid %d\n",
-                    // layer_number, rank,
-                    // (unsigned long long)cell_activated_ijk[0],
-                    // (unsigned long long)cell_activated_ijk[1],
-                    // (unsigned long long)cell_activated_ijk[2],
-                    // positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ), id_slice(pid));
                 });
         }
 
@@ -888,13 +786,6 @@ class TreeLayer
                         Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 0), M_trans_array[i].real());
                         Kokkos::atomic_add(&multipole_coefficients_slice(cell_index, i, 1), M_trans_array[i].imag());
                     }
-
-                    // printf("L%d: M2M in data %d: v2c(%.2lf, %.2lf, %.2lf) M_orig: %.2lf, %.2lf, %.2lf, trans: %.2lf, %.2lf, %.2lf\n", layer_number, pid,
-                    //     vector_to_center[0], vector_to_center[1], vector_to_center[2],
-                    //     M_orig_array[0].real(), M_orig_array[1].real(), M_orig_array[2].real(),
-                    //     multipole_coefficients_slice(cell_index, 0, 0),
-                    //     multipole_coefficients_slice(cell_index, 1, 0),
-                    //     multipole_coefficients_slice(cell_index, 2, 0));
                 });
         }
     }
@@ -919,8 +810,6 @@ class TreeLayer
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::sendCoarseLocals");
 
-        const int rank = _rank;
-        const int layer_number = _layer_number;
         const int comm_size = _comm_size;
         const int num_cells = static_cast<int>(numCells());
 
@@ -932,11 +821,9 @@ class TreeLayer
         auto factor = _tile_reduction_factor;
         auto cell_size = _cell_size;
         Kokkos::Array<double, 3> child_size;
-        // Kokkos::Array<double, 3> parent_size;
         for (int i = 0; i < 3; i++)
         {
             child_size[i] = cell_size[i] / factor;
-            // parent_size[i] = cell_size[i] * factor;
         }
 
         const int children_per_cell = factor * factor * factor;
@@ -953,9 +840,9 @@ class TreeLayer
             md_policy({{0, 0}}, {{num_cells, children_per_cell}}),
             KOKKOS_LAMBDA(const int index, const int c)
         {
-            int di =  c % factor;
-            int dj = (c / factor) % factor;
-            int dk =  c / (factor*factor);
+            const int di =  c % factor;
+            const int dj = (c / factor) % factor;
+            const int dk =  c / (factor*factor);
             
             Kokkos::Array<std::size_t, 3> child_ijk = {
                 static_cast<std::size_t>(cell_ijk_slice(index, 0) * factor + di),
@@ -964,15 +851,6 @@ class TreeLayer
             };
 
             auto child_center = cellCenter(child_ijk[0], child_ijk[1], child_ijk[2], low_corner, child_size);
-
-            // if (cell_ijk_slice(index, 0) == 10 && cell_ijk_slice(index, 1) == 17 && cell_ijk_slice(index, 2) == 2)
-            // {
-            //     printf("L%d: R%d: p(%d, %d, %d), child(%d, %d, %d) cent(%.3lf, %.3lf, %.3lf)\n", layer_number, rank,
-            //         cell_ijk_slice(index, 0), cell_ijk_slice(index, 1), cell_ijk_slice(index, 2),
-            //         child_ijk[0], child_ijk[1], child_ijk[2],
-            //         child_center[0], child_center[1], child_center[2]);
-            // }
-            int owner_rank = -1;
 
             for (int r = 0; r < comm_size; ++r)
             {
@@ -1061,9 +939,6 @@ class TreeLayer
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::addCoarseLocals");
 
-        int rank = _rank;
-        int layer_number = _layer_number;
-
         static constexpr std::size_t num_coefficients = ( p + 1 ) * ( p + 1 );
         auto ijk2index = _ijk2index;
 
@@ -1084,24 +959,22 @@ class TreeLayer
         Kokkos::RangePolicy<execution_space>(0, parent_locals.size()),
         KOKKOS_LAMBDA(const int hi)
         {
-            // printf("L%d: R%d: Got plocal(%d, %d, %d)\n", layer_number, rank, parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2));
-            
             auto parent_cell_center = cellCenter(parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2),
                 low_corner, parent_cell_size);
 
             // Iterate over all children of this parent
             for (int c = 0; c < factor*factor*factor; ++c)
             {
-                int di =  c % factor;
-                int dj = (c / factor) % factor;
-                int dk =  c / (factor*factor);
+                const int di =  c % factor;
+                const int dj = (c / factor) % factor;
+                const int dk =  c / (factor*factor);
                 
                 Kokkos::Array<std::size_t, 3> cell_ijk = {
                     static_cast<std::size_t>(parent_ijk_slice(hi, 0) * factor + di),
                     static_cast<std::size_t>(parent_ijk_slice(hi, 1) * factor + dj),
                     static_cast<std::size_t>(parent_ijk_slice(hi, 2) * factor + dk)
                 };
-                // if (parent_ijk_slice(hi, 0) == 24 && parent_ijk_slice(hi, 1) == 30 && parent_ijk_slice(hi, 2) == 13) printf("L%d: R%d: checking cell %d, %d, %d\n", _layer_number, _rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+
                 // Check if this cell is activated
                 auto cell_ijk_exists = ijk2index.exists( cell_ijk );
                 if (cell_ijk_exists)
@@ -1135,12 +1008,6 @@ class TreeLayer
                         coefficient_slice(local_index, i, 0) += L_trans[i].real();
                         coefficient_slice(local_index, i, 1) += L_trans[i].imag();
                     }
-                    // printf("Adding locals from cell ")
-                    // printf("L%d: R%d: Adding from pijk(%d, %d, %d) to ijk(%d, %d, %d): %.2lf, %.2lf, %.2lf, %.2lf\n", layer_number, rank,
-                    //     parent_ijk_slice(hi, 0), parent_ijk_slice(hi, 1), parent_ijk_slice(hi, 2),
-                    //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    //     coefficient_slice(local_index, 0, 0), coefficient_slice(local_index, 1, 0), 
-                    //     coefficient_slice(local_index, 2, 0), coefficient_slice(local_index, 3, 0));
                 }
             }
         });
@@ -1171,10 +1038,8 @@ class TreeLayer
         Kokkos::deep_copy(min_subview, INT_MAX);
         Kokkos::deep_copy(max_subview, INT_MIN);
 
-        // int cells_per_dim = _cells_per_dim;
-        // int rank = _rank;
-        int layer_number = _layer_number;
-        int cell_incr_factor = _tile_reduction_factor;
+        const int layer_number = _layer_number;
+        const int cell_incr_factor = _tile_reduction_factor;
 
         // Per-cell calculation
         Kokkos::parallel_for("interaction bounds",
@@ -1188,12 +1053,7 @@ class TreeLayer
 
                 // Cell index in local and multipole structures
                 auto index = ijk2index.value_at(ijk2index_index);
-                // printf("L%d: ijk: (%d, %d, %d), li: %d\n", layer_number,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2], local_index);
 
-                // if (layer_number == 0)
-                //     printf("L%d: L%d: ijk(%d, %d, %d)\n", layer_number, layer_number,
-                //         ijk(local_index, 0, 0), ijk(local_index, 0, 1), ijk(local_index, 0, 2));
                 // Cast cell_ijk to ints
                 Kokkos::Array<int, 3> cell_ijk_int;
                 for (int i = 0; i < 3; i++)
@@ -1205,12 +1065,6 @@ class TreeLayer
                 // Save include bounds
                 for (int i = 0; i < 6; i++)
                     m2l_bounds(index, i) = bounds.first[i];
-
-                // printf("L%d: cell(%d, %d, %d): in: (%d, %d, %d)-(%d, %d, %d)\n",
-                //     layer_number, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     bounds.first[0], bounds.first[1], bounds.first[2],
-                //     bounds.first[3], bounds.first[4], bounds.first[5]);
-                
             }
         });
       
@@ -1228,12 +1082,6 @@ class TreeLayer
             host_bounds(d) = result.v[d];
 
         Kokkos::deep_copy(mhalo_outer_bound, host_bounds);
-
-        // if (layer_number == 4) printf("L%d: R%d: mhalo bounds: (%d, %d, %d), (%d, %d, %d)\n",
-        //     _layer_number, _rank,
-        //     host_bounds(0), host_bounds(1), host_bounds(2),
-        //     host_bounds(3), host_bounds(4), host_bounds(5));
-
     }
 
     /**
@@ -1258,24 +1106,9 @@ class TreeLayer
         // Copy back to device
         auto all_mhalo_outer_bounds = Kokkos::create_mirror_view_and_copy(memory_space(), all_mhalo_outer_bounds_h);
 
-        // if(_rank == 0)
-        // {   
-        //     Kokkos::parallel_for("print",
-        //     Kokkos::RangePolicy<execution_space>(0, _comm_size),
-        //     KOKKOS_LAMBDA(const int i)
-        //     {
-        //             printf("bounds R%d: (%d, %d, %d) (%d, %d, %d)\n",
-        //                 i, all_mhalo_outer_bounds(i, 0), all_mhalo_outer_bounds(i, 1), all_mhalo_outer_bounds(i, 2),
-        //                 all_mhalo_outer_bounds(i, 4), all_mhalo_outer_bounds(i, 5), all_mhalo_outer_bounds(i, 6));
-        //     });
-        // }
-
-        int rank = _rank;
-        int comm_size = _comm_size;
-        int layer_number = _layer_number;
-
-        // Locals, cell ijk index
-        static constexpr std::size_t num_coefficients = (p+1)*(p+1);
+        const int rank = _rank;
+        const int comm_size = _comm_size;
+        const int layer_number = _layer_number;
 
         const auto num_cells = numCells();
 
@@ -1304,9 +1137,6 @@ class TreeLayer
             auto cell_ijk = position2ijk(cell_center_slice( m_index, 0 ), cell_center_slice( m_index, 1 ), cell_center_slice( m_index, 2 ),
                 low_corner, cell_size);
 
-            // printf("L%d: R%d: ff multipole(%d, %d, %d) needs to be haloed\n",
-            //     layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
-
             // Check if this cell center is within a rank's halo bound
             for (int r = 0; r < comm_size; ++r)
             {
@@ -1323,9 +1153,6 @@ class TreeLayer
                     auto index = Kokkos::atomic_fetch_add(&counter(), 1);
                     id_slice(index) = m_index;
                     rank_slice(index) = r;
-                    // printf("L%d: R%d: sending multipole ijk:(%d, %d, %d), to R%d\n",
-                    //     layer_number, rank, cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                    //     r);
                 }
             }
         });
@@ -1382,7 +1209,6 @@ class TreeLayer
 
         haloMultipoles();
 
-        // printf("L%d: R%d: cells per dim: %d, cutoff: %d\n",  _layer_number, _rank, _cells_per_dim, outer_cell_cutoff);
         auto locals = _locals;
         auto m2l_bounds = _m2l_bounds;
         auto map = *_map_ptr;
@@ -1394,9 +1220,7 @@ class TreeLayer
         auto l_slice = Cabana::slice<0>(_locals);
         auto l_cell_ijk_slice = Cabana::slice<1>(_locals);
 
-        int cells_per_dim = _cells_per_dim;
-        int rank = _rank;
-        int layer_number = _layer_number;
+        const int cells_per_dim = _cells_per_dim;
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
 
@@ -1410,7 +1234,6 @@ class TreeLayer
             Cabana::FullNeighborTag{}, m_cell_center_slice, 0, _multipoles.size(),
             neighborhood_radius );
         using list_type = decltype(neighbor_list);
-        // printf("L%d: R%d: nr: %0.3lf\n", _layer_number, _rank, neighborhood_radius);
 
         // Per-cell calculation
         Kokkos::parallel_for("Canopy::TreeLayer::multipole_to_local loop",
@@ -1438,18 +1261,11 @@ class TreeLayer
 
             // Iterate over neighbor cells
             const int num_neighbors = Cabana::NeighborList<list_type>::numNeighbor(neighbor_list, index);
-            printf("L%d: R%d: cpd: %d, m %d/%d, c(%d, %d, %d): num_n: %d\n", layer_number, rank, cells_per_dim,
-                index, _num_local_multipoles,
-                cell_ijk[0], cell_ijk[1], cell_ijk[2], num_neighbors);
             for (int j = 0; j < num_neighbors; j++) {
                 const int neighbor_id = Cabana::NeighborList<list_type>::getNeighbor(neighbor_list, index, j);
 
                 auto neighbor_cell_ijk = position2ijk(m_cell_center_slice(neighbor_id,0),
                     m_cell_center_slice(neighbor_id,1), m_cell_center_slice(neighbor_id,2), low_corner, cell_size);
-
-                // printf("L%d: R%d: j%d/%d c(%d, %d, %d) neighbor (%d, %d, %d)?\n", layer_number, rank, j, num_neighbors,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     neighbor_cell_ijk[0], neighbor_cell_ijk[1], neighbor_cell_ijk[2]);
 
                 // Check the bounds of this neighbor
                 const bool in_outer =
@@ -1466,22 +1282,6 @@ class TreeLayer
                 {
                     continue;
                 }
-                // if (rank == 0 && layer_number == 0)
-                // printf("L%d: R%d: considering cell %d, %d, %d, o: (%d, %d, %d), (%d, %d, %d), i: (%d, %d, %d), (%d, %d, %d)\n",
-                //     layer_number, rank,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     outer_lower_bound[0], outer_lower_bound[1], outer_lower_bound[2],
-                //     outer_upper_bound[0], outer_upper_bound[1], outer_upper_bound[2],
-                //     inner_lower_bound[0], inner_lower_bound[1], inner_lower_bound[2],
-                //     inner_upper_bound[0], inner_upper_bound[1], inner_upper_bound[2]);
-                // if (rank == 0)
-                // printf("L%d: R%d: considering cell %d, %d, %d, center(%.2lf, %.2lf, %.2lf)\n",
-                //     layer_number, rank,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     cell_center_slice(this_cell_index, 0), cell_center_slice(this_cell_index, 1), cell_center_slice(this_cell_index, 2));
-
-                        
-                    
                 
                 // For multipole to local conversion we need the multipole
                 // center relative to the local center
@@ -1498,28 +1298,9 @@ class TreeLayer
                     M[i].imag() = m_slice(neighbor_id, i, 1);
                 }
 
-                // if (cell_ijk[0] == 14 && cell_ijk[1] == 12 && cell_ijk[2] == 5)
-                // {
-                //     // if( ci == 5 && cj == 15 && ck == 9)
-                //     // {
-                //         for (std::size_t lid = 0; lid < (p+1)*(p+1); lid++)
-                //         {
-                //             printf("L%d: R%d: ncell(%d, %d, %d): m(%d): (%.3lf, %.3lf)\n", layer_number, rank,
-                //                 ci, cj, ck, lid,
-                //                 m_slice(neighbor_id, lid, 0), m_slice(neighbor_id, lid, 1));
-                //         }
-                //     // }
-                // }
-
                 // Convert to locals
                 Kokkos::Array<cdouble, num_coefficients> L;
                 Kernel::Scalar::m2l<p>(M, L, m2l_vec);
-
-                // printf("L%d: R%d: cell %d, %d, %d, neighbor %d, %d, %d: m2lvec(%.1lf, %.1lf, %.1lf), nL: %.3lf, %.3lf, %.3lf\n", layer_number, rank,
-                //     cell_ijk[0], cell_ijk[1], cell_ijk[2],
-                //     neighbor_cell_ijk[0], neighbor_cell_ijk[1], neighbor_cell_ijk[2],
-                //     m2l_vec[0], m2l_vec[1], m2l_vec[2],
-                //     L[0].real(), L[1].real(), L[2].real());
                 
                 // Add contribution to locals for this cell
                 for (std::size_t i = 0; i < num_coefficients; i++)
