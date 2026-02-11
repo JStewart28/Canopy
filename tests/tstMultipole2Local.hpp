@@ -9,7 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Tree.hpp>
+#include <Canopy_Solver.hpp>
 
 #include <test_helper_functions.hpp>
 
@@ -177,7 +177,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
     // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
+    ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
 
     // Check mesh information for leaf layer (layer 0)
     auto layer = tree->layer(0);
@@ -434,7 +434,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
     // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
+    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
 
     // Check mesh information for leaf layer
     int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;

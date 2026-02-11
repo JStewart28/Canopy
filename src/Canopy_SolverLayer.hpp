@@ -228,11 +228,11 @@ struct HaloBoundsReduce
 
 
 template <class TreeType, std::size_t CellPerTileDim>
-class TreeLayer
+class SolverLayer
 {
   public:
     //! Self type. All TreeLayers in the Octree are of the same type. 
-    using tree_layer_type = TreeLayer<TreeType, CellPerTileDim>;
+    using tree_layer_type = SolverLayer<TreeType, CellPerTileDim>;
 
     //! Execution space
     using execution_space = typename TreeType::execution_space;
@@ -276,7 +276,7 @@ class TreeLayer
     
     using index_map_type = Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space>;
     
-    TreeLayer(const std::array<double, 3>& global_low_corner,
+    SolverLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int tile_reduction_factor,
             const int halo_width,
@@ -350,7 +350,7 @@ class TreeLayer
      */
     void initialize()
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::initialize");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::initialize");
 
         // mesh/grid related initialization
         auto global_mesh = Cabana::Grid::createSparseGlobalMesh(
@@ -393,7 +393,7 @@ class TreeLayer
     template <class ParticlePositions>
     void optimizePartition(ParticlePositions positions, std::size_t num_particles)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::optimizePartition");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::optimizePartition");
 
         _partitioner_ptr->optimizePartition( positions, num_particles, _global_low_corner,
             _cell_size[0], _comm);
@@ -475,7 +475,7 @@ class TreeLayer
     template <class ViewType, class PositionSliceType>
     void mapParticles(const PositionSliceType& positions, ViewType& particle_ranks, const int particle_num)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::mapParticles");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::mapParticles");
 
         using mem_space = typename ViewType::memory_space;
         using exec_space = typename ViewType::execution_space;
@@ -541,7 +541,7 @@ class TreeLayer
     template <class ParticleAoSoA>
     void populateCells(const ParticleAoSoA data_aosoa, const std::size_t start, const std::size_t end)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::populateCells");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::populateCells");
 
         // int rank = _rank;
         // int layer_number = _layer_number;
@@ -808,7 +808,7 @@ class TreeLayer
      */
     void sendCoarseLocals(local_aosoa_type& halo_aosoa, const Kokkos::View<double*[6], memory_space>& child_domain)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::sendCoarseLocals");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::sendCoarseLocals");
 
         const int comm_size = _comm_size;
         const int num_cells = static_cast<int>(numCells());
@@ -937,7 +937,7 @@ class TreeLayer
 
     void addCoarseLocals(local_aosoa_type& parent_locals)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::addCoarseLocals");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::addCoarseLocals");
 
         static constexpr std::size_t num_coefficients = ( p + 1 ) * ( p + 1 );
         auto ijk2index = _ijk2index;
@@ -1023,7 +1023,7 @@ class TreeLayer
      */
     void computeInteractionBounds(int starting_cells_per_dimension, int start_layer)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::computeInteractionBounds");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::computeInteractionBounds");
 
         // Initialize _mhalo_outer_bound
         _mhalo_outer_bound = Kokkos::View<int[6], memory_space>("_mhalo_outer_bound");
@@ -1090,7 +1090,7 @@ class TreeLayer
      */
     void haloMultipoles()
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::haloMultipoles");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::haloMultipoles");
 
         // Communicate _mhalo_outer_bound to each rank so we know who we need to send to.
         // Allocate view to store data from other ranks
@@ -1203,7 +1203,7 @@ class TreeLayer
      */
     void multipole_to_local(int starting_cells_per_dimension, int start_layer)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::TreeLayer::multipole_to_local");
+        Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::multipole_to_local");
 
         computeInteractionBounds(starting_cells_per_dimension, start_layer);
 
@@ -1236,7 +1236,7 @@ class TreeLayer
         using list_type = decltype(neighbor_list);
 
         // Per-cell calculation
-        Kokkos::parallel_for("Canopy::TreeLayer::multipole_to_local loop",
+        Kokkos::parallel_for("Canopy::SolverLayer::multipole_to_local loop",
         Kokkos::RangePolicy<execution_space>(0, _num_local_multipoles),
         KOKKOS_LAMBDA(const int index)
         {            
@@ -1414,14 +1414,14 @@ class TreeLayer
 };
 
 template <class TreeType, std::size_t CellPerTileDim>
-std::shared_ptr<TreeLayer<TreeType, CellPerTileDim>> createTreeLayer(const std::array<double, 3>& global_low_corner,
+std::shared_ptr<SolverLayer<TreeType, CellPerTileDim>> createTreeLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int tile_reduction_factor,
             const int halo_width,
             const int layer_number,
             MPI_Comm comm)
 {
-    return std::make_shared<TreeLayer<TreeType, CellPerTileDim>>(global_low_corner,
+    return std::make_shared<SolverLayer<TreeType, CellPerTileDim>>(global_low_corner,
             global_high_corner,
 	        tiles_per_dim, tile_reduction_factor,
             halo_width, layer_number, comm);

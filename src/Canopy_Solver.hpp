@@ -13,7 +13,7 @@
 #define CANOPY_TREE_HPP
 
 
-#include <Canopy_TreeLayer.hpp>
+#include <Canopy_SolverLayer.hpp>
 
 #include <Cabana_Core.hpp>
 #include <Cabana_Grid.hpp>
@@ -35,7 +35,7 @@ namespace Canopy
 template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
             std::size_t InDataId, std::size_t OutDataId,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-class Tree
+class Solver
 {
   public:
     using execution_space = ExecutionSpace;
@@ -43,7 +43,7 @@ class Tree
     using memory_space = MemorySpace;
 
     //! Self type
-    using tree_type = Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
+    using tree_type = Solver<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
         NumSpaceDim, CellPerTileDim, ExpansionCutoff>;
 
     //! Memory space size type
@@ -83,7 +83,7 @@ class Tree
     //! Particle data
     using particle_aosoa_type = ParticleAoSoAType;
     
-    Tree( const std::array<double, 3>& global_low_corner,
+    Solver( const std::array<double, 3>& global_low_corner,
           const std::array<double, 3>& global_high_corner,
           const std::size_t leaf_tiles_per_dim,
           const std::size_t tile_reduction_factor,
@@ -125,7 +125,7 @@ class Tree
     void build()
     {
         if (_tile_reduction_factor < 2)
-            throw std::runtime_error("Canopy::Tree::build: _tile_reduction_factor must be greater than 1.\n");
+            throw std::runtime_error("Canopy::Solver::build: _tile_reduction_factor must be greater than 1.\n");
 
         int layer_num = 0;
 
@@ -153,7 +153,7 @@ class Tree
     void mapParticles(const PositionSliceType& positions, ViewType& particle_ranks,
                       const std::size_t particle_num, const int layer, const bool run_load_balance)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::mapParticles");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::mapParticles");
 
         using mem_space = typename ViewType::memory_space;
         using exec_space = typename ViewType::execution_space;
@@ -176,7 +176,7 @@ class Tree
         Kokkos::deep_copy(is_out_of_bounds, 0);
 
         Kokkos::parallel_for(
-            "Canopy::Tree::mapParticles loop",
+            "Canopy::Solver::mapParticles loop",
             Kokkos::RangePolicy<exec_space>(0, particle_num),
             KOKKOS_LAMBDA(const int i) {
                 const double xpos = positions(i, 0);
@@ -212,7 +212,7 @@ class Tree
             Kokkos::deep_copy(out_of_bounds, is_out_of_bounds);
             if (out_of_bounds)
             {
-                throw std::runtime_error("Canopy::Tree:MapParticles: particle or cell center is out of bounds.");
+                throw std::runtime_error("Canopy::Solver:MapParticles: particle or cell center is out of bounds.");
             }
     }
 
@@ -222,18 +222,18 @@ class Tree
      final aggregation step to translate and add multipoles into a single
      set of coefficients at the root. Since the root layer is a single set of
      multipole coefficients that is not distributed, store the root layer data
-     in this object instyead of a TreeLayer.
+     in this object instyead of a SolverLayer.
     */
     void initializeRootLayer()
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::initializeRootLayer");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::initializeRootLayer");
 
         // One rank holds all the data in the layer below the root because
         // there is only one tile per dimensions and therefore no
         // distributed partitioning.
         if(_tree.empty())
         {
-            throw std::runtime_error("Canopy::Tree::initializeRootLayer: function called with an empty tree.");
+            throw std::runtime_error("Canopy::Solver::initializeRootLayer: function called with an empty tree.");
         }
 
         // Initialize _M_root
@@ -265,7 +265,7 @@ class Tree
 
         // Iterate over all activated cells
         Kokkos::parallel_for(
-        "Canopy::Tree::initializeRootLayer loop",
+        "Canopy::Solver::initializeRootLayer loop",
         Kokkos::RangePolicy<execution_space>( 0, cells_activated ),
         KOKKOS_LAMBDA( const int index ) {
             // printf("R%d: checking index %d\n", rank, index);
@@ -335,7 +335,7 @@ class Tree
         }
         if (root == -1)
         {
-            throw std::runtime_error("Canopy::Tree::initializeRootLayer: No rank has non-empty map size!");
+            throw std::runtime_error("Canopy::Solver::initializeRootLayer: No rank has non-empty map size!");
         }
 
         // Now broadcast the data from the root.
@@ -351,7 +351,7 @@ class Tree
      */
     void create_multipoles(particle_aosoa_type& external_data, bool run_load_balance)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::create_multipoles");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::create_multipoles");
 
         // Data comes from externally to populate leaf layer (layer 0)
         _leaf_particles = external_data;
@@ -377,7 +377,7 @@ class Tree
      */
     void migrateParticleData(particle_aosoa_type& external_data, bool run_load_balance)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::migrateParticleData");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::migrateParticleData");
 
         auto positions = Cabana::slice<position_id>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
@@ -392,7 +392,7 @@ class Tree
      */
     void migrateAndSetLayer(int from_layer, int to_layer, bool run_load_balance)
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::migrateAndSetLayer");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::migrateAndSetLayer");
 
         // Communicate cell data
         auto f_layer = _tree[from_layer];
@@ -435,7 +435,7 @@ class Tree
      */
     void multipole_to_local()
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::multipole_to_local");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::multipole_to_local");
 
         const int starting_layer = static_cast<int>(_tree.size()) - 1;
 
@@ -480,7 +480,7 @@ class Tree
 
     void haloParticles()
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::haloParticles");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::haloParticles");
 
         auto leaf_cell_size = _tree[0]->cellSize();
         auto leaf_cell_per_dim = _tree[0]->cellsPerDim();
@@ -499,7 +499,7 @@ class Tree
         // two cells in each direction.
         using domain_type = Kokkos::View<int*[6], memory_space>;
         domain_type halo_domains("halo_domains", _comm_size);
-        Kokkos::parallel_for("Canopy::Tree::compute halo domains",
+        Kokkos::parallel_for("Canopy::Solver::compute halo domains",
             Kokkos::RangePolicy<execution_space>(0, _comm_size),
             KOKKOS_LAMBDA(const int r)
             {
@@ -520,7 +520,7 @@ class Tree
         // First, count the number of particles that must be haloed.
         Kokkos::View<std::size_t, memory_space> num_halos("num_halos");
         Kokkos::deep_copy(num_halos, 0);
-        Kokkos::parallel_for("Canopy::Tree::count halo particles",
+        Kokkos::parallel_for("Canopy::Solver::count halo particles",
             Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
             KOKKOS_LAMBDA(const int pid)
             {
@@ -559,7 +559,7 @@ class Tree
         Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks("ids_ranks", num_halos_h);
         auto id_slice = Cabana::slice<0>(ids_ranks);
         auto rank_slice = Cabana::slice<1>(ids_ranks);
-        Kokkos::parallel_for("Canopy::Tree::fill halo particles",
+        Kokkos::parallel_for("Canopy::Solver::fill halo particles",
             Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
             KOKKOS_LAMBDA(const int pid)
             {
@@ -604,7 +604,7 @@ class Tree
      */
     void computeL2P()
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::computeL2P");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::computeL2P");
 
         // int rank = _rank;
 
@@ -622,7 +622,7 @@ class Tree
 
         // Iterate over points and use locals to calculate potential
         Kokkos::parallel_for(
-        "Canopy::Tree::populate_local_potential",
+        "Canopy::Solver::populate_local_potential",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, _leaf_particles.size() ),
         KOKKOS_LAMBDA( const int tpi ) {
 
@@ -679,7 +679,7 @@ class Tree
 
     void computeP2P()
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Tree::computeP2P");
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::computeP2P");
 
         haloParticles();
 
@@ -704,7 +704,7 @@ class Tree
 
         using list_type = decltype(neighbor_list);
 
-        Kokkos::parallel_for("Canopy::Tree::compute_P2P loop", Kokkos::RangePolicy<execution_space>(0, owned_particles), 
+        Kokkos::parallel_for("Canopy::Solver::compute_P2P loop", Kokkos::RangePolicy<execution_space>(0, owned_particles), 
             KOKKOS_LAMBDA(int my_id) {
 
             const double xi = positions(my_id,0);
@@ -771,7 +771,7 @@ class Tree
     auto layer(int layer)
     {
         if (layer >= _tree.size())
-            throw std::runtime_error("Canopy::Tree:layer: Requested layer larger than tree depth!\n");
+            throw std::runtime_error("Canopy::Solver:layer: Requested layer larger than tree depth!\n");
         return _tree[layer];
     }
 
@@ -781,8 +781,8 @@ class Tree
     const MPI_Comm _comm;
     int _rank, _comm_size;
 
-    // Tree layers.
-    std::vector<std::shared_ptr<TreeLayer<tree_type, cell_per_tile_dim>>> _tree;
+    // Solver layers.
+    std::vector<std::shared_ptr<SolverLayer<tree_type, cell_per_tile_dim>>> _tree;
 
     // Vertical multipole halo for each tree layer
     std::vector<std::shared_ptr<Cabana::Halo<memory_space>>> _vertical_multipole_halo;
@@ -811,7 +811,7 @@ class Tree
 template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
           std::size_t InDataId, std::size_t OutDataId,
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-std::shared_ptr<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
+std::shared_ptr<Solver<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
     NumSpaceDim, CellPerTileDim, ExpansionCutoff>>
         createTree( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
@@ -819,7 +819,7 @@ std::shared_ptr<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId,
                     const std::size_t tile_reduction_factor,
                     MPI_Comm comm)
 {
-    return std::make_shared<Tree<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
+    return std::make_shared<Solver<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
         NumSpaceDim, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor,
             comm);
