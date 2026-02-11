@@ -9,7 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Tree.hpp>
+#include <Canopy_Solver.hpp>
 
 #include <test_helper_functions.hpp>
 
@@ -45,16 +45,16 @@ void testSolver(int points_per_proc_in, bool balanced)
     static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
     std::size_t leaf_tiles, red_factor;
-    red_factor = 2, leaf_tiles = 64;
+    red_factor = 2, leaf_tiles = 16;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
+    auto tree = Canopy::createSolver<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
     // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
+    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
 
     // Check mesh information for leaf layer
     int cells_per_dimension_leaf = cells_per_tile * leaf_tiles;
@@ -83,7 +83,7 @@ void testSolver(int points_per_proc_in, bool balanced)
     // If not balanced, fill domain unevenly
     if (!balanced)
     {
-        coord_bounds = {-2.8, 0.3, -0.2, -0.5, 3.0, 1.3};
+        coord_bounds = {-3.0, -3.0, -0.05, 3.0, 3.0, 0.05};
     }
     
     // Kokkos::Array<double, 6> coord_bounds1 = {2.3, 2.3, 2.3, bound_val, bound_val, bound_val};
@@ -159,13 +159,7 @@ void testSolver(int points_per_proc_in, bool balanced)
         
     // Fill the tree. This migrates particles to their correct rank.
     bool run_load_balance = !balanced;
-    tree->create_multipoles(particle_aosoa, run_load_balance);
-
-    tree->multipole_to_local();
-    
-    tree->computeL2P();
-
-    tree->computeP2P();
+    tree->solve(particle_aosoa, run_load_balance);
 
     // Gather all particles from the tree back to rank 0 for testing
     auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
@@ -194,7 +188,7 @@ void testSolver(int points_per_proc_in, bool balanced)
         auto particle_id = tree_id_slice_h(i);
         auto direct_potential = direct_potentials(particle_id);
         auto mesh_potential = tree_potentials_h(i);
-        double allowed_error = Kokkos::pow(10, -p_int+3);
+        double allowed_error = Kokkos::pow(10, -p_int+4);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
         // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }
@@ -204,9 +198,13 @@ void testSolver(int points_per_proc_in, bool balanced)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
-TEST( Tree, testSolver_balanced )
+TEST( Solver, testSolver_balanced )
 { 
-    testSolver<5>(500, true);
+    testSolver<6>(500, true);
+}
+TEST( Solver, testSolver_unbalanced )
+{ 
+    testSolver<6>(500, false);
 }
 
 //---------------------------------------------------------------------------//

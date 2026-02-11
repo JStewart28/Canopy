@@ -9,7 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Tree.hpp>
+#include <Canopy_Solver.hpp>
 
 #include <test_helper_functions.hpp>
 
@@ -52,14 +52,14 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = 2, leaf_tiles = 32;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
+    auto tree = Canopy::createSolver<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
     // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    // ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Tree depth must be at least 3.\n";
+    // ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Solver depth must be at least 3.\n";
     
     // Create the data
      int total_points = points_per_proc_in;
@@ -151,7 +151,7 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     int p_int = static_cast<int>(p);
     double error = Kokkos::pow(10, -p_int+1);
     EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
-        << p << ": Potentials do not match. Tree depth " << tree->numLayers();
+        << p << ": Potentials do not match. Solver depth " << tree->numLayers();
     // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
 }
 
@@ -161,16 +161,16 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
 
 // Test accuracy with increasing truncation cutoffs of multipole coefficients.
 // Test with a balanced particle distribution.
-TEST( Tree, testParticle2Multipole1_balanced ) { testParticle2Multipole<1>(5000, true); }
-TEST( Tree, testParticle2Multipole2_balanced ) { testParticle2Multipole<2>(5000, true); }
-TEST( Tree, testParticle2Multipole3_balanced ) { testParticle2Multipole<3>(5000, true); }
-TEST( Tree, testParticle2Multipole4_balanced ) { testParticle2Multipole<6>(5000, true); }
+TEST( Solver, testParticle2Multipole1_balanced ) { testParticle2Multipole<1>(5000, true); }
+TEST( Solver, testParticle2Multipole2_balanced ) { testParticle2Multipole<2>(5000, true); }
+TEST( Solver, testParticle2Multipole3_balanced ) { testParticle2Multipole<3>(5000, true); }
+TEST( Solver, testParticle2Multipole4_balanced ) { testParticle2Multipole<6>(5000, true); }
 
 // Test with an unbalanced particle distribution.
-TEST( Tree, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(5000, false); }
-TEST( Tree, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(5000, false); }
-TEST( Tree, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(5000, false); }
-TEST( Tree, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(5000, false); }
+TEST( Solver, testParticle2Multipole1_unbalanced ) { testParticle2Multipole<1>(5000, false); }
+TEST( Solver, testParticle2Multipole2_unbalanced ) { testParticle2Multipole<2>(5000, false); }
+TEST( Solver, testParticle2Multipole3_unbalanced ) { testParticle2Multipole<3>(5000, false); }
+TEST( Solver, testParticle2Multipole4_unbalanced ) { testParticle2Multipole<4>(5000, false); }
 
 //---------------------------------------------------------------------------//
 

@@ -2,8 +2,8 @@ configure_file(Canopy_Config.hpp.cmakein Canopy_Config.hpp)
 
 set(HEADERS_PUBLIC
   Canopy_Kernels.hpp
-  Canopy_Tree.hpp
-  Canopy_TreeLayer.hpp
+  Canopy_Solver.hpp
+  Canopy_SolverLayer.hpp
   )
 
 # Currently no impl headers

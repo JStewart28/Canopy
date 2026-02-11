@@ -9,7 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Tree.hpp>
+#include <Canopy_Solver.hpp>
 
 #include <helpers.hpp>
 
@@ -292,7 +292,7 @@ void octreeExperiments( std::string view_size )
     std::size_t leaf_tiles, root_tiles, red_factor;
     root_tiles = 1, red_factor = comm_size / 2, leaf_tiles = comm_size * 4;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<execution_space, memory_space, particle_tuple_type, entity_type,
+    auto tree = Canopy::createSolver<execution_space, memory_space, particle_tuple_type, entity_type,
         num_dim, cells_per_tile, cell_slice_id>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, root_tiles, MPI_COMM_WORLD);
 

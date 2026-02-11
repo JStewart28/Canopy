@@ -9,7 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Tree.hpp>
+#include <Canopy_Solver.hpp>
 
 #include <test_helper_functions.hpp>
 
@@ -50,14 +50,14 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = 2, leaf_tiles = 16;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
+    auto tree = Canopy::createSolver<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
     // If the depth is less than 3, this test may not work correctly.
     // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Tree depth must be depth 3.";
+    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
 
     // Check mesh information for leaf layer
     int cells_per_dimension_leaf = cells_per_tile * leaf_tiles;
@@ -236,7 +236,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
-TEST( Tree, testParticle2Particle0_balanced )
+TEST( Solver, testParticle2Particle0_balanced )
 { 
     testParticle2Particle0(500, true);     
 }
