@@ -117,7 +117,7 @@ class Solver
     void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
     {
         // printf("L%d: cell_per_dim: %d\n", layer_num, cell_per_tile_dim * tiles_per_dim);
-        auto layer = createTreeLayer<tree_type, cell_per_tile_dim>(
+        auto layer = createSolverLayer<tree_type, cell_per_tile_dim>(
             _global_low_corner, _global_high_corner, tiles_per_dim, _tile_reduction_factor, halo_width, layer_num, _comm);
         _tree.push_back(layer);
     }
@@ -750,6 +750,18 @@ class Solver
         Kokkos::fence();
     }
 
+    /**
+     * Perform the fast multipole method.
+     */
+
+    void solve(particle_aosoa_type aosoa, bool run_load_balance)
+    {
+        create_multipoles(aosoa, run_load_balance);
+        multipole_to_local();
+        computeL2P();
+        computeP2P();
+    }
+
     int rank() const { return _rank; }
 
     /**
@@ -813,7 +825,7 @@ template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std:
           std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
 std::shared_ptr<Solver<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
     NumSpaceDim, CellPerTileDim, ExpansionCutoff>>
-        createTree( const std::array<double, 3>& global_low_corner,
+        createSolver( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
                     const std::size_t leaf_tiles_per_dim,
                     const std::size_t tile_reduction_factor,

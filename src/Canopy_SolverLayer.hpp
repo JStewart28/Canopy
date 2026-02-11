@@ -17,7 +17,6 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_Sort.hpp>
 
-#include <Canopy_Tags.hpp>
 #include <Canopy_Kernels.hpp>
 
 #include <memory>
@@ -1414,7 +1413,7 @@ class SolverLayer
 };
 
 template <class TreeType, std::size_t CellPerTileDim>
-std::shared_ptr<SolverLayer<TreeType, CellPerTileDim>> createTreeLayer(const std::array<double, 3>& global_low_corner,
+std::shared_ptr<SolverLayer<TreeType, CellPerTileDim>> createSolverLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int tile_reduction_factor,
             const int halo_width,

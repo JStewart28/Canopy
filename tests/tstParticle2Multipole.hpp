@@ -52,7 +52,7 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = 2, leaf_tiles = 32;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
+    auto tree = Canopy::createSolver<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     

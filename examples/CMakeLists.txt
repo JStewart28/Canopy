@@ -9,4 +9,5 @@
 # SPDX-License-Identifier: BSD-3-Clause                                    #
 ############################################################################
 
-add_subdirectory(01_development) # XXX - Remove this later and add a real example.
+# Currently not used
+# add_subdirectory(01_development) # XXX - Remove this later and add a real example.

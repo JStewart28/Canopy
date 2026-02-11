@@ -47,7 +47,7 @@ void testSolver(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = 2, leaf_tiles = 16;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createTree<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
+    auto tree = Canopy::createSolver<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
         num_dim, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
@@ -159,13 +159,7 @@ void testSolver(int points_per_proc_in, bool balanced)
         
     // Fill the tree. This migrates particles to their correct rank.
     bool run_load_balance = !balanced;
-    tree->create_multipoles(particle_aosoa, run_load_balance);
-
-    tree->multipole_to_local();
-    
-    tree->computeL2P();
-
-    tree->computeP2P();
+    tree->solve(particle_aosoa, run_load_balance);
 
     // Gather all particles from the tree back to rank 0 for testing
     auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
