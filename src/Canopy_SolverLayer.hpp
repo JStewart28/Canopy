@@ -1252,7 +1252,7 @@ class SolverLayer
                 const int index = team.league_rank();
 
                 // Team scratch accumulation buffer: [0..num_coeff-1]=real, [num_coeff..2*num_coeff-1]=imag
-                using scratch_space = typename member_type::scratch_memory_space;zo
+                using scratch_space = typename member_type::scratch_memory_space;
                 Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged> accum(
                     team.team_scratch(0), 2 * num_coefficients);
 
