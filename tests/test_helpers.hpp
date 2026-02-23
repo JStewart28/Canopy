@@ -14,9 +14,21 @@
 
 #include <gtest/gtest.h>
 
+#include <Canopy_Solver.hpp>
+
 namespace Test
 {
 //---------------------------------------------------------------------------//
+
+// Define complex double type
+using cdouble = Kokkos::complex<double>;
+
+// Define input aosoa data
+// pos/charge/potential/global particle id
+using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
+using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
+using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
+using MD = Canopy::ParticleMetadata<particle_aosoa_type, 0, 1, 2>;   
 
 double distance(const Kokkos::Array<double,3>& a,
                 const Kokkos::Array<double,3>& b)
@@ -26,8 +38,6 @@ double distance(const Kokkos::Array<double,3>& a,
     double dz = a[2] - b[2];
     return Kokkos::sqrt(dx*dx + dy*dy + dz*dz);
 }
-
-// Usage:
 
 /**
  * Fill a view with random (x, y, z) coordinates within the specified bounds,

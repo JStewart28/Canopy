@@ -11,7 +11,7 @@
 
 #include <Canopy_Kernels.hpp>
 
-#include <test_helper_functions.hpp>
+#include <test_helpers.hpp>
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_Random.hpp>

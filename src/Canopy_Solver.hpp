@@ -32,24 +32,45 @@ namespace Canopy
 
 // https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
 
-template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
-            std::size_t InDataId, std::size_t OutDataId,
-          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
+// Value for no field given
+inline constexpr std::size_t no_id = static_cast<std::size_t>(-1);
+
+// Container for Particle input data and mapping from slice Id to the
+// correct data unit
+template<class AoSoAType,
+         std::size_t PositionId,
+         std::size_t InDataId,
+         std::size_t OutDataId,
+         std::size_t GradientId = no_id>
+struct ParticleMetadata
+{
+  using aosoa_type = AoSoAType;
+  static constexpr std::size_t pos = PositionId;
+  static constexpr std::size_t in  = InDataId;
+  static constexpr std::size_t out = OutDataId;
+  static constexpr std::size_t grad = GradientId;
+};
+
+template <class MemorySpace, class ExecutionSpace, class Metadata, 
+          std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
 class Solver
 {
   public:
+    // Check metadata
+    static_assert(Metadata::pos != no_id, "Metadata must define position index");
+    static_assert(Metadata::in != no_id, "Metadata must define in_data index");
+    static_assert(Metadata::out != no_id, "Metadata must define out_data index");
+
+    using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
     
-    using memory_space = MemorySpace;
-
     //! Self type
-    using tree_type = Solver<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
-        NumSpaceDim, CellPerTileDim, ExpansionCutoff>;
+    using solver_type = Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>;
 
     //! Memory space size type
     using size_type = typename memory_space::size_type;
     //! Dimension number
-    static constexpr std::size_t num_space_dim = NumSpaceDim;
+    static constexpr std::size_t num_space_dim = 3;
     //! Mesh type
     using mesh_type = Cabana::Grid::SparseMesh<double, num_space_dim>;
 
@@ -71,17 +92,8 @@ class Solver
     using multipole_aosoa_type = Cabana::AoSoA<multipole_member_types, memory_space, cell_per_tile_dim>;
     using local_aosoa_type = Cabana::AoSoA<local_member_types, memory_space, cell_per_tile_dim>;
 
-    //! Tuple position in ParticleAoSoAType that holds particle x/y/z position.
-    static constexpr std::size_t position_id = PositionId;
-
-    //! Tuple position in ParticleAoSoAType that holds input data
-    static constexpr std::size_t in_data_id = InDataId;
-
-    //! Tuple position in ParticleAoSoAType that holds output data
-    static constexpr std::size_t out_data_id = OutDataId;
-
     //! Particle data
-    using particle_aosoa_type = ParticleAoSoAType;
+    using particle_aosoa_type = Metadata::aosoa_type;
     
     Solver( const std::array<double, 3>& global_low_corner,
           const std::array<double, 3>& global_high_corner,
@@ -117,7 +129,7 @@ class Solver
     void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
     {
         // printf("L%d: cell_per_dim: %d\n", layer_num, cell_per_tile_dim * tiles_per_dim);
-        auto layer = createSolverLayer<tree_type, cell_per_tile_dim>(
+        auto layer = createSolverLayer<solver_type, cell_per_tile_dim>(
             _global_low_corner, _global_high_corner, tiles_per_dim, _tile_reduction_factor, halo_width, layer_num, _comm);
         _tree.push_back(layer);
     }
@@ -358,7 +370,7 @@ class Solver
         migrateParticleData(_leaf_particles, run_load_balance);
 
         // Set out data to 0
-        auto out_data_slice = Cabana::slice<out_data_id>(_leaf_particles);
+        auto out_data_slice = Cabana::slice<Metadata::out>(_leaf_particles);
         Cabana::deep_copy(out_data_slice, 0.0);
 
         // Owned particles are the number of leaf particles
@@ -379,7 +391,7 @@ class Solver
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::Solver::migrateParticleData");
 
-        auto positions = Cabana::slice<position_id>(external_data);
+        auto positions = Cabana::slice<Metadata::pos>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
         mapParticles(positions, layer_owner, external_data.size(), 0, run_load_balance);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
@@ -486,7 +498,7 @@ class Solver
         auto leaf_cell_per_dim = _tree[0]->cellsPerDim();
         auto cell_base = _tree[0]->cell_offsets();
         auto cell_offsets = _tree[0]->num_owned_cell();
-        auto positions = Cabana::slice<position_id>(_leaf_particles);
+        auto positions = Cabana::slice<Metadata::pos>(_leaf_particles);
 
         auto particle_ids = Cabana::slice<3>(_leaf_particles);
 
@@ -608,8 +620,8 @@ class Solver
 
         // int rank = _rank;
 
-        auto particle_positions = Cabana::slice<position_id>(_leaf_particles);
-        auto particle_potentials = Cabana::slice<out_data_id>(_leaf_particles);
+        auto particle_positions = Cabana::slice<Metadata::pos>(_leaf_particles);
+        auto particle_potentials = Cabana::slice<Metadata::out>(_leaf_particles);
         auto particle_id = Cabana::slice<3>(_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
@@ -683,9 +695,9 @@ class Solver
 
         haloParticles();
 
-        auto positions = Cabana::slice<position_id>(_leaf_particles);
-        auto scalars = Cabana::slice<in_data_id>(_leaf_particles);
-        auto potentials = Cabana::slice<out_data_id>(_leaf_particles);
+        auto positions = Cabana::slice<Metadata::pos>(_leaf_particles);
+        auto scalars = Cabana::slice<Metadata::in>(_leaf_particles);
+        auto potentials = Cabana::slice<Metadata::out>(_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
@@ -794,7 +806,7 @@ class Solver
     int _rank, _comm_size;
 
     // Solver layers.
-    std::vector<std::shared_ptr<SolverLayer<tree_type, cell_per_tile_dim>>> _tree;
+    std::vector<std::shared_ptr<SolverLayer<solver_type, cell_per_tile_dim>>> _tree;
 
     // Vertical multipole halo for each tree layer
     std::vector<std::shared_ptr<Cabana::Halo<memory_space>>> _vertical_multipole_halo;
@@ -820,19 +832,16 @@ class Solver
     std::size_t _ghost_particles = 0;
 };
 
-template <class ExecutionSpace, class MemorySpace, class ParticleAoSoAType, std::size_t PositionId,
-          std::size_t InDataId, std::size_t OutDataId,
-          std::size_t NumSpaceDim, std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-std::shared_ptr<Solver<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
-    NumSpaceDim, CellPerTileDim, ExpansionCutoff>>
+template <class MemorySpace, class ExecutionSpace, class Metadata, 
+          std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
+std::shared_ptr<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>
         createSolver( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
                     const std::size_t leaf_tiles_per_dim,
                     const std::size_t tile_reduction_factor,
                     MPI_Comm comm)
 {
-    return std::make_shared<Solver<ExecutionSpace, MemorySpace, ParticleAoSoAType, PositionId, InDataId, OutDataId,
-        NumSpaceDim, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
+    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor,
             comm);
 }

@@ -11,7 +11,7 @@
 
 #include <Canopy_Solver.hpp>
 
-#include <test_helper_functions.hpp>
+#include <test_helpers.hpp>
 
 #include <Kokkos_Core.hpp>
 
@@ -21,7 +21,6 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
-using cdouble = Kokkos::complex<double>;
 
 /**
  * Tests that particle-to-particle potentials are calculated correctly at the leaf layer.
@@ -36,19 +35,14 @@ void testSolver(int points_per_proc_in, bool balanced)
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     // Create a tree of depth 3. pos/charge/potential/global particle id
-    using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
-    using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
-    using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
     std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
     std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
 
-    static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
     std::size_t leaf_tiles, red_factor;
     red_factor = 2, leaf_tiles = 16;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createSolver<TEST_EXECSPACE, TEST_MEMSPACE, particle_aosoa_type, 0, 1, 2,
-        num_dim, cells_per_tile, p>(
+    auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
@@ -91,9 +85,9 @@ void testSolver(int points_per_proc_in, bool balanced)
     fillRandomScalar(q, charge_bounds, 321);
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
-    auto pos_slice_host = Cabana::slice<0>(particle_aosoa_host);
-    auto scalar_slice_host = Cabana::slice<1>(particle_aosoa_host);
-    auto potential_slice_host = Cabana::slice<2>(particle_aosoa_host);
+    auto pos_slice_host = Cabana::slice<MD::pos>(particle_aosoa_host);
+    auto scalar_slice_host = Cabana::slice<MD::in>(particle_aosoa_host);
+    auto potential_slice_host = Cabana::slice<MD::out>(particle_aosoa_host);
     auto id_slice_host = Cabana::slice<3>(particle_aosoa_host);
     Cabana::deep_copy(potential_slice_host, 0.0);
 
