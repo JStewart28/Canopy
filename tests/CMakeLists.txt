@@ -16,7 +16,7 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 #   )
 
 set(SERIAL_TESTS
-  Kernels
+  Operators
   )
 
 set(MPI_TESTS
