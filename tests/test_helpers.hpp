@@ -28,7 +28,14 @@ using cdouble = Kokkos::complex<double>;
 using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
 using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
 using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
-using MD = Canopy::ParticleMetadata<particle_aosoa_type, 0, 1, 2>;   
+using MD = Canopy::ParticleMetadata<particle_aosoa_type, 0, 1, 2>; 
+
+// Define input aosoa data including force
+// pos/force/charge/potential/global particle id
+using particle_tuple_type_f = Cabana::MemberTypes<double[3], double[3], double, double, int>;
+using particle_aosoa_type_f = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
+using particle_aosoa_type_f_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
+using MD_f = Canopy::ParticleMetadata<particle_aosoa_type, 0, 2, 3, 1>; 
 
 double distance(const Kokkos::Array<double,3>& a,
                 const Kokkos::Array<double,3>& b)
