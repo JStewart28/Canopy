@@ -17,7 +17,7 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_Sort.hpp>
 
-#include <Canopy_Kernels.hpp>
+#include <Canopy_Operators.hpp>
 
 #include <memory>
 
@@ -724,7 +724,7 @@ class SolverLayer
                         M[i] = cdouble(0.0, 0.0);
 
                     // Compute multipoles
-                    Canopy::Kernel::Scalar::p2m<p>(pos, scalar, cell_center, M);
+                    Canopy::Operator::Scalar::p2m<p>(pos, scalar, cell_center, M);
 
                     // Add this particle's contribution to the total multipoles
                     for (std::size_t i = 0; i < num_coefficients; i++)
@@ -777,7 +777,7 @@ class SolverLayer
                     for (int i = 0; i < 3; i++)
                         vector_to_center[i] = (cell_center[i] - pos[i]) * -1;
 
-                    Canopy::Kernel::Scalar::m2m<p>(M_orig_array, vector_to_center, M_trans_array);
+                    Canopy::Operator::Scalar::m2m<p>(M_orig_array, vector_to_center, M_trans_array);
 
                     // Add this multipole's contribution to the total multipoles
                     for (std::size_t i = 0; i < num_coefficients; i++)
@@ -999,7 +999,7 @@ class SolverLayer
                         L_orig[i].real() = parent_coefficient_slice(hi, i, 0);
                         L_orig[i].imag() = parent_coefficient_slice(hi, i, 1);
                     }
-                    Kernel::Scalar::l2l<p>(L_orig, L_trans, X_0);
+                    Operator::Scalar::l2l<p>(L_orig, L_trans, X_0);
 
                     // Add translated locals to cell
                     for (std::size_t i = 0; i < num_coefficients; i++)
@@ -1325,7 +1325,7 @@ class SolverLayer
 
                     // Compute local contribution
                     Kokkos::Array<cdouble, num_coefficients> L;
-                    Kernel::Scalar::m2l<p>(M, L, m2l_vec);
+                    Operator::Scalar::m2l<p>(M, L, m2l_vec);
 
                     // Accumulate into team scratch
                     for (int i = 0; i < num_coefficients; i++)

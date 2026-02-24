@@ -348,7 +348,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
 
             // Convert target point to spherical coordinates relative to local center
             double r, theta, phi;
-            Canopy::Kernel::cart2sph( tree_particle_positions(tpi, 0) - l_center[0],
+            Canopy::Operator::cart2sph( tree_particle_positions(tpi, 0) - l_center[0],
                                       tree_particle_positions(tpi, 1) - l_center[1],
                                       tree_particle_positions(tpi, 2) - l_center[2],
                                       r, theta, phi );
@@ -362,14 +362,14 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             {
                 for ( int k = -j; k <= j; ++k )
                 {
-                    int idx = Canopy::Kernel::Scalar::index( j, k );
+                    int idx = Canopy::Operator::Scalar::index( j, k );
 
                     /* Target point 1 calculations */
                     // Greengard eq. 3.59
                     cdouble val = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
                     accumulator +=
                         val * Kokkos::pow( r, j ) *
-                        Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                        Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
                 }
             }
             tree_potentials(tpi) = accumulator.real();
@@ -632,7 +632,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
 
                 // Convert target point to spherical coordinates relative to local center
                 double r, theta, phi;
-                Canopy::Kernel::cart2sph( tree_particle_positions(tpi, 0) - l_center[0],
+                Canopy::Operator::cart2sph( tree_particle_positions(tpi, 0) - l_center[0],
                                         tree_particle_positions(tpi, 1) - l_center[1],
                                         tree_particle_positions(tpi, 2) - l_center[2],
                                         r, theta, phi );
@@ -646,14 +646,14 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
                 {
                     for ( int k = -j; k <= j; ++k )
                     {
-                        int idx = Canopy::Kernel::Scalar::index( j, k );
+                        int idx = Canopy::Operator::Scalar::index( j, k );
 
                         /* Target point 1 calculations */
                         // Greengard eq. 3.59
                         cdouble val = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
                         accumulator +=
                             val * Kokkos::pow( r, j ) *
-                            Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                            Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
                     }
                 }
                 tree_potentials(tpi) = accumulator.real();

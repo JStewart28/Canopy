@@ -41,14 +41,14 @@ template<class AoSoAType,
          std::size_t PositionId,
          std::size_t InDataId,
          std::size_t OutDataId,
-         std::size_t GradientId = no_id>
+         std::size_t ForceId = no_id>
 struct ParticleMetadata
 {
   using aosoa_type = AoSoAType;
   static constexpr std::size_t pos = PositionId;
   static constexpr std::size_t in  = InDataId;
   static constexpr std::size_t out = OutDataId;
-  static constexpr std::size_t grad = GradientId;
+  static constexpr std::size_t force = ForceId;
 };
 
 template <class MemorySpace, class ExecutionSpace, class Metadata, 
@@ -304,7 +304,7 @@ class Solver
         auto M_children_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), M_children);
 
         // Create objects needed for translation of multipole coefficients.
-        Canopy::Kernel::Scalar::M2M<Kokkos::HostSpace, execution_space> m2m( p );
+        Canopy::Operator::Scalar::M2M<Kokkos::HostSpace, execution_space> m2m( p );
 
         // Iterate over each incoming data.
         for (std::size_t i = 0; i < cells_activated; ++i)
@@ -611,33 +611,21 @@ class Solver
         _ghost_particles = halo.numGhost();
     }
 
-    /**
-     * Take the locals from the leaf layer and convert them into potentials at each particle
-     */
-    void computeL2P()
+    template<class PosSlice, class PotSlice, class LocalsSlice, class ForceSlice, class IJK2Index, class CellSize, class LowCorner>
+    struct ComputeWithLocals
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::computeL2P");
+        PosSlice particle_positions;
+        PotSlice particle_potentials;
+        LocalsSlice locals_slice;
+        ForceSlice particle_force;   // Dummy type when HasForce=false
+        IJK2Index ijk2index;
+        CellSize cell_size;
+        LowCorner low_corner;
+        int p;
 
-        // int rank = _rank;
-
-        auto particle_positions = Cabana::slice<Metadata::pos>(_leaf_particles);
-        auto particle_potentials = Cabana::slice<Metadata::out>(_leaf_particles);
-        auto particle_id = Cabana::slice<3>(_leaf_particles);
-
-        auto cell_size = _tree[0]->cellSize();
-        auto cells_per_dim = _tree[0]->cellsPerDim();
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
-
-        auto ijk2index = _tree[0]->cellijk2i();
-
-        auto locals_slice = Cabana::slice<0>(_tree[0]->locals());
-
-        // Iterate over points and use locals to calculate potential
-        Kokkos::parallel_for(
-        "Canopy::Solver::populate_local_potential",
-        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, _leaf_particles.size() ),
-        KOKKOS_LAMBDA( const int tpi ) {
-
+        KOKKOS_INLINE_FUNCTION
+        void operator()(const int tpi) const
+        {
             // Get the cell this point falls into
             Kokkos::Array<std::size_t, 3> target_cell_ijk;
             for (int dim = 0; dim < 3; ++dim)
@@ -652,41 +640,97 @@ class Solver
             if (!cell_exists)
                 return;
 
-             // Center of local expansion is the cell center
+            // Center of local expansion is the cell center
             Kokkos::Array<double, 3> l_center;
             for (int i = 0; i < 3; i++)
                 l_center[i] = low_corner[i] + (static_cast<double>(target_cell_ijk[i]) + 0.5) * cell_size[i];
 
             // Convert target point to spherical coordinates relative to local center
             double r, theta, phi;
-            Canopy::Kernel::cart2sph( particle_positions(tpi, 0) - l_center[0],
-                                      particle_positions(tpi, 1) - l_center[1],
-                                      particle_positions(tpi, 2) - l_center[2],
-                                      r, theta, phi );
+            Canopy::Operator::cart2sph( particle_positions(tpi, 0) - l_center[0],
+                                    particle_positions(tpi, 1) - l_center[1],
+                                    particle_positions(tpi, 2) - l_center[2],
+                                    r, theta, phi );
 
             auto ijk2l_index = ijk2index.find(target_cell_ijk);
             auto local_index = ijk2index.value_at(ijk2l_index);
 
-            // Calculate potential using locals
-            cdouble accumulator(0.0, 0.0);
+            // Calculate potential using locals, and forces if enabled
+            cdouble potential_accumulator(0.0, 0.0);
+            Kokkos::Array<cdouble, 3> force_accumulator = {cdouble(0.0, 0.0), cdouble(0.0, 0.0), cdouble(0.0, 0.0)};
             for ( int j = 0; j <= p; ++j )
             {
                 for ( int k = -j; k <= j; ++k )
                 {
-                    int idx = Canopy::Kernel::Scalar::index( j, k );
+                    int idx = Operator::Scalar::index( j, k );
 
                     /* Target point 1 calculations */
                     // Greengard eq. 3.59
                     cdouble val = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
-                    accumulator +=
+
+                    // Potential accumulator
+                    potential_accumulator +=
                         val * Kokkos::pow( r, j ) *
-                        Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                            Operator::Scalar::Ynm( j, k, theta, phi );
+
+                    // Force accumulator
+                    if constexpr (Metadata::force != no_id)
+                    {
+                        auto force_part = Operator::Scalar::partial2gradient(r, theta, phi, j, k, val);
+                        for (int d = 0; d < 3; d++)
+                            force_accumulator[d] += force_part[d];
+                    }
                 }
             }
-            particle_potentials(tpi) += accumulator.real();
+            particle_potentials(tpi) += potential_accumulator.real();
+            if constexpr (Metadata::force != no_id)
+                for (int d = 0; d < 3; d++)
+                    particle_force(tpi, d) += force_accumulator[d].real();
+        }
+    };
 
-        } );
-        Kokkos::fence();
+    /**
+     * Take the locals from the leaf layer and convert them into potentials at each particle.
+     */
+    void computeL2P()
+    {
+        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::computeL2P");
+
+        // int rank = _rank;
+
+        auto particle_positions = Cabana::slice<Metadata::pos>(_leaf_particles);
+        auto particle_potentials = Cabana::slice<Metadata::out>(_leaf_particles);
+        auto cell_size = _tree[0]->cellSize();
+        auto cells_per_dim = _tree[0]->cellsPerDim();
+        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+
+        auto ijk2index = _tree[0]->cellijk2i();
+
+        auto locals_slice = Cabana::slice<0>(_tree[0]->locals());
+
+        if constexpr (Metadata::force != no_id)
+        {
+            auto particle_force = Cabana::slice<Metadata::force>(_leaf_particles);
+
+            Kokkos::parallel_for(
+                "Canopy::Solver::populate_local_potential",
+                Kokkos::RangePolicy<TEST_EXECSPACE>(0, _leaf_particles.size()),
+                ComputeWithLocals{particle_positions, particle_potentials, locals_slice, particle_force,
+                    ijk2index, cell_size, low_corner, p});
+        }
+        else
+        {
+            // Use a dummy force slice object
+            struct NoForceSlice {
+                KOKKOS_INLINE_FUNCTION void operator()(int,int) const {}
+            } no_force;
+
+            Kokkos::parallel_for(
+                "Canopy::Solver::populate_local_potential",
+                Kokkos::RangePolicy<TEST_EXECSPACE>(0, _leaf_particles.size()),
+                ComputeWithLocals{particle_positions, particle_potentials, locals_slice, no_force,
+                    ijk2index, cell_size, low_corner, p});
+        }
     }
 
     void computeP2P()
@@ -807,12 +851,6 @@ class Solver
 
     // Solver layers.
     std::vector<std::shared_ptr<SolverLayer<solver_type, cell_per_tile_dim>>> _tree;
-
-    // Vertical multipole halo for each tree layer
-    std::vector<std::shared_ptr<Cabana::Halo<memory_space>>> _vertical_multipole_halo;
-
-    // Vertical local halo for each tree layer
-    std::vector<std::shared_ptr<Cabana::Halo<memory_space>>> _vertical_local_halo;
 
     // How many tiles per dimension in the leaf layer.
     std::size_t _leaf_tiles_per_dim;

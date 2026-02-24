@@ -10,7 +10,7 @@
  ****************************************************************************/
 
 /*!
-  \file Canopy_Kernels.hpp
+  \file Canopy_Operators.hpp
   \brief Computational kernels for data manipluation. Assumes positions
   are the first tuple element in any data AoSoA.
 */
@@ -31,7 +31,7 @@
 namespace Canopy
 {
 
-namespace Kernel
+namespace Operator
 {
 
 using cdouble = Kokkos::complex<double>;
@@ -779,9 +779,9 @@ struct L2L
 };
 
 /**
- * Functions for gradient calculations, from Rankin, for implementation of eq. A.11.
+ * Functions for partial derivatives, from Rankin, for implementation of eq. A.11.
  * In Rankin, the F*_nm((r, theta, phi)) term in the equivalent of:
- * Kokkos::pow(r, n) * Canopy::Kernel::Scalar::Ynm( n, m, theta, phi ); in Canopy.
+ * Kokkos::pow(r, n) * Canopy::Operator::Scalar::Ynm( n, m, theta, phi ); in Canopy.
  * This term is passed as "val" in the following functions.
  */
 
@@ -816,10 +816,21 @@ cdouble d_dbeta(const int m, const cdouble val)
     return -1.0 * cdouble(0.0, double(m)) * val;
 }
 
+// Equation A.13
+KOKKOS_INLINE_FUNCTION
+Kokkos::Array<cdouble, 3> partial2gradient(const double rho, const double alpha,
+    const double beta, const int n, const int m, const cdouble val)
+{
+    auto d_rho = d_drho(rho, n, val);
+    auto d_alpha = d_dalpha(rho, alpha, beta, n, m, val);
+    auto d_beta = d_dbeta(m, val);
+    return {rho * d_rho, alpha / rho * d_alpha, beta / rho * Kokkos::sin(alpha) * d_beta};
+}
+
 
 } // end namespace Scalar
 
-} // end namespace Kernel
+} // end namespace Operator
 
 } // end namespace Canopy
 

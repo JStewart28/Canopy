@@ -96,7 +96,7 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     // Target point far away from domain so multipole approximation holds.
     double Px = 15.1, Py = -20.3, Pz = 16.2;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
+    Canopy::Operator::cart2sph( Px, Py, Pz, r, theta, phi );
     double potential_direct = 0.0;
     for (std::size_t i = 0; i < owned_points; ++i)
     {
@@ -129,11 +129,11 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     {
         for ( int k = -j; k <= j; ++k )
         {
-            int idx = Canopy::Kernel::Scalar::index( j, k );
+            int idx = Canopy::Operator::Scalar::index( j, k );
             auto val = m_root_h( idx );
             potential_M +=
                 m_root_h( idx ) / Kokkos::pow( r, j + 1 ) *
-                Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
         }
     }
 

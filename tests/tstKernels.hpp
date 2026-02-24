@@ -9,7 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Kernels.hpp>
+#include <Canopy_Operators.hpp>
 
 #include <test_helpers.hpp>
 
@@ -48,7 +48,7 @@ void testP2MStruct0()
     double Px = 6.6, Py = -5.1, Pz = 1.9;
     // P relative to the multipole expansion center.
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px - expansion_center[0],
+    Canopy::Operator::cart2sph( Px - expansion_center[0],
                               Py - expansion_center[1],
                               Pz - expansion_center[2], r, theta, phi );
 
@@ -79,7 +79,7 @@ void testP2MStruct0()
     // Loop over truncation degree
     for ( int p = 2; p <= 5; ++p )
     {
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
 
         // Particle to multipole calculation performed in operator
         p2m( cart_coords, q, num_points, expansion_center );
@@ -96,10 +96,10 @@ void testP2MStruct0()
             // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
             for ( int m = -n; m <= n; ++m )
             {
-                int idx = Canopy::Kernel::Scalar::index( n, m );
+                int idx = Canopy::Operator::Scalar::index( n, m );
                 potential_multipole +=
                     M_host( idx ) / Kokkos::pow( r, n + 1 ) *
-                    Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
+                    Canopy::Operator::Scalar::Ynm( n, m, theta, phi );
             }
         }
 
@@ -140,17 +140,17 @@ void testM2MStruct0()
 
     // Expansion center in polar coordinates - rho, alpha, beta
     double rho, alpha, beta;
-    Canopy::Kernel::cart2sph( q_center[0], q_center[1], q_center[2], rho, alpha,
+    Canopy::Operator::cart2sph( q_center[0], q_center[1], q_center[2], rho, alpha,
                               beta );
 
     // Target point - rho, theta, phi
     double Px = 10.0, Py = 0.0, Pz = 0.0;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
+    Canopy::Operator::cart2sph( Px, Py, Pz, r, theta, phi );
 
     // (Target point - q_center) - r_p, theta_p, phi_p
     double r_p, theta_p, phi_p;
-    Canopy::Kernel::cart2sph( Px - q_center[0], Py - q_center[1],
+    Canopy::Operator::cart2sph( Px - q_center[0], Py - q_center[1],
                               Pz - q_center[2], r_p, theta_p, phi_p );
 
     // Direct potential at target point
@@ -192,8 +192,8 @@ void testM2MStruct0()
     // Loop over truncation degree
     for ( int p = 1; p <= 5; ++p )
     {
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
-        Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
 
         // Compute multipoles O_nm at center Q
         p2m( coords0, q0, num_points, q_center );
@@ -216,9 +216,9 @@ void testM2MStruct0()
         {
             for ( int k = -j; k <= j; ++k )
             {
-                int idx = Canopy::Kernel::Scalar::index( j, k );
+                int idx = Canopy::Operator::Scalar::index( j, k );
                 potential_M += M_host( idx ) / Kokkos::pow( r, j + 1 ) *
-                               Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                               Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
             }
         }
 
@@ -270,22 +270,22 @@ void testM2MStruct1()
 
     // Expansion center of Q0 in polar coordinates - rho0, alpha0, beta0
     double rho0, alpha0, beta0;
-    Canopy::Kernel::cart2sph( -q0_center[0], -q0_center[1], -q0_center[2], rho0,
+    Canopy::Operator::cart2sph( -q0_center[0], -q0_center[1], -q0_center[2], rho0,
                               alpha0, beta0 );
 
     // Expansion center of Q1 in polar coordinates - rho1, alpha1, beta1
     double rho1, alpha1, beta1;
-    Canopy::Kernel::cart2sph( -q1_center[0], -q1_center[1], -q1_center[2], rho1,
+    Canopy::Operator::cart2sph( -q1_center[0], -q1_center[1], -q1_center[2], rho1,
                               alpha1, beta1 );
 
     // Target point - rho0, theta, phi
     double Px = 15.0, Py = -10.0, Pz = 7.0;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
+    Canopy::Operator::cart2sph( Px, Py, Pz, r, theta, phi );
 
     // (Target point - q0_center) - r_p, theta_p, phi_p
     // double r_p, theta_p, phi_p;
-    // Canopy::Kernel::cart2sph( Px - q0_center[0],
+    // Canopy::Operator::cart2sph( Px - q0_center[0],
     //                           Py - q0_center[1],
     //                           Pz - q0_center[2], r_p, theta_p, phi_p );
 
@@ -336,8 +336,8 @@ void testM2MStruct1()
     // Loop over truncation degree
     for ( int p = 1; p <= 5; ++p )
     {
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
-        Canopy::Kernel::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
 
         // Compute multipoles O0 at center Q0
         p2m( c0, q0, points_per_section, q0_center );
@@ -368,9 +368,9 @@ void testM2MStruct1()
         {
             for ( int k = -j; k <= j; ++k )
             {
-                int idx = Canopy::Kernel::Scalar::index( j, k );
+                int idx = Canopy::Operator::Scalar::index( j, k );
                 potential_M += M_host( idx ) / Kokkos::pow( r, j + 1 ) *
-                               Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                               Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
             }
         }
 
@@ -403,22 +403,22 @@ void testM2LStruct0()
     // Expansion center
     Kokkos::Array<double, 3> center = { -5.5, -5.4, -5.3 };
     double rho, alpha, beta;
-    Canopy::Kernel::cart2sph( center[0], center[1], center[2], rho, alpha,
+    Canopy::Operator::cart2sph( center[0], center[1], center[2], rho, alpha,
                               beta );
 
     // First target point near origin (within radius 'a' of origin)
     double Px1 = 0.2, Py1 = -0.1, Pz1 = -0.5;
     double r1, theta1, phi1, r_d1, theta_d1, phi_d1;
-    Canopy::Kernel::cart2sph( Px1 - center[0], Py1 - center[1], Pz1 - center[2],
+    Canopy::Operator::cart2sph( Px1 - center[0], Py1 - center[1], Pz1 - center[2],
                               r_d1, theta_d1, phi_d1 );
-    Canopy::Kernel::cart2sph( Px1, Py1, Pz1, r1, theta1, phi1 );
+    Canopy::Operator::cart2sph( Px1, Py1, Pz1, r1, theta1, phi1 );
 
     // Second target point near origin (within radius 'a' of origin)
     double Px2 = -0.4, Py2 = 0.3, Pz2 = -0.2;
     double r2, theta2, phi2, r_d2, theta_d2, phi_d2;
-    Canopy::Kernel::cart2sph( Px2 - center[0], Py2 - center[1], Pz2 - center[2],
+    Canopy::Operator::cart2sph( Px2 - center[0], Py2 - center[1], Pz2 - center[2],
                               r_d2, theta_d2, phi_d2 );
-    Canopy::Kernel::cart2sph( Px2, Py2, Pz2, r2, theta2, phi2 );
+    Canopy::Operator::cart2sph( Px2, Py2, Pz2, r2, theta2, phi2 );
 
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
@@ -476,11 +476,11 @@ void testM2LStruct0()
     // Loop over truncation degree
     for ( int p = 1; p <= 9; ++p )
     {
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
         p2m( cart_coords, q, num_points, center );
 
         // Convert multipoles to locals
-        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
         m2l( p2m.coefficients(), center );
 
         // Copy to host
@@ -500,27 +500,27 @@ void testM2LStruct0()
         {
             for ( int k = -j; k <= j; ++k )
             {
-                int idx = Canopy::Kernel::Scalar::index( j, k );
+                int idx = Canopy::Operator::Scalar::index( j, k );
 
                 /* Target point 1 calculations */
                 // Greengard eq. 3.59
                 potential_L1 +=
                     L_host( idx ) * Kokkos::pow( r1, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta1, phi1 );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta1, phi1 );
                 // Greengard eq. 3.36
                 potential_O1 +=
                     O_host( idx ) / Kokkos::pow( r_d1, j + 1 ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d1, phi_d1 );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta_d1, phi_d1 );
 
                 /* Target point 2 calculations */
                 // Greengard eq. 3.59
                 potential_L2 +=
                     L_host( idx ) * Kokkos::pow( r2, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta2, phi2 );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta2, phi2 );
                 // Greengard eq. 3.36
                 potential_O2 +=
                     O_host( idx ) / Kokkos::pow( r_d2, j + 1 ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta_d2, phi_d2 );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta_d2, phi_d2 );
             }
         }
 
@@ -583,7 +583,7 @@ void testM2LStruct1()
     // Convert to spherical coordinates relative to local center
     double Px = 1.0, Py = 0.1, Pz = -0.3;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px - l_center[0],
+    Canopy::Operator::cart2sph( Px - l_center[0],
                               Py - l_center[1],
                               Pz - l_center[2],
                               r, theta, phi );
@@ -654,14 +654,14 @@ void testM2LStruct1()
     // Loop over truncation degree
     for ( int p = 1; p <= 7; ++p )
     {
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m0( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m0( p );
         p2m0( coord0, q0, points_per_section, q0_center );
 
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m1( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m1( p );
         p2m1( coord1, q1, points_per_section, q1_center );
 
         // Convert multipoles to locals
-        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
         m2l( p2m0.coefficients(), Kokkos::Array<double, 3>{q0_center[0]- l_center[0],
                                                             q0_center[1]- l_center[1], 
                                                             q0_center[2]- l_center[2]} );
@@ -680,13 +680,13 @@ void testM2LStruct1()
         {
             for ( int k = -j; k <= j; ++k )
             {
-                int idx = Canopy::Kernel::Scalar::index( j, k );
+                int idx = Canopy::Operator::Scalar::index( j, k );
 
                 /* Target point 1 calculations */
                 // Greengard eq. 3.59
                 potential_L +=
                     L_host( idx ) * Kokkos::pow( r, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
             }
         }
 
@@ -717,24 +717,24 @@ void testL2LStruct0()
     // Expansion center
     Kokkos::Array<double, 3> m_center = { -5.5, -5.4, -5.3 };
     double rho_m, alpha_m, beta_m; 
-    Canopy::Kernel::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
+    Canopy::Operator::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
                               beta_m );
         
     // Shifted local center (within radius 'a' of origin): From new local center
     // to old local center.
     Kokkos::Array<double, 3> X_0 = {1.1, -0.8, -1.0};
     double rho, alpha, beta; 
-    Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
+    Canopy::Operator::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
                               beta );
 
     // Target point P near origin (within radius 'a' of origin)
     double Px = 0.7, Py = -1.9, Pz = -1.1;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
+    Canopy::Operator::cart2sph( Px, Py, Pz, r, theta, phi );
 
     // P + X_0
     double r_p, theta_p, phi_p;
-    Canopy::Kernel::cart2sph( Px + X_0[0], Py + X_0[1], Pz + X_0[2], r_p, theta_p, phi_p );
+    Canopy::Operator::cart2sph( Px + X_0[0], Py + X_0[1], Pz + X_0[2], r_p, theta_p, phi_p );
 
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
@@ -783,15 +783,15 @@ void testL2LStruct0()
     // Loop over truncation degree
     for ( int p = 1; p <= 9; ++p )
     {
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
         p2m( cart_coords, q, num_points, m_center );
 
         // Convert multipoles to locals
-        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
         m2l( p2m.coefficients(), m_center );
     
         // Translate locals
-        Canopy::Kernel::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE> l2l( p );
+        Canopy::Operator::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE> l2l( p );
         l2l( m2l.coefficients(), X_0 );
 
         // Copy to host
@@ -809,16 +809,16 @@ void testL2LStruct0()
         {
             for ( int k = -j; k <= j; ++k )
             {
-                int idx = Canopy::Kernel::Scalar::index( j, k );
+                int idx = Canopy::Operator::Scalar::index( j, k );
 
                 /* Target point 1 calculations */
                 // Greengard eq. 3.59
                 potential_L +=
                     L_orig_host( idx ) * Kokkos::pow( r, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
                 potential_shift +=
                     L_shift_host( idx ) * Kokkos::pow( r_p, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta_p, phi_p );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta_p, phi_p );
             }
         }
 
@@ -858,24 +858,24 @@ void testL2LStruct1()
     // Expansion center
     Kokkos::Array<double, 3> m_center = { -5.5, -5.4, -5.3 };
     double rho_m, alpha_m, beta_m; 
-    Canopy::Kernel::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
+    Canopy::Operator::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
                               beta_m );
         
     // Shifted local center (within radius 'a' of origin): From new local center
     // to old local center.
     Kokkos::Array<double, 3> X_0 = {1.1, -0.8, -1.0};
     double rho, alpha, beta; 
-    Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
+    Canopy::Operator::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
                               beta );
 
     // Target point P near origin (within radius 'a' of origin)
     double Px = 0.7, Py = -1.9, Pz = -1.1;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
+    Canopy::Operator::cart2sph( Px, Py, Pz, r, theta, phi );
 
     // P + X_0
     double r_p, theta_p, phi_p;
-    Canopy::Kernel::cart2sph( Px + X_0[0], Py + X_0[1], Pz + X_0[2], r_p, theta_p, phi_p );
+    Canopy::Operator::cart2sph( Px + X_0[0], Py + X_0[1], Pz + X_0[2], r_p, theta_p, phi_p );
 
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
@@ -924,15 +924,15 @@ void testL2LStruct1()
     // Loop over truncation degree
     for ( int p = 1; p <= 9; ++p )
     {
-        Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
         p2m( cart_coords, q, num_points, m_center );
 
         // Convert multipoles to locals
-        Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
         m2l( p2m.coefficients(), m_center );
     
         // Translate locals
-        Canopy::Kernel::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE> l2l( p );
+        Canopy::Operator::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE> l2l( p );
         l2l( m2l.coefficients(), X_0 );
 
         // Copy to host
@@ -950,16 +950,16 @@ void testL2LStruct1()
         {
             for ( int k = -j; k <= j; ++k )
             {
-                int idx = Canopy::Kernel::Scalar::index( j, k );
+                int idx = Canopy::Operator::Scalar::index( j, k );
 
                 /* Target point 1 calculations */
                 // Greengard eq. 3.59
                 potential_L +=
                     L_orig_host( idx ) * Kokkos::pow( r, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
                 potential_shift +=
                     L_shift_host( idx ) * Kokkos::pow( r_p, j ) *
-                    Canopy::Kernel::Scalar::Ynm( j, k, theta_p, phi_p );
+                    Canopy::Operator::Scalar::Ynm( j, k, theta_p, phi_p );
             }
         }
 
@@ -1004,7 +1004,7 @@ void testP2MFunc()
     double Px = 6.6, Py = -5.1, Pz = 1.9;
     // P relative to the multipole expansion center.
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px - expansion_center[0],
+    Canopy::Operator::cart2sph( Px - expansion_center[0],
                               Py - expansion_center[1],
                               Pz - expansion_center[2], r, theta, phi );
 
@@ -1054,7 +1054,7 @@ void testP2MFunc()
             M[i] = cdouble(0.0, 0.0);
 
         // Compute multipoles
-        Canopy::Kernel::Scalar::p2m<p>(pos, scalar, expansion_center, M);
+        Canopy::Operator::Scalar::p2m<p>(pos, scalar, expansion_center, M);
 
         // Add this particle's contribution to the total multipoles
         for (int i = 0; i < ( p + 1 ) * ( p + 1 ); i++)
@@ -1073,10 +1073,10 @@ void testP2MFunc()
         // auto norm = Kokkos::sqrt(( ( 2.0 * n + 1 ) / ( 4.0 * pi ) ));
         for ( int m = -n; m <= n; ++m )
         {
-            int idx = Canopy::Kernel::Scalar::index( n, m );
+            int idx = Canopy::Operator::Scalar::index( n, m );
             potential_multipole +=
                 M_host( idx ) / Kokkos::pow( r, n + 1 ) *
-                Canopy::Kernel::Scalar::Ynm( n, m, theta, phi );
+                Canopy::Operator::Scalar::Ynm( n, m, theta, phi );
         }
     }
 
@@ -1132,22 +1132,22 @@ void testM2MFunc()
 
     // Expansion center of Q0 in polar coordinates - rho0, alpha0, beta0
     double rho0, alpha0, beta0;
-    Canopy::Kernel::cart2sph( -q0_center[0], -q0_center[1], -q0_center[2], rho0,
+    Canopy::Operator::cart2sph( -q0_center[0], -q0_center[1], -q0_center[2], rho0,
                               alpha0, beta0 );
 
     // Expansion center of Q1 in polar coordinates - rho1, alpha1, beta1
     double rho1, alpha1, beta1;
-    Canopy::Kernel::cart2sph( -q1_center[0], -q1_center[1], -q1_center[2], rho1,
+    Canopy::Operator::cart2sph( -q1_center[0], -q1_center[1], -q1_center[2], rho1,
                               alpha1, beta1 );
 
     // Target point - rho0, theta, phi
     double Px = 15.0, Py = -10.0, Pz = 7.0;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
+    Canopy::Operator::cart2sph( Px, Py, Pz, r, theta, phi );
 
     // (Target point - q0_center) - r_p, theta_p, phi_p
     // double r_p, theta_p, phi_p;
-    // Canopy::Kernel::cart2sph( Px - q0_center[0],
+    // Canopy::Operator::cart2sph( Px - q0_center[0],
     //                           Py - q0_center[1],
     //                           Pz - q0_center[2], r_p, theta_p, phi_p );
 
@@ -1223,9 +1223,9 @@ void testM2MFunc()
         // Compute multipoles
         int index = (pid < points_per_section) ? 0 : 1;
         if (index == 0)
-            Canopy::Kernel::Scalar::p2m<p>(pos, scalar, q0_center, M);
+            Canopy::Operator::Scalar::p2m<p>(pos, scalar, q0_center, M);
         else if (index == 1)
-            Canopy::Kernel::Scalar::p2m<p>(pos, scalar, q1_center, M);
+            Canopy::Operator::Scalar::p2m<p>(pos, scalar, q1_center, M);
 
         // Add this particle's contribution to the total multipoles
         for (int i = 0; i < ( p + 1 ) * ( p + 1 ); i++)
@@ -1250,9 +1250,9 @@ void testM2MFunc()
             
         // Compute multipoles
         if (index == 0)
-            Canopy::Kernel::Scalar::m2m<p>(M_orig_array, q0_center, M_trans_array);
+            Canopy::Operator::Scalar::m2m<p>(M_orig_array, q0_center, M_trans_array);
         else if (index == 1)
-            Canopy::Kernel::Scalar::m2m<p>(M_orig_array, q1_center, M_trans_array);
+            Canopy::Operator::Scalar::m2m<p>(M_orig_array, q1_center, M_trans_array);
 
         // Add this multipole's contribution to the total multipoles
         for (int i = 0; i < ( p + 1 ) * ( p + 1 ); i++)
@@ -1269,9 +1269,9 @@ void testM2MFunc()
     {
         for ( int k = -j; k <= j; ++k )
         {
-            int idx = Canopy::Kernel::Scalar::index( j, k );
+            int idx = Canopy::Operator::Scalar::index( j, k );
             potential_M += M_trans_h( idx ) / Kokkos::pow( r, j + 1 ) *
-                            Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                            Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
         }
     }
 
@@ -1304,22 +1304,22 @@ void testM2LFunc()
     // Expansion center
     Kokkos::Array<double, 3> center = { -5.5, -5.4, -5.3 };
     double rho, alpha, beta;
-    Canopy::Kernel::cart2sph( center[0], center[1], center[2], rho, alpha,
+    Canopy::Operator::cart2sph( center[0], center[1], center[2], rho, alpha,
                               beta );
 
     // First target point near origin (within radius 'a' of origin)
     double Px1 = 0.2, Py1 = -0.1, Pz1 = -0.5;
     double r1, theta1, phi1, r_d1, theta_d1, phi_d1;
-    Canopy::Kernel::cart2sph( Px1 - center[0], Py1 - center[1], Pz1 - center[2],
+    Canopy::Operator::cart2sph( Px1 - center[0], Py1 - center[1], Pz1 - center[2],
                               r_d1, theta_d1, phi_d1 );
-    Canopy::Kernel::cart2sph( Px1, Py1, Pz1, r1, theta1, phi1 );
+    Canopy::Operator::cart2sph( Px1, Py1, Pz1, r1, theta1, phi1 );
 
     // Second target point near origin (within radius 'a' of origin)
     double Px2 = -0.4, Py2 = 0.3, Pz2 = -0.2;
     double r2, theta2, phi2, r_d2, theta_d2, phi_d2;
-    Canopy::Kernel::cart2sph( Px2 - center[0], Py2 - center[1], Pz2 - center[2],
+    Canopy::Operator::cart2sph( Px2 - center[0], Py2 - center[1], Pz2 - center[2],
                               r_d2, theta_d2, phi_d2 );
-    Canopy::Kernel::cart2sph( Px2, Py2, Pz2, r2, theta2, phi2 );
+    Canopy::Operator::cart2sph( Px2, Py2, Pz2, r2, theta2, phi2 );
 
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
@@ -1376,7 +1376,7 @@ void testM2LFunc()
 
     // Since we use compile-time sized arrays here, p must given at compile
     // time.
-    Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+    Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
     p2m( cart_coords, q, num_points, center );
     auto O_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        p2m.coefficients() );
@@ -1390,7 +1390,7 @@ void testM2LFunc()
         O[i] = O_host( i );
 
     // Convert multipoles to locals using function
-    Canopy::Kernel::Scalar::m2l<p>( O, L, center );
+    Canopy::Operator::Scalar::m2l<p>( O, L, center );
 
     // Perform local to potential conversion to calculate potential at
     // target. Equation 3.59 in Greengard
@@ -1402,25 +1402,25 @@ void testM2LFunc()
     {
         for ( int k = -j; k <= j; ++k )
         {
-            int idx = Canopy::Kernel::Scalar::index( j, k );
+            int idx = Canopy::Operator::Scalar::index( j, k );
 
             /* Target point 1 calculations */
             // Greengard eq. 3.59
             potential_L1 += L[idx] * Kokkos::pow( r1, j ) *
-                            Canopy::Kernel::Scalar::Ynm( j, k, theta1, phi1 );
+                            Canopy::Operator::Scalar::Ynm( j, k, theta1, phi1 );
             // Greengard eq. 3.36
             potential_O1 +=
                 O_host( idx ) / Kokkos::pow( r_d1, j + 1 ) *
-                Canopy::Kernel::Scalar::Ynm( j, k, theta_d1, phi_d1 );
+                Canopy::Operator::Scalar::Ynm( j, k, theta_d1, phi_d1 );
 
             /* Target point 2 calculations */
             // Greengard eq. 3.59
             potential_L2 += L[idx] * Kokkos::pow( r2, j ) *
-                            Canopy::Kernel::Scalar::Ynm( j, k, theta2, phi2 );
+                            Canopy::Operator::Scalar::Ynm( j, k, theta2, phi2 );
             // Greengard eq. 3.36
             potential_O2 +=
                 O_host( idx ) / Kokkos::pow( r_d2, j + 1 ) *
-                Canopy::Kernel::Scalar::Ynm( j, k, theta_d2, phi_d2 );
+                Canopy::Operator::Scalar::Ynm( j, k, theta_d2, phi_d2 );
         }
     }
 
@@ -1471,24 +1471,24 @@ void testL2LFunc()
     // Expansion center
     Kokkos::Array<double, 3> m_center = { -5.5, -5.4, -5.3 };
     double rho_m, alpha_m, beta_m; 
-    Canopy::Kernel::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
+    Canopy::Operator::cart2sph( m_center[0], m_center[1], m_center[2], rho_m, alpha_m,
                               beta_m );
         
     // Shifted local center (within radius 'a' of origin): From new local center
     // to old local center.
     Kokkos::Array<double, 3> X_0 = {1.1, -0.8, -1.0};
     double rho, alpha, beta; 
-    Canopy::Kernel::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
+    Canopy::Operator::cart2sph( X_0[0], X_0[1], X_0[2], rho, alpha,
                               beta );
 
     // Target point P near origin (within radius 'a' of origin)
     double Px = 0.7, Py = -1.9, Pz = -1.1;
     double r, theta, phi;
-    Canopy::Kernel::cart2sph( Px, Py, Pz, r, theta, phi );
+    Canopy::Operator::cart2sph( Px, Py, Pz, r, theta, phi );
 
     // P + X_0
     double r_p, theta_p, phi_p;
-    Canopy::Kernel::cart2sph( Px + X_0[0], Py + X_0[1], Pz + X_0[2], r_p, theta_p, phi_p );
+    Canopy::Operator::cart2sph( Px + X_0[0], Py + X_0[1], Pz + X_0[2], r_p, theta_p, phi_p );
 
     // Compute a and total charge for error bound. (See figure 3.3)
     // Also compute direct potential
@@ -1534,11 +1534,11 @@ void testL2LFunc()
     ASSERT_LT( rho, a ) << "Error: Shifted local center must be within distance 'a' "
                           "from original local center for theory to be valid.";
 
-    Canopy::Kernel::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+    Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
     p2m( cart_coords, q, num_points, m_center );
 
     // Convert multipoles to locals
-    Canopy::Kernel::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+    Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
     m2l( p2m.coefficients(), m_center );
 
     // Copy to host
@@ -1554,7 +1554,7 @@ void testL2LFunc()
         L_orig[i] = L_orig_host( i );
 
     // Translate locals
-    Canopy::Kernel::Scalar::l2l<p>(L_orig, L_trans, X_0);
+    Canopy::Operator::Scalar::l2l<p>(L_orig, L_trans, X_0);
 
     // Perform local to potential conversion to calculate potential at
     // target. Equation 3.59 in Greengard
@@ -1565,16 +1565,16 @@ void testL2LFunc()
     {
         for ( int k = -j; k <= j; ++k )
         {
-            int idx = Canopy::Kernel::Scalar::index( j, k );
+            int idx = Canopy::Operator::Scalar::index( j, k );
 
             /* Target point 1 calculations */
             // Greengard eq. 3.59
             potential_L +=
                 L_orig_host( idx ) * Kokkos::pow( r, j ) *
-                Canopy::Kernel::Scalar::Ynm( j, k, theta, phi );
+                Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
             potential_shift +=
                 L_trans[ idx ] * Kokkos::pow( r_p, j ) *
-                Canopy::Kernel::Scalar::Ynm( j, k, theta_p, phi_p );
+                Canopy::Operator::Scalar::Ynm( j, k, theta_p, phi_p );
         }
     }
 
