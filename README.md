@@ -13,6 +13,9 @@
 
 6. [1999_cheng](https://www.sciencedirect.com/science/article/pii/S0021999199963556)
 
+### Gradient Calculations:
+1. [Rankin, WT: Efficient parallel implementations of multipole based N-body algorithms](https://www.proquest.com/dissertations-theses/efficient-parallel-implementations-multipole/docview/304504480/se-2?accountid=14613)
+
 ### Black Box Methods:
 6. [The black-box fast multipole method](https://mc.stanford.edu/cgi-bin/images/f/fa/Darve_bbfmm_2009.pdf)
 

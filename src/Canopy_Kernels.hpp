@@ -123,10 +123,6 @@ Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
 
     double Pnm = Pnm_impl( n, mp, x );
 
-    // double Pnm_new = Pnm_impl(n, mp, x);
-    // printf("n%d, mp%d, x: %0.4lf: assoc: %0.9lf, impl: %0.9lf\n", n, mp, x,
-    // Pnm, Pnm_new);
-
     // See equation 3.27, Greengard for including sqrt((2n+1 / 4pi))
     double norm = Kokkos::sqrt( Kokkos::tgamma( n - mp + 1 ) /
                                 Kokkos::tgamma( n + mp + 1 ) );
@@ -781,6 +777,45 @@ struct L2L
         }
     }
 };
+
+/**
+ * Functions for gradient calculations, from Rankin, for implementation of eq. A.11.
+ * In Rankin, the F*_nm((r, theta, phi)) term in the equivalent of:
+ * Kokkos::pow(r, n) * Canopy::Kernel::Scalar::Ynm( n, m, theta, phi ); in Canopy.
+ * This term is passed as "val" in the following functions.
+ */
+
+// Equation A.17
+KOKKOS_INLINE_FUNCTION
+cdouble d_drho(const double rho, const int n, const cdouble val)
+{
+    return (n / rho) * val;
+}
+
+// Equation A.18
+KOKKOS_INLINE_FUNCTION
+cdouble d_dalpha(const double rho, const double alpha, const double beta, const int n, const int m, const cdouble val)
+{
+    // First term in subtraction
+    const cdouble t1 = m * (1 / Kokkos::tan(alpha)) * val;
+
+    // F*_n_(m+1)
+    const auto F_nm1 = Kokkos::pow(rho, n) * Ynm( n, m + 1, alpha, beta );
+    
+    // Full second term
+    const cdouble t2 = (n + m + 1) * Kokkos::exp(cdouble(0.0, beta)) * F_nm1;
+
+    // Subtract and return
+    return t1 - t2;
+}
+
+// Equation A.19
+KOKKOS_INLINE_FUNCTION
+cdouble d_dbeta(const int m, const cdouble val)
+{
+    return -1.0 * cdouble(0.0, double(m)) * val;
+}
+
 
 } // end namespace Scalar
 
