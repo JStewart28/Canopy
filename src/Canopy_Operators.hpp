@@ -50,13 +50,12 @@ void cart2sph( double x, double y, double z, double& r, double& theta,
 // Convert spherical gradients to cartesian gradients
 KOKKOS_INLINE_FUNCTION
 Kokkos::Array<double,3>
-partials_to_cartesian_gradient(
-    const Kokkos::Array<double,3>& dPartial,
+partials_to_cartesian_gradient(const Kokkos::Array<double,3>& dPartial,
     double r, double theta, double phi )
 {
-    const double dPartial_dr     = dPartial[0];
+    const double dPartial_dr = dPartial[0];
     const double dPartial_dtheta = dPartial[1];
-    const double dPartial_dphi   = dPartial[2];
+    const double dPartial_dphi = dPartial[2];
 
     const double st = Kokkos::sin(theta);
     const double ct = Kokkos::cos(theta);
@@ -852,11 +851,11 @@ cdouble d_dtheta(const double r, const double theta, const double phi, const int
 
     // Start with setup for Y_nm
     const int mp = Kokkos::abs(m);
-    const double cx = Kokkos::cos(theta)
+    const double cx = Kokkos::cos(theta);
     const double sx = Kokkos::sin(theta);
 
     const double Pnm = Pnm_impl(n, mp, cx);
-    const double Pnm1 = (n > 0) ? : Pnm_impl(n-1, mp, cx) : 0.0;
+    const double Pnm1 = (n > 0) ? Pnm_impl(n-1, mp, cx) : 0.0;
 
     // See equation 3.27, Greengard for including sqrt((2n+1 / 4pi))
     double norm = Kokkos::sqrt( Kokkos::tgamma( n - mp + 1 ) /
@@ -884,28 +883,6 @@ KOKKOS_INLINE_FUNCTION
 cdouble d_dphi(const int m, const cdouble val)
 {
     return cdouble(0.0, double(m)) * val;
-}
-
-// Equation A.13
-KOKKOS_INLINE_FUNCTION
-Kokkos::Array<cdouble, 3> partial2gradient(const double r, const double theta,
-    const double phi, const int n, const int m, const cdouble val)
-{
-     // If theta is zero, use equation A.23 to compute the force
-    if (Kokkos::abs(theta) < 1e-10)
-    {
-        auto d_r = d_dr(r, n, val);
-        auto d_theta1 = d_dtheta(r, theta, 0, n, m, val);
-        auto d_theta2 = d_dtheta(r, theta, pi/2, n, m, val);
-
-        return {r * d_r, theta / r * d_theta1, phi / r * d_theta2};
-    }
-
-    auto d_r = d_dr(r, n, val);
-    auto d_theta = d_dtheta(r, theta, phi, n, m, val);
-    auto d_phi = d_dphi(m, val);
-
-    return {r * d_r, theta / r * d_theta, phi / r * Kokkos::sin(theta) * d_phi};
 }
 
 

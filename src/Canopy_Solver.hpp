@@ -611,10 +611,11 @@ class Solver
         _ghost_particles = halo.numGhost();
     }
 
-    template<class PosSlice, class PotSlice, class LocalsSlice, class ForceSlice, class IJK2Index, class CellSize, class LowCorner>
+    template<class PosSlice, class ScalarSlice, class PotSlice, class LocalsSlice, class ForceSlice, class IJK2Index, class CellSize, class LowCorner>
     struct ComputeWithLocals
     {
         PosSlice particle_positions;
+        ScalarSlice particle_scalars;
         PotSlice particle_potentials;
         LocalsSlice locals_slice;
         ForceSlice particle_force;   // Dummy type when HasForce=false
@@ -662,11 +663,11 @@ class Solver
             {
                 for ( int m = -n; m <= n; m++ )
                 {
-                    int idx = Operator::Scalar::index( j, k );
+                    int idx = Operator::Scalar::index( n, m );
 
                     // Greengard eq. 3.59
                     cdouble L_nm = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
-                    cdouble Y_nm = Operator::Scalar::Ynm( j, k, theta, phi );
+                    cdouble Y_nm = Operator::Scalar::Ynm( n, m, theta, phi );
 
                     // Potential accumulator
                     potential_accumulator += (L_nm * Kokkos::pow( r, n ) * Y_nm).real();
@@ -676,22 +677,25 @@ class Solver
                     {
                         // d_dr term. Operator guards against r ~ 0. Kokkos::pow(r, n) term not
                         // included in operator
-                        force_accumulator[0] += (L_nm * Operator::d_dr(r, n, Kokkos::pow( r, n ) * Y_nm)).real();
+                        force_accumulator[0] += (L_nm * Operator::Scalar::d_dr(r, n, Kokkos::pow( r, n ) * Y_nm)).real();
 
                         // d_dtheta term
-                        force_accumulator[1] += (L_nm * Kokkos::pow( r, n ) * Operator::d_dtheta(r, theta, phi, n, m)).real();
+                        force_accumulator[1] += (L_nm * Kokkos::pow( r, n ) * Operator::Scalar::d_dtheta(r, theta, phi, n, m)).real();
 
                         // d_dphi term. Kokkos::pow(r, j) term not included in operator.
-                        force_accumulator[2] += (L_nm * Operator::d_dphi(m, Kokkos::pow(r, n) * Y_nm)).real();
+                        force_accumulator[2] += (L_nm * Operator::Scalar::d_dphi(m, Kokkos::pow(r, n) * Y_nm)).real();
                     }
                 }
             }
             particle_potentials(tpi) += potential_accumulator;
             if constexpr (Metadata::force != no_id)
             {
-                // Convert forces in spherical coordinates to forces in cartesian coordinates.
+                // Convert potentials in spherical coordinates to potentials in cartesian coordinates.
+                auto cart_pot = Operator::partials_to_cartesian_gradient(force_accumulator, r, theta, phi);
+
+                // Accumulate and multiply by scalar in_data to get force: F = ma
                 for (int d = 0; d < 3; d++)
-                    particle_force(tpi, d) += force_accumulator[d].real();
+                    particle_force(tpi, d) += -1.0 * particle_scalars(tpi) * cart_pot[d];
             }
                 
         }
@@ -707,6 +711,7 @@ class Solver
         // int rank = _rank;
 
         auto particle_positions = Cabana::slice<Metadata::pos>(_leaf_particles);
+        auto particle_scalars = Cabana::slice<Metadata::in>(_leaf_particles);
         auto particle_potentials = Cabana::slice<Metadata::out>(_leaf_particles);
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
@@ -723,7 +728,7 @@ class Solver
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_local_potential",
                 Kokkos::RangePolicy<TEST_EXECSPACE>(0, _leaf_particles.size()),
-                ComputeWithLocals{particle_positions, particle_potentials, locals_slice, particle_force,
+                ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, locals_slice, particle_force,
                     ijk2index, cell_size, low_corner, p});
         }
         else
@@ -736,7 +741,7 @@ class Solver
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_local_potential",
                 Kokkos::RangePolicy<TEST_EXECSPACE>(0, _leaf_particles.size()),
-                ComputeWithLocals{particle_positions, particle_potentials, locals_slice, no_force,
+                ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, locals_slice, no_force,
                     ijk2index, cell_size, low_corner, p});
         }
     }
