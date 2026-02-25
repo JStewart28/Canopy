@@ -789,13 +789,31 @@ struct L2L
 KOKKOS_INLINE_FUNCTION
 cdouble d_drho(const double rho, const int n, const cdouble val)
 {
-    return (n / rho) * val;
+    if (Kokkos::abs(rho) < 1e-10)
+        return 0;
+
+    return (double(n) / rho) * val;
 }
 
 // Equation A.18
 KOKKOS_INLINE_FUNCTION
 cdouble d_dalpha(const double rho, const double alpha, const double beta, const int n, const int m, const cdouble val)
 {
+    // Edge case where alpha equals 0. Use equation A.21.
+    if (Kokkos::abs(alpha) < 1e-10)
+    {
+        if (m != 1)
+            return 0;
+
+        // First term in multiplication
+        double t1 = Kokkos::pow(-1, n - 1) * factorial(n - 1) / Kokkos::pow(rho, n + 1);
+
+        // Second term
+        double t2 = Kokkos::exp(cdouble(0.0, beta)) * n * (n + 1) / 2;
+
+        return t1 * t2;
+    }
+
     // First term in subtraction
     const cdouble t1 = m * (1 / Kokkos::tan(alpha)) * val;
 
@@ -809,11 +827,11 @@ cdouble d_dalpha(const double rho, const double alpha, const double beta, const 
     return t1 - t2;
 }
 
-// Equation A.19
+// Equation A.19, with a sign flip because Rankin uses opposite signs in Y_nm.
 KOKKOS_INLINE_FUNCTION
 cdouble d_dbeta(const int m, const cdouble val)
 {
-    return -1.0 * cdouble(0.0, double(m)) * val;
+    return cdouble(0.0, double(m)) * val;
 }
 
 // Equation A.13
@@ -821,9 +839,20 @@ KOKKOS_INLINE_FUNCTION
 Kokkos::Array<cdouble, 3> partial2gradient(const double rho, const double alpha,
     const double beta, const int n, const int m, const cdouble val)
 {
+     // If alpha is zero, use equation A.23 to compute the force
+    if (Kokkos::abs(alpha) < 1e-10)
+    {
+        auto d_rho = d_drho(rho, n, val);
+        auto d_alpha1 = d_dalpha(rho, alpha, 0, n, m, val);
+        auto d_alpha2 = d_dalpha(rho, alpha, pi/2, n, m, val);
+
+        return {rho * d_rho, alpha / rho * d_alpha1, beta / rho * d_alpha2};
+    }
+
     auto d_rho = d_drho(rho, n, val);
     auto d_alpha = d_dalpha(rho, alpha, beta, n, m, val);
     auto d_beta = d_dbeta(m, val);
+
     return {rho * d_rho, alpha / rho * d_alpha, beta / rho * Kokkos::sin(alpha) * d_beta};
 }
 
