@@ -47,6 +47,36 @@ void cart2sph( double x, double y, double z, double& r, double& theta,
     phi = Kokkos::atan2( y, x );                        // azimuth
 }
 
+// Convert spherical gradients to cartesian gradients
+KOKKOS_INLINE_FUNCTION
+Kokkos::Array<double,3>
+partials_to_cartesian_gradient(
+    const Kokkos::Array<double,3>& dPartial,
+    double r, double theta, double phi )
+{
+    const double dPartial_dr     = dPartial[0];
+    const double dPartial_dtheta = dPartial[1];
+    const double dPartial_dphi   = dPartial[2];
+
+    const double st = Kokkos::sin(theta);
+    const double ct = Kokkos::cos(theta);
+    const double sp = Kokkos::sin(phi);
+    const double cp = Kokkos::cos(phi);
+
+    // spherical vector components of ∇Φ
+    const double g_r = dPartial_dr;
+    const double g_theta = (r > 0.0) ? dPartial_dtheta / r : 0.0;
+    const double g_phi   = (r > 0.0 && Kokkos::abs(st) > 1e-14)
+                           ? dPartial_dphi / (r * st)
+                           : 0.0;
+
+    Kokkos::Array<double,3> grad;
+    grad[0] = g_r * st * cp + g_theta * ct * cp - g_phi * sp;
+    grad[1] = g_r * st * sp + g_theta * ct * sp + g_phi * cp;
+    grad[2] = g_r * ct      - g_theta * st;
+    return grad;
+}
+
 // Factorial double: (2m-1)!!
 KOKKOS_INLINE_FUNCTION
 double factorial( int k )
@@ -118,20 +148,20 @@ double Pnm_impl( int n, int m, double x )
 KOKKOS_INLINE_FUNCTION
 Kokkos::complex<double> Ynm( int n, int m, double theta, double phi )
 {
-    int mp = Kokkos::abs( m );
-    double x = Kokkos::cos( theta );
+    const int mp = Kokkos::abs( m );
+    const double x = Kokkos::cos( theta );
 
-    double Pnm = Pnm_impl( n, mp, x );
+    const double Pnm = Pnm_impl( n, mp, x );
 
     // See equation 3.27, Greengard for including sqrt((2n+1 / 4pi))
-    double norm = Kokkos::sqrt( Kokkos::tgamma( n - mp + 1 ) /
-                                Kokkos::tgamma( n + mp + 1 ) );
+    const double norm = Kokkos::sqrt( Kokkos::tgamma( n - mp + 1 ) /
+                                      Kokkos::tgamma( n + mp + 1 ) );
 
     // Equation 3.32, Greengard
-    cdouble y = norm * Pnm * Kokkos::polar( 1.0, double( m ) * phi );
+    const cdouble y = norm * Pnm * Kokkos::polar( 1.0, double( m ) * phi );
 
-    double phase = ( m >= 0 ? ( ( m % 2 ) ? -1.0 : 1.0 ) // (-1)^m
-                            : ( ( ( -m ) % 2 ) ? -1.0 : 1.0 ) );
+    const double phase = ( m >= 0 ? ( ( m % 2 ) ? -1.0 : 1.0 ) // (-1)^m
+                                  : ( ( ( -m ) % 2 ) ? -1.0 : 1.0 ) );
 
     return y * phase;
 }
@@ -783,77 +813,99 @@ struct L2L
  * In Rankin, the F*_nm((r, theta, phi)) term in the equivalent of:
  * Kokkos::pow(r, n) * Canopy::Operator::Scalar::Ynm( n, m, theta, phi ); in Canopy.
  * This term is passed as "val" in the following functions.
+ * Essentially, we are taking partial derivatives of the following function,
+ * where 'a' is a constant factor dependant on 'n' and 'm' and 'i'
+ * is the imaginary number i:
+ * Y_nm(alpha, beta) = a * P_nm(cos(alpha)) * exp(i * m * beta)
+ * Incorporated into the summation for the local-to-potential calculation:
+ * ∑_nm (L_nm * rho^n * Y_nm(alpha, beta)) 
  */
 
-// Equation A.17
+/**
+ * Given val = r^n * Y_nm(θ, phi)
+ *  d/d_r (r^n * Y_nm(θ, phi)) = n * r^(n-1) Y_nm(θ, phi)
+ *                                      = n/r * (r^n * Y_nm(θ, phi))
+ *                                      = n/r * val
+ */ 
 KOKKOS_INLINE_FUNCTION
-cdouble d_drho(const double rho, const int n, const cdouble val)
+cdouble d_dr(const double r, const int n, const cdouble val)
 {
-    if (Kokkos::abs(rho) < 1e-10)
+    if (Kokkos::abs(r) < 1e-10)
         return 0;
 
-    return (double(n) / rho) * val;
+    return (double(n) / r) * val;
 }
 
-// Equation A.18
+/**
+ * Equation A.18
+ * d/d_theta (r^n * Y_nm(θ, phi))
+ *  = r^n * d/d_theta (Y_nm(θ, phi))
+ *  = r^n * d_theta(a * P_nm(cos(θ)) * exp(i * m * phi))
+ *  = r^n * (n * cos(θ) * P_nm(cos(θ)) - (n + m) * P_(n-1)_m(cos(θ)))) / sin(θ) for m >= 0
+ * XXX - optimize to pass val so we don't need to recompute
+ */
 KOKKOS_INLINE_FUNCTION
-cdouble d_dalpha(const double rho, const double alpha, const double beta, const int n, const int m, const cdouble val)
+cdouble d_dtheta(const double r, const double theta, const double phi, const int n, const int m)
 {
-    // Edge case where alpha equals 0. Use equation A.21.
-    if (Kokkos::abs(alpha) < 1e-10)
-    {
-        if (m != 1)
-            return 0;
+    // Compute derivative of associated legendre polynomial in terms of theta
+    // Defined as P_nm(x) in this code.
 
-        // First term in multiplication
-        double t1 = Kokkos::pow(-1, n - 1) * factorial(n - 1) / Kokkos::pow(rho, n + 1);
+    // Start with setup for Y_nm
+    const int mp = Kokkos::abs(m);
+    const double cx = Kokkos::cos(theta)
+    const double sx = Kokkos::sin(theta);
 
-        // Second term
-        double t2 = Kokkos::exp(cdouble(0.0, beta)) * n * (n + 1) / 2;
+    const double Pnm = Pnm_impl(n, mp, cx);
+    const double Pnm1 = (n > 0) ? : Pnm_impl(n-1, mp, cx) : 0.0;
 
-        return t1 * t2;
-    }
-
-    // First term in subtraction
-    const cdouble t1 = m * (1 / Kokkos::tan(alpha)) * val;
-
-    // F*_n_(m+1)
-    const auto F_nm1 = Kokkos::pow(rho, n) * Ynm( n, m + 1, alpha, beta );
+    // See equation 3.27, Greengard for including sqrt((2n+1 / 4pi))
+    double norm = Kokkos::sqrt( Kokkos::tgamma( n - mp + 1 ) /
+                                Kokkos::tgamma( n + mp + 1 ) );
     
-    // Full second term
-    const cdouble t2 = (n + m + 1) * Kokkos::exp(cdouble(0.0, beta)) * F_nm1;
+    // Const exp(i * m* phi) from Y_nm
+    const cdouble e_imp = Kokkos::polar(1.0, double(m) * phi);
 
-    // Subtract and return
-    return t1 - t2;
+    // Const phase from Y_nm
+    const double phase = ( m >= 0 ? ( ( m % 2 ) ? -1.0 : 1.0 ) // (-1)^m
+                            : ( ( ( -m ) % 2 ) ? -1.0 : 1.0 ) );
+
+    // If theta is near zero, set 1/sin(θ) to zero to avoid errors.
+    const double inv_sin_theta = (Kokkos::abs(sx) < 1e-10) ? 0.0 : (1.0 / sx);
+
+    // Compute derivative: d/dtheta P_n^mp(cos(θ)) = ( n cos(θ) P_n_mp - (n+mp) P_(n-1)_mp ) / sin(θ)
+    const double dP_dtheta = ( double(n) * cx * Pnm - double(n + mp) * Pnm1) * inv_sin_theta;
+
+    // Multiply by constant terms and return
+    return cdouble(phase * norm * dP_dtheta, 0.0) * e_imp;
 }
 
 // Equation A.19, with a sign flip because Rankin uses opposite signs in Y_nm.
 KOKKOS_INLINE_FUNCTION
-cdouble d_dbeta(const int m, const cdouble val)
+cdouble d_dphi(const int m, const cdouble val)
 {
     return cdouble(0.0, double(m)) * val;
 }
 
 // Equation A.13
 KOKKOS_INLINE_FUNCTION
-Kokkos::Array<cdouble, 3> partial2gradient(const double rho, const double alpha,
-    const double beta, const int n, const int m, const cdouble val)
+Kokkos::Array<cdouble, 3> partial2gradient(const double r, const double theta,
+    const double phi, const int n, const int m, const cdouble val)
 {
-     // If alpha is zero, use equation A.23 to compute the force
-    if (Kokkos::abs(alpha) < 1e-10)
+     // If theta is zero, use equation A.23 to compute the force
+    if (Kokkos::abs(theta) < 1e-10)
     {
-        auto d_rho = d_drho(rho, n, val);
-        auto d_alpha1 = d_dalpha(rho, alpha, 0, n, m, val);
-        auto d_alpha2 = d_dalpha(rho, alpha, pi/2, n, m, val);
+        auto d_r = d_dr(r, n, val);
+        auto d_theta1 = d_dtheta(r, theta, 0, n, m, val);
+        auto d_theta2 = d_dtheta(r, theta, pi/2, n, m, val);
 
-        return {rho * d_rho, alpha / rho * d_alpha1, beta / rho * d_alpha2};
+        return {r * d_r, theta / r * d_theta1, phi / r * d_theta2};
     }
 
-    auto d_rho = d_drho(rho, n, val);
-    auto d_alpha = d_dalpha(rho, alpha, beta, n, m, val);
-    auto d_beta = d_dbeta(m, val);
+    auto d_r = d_dr(r, n, val);
+    auto d_theta = d_dtheta(r, theta, phi, n, m, val);
+    auto d_phi = d_dphi(m, val);
 
-    return {rho * d_rho, alpha / rho * d_alpha, beta / rho * Kokkos::sin(alpha) * d_beta};
+    return {r * d_r, theta / r * d_theta, phi / r * Kokkos::sin(theta) * d_phi};
 }
 
 

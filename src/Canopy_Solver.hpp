@@ -655,37 +655,45 @@ class Solver
             auto ijk2l_index = ijk2index.find(target_cell_ijk);
             auto local_index = ijk2index.value_at(ijk2l_index);
 
-            // Calculate potential using locals, and forces if enabled
-            cdouble potential_accumulator(0.0, 0.0);
-            Kokkos::Array<cdouble, 3> force_accumulator = {cdouble(0.0, 0.0), cdouble(0.0, 0.0), cdouble(0.0, 0.0)};
-            for ( int j = 0; j <= p; ++j )
+            // Accumulate potential using locals, and forces if enabled
+            double potential_accumulator = 0.0;
+            Kokkos::Array<double, 3> force_accumulator = {0.0, 0.0, 0.0};
+            for ( int n = 0; n <= p; n++ )
             {
-                for ( int k = -j; k <= j; ++k )
+                for ( int m = -n; m <= n; m++ )
                 {
                     int idx = Operator::Scalar::index( j, k );
 
-                    /* Target point 1 calculations */
                     // Greengard eq. 3.59
-                    cdouble val = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
+                    cdouble L_nm = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
+                    cdouble Y_nm = Operator::Scalar::Ynm( j, k, theta, phi );
 
                     // Potential accumulator
-                    potential_accumulator +=
-                        val * Kokkos::pow( r, j ) *
-                            Operator::Scalar::Ynm( j, k, theta, phi );
-
+                    potential_accumulator += (L_nm * Kokkos::pow( r, n ) * Y_nm).real();
+                            
                     // Force accumulator
                     if constexpr (Metadata::force != no_id)
                     {
-                        auto force_part = Operator::Scalar::partial2gradient(r, theta, phi, j, k, val);
-                        for (int d = 0; d < 3; d++)
-                            force_accumulator[d] += force_part[d];
+                        // d_dr term. Operator guards against r ~ 0. Kokkos::pow(r, n) term not
+                        // included in operator
+                        force_accumulator[0] += (L_nm * Operator::d_dr(r, n, Kokkos::pow( r, n ) * Y_nm)).real();
+
+                        // d_dtheta term
+                        force_accumulator[1] += (L_nm * Kokkos::pow( r, n ) * Operator::d_dtheta(r, theta, phi, n, m)).real();
+
+                        // d_dphi term. Kokkos::pow(r, j) term not included in operator.
+                        force_accumulator[2] += (L_nm * Operator::d_dphi(m, Kokkos::pow(r, n) * Y_nm)).real();
                     }
                 }
             }
-            particle_potentials(tpi) += potential_accumulator.real();
+            particle_potentials(tpi) += potential_accumulator;
             if constexpr (Metadata::force != no_id)
+            {
+                // Convert forces in spherical coordinates to forces in cartesian coordinates.
                 for (int d = 0; d < 3; d++)
                     particle_force(tpi, d) += force_accumulator[d].real();
+            }
+                
         }
     };
 
