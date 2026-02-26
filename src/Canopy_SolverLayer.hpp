@@ -226,39 +226,41 @@ struct HaloBoundsReduce
 };
 
 
-template <class TreeType, std::size_t CellPerTileDim>
+template <class SolverType, std::size_t CellPerTileDim>
 class SolverLayer
 {
   public:
     //! Self type. All TreeLayers in the Octree are of the same type. 
-    using tree_layer_type = SolverLayer<TreeType, CellPerTileDim>;
+    using tree_layer_type = SolverLayer<SolverType, CellPerTileDim>;
 
     //! Execution space
-    using execution_space = typename TreeType::execution_space;
+    using execution_space = typename SolverType::execution_space;
     //! Memory space.
-    using memory_space = typename TreeType::memory_space;
+    using memory_space = typename SolverType::memory_space;
+    //! Metadata
+    using metadata = typename SolverType::metadata;
     //! Number of dimensions
-    static constexpr std::size_t num_space_dim = TreeType::num_space_dim;
+    static constexpr std::size_t num_space_dim = SolverType::num_space_dim;
 
     //! Multipole/local expansion cutoff
-    static constexpr std::size_t p = TreeType::p;
+    static constexpr std::size_t p = SolverType::p;
 
     //! Sparse partitioner type
     using sparse_partitioner_type = Cabana::Grid::SparseDimPartitioner<memory_space, CellPerTileDim, num_space_dim>;
 
      //! DataTypes Data types (Cabana::MemberTypes).
-    using cdouble = typename TreeType::cdouble;
-    using multipole_tuple_type = typename TreeType::multipole_tuple_type;
-    using local_tuple_type = typename TreeType::local_tuple_type;
-    using multipole_member_types = typename TreeType::multipole_member_types;
-    using local_member_types = typename TreeType::local_member_types;
-    using multipole_aosoa_type = typename TreeType::multipole_aosoa_type;
-    using local_aosoa_type = typename TreeType::local_aosoa_type;
+    using cdouble = typename SolverType::cdouble;
+    using multipole_tuple_type = typename SolverType::multipole_tuple_type;
+    using local_tuple_type = typename SolverType::local_tuple_type;
+    using multipole_member_types = typename SolverType::multipole_member_types;
+    using local_member_types = typename SolverType::local_member_types;
+    using multipole_aosoa_type = typename SolverType::multipole_aosoa_type;
+    using local_aosoa_type = typename SolverType::local_aosoa_type;
 
     //! Particle data
-    using particle_aosoa_type = typename TreeType::particle_aosoa_type;
+    using particle_aosoa_type = typename SolverType::particle_aosoa_type;
 
-    using mesh_type = typename TreeType::mesh_type;
+    using mesh_type = typename SolverType::mesh_type;
 
     static constexpr std::size_t cell_per_tile_dim = CellPerTileDim;
 
@@ -574,8 +576,8 @@ class SolverLayer
         static constexpr bool is_coeff =
             std::is_same_v<ParticleAoSoA, multipole_aosoa_type>;
 
-        static constexpr std::size_t position_index = is_coeff ? 1 : 0;
-        static constexpr std::size_t data_index = is_coeff ? 0 : 1;
+        static constexpr std::size_t position_index = is_coeff ? 1 : metadata::pos;
+        static constexpr std::size_t data_index = is_coeff ? 0 : metadata::in;
         auto positions = Cabana::slice<position_index>(data_aosoa);
         auto data_slice = Cabana::slice<data_index>(data_aosoa);
 
@@ -1449,15 +1451,15 @@ class SolverLayer
     Kokkos::View<int[6], memory_space> _mhalo_outer_bound;
 };
 
-template <class TreeType, std::size_t CellPerTileDim>
-std::shared_ptr<SolverLayer<TreeType, CellPerTileDim>> createSolverLayer(const std::array<double, 3>& global_low_corner,
+template <class SolverType, std::size_t CellPerTileDim>
+std::shared_ptr<SolverLayer<SolverType, CellPerTileDim>> createSolverLayer(const std::array<double, 3>& global_low_corner,
             const std::array<double, 3>& global_high_corner,
 	        const int tiles_per_dim, const int tile_reduction_factor,
             const int halo_width,
             const int layer_number,
             MPI_Comm comm)
 {
-    return std::make_shared<SolverLayer<TreeType, CellPerTileDim>>(global_low_corner,
+    return std::make_shared<SolverLayer<SolverType, CellPerTileDim>>(global_low_corner,
             global_high_corner,
 	        tiles_per_dim, tile_reduction_factor,
             halo_width, layer_number, comm);

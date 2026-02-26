@@ -23,6 +23,7 @@ namespace Test
 //---------------------------------------------------------------------------//
 
 using cdouble = Kokkos::complex<double>;
+constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
 /**
  * Test that scalar structs are correctly calculated
@@ -1593,14 +1594,98 @@ void testL2LFunc()
     //     potential_direct, potential_L.real(), potential_shift.real());
 }
 
-// Force tests
+/**
+ * Test that partial derivatives of the legendre polynomials are computed correctly.
+ */
+void testPartials()
+{
+    constexpr double tolerance = 1e-8;
+
+    // ---------- Case 1: Phi = z (n=1,m=0), check analytic partials at generic angle ----------
+    {
+        const double r = 0.7;
+        const double theta = 1.1;
+        const double phi = 0.9;
+
+        const int n = 1, m = 0;
+        const cdouble L_10(1.0, 0.0);
+        const cdouble Y = Canopy::Operator::Scalar::Ynm(n, m, theta, phi);
+        const cdouble val = Kokkos::pow(r, n) * Y;
+
+        const double dr = (L_10 * Canopy::Operator::Scalar::d_dr(r, n, val)).real();
+        const double dtheta = (L_10 * Kokkos::pow(r,n) *
+                               Canopy::Operator::Scalar::d_dtheta(r, theta, phi, n, m)).real();
+        const double dphi = (L_10 * Canopy::Operator::Scalar::d_dphi(m, val)).real();
+
+        // Analytic for Phi=z=r cos(theta)
+        EXPECT_NEAR(dr, Kokkos::cos(theta), tolerance) << "d/dr outside of tolerance";
+        EXPECT_NEAR(dtheta, -r * Kokkos::sin(theta), tolerance) << "d/dtheta outside of tolerance";
+        EXPECT_NEAR(dphi, 0.0, tolerance) << "d/dphi outside of tolerance";
+
+        // Check Cartesian gradient equals (0,0,1)
+        Kokkos::Array<double,3> partials = {dr, dtheta, dphi};
+        auto grad = Canopy::Operator::partials_to_cartesian_gradient(partials, r, theta, phi);
+        EXPECT_NEAR(grad[0], 0.0, tolerance) << "grad[x] outside of tolerance";
+        EXPECT_NEAR(grad[1], 0.0, tolerance) << "grad[y] outside of tolerance";
+        EXPECT_NEAR(grad[2], 1.0, tolerance) << "grad[z] outside of tolerance";
+    }
+
+    // ---------- Case 2: finite-difference check for d/dphi and d/dtheta on general (n,m) ----------
+    auto fd_check = [&](int n, int m, double r, double theta, double phi)
+    {
+        constexpr double h = 1e-8;
+
+        const cdouble Y0  = Canopy::Operator::Scalar::Ynm(n, m, theta, phi);
+        const cdouble F0  = Kokkos::pow(r,n) * Y0;
+
+        // d/dphi reference
+        const cdouble Yp = Canopy::Operator::Scalar::Ynm(n, m, theta, phi + h);
+        const cdouble Ym = Canopy::Operator::Scalar::Ynm(n, m, theta, phi - h);
+        const cdouble Fp = Kokkos::pow(r,n) * Yp;
+        const cdouble Fm = Kokkos::pow(r,n) * Ym;
+        const cdouble dphi_fd = (Fp - Fm) * (0.5 / h);
+
+        const cdouble dphi_op = Canopy::Operator::Scalar::d_dphi(m, F0);
+
+        // d/dtheta reference
+        const cdouble Ytp = Canopy::Operator::Scalar::Ynm(n, m, theta + h, phi);
+        const cdouble Ytm = Canopy::Operator::Scalar::Ynm(n, m, theta - h, phi);
+        const cdouble Ftp = Kokkos::pow(r,n) * Ytp;
+        const cdouble Ftm = Kokkos::pow(r,n) * Ytm;
+        const cdouble dtheta_fd = (Ftp - Ftm) * (0.5 / h);
+
+        // Operator returns dY/dtheta, so d/dtheta (r^n Y)= r^n * dY/dtheta
+        const cdouble dtheta_op = Kokkos::pow(r,n) *
+            Canopy::Operator::Scalar::d_dtheta(r, theta, phi, n, m);
+
+        auto err = [](cdouble a, cdouble b){
+            return Kokkos::abs(a - b);
+        };
+
+        EXPECT_NEAR(err(dphi_op, dphi_fd), 0.0, tolerance);
+        EXPECT_NEAR(err(dtheta_op, dtheta_fd), 0.0, tolerance);
+    };
+
+    {
+        const double r = 0.8;
+        const double theta = 1.0;  // avoid poles
+        const double phi = 2.0;
+
+        fd_check(1,  1, r, theta, phi);
+        fd_check(2,  1, r, theta, phi);
+        fd_check(2, -1, r, theta, phi);
+        fd_check(3,  2, r, theta, phi);
+    }
+}
+
+// Force test
 template <int p>
 void testForce()
 {
     static_assert(p > 0);
 
     // Create points and q (scalar value)
-    const int num_points = 500;
+    const int num_points = 200;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -1613,13 +1698,14 @@ void testForce()
     fillRandomScalar( q, charge_bounds, 999 );
 
     // Expansion center
-    Kokkos::Array<double, 3> center = { -5.5, -5.4, -5.3 };
+    Kokkos::Array<double, 3> center = { -6.5, -5.5, -7.1 };
     double rho, alpha, beta;
     Canopy::Operator::cart2sph( center[0], center[1], center[2], rho, alpha,
                               beta );
 
     // First target point near origin (within radius 'a' of origin)
-    double Px1 = 0.2, Py1 = -0.1, Pz1 = -0.5;
+    double Px1 = 0.2, Py1 = 0.6, Pz1 = -0.3;
+    double charge1 = 1.0;
     double r1, theta1, phi1, r_d1, theta_d1, phi_d1;
     Canopy::Operator::cart2sph( Px1 - center[0], Py1 - center[1], Pz1 - center[2],
                               r_d1, theta_d1, phi_d1 );
@@ -1627,6 +1713,7 @@ void testForce()
 
     // Second target point near origin (within radius 'a' of origin)
     double Px2 = -0.4, Py2 = 0.3, Pz2 = -0.2;
+    double charge2 = -3.3;
     double r2, theta2, phi2, r_d2, theta_d2, phi_d2;
     Canopy::Operator::cart2sph( Px2 - center[0], Py2 - center[1], Pz2 - center[2],
                               r_d2, theta_d2, phi_d2 );
@@ -1639,11 +1726,11 @@ void testForce()
     auto q_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), q );
     double q_total = 0.0;
     double a = 0.0;
-    double potential_direct1 = 0.0;
-    double potential_direct2 = 0.0;
+    Kokkos::Array<double, 3> force_direct1 = {0.0, 0.0, 0.0};
+    Kokkos::Array<double, 3> force_direct2 = {0.0, 0.0, 0.0};
     for ( int i = 0; i < num_points; ++i )
     {
-        double dx, dy, dz, dist;
+        double dx, dy, dz, dist, dist2, dist_inv, dist_inv3, fp;
 
         // Radius a
         dx = cart_coords_host( i, 0 ) - center[0];
@@ -1655,21 +1742,31 @@ void testForce()
         // Total sum
         q_total += std::abs( q_host( i ) );
 
-        // Direct potential at first target point using coordinates relative to
+        // Direct force at first target point using coordinates relative to
         // origin.
         dx = Px1 - cart_coords_host( i, 0 );
         dy = Py1 - cart_coords_host( i, 1 );
         dz = Pz1 - cart_coords_host( i, 2 );
-        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        potential_direct1 += q_host( i ) / dist;
+        dist2 = dx*dx + dy*dy + dz*dz;
+        dist_inv  = 1.0 / Kokkos::sqrt(dist2);
+        dist_inv3 = dist_inv * dist_inv * dist_inv;
+        fp = charge1 * q(i) * dist_inv3;
+        force_direct1[0] += fp * dx;
+        force_direct1[1] += fp * dy;
+        force_direct1[2] += fp * dz;
 
         // Direct potential at second target point using coordinates relative to
         // origin.
         dx = Px2 - cart_coords_host( i, 0 );
         dy = Py2 - cart_coords_host( i, 1 );
         dz = Pz2 - cart_coords_host( i, 2 );
-        dist = std::sqrt( dx * dx + dy * dy + dz * dz );
-        potential_direct2 += q_host( i ) / dist;
+        dist2 = dx*dx + dy*dy + dz*dz;
+        dist_inv  = 1.0 / Kokkos::sqrt(dist2);
+        dist_inv3 = dist_inv * dist_inv * dist_inv;
+        fp = charge2 * q(i) * dist_inv3;
+        force_direct2[0] += fp * dx;
+        force_direct2[1] += fp * dy;
+        force_direct2[2] += fp * dz;
     }
 
     // Theorem 3.5.5 requires c > 1 and rho > (c+1)*a.
@@ -1705,52 +1802,78 @@ void testForce()
 
     // Perform local to potential and local to force conversion to calculate 
     // values at target. Equation 3.59 in Greengard and A.11 in Rankin
-    cdouble potential_L1 = 0.0;
-    cdouble potential_L2 = 0.0;
-    using force_array = Kokkos::Array<double, 3>;
-    force_array force_L1 = {0.0, 0.0, 0.0};
-    force_array force_L2 = {0.0, 0.0, 0.0};
-    for ( int j = 0; j <= p; ++j )
+    Kokkos::Array<double, 3> dPhi1 = {0.0, 0.0, 0.0};
+    Kokkos::Array<double, 3> dPhi2 = {0.0, 0.0, 0.0};
+    for ( int n = 0; n <= p; n++ )
     {
-        for ( int k = -j; k <= j; ++k )
+        for ( int m = -n; m <= n; m++ )
         {
-            int idx = Canopy::Operator::Scalar::index( j, k );
+            const int idx = Canopy::Operator::Scalar::index( n, m );
+            const cdouble L_nm = L[idx];
 
             /* Target point 1 calculations */
-            // Greengard eq. 3.59
-            auto val1 = Kokkos::pow( r1, j ) *
-                            Canopy::Operator::Scalar::Ynm( j, k, theta1, phi1 );
-            potential_L1 += L[idx] * val1;
-            auto force_part = Canopy::Operator::Scalar::partial2gradient(r1, theta1, phi1, j, k, val1);
-            for (int d = 0; d < 3; d++)
-                force_L1[d] += force_part[d].real();
+            const cdouble Y_nm1 = Canopy::Operator::Scalar::Ynm(n, m, theta1, phi1);
+
+            // d/dr
+            auto dr = (L_nm * Canopy::Operator::Scalar::d_dr(r1, n, Kokkos::pow( r1, n ) * Y_nm1)).real();
+            dPhi1[0] += dr;
+
+            // d/dtheta
+            auto dtheta = (L_nm * Kokkos::pow( r1, n ) * Canopy::Operator::Scalar::d_dtheta(r1, theta1, phi1, n, m)).real();
+            dPhi1[1] += dtheta;
+
+            // d/dphi
+            auto dphi = (L_nm * Canopy::Operator::Scalar::d_dphi(m, Kokkos::pow(r1, n) * Y_nm1)).real();
+            dPhi1[2] += dphi;
 
             /* Target point 2 calculations */
-            // Greengard eq. 3.59
-            auto val2 = Kokkos::pow( r2, j ) *
-                            Canopy::Operator::Scalar::Ynm( j, k, theta2, phi2 );
-            potential_L2 += L[idx] * val2;
-            force_part = Canopy::Operator::Scalar::partial2gradient(r2, theta2, phi2, j, k, val2);
-            for (int d = 0; d < 3; d++)
-                force_L2[d] += force_part[d].real();
+            const cdouble Y_nm2 = Canopy::Operator::Scalar::Ynm(n, m, theta2, phi2);
 
+            // d/dr
+            dPhi2[0] += (L_nm * Canopy::Operator::Scalar::d_dr(r2, n, Kokkos::pow( r2, n ) * Y_nm2)).real();
+
+            // d/dtheta
+            dPhi2[1] += (L_nm * Kokkos::pow( r2, n ) * Canopy::Operator::Scalar::d_dtheta(r2, theta2, phi2, n, m)).real();
+
+            // d/dphi
+            dPhi2[2] += (L_nm * Canopy::Operator::Scalar::d_dphi(m, Kokkos::pow(r2, n) * Y_nm2)).real();
         }
     }
 
-    // Check the error bounds from eq. 3.61
-    double bound = ( q_total / ( c * a - a ) ) * std::pow( 1.0 / c, p + 1 );
-    double error1 = std::abs( potential_L1.real() - potential_direct1 );
-    double error2 = std::abs( potential_L2.real() - potential_direct2 );
-    // EXPECT_LE( error1, bound ) << "p=" << p
-    //                            << ": error between local and direct "
-    //                               "potentials at target point 1 too high.";
-    // EXPECT_LE( error2, bound ) << "p=" << p
-    //                            << ": error between local and direct "
-    //                               "potentials at target point 2 too high.";
-    printf("p=%d: D1: %0.5lf, L1: %0.5lf, F: (%0.5lf, %0.5lf, %0.5lf)\n", p,
-        potential_direct1, potential_L1.real(), force_L1[0], force_L1[1], force_L1[2]);
-   printf("p=%d: D1: %0.5lf, L1: %0.5lf, F: (%0.5lf, %0.5lf, %0.5lf)\n", p,
-        potential_direct2, potential_L2.real(), force_L2[0], force_L2[1], force_L2[2]);
+    // Convert to cartesian partials
+    auto gradPhi1 = Canopy::Operator::partials_to_cartesian_gradient(dPhi1, r1, theta1, phi1);
+    auto gradPhi2 = Canopy::Operator::partials_to_cartesian_gradient(dPhi2, r2, theta2, phi2);
+
+    // Convert to force
+    Kokkos::Array<double, 3> F_local1 = {
+        -charge1 * gradPhi1[0],
+        -charge1 * gradPhi1[1],
+        -charge1 * gradPhi1[2]
+    };
+    Kokkos::Array<double, 3> F_local2 = {
+        -charge2 * gradPhi2[0],
+        -charge2 * gradPhi2[1],
+        -charge2 * gradPhi2[2]
+    };
+
+    // Check the error
+    double tolerance = Kokkos::pow(10, -p+2);
+    Kokkos::Array<double, 3> error1;
+    Kokkos::Array<double, 3> error2;
+    for (int i = 0; i < 3; i++)
+    {
+        error1[i] = Kokkos::abs(F_local1[i] - force_direct1[i]);
+        error2[i] = Kokkos::abs(F_local2[i] - force_direct2[i]);
+        EXPECT_NEAR(error1[i], 0.0, tolerance) << "Force in dim " << i << " outside of tolerance at point 1.";
+        EXPECT_NEAR(error2[i], 0.0, tolerance) << "Force in dim " << i << " outside of tolerance at point 2.";
+    }
+
+    // printf("p=%d: 1: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
+    //     force_direct1[0], force_direct1[1], force_direct1[2],
+    //     F_local1[0], F_local1[1], F_local1[2]);
+    // printf("p=%d: 2: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
+    //     force_direct2[0], force_direct2[1], force_direct2[2],
+    //     F_local2[0], F_local2[1], F_local2[2]);
 }
 
 //---------------------------------------------------------------------------//
@@ -1793,10 +1916,11 @@ TEST( Func, testL2LFunc3 ) { testL2LFunc<3>(); }
 TEST( Func, testL2LFunc5 ) { testL2LFunc<5>(); }
 TEST( Func, testL2LFunc9 ) { testL2LFunc<9>(); }
 
-/*********************************
- * Test force computation
- ********************************/
-TEST(Force, testForce4 ) { testForce<4>();}
+/******************************************
+ * Test gradient and force computations
+ *****************************************/
+TEST(Partials, testPartials) { testPartials(); }
+TEST(Force, testForce1 ) { testForce<5>(); }
 
 //---------------------------------------------------------------------------//
 

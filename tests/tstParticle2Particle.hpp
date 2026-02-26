@@ -33,8 +33,6 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     // Create a tree of depth 3. pos/charge/potential/global particle id
-    using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
-    using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
     std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
     std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
 
@@ -43,7 +41,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = 2, leaf_tiles = 16;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD, cells_per_tile, p>(
+    auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD_f, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
@@ -96,12 +94,14 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     //     cart_coords(1, 2) = 1.0 + (3.0/16.0);;
     // }
 
-    Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", num_points);
-    auto pos_slice_host = Cabana::slice<MD::pos>(particle_aosoa_host);
-    auto scalar_slice_host = Cabana::slice<MD::in>(particle_aosoa_host);
-    auto potential_slice_host = Cabana::slice<MD::out>(particle_aosoa_host);
-    auto id_slice_host = Cabana::slice<3>(particle_aosoa_host);
+    particle_aosoa_type_f_h particle_aosoa_host("particle_aosoa", num_points);
+    auto pos_slice_host = Cabana::slice<MD_f::pos>(particle_aosoa_host);
+    auto scalar_slice_host = Cabana::slice<MD_f::in>(particle_aosoa_host);
+    auto potential_slice_host = Cabana::slice<MD_f::out>(particle_aosoa_host);
+    auto force_slice_host = Cabana::slice<MD_f::force>(particle_aosoa_host);
+    auto id_slice_host = Cabana::slice<4>(particle_aosoa_host);
     Cabana::deep_copy(potential_slice_host, 0.0);
+    Cabana::deep_copy(force_slice_host, 0.0);
 
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
@@ -122,7 +122,11 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     // Iterate over particles and calculate potential
     Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
                                                           num_points );
+    Kokkos::View<double*[3], Kokkos::HostSpace> direct_forces( "direct_forces",
+                                                          num_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
+    Kokkos::deep_copy(direct_forces, 0.0);
+
     for (int this_pid = 0; this_pid < num_points; this_pid++)
     {
         // Get the cell this point falls into
@@ -178,6 +182,15 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
                 // if (this_pid == 326) printf("R%d: correct p%d: cell(%d, %d, %d), np%d: cell(%d, %d, %d)\n",
                 //     rank, this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2],
                 //     other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
+
+                // Force calculation
+                double dist2 = dx*dx + dy*dy + dz*dz;
+                double dist_inv  = 1.0 / Kokkos::sqrt(dist2);
+                double dist_inv3 = dist_inv * dist_inv * dist_inv;
+                double fp = -1 * q(this_pid) * q(other_pid) * dist_inv3;
+                direct_forces(this_pid, 0) += fp * dx;
+                direct_forces(this_pid, 1) += fp * dy;
+                direct_forces(this_pid, 2) += fp * dz;
             }            
         }
     }
@@ -194,7 +207,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
 
     // Gather all particles from the tree back to rank 0 for testing
     auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
-    particle_aosoa_type_h tree_particles("tree_particles", tmp.size());
+    particle_aosoa_type_f_h tree_particles("tree_particles", tmp.size());
     Cabana::deep_copy(tree_particles, tmp);
 
     // Remove ghost particles
@@ -207,19 +220,26 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     Cabana::migrate( distributor, tree_particles );
 
     // Sort the particles by increasing cell_id
-    auto tree_id_slice = Cabana::slice<3>(tree_particles);
+    auto tree_id_slice = Cabana::slice<4>(tree_particles);
     auto sort_data = Cabana::sortByKey( tree_id_slice );
     Cabana::permute( sort_data, tree_particles );
-    tree_id_slice = Cabana::slice<3>(tree_particles);
-    auto tree_potentials = Cabana::slice<2>(tree_particles);
+    tree_id_slice = Cabana::slice<4>(tree_particles);
+    auto tree_potentials = Cabana::slice<MD_f::out>(tree_particles);
+    auto tree_forces = Cabana::slice<MD_f::force>(tree_particles);
 
     for (int i = 0; i < num_points; i++)
     {
         auto direct_potential = direct_potentials(i);
         auto particle_id = tree_id_slice(i);
-        auto mesh_potential = tree_potentials(i);
+        auto solver_potential = tree_potentials(i);
         double allowed_error = Kokkos::pow(10, -9);
-        EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << i;
+        EXPECT_NEAR(solver_potential, direct_potential, allowed_error) << " at particle " << i;
+        for (int d = 0; d < 3; d++)
+        {
+            auto direct_force = direct_forces(i, d);
+            auto solver_force = tree_forces(i, d);
+            EXPECT_NEAR(solver_force, direct_force, allowed_error) << " at particle " << i;
+        }
         // if (particle_id == 326) printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }
 }
