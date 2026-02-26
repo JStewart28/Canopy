@@ -1594,20 +1594,12 @@ void testL2LFunc()
     //     potential_direct, potential_L.real(), potential_shift.real());
 }
 
-// Gradient test
-void testGrad()
+/**
+ * Test that partial derivatives of the legendre polynomials are computed correctly.
+ */
+void testPartials()
 {
-    constexpr double h = 1e-7;
-    constexpr double tol = 1e-8;
-
-    auto check_close = [&](const char* name, double got, double ref)
-    {
-        double err = Kokkos::abs(got - ref);
-        if (err > tol)
-            printf("FAIL %s got=%.15e ref=%.15e err=%.3e\n", name, got, ref, err);
-        else
-            printf("OK   %s got=%.15e ref=%.15e err=%.3e\n", name, got, ref, err);
-    };
+    constexpr double tolerance = 1e-8;
 
     // ---------- Case 1: Phi = z (n=1,m=0), check analytic partials at generic angle ----------
     {
@@ -1625,22 +1617,24 @@ void testGrad()
                                Canopy::Operator::Scalar::d_dtheta(r, theta, phi, n, m)).real();
         const double dphi = (L_10 * Canopy::Operator::Scalar::d_dphi(m, val)).real();
 
-        // analytic for Phi=z=r cos(theta)
-        check_close("Phi=z: d/dr",     dr,     Kokkos::cos(theta));
-        check_close("Phi=z: d/dtheta", dtheta, -r * Kokkos::sin(theta));
-        check_close("Phi=z: d/dphi",   dphi,   0.0);
+        // Analytic for Phi=z=r cos(theta)
+        EXPECT_NEAR(dr, Kokkos::cos(theta), tolerance) << "d/dr outside of tolerance";
+        EXPECT_NEAR(dtheta, -r * Kokkos::sin(theta), tolerance) << "d/dtheta outside of tolerance";
+        EXPECT_NEAR(dphi, 0.0, tolerance) << "d/dphi outside of tolerance";
 
-        // optional: check Cartesian gradient equals (0,0,1)
+        // Check Cartesian gradient equals (0,0,1)
         Kokkos::Array<double,3> partials = {dr, dtheta, dphi};
         auto grad = Canopy::Operator::partials_to_cartesian_gradient(partials, r, theta, phi);
-        check_close("Phi=z: gx", grad[0], 0.0);
-        check_close("Phi=z: gy", grad[1], 0.0);
-        check_close("Phi=z: gz", grad[2], 1.0);
+        EXPECT_NEAR(grad[0], 0.0, tolerance) << "grad[x] outside of tolerance";
+        EXPECT_NEAR(grad[1], 0.0, tolerance) << "grad[y] outside of tolerance";
+        EXPECT_NEAR(grad[2], 1.0, tolerance) << "grad[z] outside of tolerance";
     }
 
     // ---------- Case 2: finite-difference check for d/dphi and d/dtheta on general (n,m) ----------
     auto fd_check = [&](int n, int m, double r, double theta, double phi)
     {
+        constexpr double h = 1e-8;
+
         const cdouble Y0  = Canopy::Operator::Scalar::Ynm(n, m, theta, phi);
         const cdouble F0  = Kokkos::pow(r,n) * Y0;
 
@@ -1660,7 +1654,7 @@ void testGrad()
         const cdouble Ftm = Kokkos::pow(r,n) * Ytm;
         const cdouble dtheta_fd = (Ftp - Ftm) * (0.5 / h);
 
-        // Option 1: operator returns dY/dtheta, so d/dtheta (r^n Y)= r^n * dY/dtheta
+        // Operator returns dY/dtheta, so d/dtheta (r^n Y)= r^n * dY/dtheta
         const cdouble dtheta_op = Kokkos::pow(r,n) *
             Canopy::Operator::Scalar::d_dtheta(r, theta, phi, n, m);
 
@@ -1668,8 +1662,8 @@ void testGrad()
             return Kokkos::abs(a - b);
         };
 
-        printf("FD (n=%d,m=%d): |dphi_op-dphi_fd|=%.3e  |dtheta_op-dtheta_fd|=%.3e\n",
-               n, m, err(dphi_op, dphi_fd), err(dtheta_op, dtheta_fd));
+        EXPECT_NEAR(err(dphi_op, dphi_fd), 0.0, tolerance);
+        EXPECT_NEAR(err(dtheta_op, dtheta_fd), 0.0, tolerance);
     };
 
     {
@@ -1930,7 +1924,7 @@ TEST( Func, testL2LFunc9 ) { testL2LFunc<9>(); }
 /******************************************
  * Test gradient and force computations
  *****************************************/
-TEST(Gradient, testGrad) { testGrad(); }
+TEST(Partials, testPartials) { testPartials(); }
 // TEST(Force, testForce1 ) { testForce<1>(); }
 
 //---------------------------------------------------------------------------//
