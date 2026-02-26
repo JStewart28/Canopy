@@ -122,7 +122,7 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     // Iterate over particles and calculate potential
     Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
                                                           num_points );
-    Kokkos::View<double*[3], Kokkos::HostSpace> direct_forces( "direct_potentials",
+    Kokkos::View<double*[3], Kokkos::HostSpace> direct_forces( "direct_forces",
                                                           num_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
     Kokkos::deep_copy(direct_forces, 0.0);
@@ -187,10 +187,10 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
                 double dist2 = dx*dx + dy*dy + dz*dz;
                 double dist_inv  = 1.0 / Kokkos::sqrt(dist2);
                 double dist_inv3 = dist_inv * dist_inv * dist_inv;
-                double fp = q(this_pid) * q(other_pid) * dist_inv3;
+                double fp = -1 * q(this_pid) * q(other_pid) * dist_inv3;
                 direct_forces(this_pid, 0) += fp * dx;
                 direct_forces(this_pid, 1) += fp * dy;
-                direct_forces(this_pid, 2) += fp * dz;     
+                direct_forces(this_pid, 2) += fp * dz;
             }            
         }
     }

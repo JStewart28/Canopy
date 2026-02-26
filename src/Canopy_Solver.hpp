@@ -57,9 +57,9 @@ class Solver
 {
   public:
     // Check metadata
-    static_assert(Metadata::pos != no_id, "Metadata must define position index");
-    static_assert(Metadata::in != no_id, "Metadata must define in_data index");
-    static_assert(Metadata::out != no_id, "Metadata must define out_data index");
+    static_assert(Metadata::pos != no_id, "metadata must define position index");
+    static_assert(Metadata::in != no_id, "metadata must define in_data index");
+    static_assert(Metadata::out != no_id, "metadata must define out_data index");
 
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
@@ -93,7 +93,8 @@ class Solver
     using local_aosoa_type = Cabana::AoSoA<local_member_types, memory_space, cell_per_tile_dim>;
 
     //! Particle data
-    using particle_aosoa_type = Metadata::aosoa_type;
+    using metadata = Metadata;
+    using particle_aosoa_type = metadata::aosoa_type;
     
     Solver( const std::array<double, 3>& global_low_corner,
           const std::array<double, 3>& global_high_corner,
@@ -370,7 +371,7 @@ class Solver
         migrateParticleData(_leaf_particles, run_load_balance);
 
         // Set out data to 0
-        auto out_data_slice = Cabana::slice<Metadata::out>(_leaf_particles);
+        auto out_data_slice = Cabana::slice<metadata::out>(_leaf_particles);
         Cabana::deep_copy(out_data_slice, 0.0);
 
         // Owned particles are the number of leaf particles
@@ -391,7 +392,7 @@ class Solver
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::Solver::migrateParticleData");
 
-        auto positions = Cabana::slice<Metadata::pos>(external_data);
+        auto positions = Cabana::slice<metadata::pos>(external_data);
         Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
         mapParticles(positions, layer_owner, external_data.size(), 0, run_load_balance);
         Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
@@ -498,7 +499,7 @@ class Solver
         auto leaf_cell_per_dim = _tree[0]->cellsPerDim();
         auto cell_base = _tree[0]->cell_offsets();
         auto cell_offsets = _tree[0]->num_owned_cell();
-        auto positions = Cabana::slice<Metadata::pos>(_leaf_particles);
+        auto positions = Cabana::slice<metadata::pos>(_leaf_particles);
 
         auto particle_ids = Cabana::slice<3>(_leaf_particles);
 
@@ -611,7 +612,7 @@ class Solver
         _ghost_particles = halo.numGhost();
     }
 
-    template<class PosSlice, class ScalarSlice, class PotSlice, class LocalsSlice, class ForceSlice, class IJK2Index, class CellSize, class LowCorner>
+    template<class PosSlice, class ScalarSlice, class PotSlice, class LocalsSlice, class ForceSlice, class IJK2Index>
     struct ComputeWithLocals
     {
         PosSlice particle_positions;
@@ -620,8 +621,8 @@ class Solver
         LocalsSlice locals_slice;
         ForceSlice particle_force;   // Dummy type when HasForce=false
         IJK2Index ijk2index;
-        CellSize cell_size;
-        LowCorner low_corner;
+        Kokkos::Array<double, 3> cell_size;
+        Kokkos::Array<double, 3> low_corner;
         int p;
 
         KOKKOS_INLINE_FUNCTION
@@ -673,7 +674,7 @@ class Solver
                     potential_accumulator += (L_nm * Kokkos::pow( r, n ) * Y_nm).real();
                             
                     // Force accumulator
-                    if constexpr (Metadata::force != no_id)
+                    if constexpr (metadata::force != no_id)
                     {
                         // d_dr term. Operator guards against r ~ 0. Kokkos::pow(r, n) term not
                         // included in operator
@@ -688,7 +689,7 @@ class Solver
                 }
             }
             particle_potentials(tpi) += potential_accumulator;
-            if constexpr (Metadata::force != no_id)
+            if constexpr (metadata::force != no_id)
             {
                 // Convert potentials in spherical coordinates to potentials in cartesian coordinates.
                 auto cart_pot = Operator::partials_to_cartesian_gradient(force_accumulator, r, theta, phi);
@@ -710,9 +711,9 @@ class Solver
 
         // int rank = _rank;
 
-        auto particle_positions = Cabana::slice<Metadata::pos>(_leaf_particles);
-        auto particle_scalars = Cabana::slice<Metadata::in>(_leaf_particles);
-        auto particle_potentials = Cabana::slice<Metadata::out>(_leaf_particles);
+        auto particle_positions = Cabana::slice<metadata::pos>(_leaf_particles);
+        auto particle_scalars = Cabana::slice<metadata::in>(_leaf_particles);
+        auto particle_potentials = Cabana::slice<metadata::out>(_leaf_particles);
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
         Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
@@ -721,10 +722,9 @@ class Solver
 
         auto locals_slice = Cabana::slice<0>(_tree[0]->locals());
 
-        if constexpr (Metadata::force != no_id)
+        if constexpr (metadata::force != no_id)
         {
-            auto particle_force = Cabana::slice<Metadata::force>(_leaf_particles);
-
+            auto particle_force = Cabana::slice<metadata::force>(_leaf_particles);
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_local",
                 Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
@@ -746,7 +746,7 @@ class Solver
         }
     }
 
-    template<class PosSlice, class ScalarSlice, class PotSlice, class NeighborList, class ForceSlice, class CellSize, class LowCorner>
+    template<class PosSlice, class ScalarSlice, class PotSlice, class NeighborList, class ForceSlice>
     struct ComputeDirectly
     {
         PosSlice particle_positions;
@@ -754,8 +754,8 @@ class Solver
         PotSlice particle_potentials;
         NeighborList neighbor_list;
         ForceSlice particle_force;   // Dummy type when HasForce=false
-        CellSize cell_size;
-        LowCorner low_corner;
+        Kokkos::Array<double, 3> cell_size;
+        Kokkos::Array<double, 3> low_corner;
         int cells_per_dim;
         int p;
 
@@ -801,7 +801,7 @@ class Solver
                 phi += particle_scalars(neighbor_id) / r;
                 
                 // Force calculations
-                if constexpr(Metadata::force != no_id)
+                if constexpr(metadata::force != no_id)
                 {
                     double dist_inv  = 1.0 / r;
                     double dist_inv3 = dist_inv * dist_inv * dist_inv;
@@ -813,7 +813,7 @@ class Solver
             }
             particle_potentials(my_id) += phi;
 
-            if constexpr(Metadata::force != no_id)
+            if constexpr(metadata::force != no_id)
                 for (int d = 0; d < 3; d++)
                     particle_force(my_id, d) += fpart[d];
         }
@@ -825,9 +825,9 @@ class Solver
 
         haloParticles();
 
-        auto particle_positions = Cabana::slice<Metadata::pos>(_leaf_particles);
-        auto particle_scalars = Cabana::slice<Metadata::in>(_leaf_particles);
-        auto particle_potentials = Cabana::slice<Metadata::out>(_leaf_particles);
+        auto particle_positions = Cabana::slice<metadata::pos>(_leaf_particles);
+        auto particle_scalars = Cabana::slice<metadata::in>(_leaf_particles);
+        auto particle_potentials = Cabana::slice<metadata::out>(_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
@@ -844,14 +844,14 @@ class Solver
             Cabana::FullNeighborTag{}, particle_positions, 0, total_particles,
             neighborhood_radius );
 
-        if constexpr (Metadata::force != no_id)
+        if constexpr (metadata::force != no_id)
         {
-            auto particle_force = Cabana::slice<Metadata::force>(_leaf_particles);
+            auto particle_force = Cabana::slice<metadata::force>(_leaf_particles);
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_direct",
                 Kokkos::RangePolicy<execution_space>(0, owned_particles),
-                ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, neighbor_list, particle_force,
+                ComputeDirectly{particle_positions, particle_scalars, particle_potentials, neighbor_list, particle_force,
                     cell_size, low_corner, cells_per_dim, p});
         }
         else
@@ -864,7 +864,7 @@ class Solver
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_direct",
                 Kokkos::RangePolicy<execution_space>(0, owned_particles),
-                ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, neighbor_list, no_force,
+                ComputeDirectly{particle_positions, particle_scalars, particle_potentials, neighbor_list, no_force,
                     cell_size, low_corner, cells_per_dim, p});
         }
         Kokkos::fence();
@@ -934,16 +934,16 @@ class Solver
     std::size_t _ghost_particles = 0;
 };
 
-template <class MemorySpace, class ExecutionSpace, class Metadata, 
+template <class MemorySpace, class ExecutionSpace, class metadata, 
           std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-std::shared_ptr<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>
+std::shared_ptr<Solver<MemorySpace, ExecutionSpace, metadata, CellPerTileDim, ExpansionCutoff>>
         createSolver( const std::array<double, 3>& global_low_corner,
                     const std::array<double, 3>& global_high_corner,
                     const std::size_t leaf_tiles_per_dim,
                     const std::size_t tile_reduction_factor,
                     MPI_Comm comm)
 {
-    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
+    return std::make_shared<Solver<MemorySpace, ExecutionSpace, metadata, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor,
             comm);
 }
