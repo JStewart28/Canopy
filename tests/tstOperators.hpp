@@ -1685,7 +1685,7 @@ void testForce()
     static_assert(p > 0);
 
     // Create points and q (scalar value)
-    const int num_points = 1;
+    const int num_points = 200;
     Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           num_points );
     Kokkos::View<double*, TEST_MEMSPACE> q( "q", num_points );
@@ -1697,19 +1697,19 @@ void testForce()
     Kokkos::Array<double, 2> charge_bounds = { -3.0, 2.0 };
     fillRandomScalar( q, charge_bounds, 999 );
 
-    cart_coords(0, 0) = -7.5;
-    cart_coords(0, 1) = 0.0;
-    cart_coords(0, 2) = 0.0;
-    q(0) = 1.0;
+    // cart_coords(0, 0) = -7.5;
+    // cart_coords(0, 1) = 0.0;
+    // cart_coords(0, 2) = 0.0;
+    // q(0) = 1.0;
 
     // Expansion center
-    Kokkos::Array<double, 3> center = { -6.5, 0.0, 0.0 };
+    Kokkos::Array<double, 3> center = { -6.5, -5.5, -7.1 };
     double rho, alpha, beta;
     Canopy::Operator::cart2sph( center[0], center[1], center[2], rho, alpha,
                               beta );
 
     // First target point near origin (within radius 'a' of origin)
-    double Px1 = 0.2, Py1 = 0.0, Pz1 = 0.0;
+    double Px1 = 0.2, Py1 = 0.6, Pz1 = -0.3;
     double charge1 = 1.0;
     double r1, theta1, phi1, r_d1, theta_d1, phi_d1;
     Canopy::Operator::cart2sph( Px1 - center[0], Py1 - center[1], Pz1 - center[2],
@@ -1768,7 +1768,7 @@ void testForce()
         dist2 = dx*dx + dy*dy + dz*dz;
         dist_inv  = 1.0 / Kokkos::sqrt(dist2);
         dist_inv3 = dist_inv * dist_inv * dist_inv;
-        fp = charge1 * q(i) * dist_inv3;
+        fp = charge2 * q(i) * dist_inv3;
         force_direct2[0] += fp * dx;
         force_direct2[1] += fp * dy;
         force_direct2[2] += fp * dz;
@@ -1784,8 +1784,8 @@ void testForce()
     // Target points must be within radius a of origin
     ASSERT_LT( r1, a ) << "Error: Target point 1 must be within distance 'a' "
                           "from origin for theory to be valid.";
-    // ASSERT_LT( r2, a ) << "Error: Target point 2 must be within distance 'a' "
-    //                       "from origin for theory to be valid.";
+    ASSERT_LT( r2, a ) << "Error: Target point 2 must be within distance 'a' "
+                          "from origin for theory to be valid.";
 
     // Since we use compile-time sized arrays here, p must given at compile
     // time.
@@ -1822,29 +1822,26 @@ void testForce()
             // d/dr
             auto dr = (L_nm * Canopy::Operator::Scalar::d_dr(r1, n, Kokkos::pow( r1, n ) * Y_nm1)).real();
             dPhi1[0] += dr;
-            printf("idx %d: dr: adding %.2lf\n", idx, dr);
 
             // d/dtheta
             auto dtheta = (L_nm * Kokkos::pow( r1, n ) * Canopy::Operator::Scalar::d_dtheta(r1, theta1, phi1, n, m)).real();
             dPhi1[1] += dtheta;
-            printf("idx %d: dtheta: adding %.2lf\n", idx, dtheta);
 
             // d/dphi
             auto dphi = (L_nm * Canopy::Operator::Scalar::d_dphi(m, Kokkos::pow(r1, n) * Y_nm1)).real();
             dPhi1[2] += dphi;
-            printf("idx %d: dphi: adding %.2lf\n", idx, dphi);
 
             /* Target point 2 calculations */
             const cdouble Y_nm2 = Canopy::Operator::Scalar::Ynm(n, m, theta2, phi2);
 
             // d/dr
-            dPhi1[0] += (L_nm * Canopy::Operator::Scalar::d_dr(r2, n, Kokkos::pow( r2, n ) * Y_nm2)).real();
+            dPhi2[0] += (L_nm * Canopy::Operator::Scalar::d_dr(r2, n, Kokkos::pow( r2, n ) * Y_nm2)).real();
 
             // d/dtheta
-            dPhi1[1] += (L_nm * Kokkos::pow( r2, n ) * Canopy::Operator::Scalar::d_dtheta(r2, theta2, phi2, n, m)).real();
+            dPhi2[1] += (L_nm * Kokkos::pow( r2, n ) * Canopy::Operator::Scalar::d_dtheta(r2, theta2, phi2, n, m)).real();
 
             // d/dphi
-            dPhi1[2] += (L_nm * Canopy::Operator::Scalar::d_dphi(m, Kokkos::pow(r2, n) * Y_nm2)).real();
+            dPhi2[2] += (L_nm * Canopy::Operator::Scalar::d_dphi(m, Kokkos::pow(r2, n) * Y_nm2)).real();
         }
     }
 
@@ -1876,9 +1873,9 @@ void testForce()
     printf("p=%d: 1: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
         force_direct1[0], force_direct1[1], force_direct1[2],
         F_local1[0], F_local1[1], F_local1[2]);
-    // printf("p=%d: 2: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
-    //     force_direct2[0], force_direct2[1], force_direct2[2],
-    //     F_local2[0], F_local2[1], F_local2[2]);
+    printf("p=%d: 2: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
+        force_direct2[0], force_direct2[1], force_direct2[2],
+        F_local2[0], F_local2[1], F_local2[2]);
 }
 
 //---------------------------------------------------------------------------//
@@ -1925,7 +1922,7 @@ TEST( Func, testL2LFunc9 ) { testL2LFunc<9>(); }
  * Test gradient and force computations
  *****************************************/
 TEST(Partials, testPartials) { testPartials(); }
-// TEST(Force, testForce1 ) { testForce<1>(); }
+TEST(Force, testForce1 ) { testForce<5>(); }
 
 //---------------------------------------------------------------------------//
 
