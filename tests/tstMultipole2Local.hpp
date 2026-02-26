@@ -162,7 +162,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     std::size_t leaf_tiles, red_factor;
     red_factor = 8, leaf_tiles = 8;
     if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD, cells_per_tile, p>(
+    auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD_f, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
     // The tree depth should always be at least three, but this check is here just in case.
@@ -204,12 +204,14 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
-    Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
-    auto pos_slice_host = Cabana::slice<MD::pos>(particle_aosoa_host);
-    auto scalar_slice_host = Cabana::slice<MD::in>(particle_aosoa_host);
-    auto potential_slice_host = Cabana::slice<MD::out>(particle_aosoa_host);
-    auto id_slice_host = Cabana::slice<3>(particle_aosoa_host);
+    particle_tuple_type_f_h particle_aosoa_host("particle_aosoa", owned_points);
+    auto pos_slice_host = Cabana::slice<MD_f::pos>(particle_aosoa_host);
+    auto scalar_slice_host = Cabana::slice<MD_f::in>(particle_aosoa_host);
+    auto potential_slice_host = Cabana::slice<MD_f::out>(particle_aosoa_host);
+    auto force_slice_host = Cabana::slice<MD_f::force>(particle_aosoa_host);
+    auto id_slice_host = Cabana::slice<4>(particle_aosoa_host);
     Cabana::deep_copy(potential_slice_host, 0.0);
+    Cabana::deep_copy(force_slice_host, 0.0);
 
     // Fill the particles into the AoSoA
     auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
@@ -229,7 +231,10 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     // Iterate over particles and calculate potential
     Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
                                                           total_points );
+    Kokkos::View<double*[3], Kokkos::HostSpace> direct_forces( "direct_potentials",
+                                                          total_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
+    Kokkos::deep_copy(direct_forces, 0.0);
 
     // Only rank 0 executes this loop because it owns all points
     for (int this_pid = 0; this_pid < owned_points; this_pid++)
@@ -279,7 +284,16 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
             double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
             double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
-            direct_potentials(this_pid) += q_h( other_pid ) / dist;        
+            direct_potentials(this_pid) += q_h( other_pid ) / dist;
+
+            // Force calculation
+            double dist2 = dx*dx + dy*dy + dz*dz;
+            double dist_inv  = 1.0 / Kokkos::sqrt(dist2);
+            double dist_inv3 = dist_inv * dist_inv * dist_inv;
+            double fp = charge1 * q(i) * dist_inv3;
+            direct_forces(this_pid, 0) += fp * dx;
+            direct_forces(this_pid, 1) += fp * dy;
+            direct_forces(this_pid, 2) += fp * dz;     
         }
     }
 
@@ -304,14 +318,15 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
 
     // Get particles
     auto tree_particles = tree->particles();
-    auto tree_particle_positions = Cabana::slice<0>(tree_particles);
+    auto tree_particle_positions = Cabana::slice<MD_f::pos>(tree_particles);
 
     // Sort the particles by increasing cell_id
-    auto tree_id_slice = Cabana::slice<3>(tree_particles);
+    auto tree_id_slice = Cabana::slice<4>(tree_particles);
     auto sort_data = Cabana::sortByKey( tree_id_slice );
     Cabana::permute( sort_data, tree_particles );
-    tree_id_slice = Cabana::slice<3>(tree_particles);
-    auto tree_potentials = Cabana::slice<2>(tree_particles);
+    tree_id_slice = Cabana::slice<4>(tree_particles);
+    auto tree_potentials = Cabana::slice<MD_f::out>(tree_particles);
+    auto tree_forces = Cabana::slice<MD_f::force>(tree_particles);
 
     // Reset tree_potentials
     Cabana::deep_copy(tree_potentials, 0.0);

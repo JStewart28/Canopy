@@ -726,8 +726,8 @@ class Solver
             auto particle_force = Cabana::slice<Metadata::force>(_leaf_particles);
 
             Kokkos::parallel_for(
-                "Canopy::Solver::populate_local_potential",
-                Kokkos::RangePolicy<TEST_EXECSPACE>(0, _leaf_particles.size()),
+                "Canopy::Solver::populate_local",
+                Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
                 ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, locals_slice, particle_force,
                     ijk2index, cell_size, low_corner, p});
         }
@@ -739,12 +739,85 @@ class Solver
             } no_force;
 
             Kokkos::parallel_for(
-                "Canopy::Solver::populate_local_potential",
-                Kokkos::RangePolicy<TEST_EXECSPACE>(0, _leaf_particles.size()),
+                "Canopy::Solver::populate_local",
+                Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
                 ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, locals_slice, no_force,
                     ijk2index, cell_size, low_corner, p});
         }
     }
+
+    template<class PosSlice, class ScalarSlice, class PotSlice, class NeighborList, class ForceSlice, class CellSize, class LowCorner>
+    struct ComputeDirectly
+    {
+        PosSlice particle_positions;
+        ScalarSlice particle_scalars;
+        PotSlice particle_potentials;
+        NeighborList neighbor_list;
+        ForceSlice particle_force;   // Dummy type when HasForce=false
+        CellSize cell_size;
+        LowCorner low_corner;
+        int cells_per_dim;
+        int p;
+
+        KOKKOS_INLINE_FUNCTION
+        void operator()(const int my_id) const
+        {
+            const double xi = particle_positions(my_id,0);
+            const double yi = particle_positions(my_id,1);
+            const double zi = particle_positions(my_id,2);
+
+            auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
+
+            // Cell bounds for this particle
+            Kokkos::Array<int,3> lower, upper;
+            for (int d = 0; d < 3; ++d) {
+                lower[d] = Kokkos::max(int(ijk_i[d]) - 2, 0);
+                upper[d] = Kokkos::min(int(ijk_i[d]) + 3, cells_per_dim);
+            }
+
+            int num_neighbors = Cabana::NeighborList<NeighborList>::numNeighbor(neighbor_list, my_id);
+            double phi = 0.0;
+            Kokkos::Array<double, 3> fpart = {0.0, 0.0, 0.0};
+            for (int j = 0; j < num_neighbors; j++) {
+                int neighbor_id = Cabana::NeighborList<NeighborList>::getNeighbor(neighbor_list, my_id, j);
+
+                const double xn = particle_positions(neighbor_id,0);
+                const double yn = particle_positions(neighbor_id,1);
+                const double zn = particle_positions(neighbor_id,2);
+
+                auto ijk_n = position2ijk(xn, yn, zn, low_corner, cell_size);
+
+                // Check that our neighbor particle's cell is within 2 cells
+                if (ijk_n[0] < lower[0] || ijk_n[0] >= upper[0] ||
+                    ijk_n[1] < lower[1] || ijk_n[1] >= upper[1] ||
+                    ijk_n[2] < lower[2] || ijk_n[2] >= upper[2])
+                        continue;
+                
+                const double dx = xi - xn;
+                const double dy = yi - yn;
+                const double dz = zi - zn;
+                const double r  = Kokkos::sqrt(dx*dx + dy*dy + dz*dz);
+
+                phi += particle_scalars(neighbor_id) / r;
+                
+                // Force calculations
+                if constexpr(Metadata::force != no_id)
+                {
+                    double dist_inv  = 1.0 / r;
+                    double dist_inv3 = dist_inv * dist_inv * dist_inv;
+                    double fp = particle_scalars(my_id) * particle_scalars(neighbor_id) * dist_inv3;
+                    fpart[0] += fp * dx;
+                    fpart[1] += fp * dy;
+                    fpart[2] += fp * dz;
+                }
+            }
+            particle_potentials(my_id) += phi;
+
+            if constexpr(Metadata::force != no_id)
+                for (int d = 0; d < 3; d++)
+                    particle_force(my_id, d) += fpart[d];
+        }
+    };
 
     void computeP2P()
     {
@@ -752,9 +825,9 @@ class Solver
 
         haloParticles();
 
-        auto positions = Cabana::slice<Metadata::pos>(_leaf_particles);
-        auto scalars = Cabana::slice<Metadata::in>(_leaf_particles);
-        auto potentials = Cabana::slice<Metadata::out>(_leaf_particles);
+        auto particle_positions = Cabana::slice<Metadata::pos>(_leaf_particles);
+        auto particle_scalars = Cabana::slice<Metadata::in>(_leaf_particles);
+        auto particle_potentials = Cabana::slice<Metadata::out>(_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
@@ -768,54 +841,32 @@ class Solver
         // all particles within cells up to 2 cells away are considered.
         const double neighborhood_radius = Kokkos::max(Kokkos::max(cell_size[0], cell_size[1]), cell_size[2]) * 3 * Kokkos::sqrt(3.0);
         auto neighbor_list = Cabana::Experimental::makeNeighborList(
-            Cabana::FullNeighborTag{}, positions, 0, total_particles,
+            Cabana::FullNeighborTag{}, particle_positions, 0, total_particles,
             neighborhood_radius );
 
-        using list_type = decltype(neighbor_list);
+        if constexpr (Metadata::force != no_id)
+        {
+            auto particle_force = Cabana::slice<Metadata::force>(_leaf_particles);
 
-        Kokkos::parallel_for("Canopy::Solver::compute_P2P loop", Kokkos::RangePolicy<execution_space>(0, owned_particles), 
-            KOKKOS_LAMBDA(int my_id) {
+            Kokkos::parallel_for(
+                "Canopy::Solver::populate_direct",
+                Kokkos::RangePolicy<execution_space>(0, owned_particles),
+                ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, neighbor_list, particle_force,
+                    cell_size, low_corner, cells_per_dim, p});
+        }
+        else
+        {
+            // Use a dummy force slice object
+            struct NoForceSlice {
+                KOKKOS_INLINE_FUNCTION void operator()(int,int) const {}
+            } no_force;
 
-            const double xi = positions(my_id,0);
-            const double yi = positions(my_id,1);
-            const double zi = positions(my_id,2);
-
-            auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
-
-            // Cell bounds for this particle
-            Kokkos::Array<int,3> lower, upper;
-            for (int d = 0; d < 3; ++d) {
-                lower[d] = Kokkos::max(int(ijk_i[d]) - 2, 0);
-                upper[d] = Kokkos::min(int(ijk_i[d]) + 3, cells_per_dim);
-            }
-
-            int num_neighbors = Cabana::NeighborList<list_type>::numNeighbor(neighbor_list, my_id);
-            double phi = 0.0;
-            for (int j = 0; j < num_neighbors; j++) {
-                int neighbor_id = Cabana::NeighborList<list_type>::getNeighbor(neighbor_list, my_id, j);
-
-                const double xn = positions(neighbor_id,0);
-                const double yn = positions(neighbor_id,1);
-                const double zn = positions(neighbor_id,2);
-
-                auto ijk_n = position2ijk(xn, yn, zn, low_corner, cell_size);
-
-                // Check that our neighbor particle's cell is within 2 cells
-                if (ijk_n[0] < lower[0] || ijk_n[0] >= upper[0] ||
-                    ijk_n[1] < lower[1] || ijk_n[1] >= upper[1] ||
-                    ijk_n[2] < lower[2] || ijk_n[2] >= upper[2])
-                        continue;
-                
-                const double dx = xi - xn;
-                const double dy = yi - yn;
-                const double dz = zi - zn;
-                const double r  = sqrt(dx*dx + dy*dy + dz*dz);
-
-                phi += scalars(neighbor_id) / r;
-            }
-
-            potentials(my_id) += phi;
-        });
+            Kokkos::parallel_for(
+                "Canopy::Solver::populate_direct",
+                Kokkos::RangePolicy<execution_space>(0, owned_particles),
+                ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, neighbor_list, no_force,
+                    cell_size, low_corner, cells_per_dim, p});
+        }
         Kokkos::fence();
     }
 
