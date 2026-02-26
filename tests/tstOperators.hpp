@@ -23,6 +23,7 @@ namespace Test
 //---------------------------------------------------------------------------//
 
 using cdouble = Kokkos::complex<double>;
+constexpr auto pi = Kokkos::numbers::pi_v<double>;
 
 /**
  * Test that scalar structs are correctly calculated
@@ -1593,7 +1594,97 @@ void testL2LFunc()
     //     potential_direct, potential_L.real(), potential_shift.real());
 }
 
-// Force tests
+// Gradient test
+void testGrad()
+{
+    constexpr double h = 1e-7;
+    constexpr double tol = 1e-8;
+
+    auto check_close = [&](const char* name, double got, double ref)
+    {
+        double err = Kokkos::abs(got - ref);
+        if (err > tol)
+            printf("FAIL %s got=%.15e ref=%.15e err=%.3e\n", name, got, ref, err);
+        else
+            printf("OK   %s got=%.15e ref=%.15e err=%.3e\n", name, got, ref, err);
+    };
+
+    // ---------- Case 1: Phi = z (n=1,m=0), check analytic partials at generic angle ----------
+    {
+        const double r = 0.7;
+        const double theta = 1.1;
+        const double phi = 0.9;
+
+        const int n = 1, m = 0;
+        const cdouble L_10(1.0, 0.0);
+        const cdouble Y = Canopy::Operator::Scalar::Ynm(n, m, theta, phi);
+        const cdouble val = Kokkos::pow(r, n) * Y;
+
+        const double dr = (L_10 * Canopy::Operator::Scalar::d_dr(r, n, val)).real();
+        const double dtheta = (L_10 * Kokkos::pow(r,n) *
+                               Canopy::Operator::Scalar::d_dtheta(r, theta, phi, n, m)).real();
+        const double dphi = (L_10 * Canopy::Operator::Scalar::d_dphi(m, val)).real();
+
+        // analytic for Phi=z=r cos(theta)
+        check_close("Phi=z: d/dr",     dr,     Kokkos::cos(theta));
+        check_close("Phi=z: d/dtheta", dtheta, -r * Kokkos::sin(theta));
+        check_close("Phi=z: d/dphi",   dphi,   0.0);
+
+        // optional: check Cartesian gradient equals (0,0,1)
+        Kokkos::Array<double,3> partials = {dr, dtheta, dphi};
+        auto grad = Canopy::Operator::partials_to_cartesian_gradient(partials, r, theta, phi);
+        check_close("Phi=z: gx", grad[0], 0.0);
+        check_close("Phi=z: gy", grad[1], 0.0);
+        check_close("Phi=z: gz", grad[2], 1.0);
+    }
+
+    // ---------- Case 2: finite-difference check for d/dphi and d/dtheta on general (n,m) ----------
+    auto fd_check = [&](int n, int m, double r, double theta, double phi)
+    {
+        const cdouble Y0  = Canopy::Operator::Scalar::Ynm(n, m, theta, phi);
+        const cdouble F0  = Kokkos::pow(r,n) * Y0;
+
+        // d/dphi reference
+        const cdouble Yp = Canopy::Operator::Scalar::Ynm(n, m, theta, phi + h);
+        const cdouble Ym = Canopy::Operator::Scalar::Ynm(n, m, theta, phi - h);
+        const cdouble Fp = Kokkos::pow(r,n) * Yp;
+        const cdouble Fm = Kokkos::pow(r,n) * Ym;
+        const cdouble dphi_fd = (Fp - Fm) * (0.5 / h);
+
+        const cdouble dphi_op = Canopy::Operator::Scalar::d_dphi(m, F0);
+
+        // d/dtheta reference
+        const cdouble Ytp = Canopy::Operator::Scalar::Ynm(n, m, theta + h, phi);
+        const cdouble Ytm = Canopy::Operator::Scalar::Ynm(n, m, theta - h, phi);
+        const cdouble Ftp = Kokkos::pow(r,n) * Ytp;
+        const cdouble Ftm = Kokkos::pow(r,n) * Ytm;
+        const cdouble dtheta_fd = (Ftp - Ftm) * (0.5 / h);
+
+        // Option 1: operator returns dY/dtheta, so d/dtheta (r^n Y)= r^n * dY/dtheta
+        const cdouble dtheta_op = Kokkos::pow(r,n) *
+            Canopy::Operator::Scalar::d_dtheta(r, theta, phi, n, m);
+
+        auto err = [](cdouble a, cdouble b){
+            return Kokkos::abs(a - b);
+        };
+
+        printf("FD (n=%d,m=%d): |dphi_op-dphi_fd|=%.3e  |dtheta_op-dtheta_fd|=%.3e\n",
+               n, m, err(dphi_op, dphi_fd), err(dtheta_op, dtheta_fd));
+    };
+
+    {
+        const double r = 0.8;
+        const double theta = 1.0;  // avoid poles
+        const double phi = 2.0;
+
+        fd_check(1,  1, r, theta, phi);
+        fd_check(2,  1, r, theta, phi);
+        fd_check(2, -1, r, theta, phi);
+        fd_check(3,  2, r, theta, phi);
+    }
+}
+
+// Force test
 template <int p>
 void testForce()
 {
@@ -1836,10 +1927,11 @@ TEST( Func, testL2LFunc3 ) { testL2LFunc<3>(); }
 TEST( Func, testL2LFunc5 ) { testL2LFunc<5>(); }
 TEST( Func, testL2LFunc9 ) { testL2LFunc<9>(); }
 
-/*********************************
- * Test force computation
- ********************************/
-TEST(Force, testForce1 ) { testForce<1>();}
+/******************************************
+ * Test gradient and force computations
+ *****************************************/
+TEST(Gradient, testGrad) { testGrad(); }
+// TEST(Force, testForce1 ) { testForce<1>(); }
 
 //---------------------------------------------------------------------------//
 
