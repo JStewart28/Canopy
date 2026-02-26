@@ -1697,11 +1697,6 @@ void testForce()
     Kokkos::Array<double, 2> charge_bounds = { -3.0, 2.0 };
     fillRandomScalar( q, charge_bounds, 999 );
 
-    // cart_coords(0, 0) = -7.5;
-    // cart_coords(0, 1) = 0.0;
-    // cart_coords(0, 2) = 0.0;
-    // q(0) = 1.0;
-
     // Expansion center
     Kokkos::Array<double, 3> center = { -6.5, -5.5, -7.1 };
     double rho, alpha, beta;
@@ -1862,20 +1857,23 @@ void testForce()
     };
 
     // Check the error
+    double tolerance = Kokkos::pow(10, -p+2);
     Kokkos::Array<double, 3> error1;
     Kokkos::Array<double, 3> error2;
     for (int i = 0; i < 3; i++)
     {
         error1[i] = Kokkos::abs(F_local1[i] - force_direct1[i]);
         error2[i] = Kokkos::abs(F_local2[i] - force_direct2[i]);
+        EXPECT_NEAR(error1[i], 0.0, tolerance) << "Force in dim " << i << " outside of tolerance at point 1.";
+        EXPECT_NEAR(error2[i], 0.0, tolerance) << "Force in dim " << i << " outside of tolerance at point 2.";
     }
-    
-    printf("p=%d: 1: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
-        force_direct1[0], force_direct1[1], force_direct1[2],
-        F_local1[0], F_local1[1], F_local1[2]);
-    printf("p=%d: 2: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
-        force_direct2[0], force_direct2[1], force_direct2[2],
-        F_local2[0], F_local2[1], F_local2[2]);
+
+    // printf("p=%d: 1: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
+    //     force_direct1[0], force_direct1[1], force_direct1[2],
+    //     F_local1[0], F_local1[1], F_local1[2]);
+    // printf("p=%d: 2: FE: (%0.5lf, %0.5lf, %0.5lf), FL: (%0.5lf, %0.5lf, %0.5lf)\n", p,
+    //     force_direct2[0], force_direct2[1], force_direct2[2],
+    //     F_local2[0], F_local2[1], F_local2[2]);
 }
 
 //---------------------------------------------------------------------------//
