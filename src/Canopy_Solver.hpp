@@ -37,7 +37,7 @@ inline constexpr std::size_t no_id = static_cast<std::size_t>(-1);
 
 // Container for Particle input data and mapping from slice Id to the
 // correct data unit
-template<class AoSoAType,
+template<class AoSoAType, class Scalar,
          std::size_t PositionId,
          std::size_t InDataId,
          std::size_t OutDataId,
@@ -45,6 +45,7 @@ template<class AoSoAType,
 struct ParticleMetadata
 {
   using aosoa_type = AoSoAType;
+  using scalar_type = Scalar;
   static constexpr std::size_t pos = PositionId;
   static constexpr std::size_t in  = InDataId;
   static constexpr std::size_t out = OutDataId;
@@ -61,6 +62,8 @@ class Solver
     static_assert(Metadata::in != no_id, "metadata must define in_data index");
     static_assert(Metadata::out != no_id, "metadata must define out_data index");
 
+    using metadata = Metadata;
+
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
     
@@ -71,8 +74,10 @@ class Solver
     using size_type = typename memory_space::size_type;
     //! Dimension number
     static constexpr std::size_t num_space_dim = 3;
+    //! Scalar type
+    using scalar_type = metadata::scalar_type;
     //! Mesh type
-    using mesh_type = Cabana::Grid::SparseMesh<double, num_space_dim>;
+    using mesh_type = Cabana::Grid::SparseMesh<scalar_type, num_space_dim>;
 
     static constexpr std::size_t cell_per_tile_dim = CellPerTileDim;
 
@@ -80,12 +85,12 @@ class Solver
     //! MemberType Data types
     //! Cell x/y/z center
     static constexpr std::size_t p = ExpansionCutoff;
-    using cdouble = Kokkos::complex<double>;
+    using cdouble = Kokkos::complex<scalar_type>;
     // MemberType must be trivially copyable, so we cannot use cdouble.
     // Instead, store as two doubles
     // Multipoles are stored with cell center position, locals are stored with cell ijk position
-    using multipole_member_types = Cabana::MemberTypes<double[(p+1)*(p+1)][2], double[3]>;
-    using local_member_types = Cabana::MemberTypes<double[(p+1)*(p+1)][2], int[3]>;
+    using multipole_member_types = Cabana::MemberTypes<scalar_type[(p+1)*(p+1)][2], scalar_type[3]>;
+    using local_member_types = Cabana::MemberTypes<scalar_type[(p+1)*(p+1)][2], int[3]>;
     //! AoSoA Tuple type
     using multipole_tuple_type = Cabana::Tuple<multipole_member_types>;
     using local_tuple_type = Cabana::Tuple<local_member_types>;
@@ -93,11 +98,10 @@ class Solver
     using local_aosoa_type = Cabana::AoSoA<local_member_types, memory_space, cell_per_tile_dim>;
 
     //! Particle data
-    using metadata = Metadata;
     using particle_aosoa_type = metadata::aosoa_type;
     
-    Solver( const std::array<double, 3>& global_low_corner,
-          const std::array<double, 3>& global_high_corner,
+    Solver( const std::array<scalar_type, 3>& global_low_corner,
+          const std::array<scalar_type, 3>& global_high_corner,
           const std::size_t leaf_tiles_per_dim,
           const std::size_t tile_reduction_factor,
           MPI_Comm comm )
@@ -192,19 +196,19 @@ class Solver
             "Canopy::Solver::mapParticles loop",
             Kokkos::RangePolicy<exec_space>(0, particle_num),
             KOKKOS_LAMBDA(const int i) {
-                const double xpos = positions(i, 0);
-                const double ypos = positions(i, 1);
-                const double zpos = positions(i, 2);
+                const scalar_type xpos = positions(i, 0);
+                const scalar_type ypos = positions(i, 1);
+                const scalar_type zpos = positions(i, 2);
 
                 // Linear search: check each rank domain
                 for (int r = 0; r < comm_size; ++r)
                 {
-                    const double x_lo = domain_bounds(r, 0);
-                    const double y_lo = domain_bounds(r, 1);
-                    const double z_lo = domain_bounds(r, 2);
-                    const double x_hi = domain_bounds(r, 3);
-                    const double y_hi = domain_bounds(r, 4);
-                    const double z_hi = domain_bounds(r, 5);
+                    const scalar_type x_lo = domain_bounds(r, 0);
+                    const scalar_type y_lo = domain_bounds(r, 1);
+                    const scalar_type z_lo = domain_bounds(r, 2);
+                    const scalar_type x_hi = domain_bounds(r, 3);
+                    const scalar_type y_hi = domain_bounds(r, 4);
+                    const scalar_type z_hi = domain_bounds(r, 5);
 
                     // Non-inclusive upper bound
                     if (xpos >= x_lo && xpos < x_hi &&
@@ -261,7 +265,7 @@ class Solver
         auto cell_center_slice = Cabana::slice<1>(multipoles);
         
         // Save cell centers for multipole translations
-        Kokkos::View<double*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
+        Kokkos::View<scalar_type*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
 
         // Save multipole coefficients.
         static constexpr std::size_t num_coefficients = (p+1) * (p+1);
@@ -272,7 +276,7 @@ class Solver
         Kokkos::deep_copy(idx, 0);
 
         // The center of expansion at the root layer is the center of the domain.
-        Kokkos::Array<double, 3> domain_center;
+        Kokkos::Array<scalar_type, 3> domain_center;
         for (int d = 0; d < 3; ++d)
             domain_center[d] = _global_low_corner[d] + 0.5 * (_global_high_corner[d] - _global_low_corner[d]);
 
@@ -291,8 +295,8 @@ class Solver
             auto offset_M_base = index * num_coefficients;
             for (std::size_t j = 0; j < num_coefficients; ++j)
             {
-                double real_part = multipole_coefficients_slice(index, j, 0);
-                double imag_part = multipole_coefficients_slice(index, j, 1);
+                scalar_type real_part = multipole_coefficients_slice(index, j, 0);
+                scalar_type imag_part = multipole_coefficients_slice(index, j, 1);
                 M_children(offset_M_base + j) = cdouble(real_part, imag_part);
             }
         
@@ -314,8 +318,8 @@ class Solver
             auto sub_M = Kokkos::subview(M_children_h, Kokkos::make_pair(i * num_coefficients, (i+1)*num_coefficients));
 
             // Create Kokkos:Array of vector pointing from child cell center to cell center.
-            Kokkos::Array<double, 3> vector_to_center;
-            Kokkos::Array<double, 3> child_center = {incoming_cell_centers_h(i, 0),
+            Kokkos::Array<scalar_type, 3> vector_to_center;
+            Kokkos::Array<scalar_type, 3> child_center = {incoming_cell_centers_h(i, 0),
                 incoming_cell_centers_h(i, 1), incoming_cell_centers_h(i, 2)};
             
             for (int j = 0; j < 3; ++j)
@@ -352,7 +356,7 @@ class Solver
         }
 
         // Now broadcast the data from the root.
-        MPI_Bcast(reinterpret_cast<double*>(_M_root.data()), 2 * num_coefficients, MPI_DOUBLE, root, _comm);
+        MPI_Bcast(reinterpret_cast<scalar_type*>(_M_root.data()), 2 * num_coefficients, MPI_DOUBLE, root, _comm);
     }
 
 
@@ -506,7 +510,7 @@ class Solver
         const int rank = _rank;
         const int comm_size = _comm_size;
 
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
         // For particle-to-particle calculations, we need to halo all particles within
         // two cells in each direction.
@@ -537,9 +541,9 @@ class Solver
             Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
             KOKKOS_LAMBDA(const int pid)
             {
-                const double x = positions(pid, 0);
-                const double y = positions(pid, 1);
-                const double z = positions(pid, 2);
+                const scalar_type x = positions(pid, 0);
+                const scalar_type y = positions(pid, 1);
+                const scalar_type z = positions(pid, 2);
 
                 auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
 
@@ -576,9 +580,9 @@ class Solver
             Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
             KOKKOS_LAMBDA(const int pid)
             {
-                const double x = positions(pid, 0);
-                const double y = positions(pid, 1);
-                const double z = positions(pid, 2);
+                const scalar_type x = positions(pid, 0);
+                const scalar_type y = positions(pid, 1);
+                const scalar_type z = positions(pid, 2);
                 auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
 
                 for (std::size_t r = 0; r < comm_size; r++)
@@ -612,7 +616,7 @@ class Solver
         _ghost_particles = halo.numGhost();
     }
 
-    template<class PosSlice, class ScalarSlice, class PotSlice, class LocalsSlice, class ForceSlice, class IJK2Index>
+    template<class PosSlice, class ScalarSlice, class PotSlice, class LocalsSlice, class ForceSlice, class IJK2Index, class ScalarArray>
     struct ComputeWithLocals
     {
         PosSlice particle_positions;
@@ -621,8 +625,8 @@ class Solver
         LocalsSlice locals_slice;
         ForceSlice particle_force;   // Dummy type when HasForce=false
         IJK2Index ijk2index;
-        Kokkos::Array<double, 3> cell_size;
-        Kokkos::Array<double, 3> low_corner;
+        ScalarArray cell_size;
+        ScalarArray low_corner;
         int p;
 
         KOKKOS_INLINE_FUNCTION
@@ -643,12 +647,12 @@ class Solver
                 return;
 
             // Center of local expansion is the cell center
-            Kokkos::Array<double, 3> l_center;
+            ScalarArray l_center;
             for (int i = 0; i < 3; i++)
-                l_center[i] = low_corner[i] + (static_cast<double>(target_cell_ijk[i]) + 0.5) * cell_size[i];
+                l_center[i] = low_corner[i] + (static_cast<scalar_type>(target_cell_ijk[i]) + 0.5) * cell_size[i];
 
             // Convert target point to spherical coordinates relative to local center
-            double r, theta, phi;
+            scalar_type r, theta, phi;
             Canopy::Operator::cart2sph( particle_positions(tpi, 0) - l_center[0],
                                     particle_positions(tpi, 1) - l_center[1],
                                     particle_positions(tpi, 2) - l_center[2],
@@ -658,8 +662,8 @@ class Solver
             auto local_index = ijk2index.value_at(ijk2l_index);
 
             // Accumulate potential using locals, and forces if enabled
-            double potential_accumulator = 0.0;
-            Kokkos::Array<double, 3> force_accumulator = {0.0, 0.0, 0.0};
+            scalar_type potential_accumulator = 0.0;
+            Kokkos::Array<scalar_type, 3> force_accumulator = {0.0, 0.0, 0.0};
             for ( int n = 0; n <= p; n++ )
             {
                 for ( int m = -n; m <= n; m++ )
@@ -716,7 +720,7 @@ class Solver
         auto particle_potentials = Cabana::slice<metadata::out>(_leaf_particles);
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
         auto ijk2index = _tree[0]->cellijk2i();
 
@@ -746,7 +750,7 @@ class Solver
         }
     }
 
-    template<class PosSlice, class ScalarSlice, class PotSlice, class NeighborList, class ForceSlice>
+    template<class PosSlice, class ScalarSlice, class PotSlice, class NeighborList, class ForceSlice, class ScalarArray>
     struct ComputeDirectly
     {
         PosSlice particle_positions;
@@ -754,17 +758,17 @@ class Solver
         PotSlice particle_potentials;
         NeighborList neighbor_list;
         ForceSlice particle_force;   // Dummy type when HasForce=false
-        Kokkos::Array<double, 3> cell_size;
-        Kokkos::Array<double, 3> low_corner;
+        ScalarArray cell_size;
+        ScalarArray low_corner;
         int cells_per_dim;
         int p;
 
         KOKKOS_INLINE_FUNCTION
         void operator()(const int my_id) const
         {
-            const double xi = particle_positions(my_id,0);
-            const double yi = particle_positions(my_id,1);
-            const double zi = particle_positions(my_id,2);
+            const scalar_type xi = particle_positions(my_id,0);
+            const scalar_type yi = particle_positions(my_id,1);
+            const scalar_type zi = particle_positions(my_id,2);
 
             auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
 
@@ -776,14 +780,14 @@ class Solver
             }
 
             int num_neighbors = Cabana::NeighborList<NeighborList>::numNeighbor(neighbor_list, my_id);
-            double phi = 0.0;
-            Kokkos::Array<double, 3> fpart = {0.0, 0.0, 0.0};
+            scalar_type phi = 0.0;
+            ScalarArray fpart = {0.0, 0.0, 0.0};
             for (int j = 0; j < num_neighbors; j++) {
                 int neighbor_id = Cabana::NeighborList<NeighborList>::getNeighbor(neighbor_list, my_id, j);
 
-                const double xn = particle_positions(neighbor_id,0);
-                const double yn = particle_positions(neighbor_id,1);
-                const double zn = particle_positions(neighbor_id,2);
+                const scalar_type xn = particle_positions(neighbor_id,0);
+                const scalar_type yn = particle_positions(neighbor_id,1);
+                const scalar_type zn = particle_positions(neighbor_id,2);
 
                 auto ijk_n = position2ijk(xn, yn, zn, low_corner, cell_size);
 
@@ -793,19 +797,19 @@ class Solver
                     ijk_n[2] < lower[2] || ijk_n[2] >= upper[2])
                         continue;
                 
-                const double dx = xi - xn;
-                const double dy = yi - yn;
-                const double dz = zi - zn;
-                const double r  = Kokkos::sqrt(dx*dx + dy*dy + dz*dz);
+                const scalar_type dx = xi - xn;
+                const scalar_type dy = yi - yn;
+                const scalar_type dz = zi - zn;
+                const scalar_type r  = Kokkos::sqrt(dx*dx + dy*dy + dz*dz);
 
                 phi += particle_scalars(neighbor_id) / r;
                 
                 // Force calculations
                 if constexpr(metadata::force != no_id)
                 {
-                    double dist_inv  = 1.0 / r;
-                    double dist_inv3 = dist_inv * dist_inv * dist_inv;
-                    double fp = particle_scalars(my_id) * particle_scalars(neighbor_id) * dist_inv3;
+                    scalar_type dist_inv  = 1.0 / r;
+                    scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
+                    scalar_type fp = particle_scalars(my_id) * particle_scalars(neighbor_id) * dist_inv3;
                     fpart[0] += fp * dx;
                     fpart[1] += fp * dy;
                     fpart[2] += fp * dz;
@@ -831,7 +835,7 @@ class Solver
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
         auto total_particles = _leaf_particles.size();
         auto owned_particles = _owned_particles;
@@ -839,7 +843,7 @@ class Solver
         // Find neighbor particles that are within 3 cells width of each other. 
         // We need to use 3 cell width to ensure that for a particle in any given cell,
         // all particles within cells up to 2 cells away are considered.
-        const double neighborhood_radius = Kokkos::max(Kokkos::max(cell_size[0], cell_size[1]), cell_size[2]) * 3 * Kokkos::sqrt(3.0);
+        const scalar_type neighborhood_radius = Kokkos::max(Kokkos::max(cell_size[0], cell_size[1]), cell_size[2]) * 3 * Kokkos::sqrt(3.0);
         auto neighbor_list = Cabana::Experimental::makeNeighborList(
             Cabana::FullNeighborTag{}, particle_positions, 0, total_particles,
             neighborhood_radius );
@@ -894,8 +898,8 @@ class Solver
     auto particles() {return _leaf_particles;}
     auto numOwnedParticles() {return _owned_particles;}
     auto numGhostParticles() {return _ghost_particles;}
-    std::array<double, 3> globalLowCorner() const { return _global_low_corner; }
-    std::array<double, 3> globalHighCorner() const { return _global_high_corner; }
+    std::array<scalar_type, 3> globalLowCorner() const { return _global_low_corner; }
+    std::array<scalar_type, 3> globalHighCorner() const { return _global_high_corner; }
 
     /**
      * Get a layer of the tree
@@ -908,8 +912,8 @@ class Solver
     }
 
   private:
-    std::array<double, 3> _global_high_corner;
-    std::array<double, 3> _global_low_corner;
+    std::array<scalar_type, 3> _global_high_corner;
+    std::array<scalar_type, 3> _global_low_corner;
     const MPI_Comm _comm;
     int _rank, _comm_size;
 
@@ -934,16 +938,16 @@ class Solver
     std::size_t _ghost_particles = 0;
 };
 
-template <class MemorySpace, class ExecutionSpace, class metadata, 
+template <class MemorySpace, class ExecutionSpace, class Metadata, 
           std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-std::shared_ptr<Solver<MemorySpace, ExecutionSpace, metadata, CellPerTileDim, ExpansionCutoff>>
-        createSolver( const std::array<double, 3>& global_low_corner,
-                    const std::array<double, 3>& global_high_corner,
+std::shared_ptr<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>
+        createSolver( const std::array<typename Metadata::scalar_type, 3>& global_low_corner,
+                    const std::array<typename Metadata::scalar_type, 3>& global_high_corner,
                     const std::size_t leaf_tiles_per_dim,
                     const std::size_t tile_reduction_factor,
                     MPI_Comm comm)
 {
-    return std::make_shared<Solver<MemorySpace, ExecutionSpace, metadata, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
+    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
             global_high_corner, leaf_tiles_per_dim, tile_reduction_factor,
             comm);
 }
