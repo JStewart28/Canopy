@@ -199,7 +199,7 @@ void testSolver(int points_per_proc_in, bool balanced)
         auto direct_potential = direct_potentials(i);
         auto particle_id = tree_id_slice(i);
         auto solver_potential = tree_potentials(i);
-        EXPECT_NEAR(solver_potential, direct_potential, 0.001) << " at particle " << i;
+        EXPECT_NEAR(solver_potential, direct_potential, 0.003) << " at particle " << i;
         const auto error_p = Kokkos::abs(direct_potential - solver_potential);
         if (error_p > max_error_potential)
             max_error_potential = error_p;

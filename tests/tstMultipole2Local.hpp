@@ -204,7 +204,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
-    particle_tuple_type_f_h particle_aosoa_host("particle_aosoa", owned_points);
+    particle_aosoa_type_f_h particle_aosoa_host("particle_aosoa", owned_points);
     auto pos_slice_host = Cabana::slice<MD_f::pos>(particle_aosoa_host);
     auto scalar_slice_host = Cabana::slice<MD_f::in>(particle_aosoa_host);
     auto potential_slice_host = Cabana::slice<MD_f::out>(particle_aosoa_host);
@@ -400,8 +400,8 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     int p_int = static_cast<int>(p_val);
 
     auto tree_particles_h = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree_particles);
-    auto pid_h = Cabana::slice<3>(tree_particles_h);
-    auto p_pot = Cabana::slice<2>(tree_particles_h);
+    auto pid_h = Cabana::slice<4>(tree_particles_h);
+    auto p_pot = Cabana::slice<MD_f::out>(tree_particles_h);
     
     for (int i = 0; i < tree_particles_h.size(); i++)
     {
@@ -427,7 +427,6 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
     std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
 
-    static constexpr std::size_t num_dim = 3;
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
