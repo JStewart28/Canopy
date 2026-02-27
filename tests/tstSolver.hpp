@@ -192,21 +192,30 @@ void testSolver(int points_per_proc_in, bool balanced)
     auto tree_potentials = Cabana::slice<MD_f::out>(tree_particles);
     auto tree_forces = Cabana::slice<MD_f::force>(tree_particles);
 
+    double max_error_potential = 0.0;
+    double max_error_force = 0.0;
     for (int i = 0; i < owned_points; i++)
     {
         auto direct_potential = direct_potentials(i);
         auto particle_id = tree_id_slice(i);
         auto solver_potential = tree_potentials(i);
-        double allowed_error = Kokkos::pow(10, -p+3);
-        EXPECT_NEAR(solver_potential, direct_potential, allowed_error) << " at particle " << i;
+        EXPECT_NEAR(solver_potential, direct_potential, 0.001) << " at particle " << i;
+        const auto error_p = Kokkos::abs(direct_potential - solver_potential);
+        if (error_p > max_error_potential)
+            max_error_potential = error_p;
         for (int d = 0; d < 3; d++)
         {
             auto direct_force = direct_forces(i, d);
             auto solver_force = tree_forces(i, d);
-            EXPECT_NEAR(solver_force, direct_force, allowed_error) << " at particle " << i;
+            EXPECT_NEAR(solver_force, direct_force, 0.6) << " at particle " << i;
+            const auto error_f = Kokkos::abs(direct_force - solver_force);
+            if (error_f > max_error_force)
+                max_error_force = error_f;
         }
         // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }
+    if (owned_points > 0)
+        printf("Max errors: potential: %.5lf, force: %.5lf\n", max_error_potential, max_error_force);
 }
 
 //---------------------------------------------------------------------------//

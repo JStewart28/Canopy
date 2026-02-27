@@ -248,7 +248,8 @@ class SolverLayer
     //! Sparse partitioner type
     using sparse_partitioner_type = Cabana::Grid::SparseDimPartitioner<memory_space, CellPerTileDim, num_space_dim>;
 
-     //! DataTypes Data types (Cabana::MemberTypes).
+    //! DataTypes Data types (Cabana::MemberTypes).
+    using scalar_type = typename SolverType::scalar_type;
     using cdouble = typename SolverType::cdouble;
     using multipole_tuple_type = typename SolverType::multipole_tuple_type;
     using local_tuple_type = typename SolverType::local_tuple_type;
@@ -277,8 +278,8 @@ class SolverLayer
     
     using index_map_type = Kokkos::UnorderedMap<Kokkos::Array<std::size_t, 3>, std::size_t, memory_space>;
     
-    SolverLayer(const std::array<double, 3>& global_low_corner,
-            const std::array<double, 3>& global_high_corner,
+    SolverLayer(const std::array<scalar_type, 3>& global_low_corner,
+            const std::array<scalar_type, 3>& global_high_corner,
 	        const int tiles_per_dim, const int tile_reduction_factor,
             const int halo_width,
             const int layer_number,
@@ -364,7 +365,7 @@ class SolverLayer
         auto local_grid =
             Cabana::Grid::Experimental::createSparseLocalGrid( global_grid, _halo_width, cell_per_tile_dim );
         sparse_map_type sparse_map =
-            Cabana::Grid::createSparseMap<memory_space, double, cell_per_tile_dim>( global_mesh, 1.2 );
+            Cabana::Grid::createSparseMap<memory_space, scalar_type, cell_per_tile_dim>( global_mesh, 1.2 );
         // Save sparse map as shared pointer
         _map_ptr = std::make_shared<sparse_map_type>(sparse_map);
         
@@ -416,14 +417,14 @@ class SolverLayer
         // Allocate vectors
         std::vector<Kokkos::Array<int, 3>> cell_offsets_vec(_comm_size);
         std::vector<Kokkos::Array<int, 3>> num_owned_cell_vec(_comm_size);
-        std::vector<Kokkos::Array<double, 6>> domains_vec(_comm_size);
+        std::vector<Kokkos::Array<scalar_type, 6>> domains_vec(_comm_size);
 
         for (int rank = 0; rank < _comm_size; ++rank)
         {
             int coords[3];
             MPI_Cart_coords(_cart_comm, rank, 3, coords);
 
-            Kokkos::Array<double, 6> domain;
+            Kokkos::Array<scalar_type, 6> domain;
             Kokkos::Array<int, 3> cell_offsets;
             Kokkos::Array<int, 3> cells_owned;
             for (int d = 0; d < 3; ++d)
@@ -431,9 +432,9 @@ class SolverLayer
                 int tile_start = current_partition[d][coords[d]];
                 int tile_end   = current_partition[d][coords[d] + 1];
 
-                double global_min = _global_low_corner[d];
-                double global_max = _global_high_corner[d];
-                double tile_width = (global_max - global_min) / _tiles_per_dim;
+                scalar_type global_min = _global_low_corner[d];
+                scalar_type global_max = _global_high_corner[d];
+                scalar_type tile_width = (global_max - global_min) / _tiles_per_dim;
                 
                 // Set domain lower and upper bound for this rank
                 domain[d]     = global_min + tile_start * tile_width;
@@ -486,7 +487,7 @@ class SolverLayer
         int num_ranks = domains_host.size();
 
         // Copy domains to device
-        Kokkos::View<double*[6], mem_space> domain_bounds("domain_bounds", num_ranks);
+        Kokkos::View<scalar_type*[6], mem_space> domain_bounds("domain_bounds", num_ranks);
         auto domain_bounds_host = Kokkos::create_mirror_view(domain_bounds);
         for (int r = 0; r < num_ranks; ++r)
             for (int j = 0; j < 6; ++j)
@@ -497,19 +498,19 @@ class SolverLayer
             "mapParticles",
             Kokkos::RangePolicy<exec_space>(0, particle_num),
             KOKKOS_LAMBDA(const int i) {
-                double xpos = positions(i, 0);
-                double ypos = positions(i, 1);
-                double zpos = positions(i, 2);
+                scalar_type xpos = positions(i, 0);
+                scalar_type ypos = positions(i, 1);
+                scalar_type zpos = positions(i, 2);
 
                 // Linear search: check each rank domain
                 for (int r = 0; r < num_ranks; ++r)
                 {
-                    double x_lo = domain_bounds(r, 0);
-                    double y_lo = domain_bounds(r, 1);
-                    double z_lo = domain_bounds(r, 2);
-                    double x_hi = domain_bounds(r, 3);
-                    double y_hi = domain_bounds(r, 4);
-                    double z_hi = domain_bounds(r, 5);
+                    scalar_type x_lo = domain_bounds(r, 0);
+                    scalar_type y_lo = domain_bounds(r, 1);
+                    scalar_type z_lo = domain_bounds(r, 2);
+                    scalar_type x_hi = domain_bounds(r, 3);
+                    scalar_type y_hi = domain_bounds(r, 4);
+                    scalar_type z_hi = domain_bounds(r, 5);
 
                     // Non-inclusive upper bound
                     if (xpos >= x_lo && xpos < x_hi &&
@@ -586,7 +587,7 @@ class SolverLayer
         auto cell_size = _cell_size;
 
         // Convert std::array to Kokkos::Array
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         
         // Register cells in the sparse map and count the number of cells that will
         // be activated in this layer for sizing data structures. Use the _ijk2index
@@ -708,17 +709,17 @@ class SolverLayer
                     auto cell_index = ijk2index.value_at(map_index);
 
                     // Get cell center
-                    Kokkos::Array<double, 3> cell_center;
+                    Kokkos::Array<scalar_type, 3> cell_center;
                     for (int i = 0; i < 3; i++)
                         cell_center[i] = cell_center_slice(cell_index, i);
                     
                     // Get position
-                    Kokkos::Array<double, 3> pos;
+                    Kokkos::Array<scalar_type, 3> pos;
                     for (int i = 0; i < 3; i++)
                         pos[i] = positions( pid, i );
                     
                     // This means we are layer 0 and incoming data must be converted to multipoles
-                    double scalar = data_slice(pid);    
+                    scalar_type scalar = data_slice(pid);    
 
                     // Create multipole array
                     Kokkos::Array<cdouble, num_coefficients> M;
@@ -755,12 +756,12 @@ class SolverLayer
                     auto cell_index = ijk2index.value_at(map_index);
 
                     // Get cell center
-                    Kokkos::Array<double, 3> cell_center;
+                    Kokkos::Array<scalar_type, 3> cell_center;
                     for (int i = 0; i < 3; i++)
                         cell_center[i] = cell_center_slice(cell_index, i);
                     
                     // Get position
-                    Kokkos::Array<double, 3> pos;
+                    Kokkos::Array<scalar_type, 3> pos;
                     for (int i = 0; i < 3; i++)
                         pos[i] = positions( pid, i );
 
@@ -774,7 +775,7 @@ class SolverLayer
                     }
 
                     // Create Kokkos:Array of vector pointing from child cell center to cell center.
-                    Kokkos::Array<double, 3> vector_to_center;
+                    Kokkos::Array<scalar_type, 3> vector_to_center;
                     
                     for (int i = 0; i < 3; i++)
                         vector_to_center[i] = (cell_center[i] - pos[i]) * -1;
@@ -807,7 +808,7 @@ class SolverLayer
      *  3. Iterate over parent locals. Shift and add parent locals to all its
      *      child cells on this layer. 
      */
-    void sendCoarseLocals(local_aosoa_type& halo_aosoa, const Kokkos::View<double*[6], memory_space>& child_domain)
+    void sendCoarseLocals(local_aosoa_type& halo_aosoa, const Kokkos::View<scalar_type*[6], memory_space>& child_domain)
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::sendCoarseLocals");
 
@@ -818,10 +819,10 @@ class SolverLayer
         auto locals = _locals;
 
         // For cell center calculations
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto factor = _tile_reduction_factor;
         auto cell_size = _cell_size;
-        Kokkos::Array<double, 3> child_size;
+        Kokkos::Array<scalar_type, 3> child_size;
         for (int i = 0; i < 3; i++)
         {
             child_size[i] = cell_size[i] / factor;
@@ -948,10 +949,10 @@ class SolverLayer
         auto ijk_slice = Cabana::slice<1>(_locals);
         auto coefficient_slice = Cabana::slice<0>(_locals);
 
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto factor = _tile_reduction_factor;
         auto cell_size = _cell_size;
-        Kokkos::Array<double, 3> parent_cell_size;
+        Kokkos::Array<scalar_type, 3> parent_cell_size;
         for (int i = 0; i < 3; i++)
             parent_cell_size[i] = cell_size[i] * factor;
 
@@ -989,7 +990,7 @@ class SolverLayer
                     // Shift and add the parent cell's locals to this cell's locals.
                     // Start by getting vector from new local center (child cell center, A)
                     // to old local center (parent cell center, B), which is B - A
-                    Kokkos::Array<double, 3> X_0;
+                    Kokkos::Array<scalar_type, 3> X_0;
                     for (int i = 0; i < 3; i++)
                         X_0[i] = parent_cell_center[i] - child_cell_center[i];
                     
@@ -1116,7 +1117,7 @@ class SolverLayer
         auto ijk2index = _ijk2index;
 
         // For cell center calculations
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
             
         std::size_t max_num_exports = num_cells * _comm_size;
@@ -1222,12 +1223,12 @@ class SolverLayer
         auto l_cell_ijk_slice = Cabana::slice<1>(_locals);
 
         const int cells_per_dim = _cells_per_dim;
-        Kokkos::Array<double, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
 
         // Compute neighbor list of cells within the outer cutoff
         // We look at most 10 cells in each dimension
-        double neighborhood_radius = Kokkos::sqrt(
+        scalar_type neighborhood_radius = Kokkos::sqrt(
             Kokkos::pow(5.0*_cell_size[0], 2) +
             Kokkos::pow(5.0*_cell_size[1], 2) +
             Kokkos::pow(5.0*_cell_size[2], 2)) + 0.00001;
@@ -1242,7 +1243,7 @@ class SolverLayer
 
         // Scratch: store (real, imag) as doubles for each coefficient
         const int scratch_bytes =
-            Kokkos::View<double*, Kokkos::DefaultExecutionSpace::scratch_memory_space,
+            Kokkos::View<scalar_type*, Kokkos::DefaultExecutionSpace::scratch_memory_space,
                         Kokkos::MemoryUnmanaged>::shmem_size(2 * num_coefficients);
 
         Kokkos::parallel_for(
@@ -1255,7 +1256,7 @@ class SolverLayer
 
                 // Team scratch accumulation buffer: [0..num_coeff-1]=real, [num_coeff..2*num_coeff-1]=imag
                 using scratch_space = typename member_type::scratch_memory_space;
-                Kokkos::View<double*, scratch_space, Kokkos::MemoryUnmanaged> accum(
+                Kokkos::View<scalar_type*, scratch_space, Kokkos::MemoryUnmanaged> accum(
                     team.team_scratch(0), 2 * num_coefficients);
 
                 // Zero scratch
@@ -1313,7 +1314,7 @@ class SolverLayer
                         return;
 
                     // m2l vector
-                    Kokkos::Array<double, 3> m2l_vec;
+                    Kokkos::Array<scalar_type, 3> m2l_vec;
                     for (int d = 0; d < 3; ++d)
                         m2l_vec[d] = m_cell_center_slice(neighbor_id, d) - m_cell_center_slice(index, d);
 
@@ -1365,7 +1366,7 @@ class SolverLayer
     std::shared_ptr<sparse_map_type> map() {return _map_ptr;}
     int cellsPerDim() const {return _cells_per_dim;}
     int tilesPerDim() const {return _tiles_per_dim;}
-    Kokkos::Array<double, 3> cellSize() const {return _cell_size;}
+    Kokkos::Array<scalar_type, 3> cellSize() const {return _cell_size;}
     Kokkos::UnorderedMap<int, Kokkos::Array<std::size_t, 3>, memory_space>& cid2ijk() {return _cid2ijk;}
 
     // Get the multipole coefficients
@@ -1390,8 +1391,8 @@ class SolverLayer
     }
 
   private:
-    const std::array<double, 3> _global_high_corner;
-    const std::array<double, 3> _global_low_corner;
+    const std::array<scalar_type, 3> _global_high_corner;
+    const std::array<scalar_type, 3> _global_low_corner;
     std::array<int, 3> _global_num_cell;
 	const int _tiles_per_dim;
     const int _tile_reduction_factor;
@@ -1401,13 +1402,13 @@ class SolverLayer
     int _rank, _comm_size;
 
     // Cell size in the x, y, and z dimensions.
-    Kokkos::Array<double, 3> _cell_size;
+    Kokkos::Array<scalar_type, 3> _cell_size;
 
     // Information about which processes own which other
     // section of the sparse mesh
     Kokkos::View<int*[3], memory_space> _cell_offsets_view;
     Kokkos::View<int*[3], memory_space> _num_owned_cell_view;
-    Kokkos::View<double*[6], memory_space> _domains;
+    Kokkos::View<scalar_type*[6], memory_space> _domains;
 
     // Partitioner parameters
     int _num_step_rebalance, _max_optimize_iteration;
@@ -1451,9 +1452,9 @@ class SolverLayer
     Kokkos::View<int[6], memory_space> _mhalo_outer_bound;
 };
 
-template <class SolverType, std::size_t CellPerTileDim>
-std::shared_ptr<SolverLayer<SolverType, CellPerTileDim>> createSolverLayer(const std::array<double, 3>& global_low_corner,
-            const std::array<double, 3>& global_high_corner,
+template <class SolverType, std::size_t CellPerTileDim, class ScalarType>
+std::shared_ptr<SolverLayer<SolverType, CellPerTileDim>> createSolverLayer(const std::array<ScalarType, 3>& global_low_corner,
+            const std::array<ScalarType, 3>& global_high_corner,
 	        const int tiles_per_dim, const int tile_reduction_factor,
             const int halo_width,
             const int layer_number,
