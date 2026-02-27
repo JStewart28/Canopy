@@ -250,7 +250,7 @@ class SolverLayer
 
     //! DataTypes Data types (Cabana::MemberTypes).
     using scalar_type = typename SolverType::scalar_type;
-    using cdouble = typename SolverType::cdouble;
+    using complex = typename SolverType::complex;
     using multipole_tuple_type = typename SolverType::multipole_tuple_type;
     using local_tuple_type = typename SolverType::local_tuple_type;
     using multipole_member_types = typename SolverType::multipole_member_types;
@@ -722,9 +722,9 @@ class SolverLayer
                     scalar_type scalar = data_slice(pid);    
 
                     // Create multipole array
-                    Kokkos::Array<cdouble, num_coefficients> M;
+                    Kokkos::Array<complex, num_coefficients> M;
                     for (std::size_t i = 0; i < num_coefficients; i++)
-                        M[i] = cdouble(0.0, 0.0);
+                        M[i] = complex(0.0, 0.0);
 
                     // Compute multipoles
                     Canopy::Operator::Scalar::p2m<p>(pos, scalar, cell_center, M);
@@ -766,12 +766,12 @@ class SolverLayer
                         pos[i] = positions( pid, i );
 
                     // Create arrays
-                    Kokkos::Array<cdouble, num_coefficients> M_orig_array;
-                    Kokkos::Array<cdouble, num_coefficients> M_trans_array;
+                    Kokkos::Array<complex, num_coefficients> M_orig_array;
+                    Kokkos::Array<complex, num_coefficients> M_trans_array;
                     for (std::size_t i = 0; i < num_coefficients; i++)
                     {
-                        M_trans_array[i] = cdouble(0.0, 0.0);
-                        M_orig_array[i] = cdouble(data_slice(pid, i, 0), data_slice(pid, i, 1));
+                        M_trans_array[i] = complex(0.0, 0.0);
+                        M_orig_array[i] = complex(data_slice(pid, i, 0), data_slice(pid, i, 1));
                     }
 
                     // Create Kokkos:Array of vector pointing from child cell center to cell center.
@@ -995,8 +995,8 @@ class SolverLayer
                         X_0[i] = parent_cell_center[i] - child_cell_center[i];
                     
                     // Translate locals
-                    Kokkos::Array<cdouble, num_coefficients> L_orig;
-                    Kokkos::Array<cdouble, num_coefficients> L_trans;
+                    Kokkos::Array<complex, num_coefficients> L_orig;
+                    Kokkos::Array<complex, num_coefficients> L_trans;
                     for (std::size_t i = 0; i < num_coefficients; i++)
                     {
                         L_orig[i].real() = parent_coefficient_slice(hi, i, 0);
@@ -1319,7 +1319,7 @@ class SolverLayer
                         m2l_vec[d] = m_cell_center_slice(neighbor_id, d) - m_cell_center_slice(index, d);
 
                     // Load multipole coefficients
-                    Kokkos::Array<cdouble, num_coefficients> M;
+                    Kokkos::Array<complex, num_coefficients> M;
                     for (int i = 0; i < num_coefficients; i++)
                     {
                         M[i].real() = m_slice(neighbor_id, i, 0);
@@ -1327,7 +1327,7 @@ class SolverLayer
                     }
 
                     // Compute local contribution
-                    Kokkos::Array<cdouble, num_coefficients> L;
+                    Kokkos::Array<complex, num_coefficients> L;
                     Operator::Scalar::m2l<p>(M, L, m2l_vec);
 
                     // Accumulate into team scratch

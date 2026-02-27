@@ -43,7 +43,7 @@ template<class AoSoAType, class Scalar,
          std::size_t OutDataId,
          std::size_t ForceId = no_id>
 struct ParticleMetadata
-{
+{   
   using aosoa_type = AoSoAType;
   using scalar_type = Scalar;
   static constexpr std::size_t pos = PositionId;
@@ -85,8 +85,8 @@ class Solver
     //! MemberType Data types
     //! Cell x/y/z center
     static constexpr std::size_t p = ExpansionCutoff;
-    using cdouble = Kokkos::complex<scalar_type>;
-    // MemberType must be trivially copyable, so we cannot use cdouble.
+    using complex = Kokkos::complex<scalar_type>;
+    // MemberType must be trivially copyable, so we cannot use complex.
     // Instead, store as two doubles
     // Multipoles are stored with cell center position, locals are stored with cell ijk position
     using multipole_member_types = Cabana::MemberTypes<scalar_type[(p+1)*(p+1)][2], scalar_type[3]>;
@@ -254,7 +254,7 @@ class Solver
         }
 
         // Initialize _M_root
-        _M_root = Kokkos::View<cdouble[(p+1)*(p+1)], memory_space>("_M_root");
+        _M_root = Kokkos::View<complex[(p+1)*(p+1)], memory_space>("_M_root");
 
         // DEBUG: Set top layer to first layer
         auto top_layer = _tree.back();
@@ -269,7 +269,7 @@ class Solver
 
         // Save multipole coefficients.
         static constexpr std::size_t num_coefficients = (p+1) * (p+1);
-        Kokkos::View<cdouble*, memory_space> M_children("M_children", num_coefficients * cells_activated);
+        Kokkos::View<complex*, memory_space> M_children("M_children", num_coefficients * cells_activated);
 
         // Offset for filling M_children.
         Kokkos::View<std::size_t, memory_space> idx("idx");
@@ -297,7 +297,7 @@ class Solver
             {
                 scalar_type real_part = multipole_coefficients_slice(index, j, 0);
                 scalar_type imag_part = multipole_coefficients_slice(index, j, 1);
-                M_children(offset_M_base + j) = cdouble(real_part, imag_part);
+                M_children(offset_M_base + j) = complex(real_part, imag_part);
             }
         
         } );
@@ -309,7 +309,7 @@ class Solver
         auto M_children_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), M_children);
 
         // Create objects needed for translation of multipole coefficients.
-        Canopy::Operator::Scalar::M2M<Kokkos::HostSpace, execution_space> m2m( p );
+        Canopy::Operator::Scalar::M2M<Kokkos::HostSpace, execution_space, scalar_type> m2m( p );
 
         // Iterate over each incoming data.
         for (std::size_t i = 0; i < cells_activated; ++i)
@@ -671,8 +671,8 @@ class Solver
                     int idx = Operator::Scalar::index( n, m );
 
                     // Greengard eq. 3.59
-                    cdouble L_nm = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
-                    cdouble Y_nm = Operator::Scalar::Ynm( n, m, theta, phi );
+                    complex L_nm = complex(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
+                    complex Y_nm = Operator::Scalar::Ynm( n, m, theta, phi );
 
                     // Potential accumulator
                     potential_accumulator += (L_nm * Kokkos::pow( r, n ) * Y_nm).real();
@@ -930,7 +930,7 @@ class Solver
     std::size_t _root_tiles_per_dim;
 
     // Root data
-    Kokkos::View<cdouble[(p+1)*(p+1)], memory_space> _M_root;
+    Kokkos::View<complex[(p+1)*(p+1)], memory_space> _M_root;
 
     // Leaf particles
     particle_aosoa_type _leaf_particles;

@@ -80,7 +80,7 @@ void testP2MStruct0()
     // Loop over truncation degree
     for ( int p = 2; p <= 5; ++p )
     {
-        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
 
         // Particle to multipole calculation performed in operator
         p2m( cart_coords, q, num_points, expansion_center );
@@ -193,8 +193,8 @@ void testM2MStruct0()
     // Loop over truncation degree
     for ( int p = 1; p <= 5; ++p )
     {
-        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
-        Canopy::Operator::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
+        Canopy::Operator::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE, double> m2m( p );
 
         // Compute multipoles O_nm at center Q
         p2m( coords0, q0, num_points, q_center );
@@ -337,8 +337,8 @@ void testM2MStruct1()
     // Loop over truncation degree
     for ( int p = 1; p <= 5; ++p )
     {
-        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
-        Canopy::Operator::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE> m2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
+        Canopy::Operator::Scalar::M2M<TEST_MEMSPACE, TEST_EXECSPACE, double> m2m( p );
 
         // Compute multipoles O0 at center Q0
         p2m( c0, q0, points_per_section, q0_center );
@@ -477,11 +477,11 @@ void testM2LStruct0()
     // Loop over truncation degree
     for ( int p = 1; p <= 9; ++p )
     {
-        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
         p2m( cart_coords, q, num_points, center );
 
         // Convert multipoles to locals
-        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE, double> m2l( p );
         m2l( p2m.coefficients(), center );
 
         // Copy to host
@@ -655,14 +655,14 @@ void testM2LStruct1()
     // Loop over truncation degree
     for ( int p = 1; p <= 7; ++p )
     {
-        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m0( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m0( p );
         p2m0( coord0, q0, points_per_section, q0_center );
 
-        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m1( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m1( p );
         p2m1( coord1, q1, points_per_section, q1_center );
 
         // Convert multipoles to locals
-        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE, double> m2l( p );
         m2l( p2m0.coefficients(), Kokkos::Array<double, 3>{q0_center[0]- l_center[0],
                                                             q0_center[1]- l_center[1], 
                                                             q0_center[2]- l_center[2]} );
@@ -784,15 +784,15 @@ void testL2LStruct0()
     // Loop over truncation degree
     for ( int p = 1; p <= 9; ++p )
     {
-        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
         p2m( cart_coords, q, num_points, m_center );
 
         // Convert multipoles to locals
-        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE, double> m2l( p );
         m2l( p2m.coefficients(), m_center );
     
         // Translate locals
-        Canopy::Operator::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE> l2l( p );
+        Canopy::Operator::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE, double> l2l( p );
         l2l( m2l.coefficients(), X_0 );
 
         // Copy to host
@@ -925,15 +925,15 @@ void testL2LStruct1()
     // Loop over truncation degree
     for ( int p = 1; p <= 9; ++p )
     {
-        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+        Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
         p2m( cart_coords, q, num_points, m_center );
 
         // Convert multipoles to locals
-        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+        Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE, double> m2l( p );
         m2l( p2m.coefficients(), m_center );
     
         // Translate locals
-        Canopy::Operator::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE> l2l( p );
+        Canopy::Operator::Scalar::L2L<TEST_MEMSPACE, TEST_EXECSPACE, double> l2l( p );
         l2l( m2l.coefficients(), X_0 );
 
         // Copy to host
@@ -1377,7 +1377,7 @@ void testM2LFunc()
 
     // Since we use compile-time sized arrays here, p must given at compile
     // time.
-    Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+    Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
     p2m( cart_coords, q, num_points, center );
     auto O_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        p2m.coefficients() );
@@ -1535,11 +1535,11 @@ void testL2LFunc()
     ASSERT_LT( rho, a ) << "Error: Shifted local center must be within distance 'a' "
                           "from original local center for theory to be valid.";
 
-    Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+    Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
     p2m( cart_coords, q, num_points, m_center );
 
     // Convert multipoles to locals
-    Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE> m2l( p );
+    Canopy::Operator::Scalar::M2L<TEST_MEMSPACE, TEST_EXECSPACE, double> m2l( p );
     m2l( p2m.coefficients(), m_center );
 
     // Copy to host
@@ -1784,7 +1784,7 @@ void testForce()
 
     // Since we use compile-time sized arrays here, p must given at compile
     // time.
-    Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE> p2m( p );
+    Canopy::Operator::Scalar::P2M<TEST_MEMSPACE, TEST_EXECSPACE, double> p2m( p );
     p2m( cart_coords, q, num_points, center );
     auto O_host = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        p2m.coefficients() );
