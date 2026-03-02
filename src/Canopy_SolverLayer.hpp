@@ -694,6 +694,7 @@ class SolverLayer
         // the data_slice, which changes depending on if layer 0 or not.
         if constexpr (position_index == 0)
         {
+            // Data coming from incoming multipoles
             Kokkos::parallel_for( "set_multipoles_layer0",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -738,7 +739,7 @@ class SolverLayer
                 });
         }
 
-        else if constexpr (position_index == 1)
+        else if constexpr (position_index != 0)
         {
             // This means we are not layer 0 and incoming data are multipoles to be translated
             Kokkos::parallel_for( "set_multipoles",
