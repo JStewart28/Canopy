@@ -574,11 +574,11 @@ class SolverLayer
         // Otherwise they are the first.
         // If positions are the 2nd element, this is not layer 0 and the first element are multipole coefficients.
         // Otherwise the values at each particle are the 2nd coefficient. 
-        static constexpr bool is_coeff =
+        static constexpr bool is_multipole_aosoa_type =
             std::is_same_v<ParticleAoSoA, multipole_aosoa_type>;
 
-        static constexpr std::size_t position_index = is_coeff ? 1 : metadata::pos;
-        static constexpr std::size_t data_index = is_coeff ? 0 : metadata::in;
+        static constexpr std::size_t position_index = is_multipole_aosoa_type ? 1 : metadata::pos;
+        static constexpr std::size_t data_index = is_multipole_aosoa_type ? 0 : metadata::in;
         auto positions = Cabana::slice<position_index>(data_aosoa);
         auto data_slice = Cabana::slice<data_index>(data_aosoa);
 
