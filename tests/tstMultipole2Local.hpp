@@ -154,8 +154,8 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     // Create a tree of depth 3.
-    std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
-    std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
+    std::array<scalar_type, 3> global_low_corner = { -3.0, -3.0, -3.0 };
+    std::array<scalar_type, 3> global_high_corner = { 3.0, 3.0, 3.0 };
 
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
@@ -173,7 +173,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     // Check mesh information for leaf layer (layer 0)
     auto layer = tree->layer(0);
     int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
-    Kokkos::Array<double, 3> cell_size;
+    Kokkos::Array<scalar_type, 3> cell_size;
     for (int i = 0; i < 3; ++i)
     {
         cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_leaf_dimension;
@@ -188,13 +188,13 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     // "real" code because we only evaluate locals where cells are activated.
     int total_points = points_per_proc_in;
     int owned_points = (rank == 0) ? (total_points) : 0;
-    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
+    Kokkos::View<scalar_type* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           owned_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q( "q", owned_points );
+    Kokkos::View<scalar_type*, TEST_MEMSPACE> q( "q", owned_points );
     
-    Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
-    double bound_val = 3.0;
-    Kokkos::Array<double, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
+    Kokkos::Array<scalar_type, 2> charge_bounds = {-10.0, 10.0};
+    scalar_type bound_val = 3.0;
+    Kokkos::Array<scalar_type, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
     // If not balanced, fill domain unevenly
     if (!balanced)
     {
@@ -229,9 +229,9 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
 
     // Calculate potentials directly, considering all particles in cells more than 2 cells away
     // Iterate over particles and calculate potential
-    Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
+    Kokkos::View<scalar_type*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
                                                           total_points );
-    Kokkos::View<double*[3], Kokkos::HostSpace> direct_forces( "direct_potentials",
+    Kokkos::View<scalar_type*[3], Kokkos::HostSpace> direct_forces( "direct_potentials",
                                                           total_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
     Kokkos::deep_copy(direct_forces, 0.0);
@@ -280,17 +280,17 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             {
                 continue;
             }
-            double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
-            double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
-            double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
-            double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
+            scalar_type dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
+            scalar_type dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
+            scalar_type dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
+            scalar_type dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
             direct_potentials(this_pid) += q_h( other_pid ) / dist;
 
             // Force calculation
-            // double dist2 = dx*dx + dy*dy + dz*dz;
-            // double dist_inv  = 1.0 / Kokkos::sqrt(dist2);
-            // double dist_inv3 = dist_inv * dist_inv * dist_inv;
-            // double fp = charge1 * q(i) * dist_inv3;
+            // scalar_type dist2 = dx*dx + dy*dy + dz*dz;
+            // scalar_type dist_inv  = 1.0 / Kokkos::sqrt(dist2);
+            // scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
+            // scalar_type fp = charge1 * q(i) * dist_inv3;
             // direct_forces(this_pid, 0) += fp * dx;
             // direct_forces(this_pid, 1) += fp * dy;
             // direct_forces(this_pid, 2) += fp * dz;
@@ -332,7 +332,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     Cabana::deep_copy(tree_potentials, 0.0);
 
     // Device-friendly version of global low corner
-    Kokkos::Array<double, 3> global_low_corner_k;
+    Kokkos::Array<scalar_type, 3> global_low_corner_k;
     for (int i = 0; i < 3; i++)
         global_low_corner_k[i] = global_low_corner[i];
 
@@ -357,12 +357,12 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
                 return;
 
              // Center of local expansion is the cell center
-            Kokkos::Array<double, 3> l_center;
+            Kokkos::Array<scalar_type, 3> l_center;
             for (int i = 0; i < 3; i++)
-                l_center[i] = global_low_corner_k[i] + (static_cast<double>(target_cell_ijk[i]) + 0.5) * cell_size[i];
+                l_center[i] = global_low_corner_k[i] + (static_cast<scalar_type>(target_cell_ijk[i]) + 0.5) * cell_size[i];
 
             // Convert target point to spherical coordinates relative to local center
-            double r, theta, phi;
+            scalar_type r, theta, phi;
             Canopy::Operator::cart2sph( tree_particle_positions(tpi, 0) - l_center[0],
                                       tree_particle_positions(tpi, 1) - l_center[1],
                                       tree_particle_positions(tpi, 2) - l_center[2],
@@ -372,7 +372,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
             auto local_index = ijk2index.value_at(ijk2l_index);
 
             // Calculate potential using locals
-            cdouble accumulator(0.0, 0.0);
+            complex accumulator(0.0, 0.0);
             for ( int j = 0; j <= p_val; ++j )
             {
                 for ( int k = -j; k <= j; ++k )
@@ -381,7 +381,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
 
                     /* Target point 1 calculations */
                     // Greengard eq. 3.59
-                    cdouble val = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
+                    complex val = complex(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
                     accumulator +=
                         val * Kokkos::pow( r, j ) *
                         Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
@@ -408,7 +408,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
         auto particle_id = pid_h(i);
         auto mesh_potential = p_pot(i);
         auto direct_potential = direct_potentials(particle_id);
-        double allowed_error = Kokkos::pow(10, -p_int+3);
+        scalar_type allowed_error = Kokkos::pow(10, -p_int+3);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
         // printf("R%d: i%d: particle %d: direct: %.5lf, tree: %.5lf\n", rank, i, particle_id, mesh_potential, direct_potential);
     }
@@ -424,8 +424,8 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     // Create a tree of depth 3.
-    std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
-    std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
+    std::array<scalar_type, 3> global_low_corner = { -3.0, -3.0, -3.0 };
+    std::array<scalar_type, 3> global_high_corner = { 3.0, 3.0, 3.0 };
 
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
@@ -442,7 +442,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
 
     // Check mesh information for leaf layer
     int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
-    Kokkos::Array<double, 3> cell_size;
+    Kokkos::Array<scalar_type, 3> cell_size;
     for (int i = 0; i < 3; ++i)
     {
         cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_leaf_dimension;
@@ -457,13 +457,13 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     // "real" code because we only evaluate locals where cells are activated.
     int total_points = points_per_proc_in;
     int owned_points = (rank == 0) ? (total_points) : 0;
-    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
+    Kokkos::View<scalar_type* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           owned_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q( "q", owned_points );
+    Kokkos::View<scalar_type*, TEST_MEMSPACE> q( "q", owned_points );
     
-    Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
-    double bound_val = 3.0;
-    Kokkos::Array<double, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
+    Kokkos::Array<scalar_type, 2> charge_bounds = {-10.0, 10.0};
+    scalar_type bound_val = 3.0;
+    Kokkos::Array<scalar_type, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
     // If not balanced, fill domain unevenly
     if (!balanced)
     {
@@ -511,7 +511,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
 
     // Calculate potentials directly, considering all particles in cells more than 2 cells away
     // Iterate over particles and calculate potential
-    Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
+    Kokkos::View<scalar_type*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
                                                           total_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
 
@@ -562,18 +562,19 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
                 continue;
             }
             // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
-            double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
-            double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
-            double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
-            double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
+            scalar_type dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
+            scalar_type dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
+            scalar_type dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
+            scalar_type dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
             // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
             direct_potentials(this_pid) += q_h( other_pid ) / dist;        
         }
         // printf("R%d: dp%d: %.4lf\n", rank, this_pid, direct_potentials(this_pid));
     }
 
-    // Send direct_potentials view to all ranks so they can check it against their points    
-    MPI_Bcast(direct_potentials.data(), total_points, MPI_DOUBLE, 0, MPI_COMM_WORLD );
+    // Send direct_potentials view to all ranks so they can check it against their points
+    auto data_type = Canopy::mpi_real_type<scalar_type>();
+    MPI_Bcast(direct_potentials.data(), total_points, data_type, 0, MPI_COMM_WORLD );
 
     // Copy to device
     auto particle_aosoa =
@@ -615,7 +616,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
         auto locals_slice = Cabana::slice<0>(locals);
 
         // Device-friendly version of global low corner
-        Kokkos::Array<double, 3> global_low_corner_k;
+        Kokkos::Array<scalar_type, 3> global_low_corner_k;
         for (int i = 0; i < 3; i++)
             global_low_corner_k[i] = global_low_corner[i];
 
@@ -640,12 +641,12 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
                     return;
 
                 // Center of local expansion is the cell center
-                Kokkos::Array<double, 3> l_center;
+                Kokkos::Array<scalar_type, 3> l_center;
                 for (int i = 0; i < 3; i++)
-                    l_center[i] = global_low_corner_k[i] + (static_cast<double>(target_cell_ijk[i]) + 0.5) * cell_size[i];
+                    l_center[i] = global_low_corner_k[i] + (static_cast<scalar_type>(target_cell_ijk[i]) + 0.5) * cell_size[i];
 
                 // Convert target point to spherical coordinates relative to local center
-                double r, theta, phi;
+                scalar_type r, theta, phi;
                 Canopy::Operator::cart2sph( tree_particle_positions(tpi, 0) - l_center[0],
                                         tree_particle_positions(tpi, 1) - l_center[1],
                                         tree_particle_positions(tpi, 2) - l_center[2],
@@ -655,7 +656,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
                 auto local_index = ijk2index.value_at(ijk2l_index);
 
                 // Calculate potential using locals
-                cdouble accumulator(0.0, 0.0);
+                complex accumulator(0.0, 0.0);
                 for ( int j = 0; j <= p_val; ++j )
                 {
                     for ( int k = -j; k <= j; ++k )
@@ -664,7 +665,7 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
 
                         /* Target point 1 calculations */
                         // Greengard eq. 3.59
-                        cdouble val = cdouble(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
+                        complex val = complex(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
                         accumulator +=
                             val * Kokkos::pow( r, j ) *
                             Canopy::Operator::Scalar::Ynm( j, k, theta, phi );
@@ -703,12 +704,18 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     auto tree_potentials_h= Cabana::slice<2>(tree_particles_h);
 
     int p_int = static_cast<int>(p_val);
+
+    // Error is higher using floats
+    scalar_type allowed_error;
+    if constexpr (std::is_same_v<scalar_type, float>) allowed_error = Kokkos::pow(10, -p_int+3);
+    else if constexpr (std::is_same_v<scalar_type, double>) allowed_error = Kokkos::pow(10, -p_int+3);
+    else if constexpr (std::is_same_v<scalar_type, long double>) allowed_error = Kokkos::pow(10, -p_int+3);
+
     for (int i = 0; i < owned_points; i++)
     {
         auto particle_id = tree_id_slice_h(i);
         auto direct_potential = direct_potentials(particle_id);
         auto mesh_potential = tree_potentials_h(i);
-        double allowed_error = Kokkos::pow(10, -p_int+3);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
         // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
     }

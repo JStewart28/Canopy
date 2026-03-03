@@ -52,6 +52,37 @@ struct ParticleMetadata
   static constexpr std::size_t force = ForceId;
 };
 
+template<class Real>
+constexpr MPI_Datatype mpi_real_type()
+{
+    if constexpr (std::is_same_v<Real, float>)  return MPI_FLOAT;
+    else if constexpr (std::is_same_v<Real, double>) return MPI_DOUBLE;
+    else if constexpr (std::is_same_v<Real, long double>) return MPI_LONG_DOUBLE;
+    else {
+        static_assert(!sizeof(Real), "Unsupported real_type for MPI");
+        return MPI_DATATYPE_NULL;
+    }
+}
+
+// MPI datatype representing Kokkos::complex<Real> as two contiguous reals.
+template<class Real>
+MPI_Datatype mpi_kokkos_complex_type()
+{
+    static_assert(std::is_floating_point_v<Real>,
+                  "mpi_kokkos_complex_type<Real>: Real must be float/double/long double");
+
+    static MPI_Datatype dt = MPI_DATATYPE_NULL;
+    static bool committed = false;
+
+    if (!committed)
+    {
+        MPI_Type_contiguous(2, mpi_real_type<Real>(), &dt);
+        MPI_Type_commit(&dt);
+        committed = true;
+    }
+    return dt;
+}
+
 template <class MemorySpace, class ExecutionSpace, class Metadata, 
           std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
 class Solver
@@ -309,7 +340,7 @@ class Solver
         auto M_children_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), M_children);
 
         // Create objects needed for translation of multipole coefficients.
-        Canopy::Operator::Scalar::M2M<Kokkos::HostSpace, execution_space, scalar_type> m2m( p );
+        Canopy::Operator::Scalar::M2M<Kokkos::HostSpace, Kokkos::DefaultHostExecutionSpace, scalar_type> m2m( p );
 
         // Iterate over each incoming data.
         for (std::size_t i = 0; i < cells_activated; ++i)
@@ -356,7 +387,8 @@ class Solver
         }
 
         // Now broadcast the data from the root.
-        MPI_Bcast(reinterpret_cast<scalar_type*>(_M_root.data()), 2 * num_coefficients, MPI_DOUBLE, root, _comm);
+        int count = static_cast<int>(_M_root.size());
+        MPI_Bcast(_M_root.data(), count, mpi_kokkos_complex_type<scalar_type>(), root, _comm);
     }
 
 
@@ -666,6 +698,7 @@ class Solver
             Kokkos::Array<scalar_type, 3> force_accumulator = {0.0, 0.0, 0.0};
             for ( int n = 0; n <= p; n++ )
             {
+                auto r_n = static_cast<scalar_type>(Kokkos::pow( r, n ) );
                 for ( int m = -n; m <= n; m++ )
                 {
                     int idx = Operator::Scalar::index( n, m );
@@ -675,20 +708,20 @@ class Solver
                     complex Y_nm = Operator::Scalar::Ynm( n, m, theta, phi );
 
                     // Potential accumulator
-                    potential_accumulator += (L_nm * Kokkos::pow( r, n ) * Y_nm).real();
+                    potential_accumulator += (L_nm * r_n * Y_nm).real();
                             
                     // Force accumulator
                     if constexpr (metadata::force != no_id)
                     {
                         // d_dr term. Operator guards against r ~ 0. Kokkos::pow(r, n) term not
                         // included in operator
-                        force_accumulator[0] += (L_nm * Operator::Scalar::d_dr(r, n, Kokkos::pow( r, n ) * Y_nm)).real();
+                        force_accumulator[0] += (L_nm * Operator::Scalar::d_dr(r, n, r_n * Y_nm)).real();
 
                         // d_dtheta term
-                        force_accumulator[1] += (L_nm * Kokkos::pow( r, n ) * Operator::Scalar::d_dtheta(r, theta, phi, n, m)).real();
+                        force_accumulator[1] += (L_nm * r_n * Operator::Scalar::d_dtheta(r, theta, phi, n, m)).real();
 
                         // d_dphi term. Kokkos::pow(r, j) term not included in operator.
-                        force_accumulator[2] += (L_nm * Operator::Scalar::d_dphi(m, Kokkos::pow(r, n) * Y_nm)).real();
+                        force_accumulator[2] += (L_nm * Operator::Scalar::d_dphi(m, r_n * Y_nm)).real();
                     }
                 }
             }

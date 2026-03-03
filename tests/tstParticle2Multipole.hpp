@@ -38,8 +38,8 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     // Create a tree of at least depth 3 for any number of processes
-    std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
-    std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
+    std::array<scalar_type, 3> global_low_corner = { -3.0, -3.0, -3.0 };
+    std::array<scalar_type, 3> global_high_corner = { 3.0, 3.0, 3.0 };
     static constexpr std::size_t cells_per_tile = 2;
     static constexpr std::size_t p = p_val;
     std::size_t leaf_tiles, red_factor;
@@ -56,12 +56,12 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     // Create the data
      int total_points = points_per_proc_in;
     int owned_points = (rank == 0) ? (total_points) : 0;
-    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
+    Kokkos::View<scalar_type* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           owned_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q( "q", owned_points );
+    Kokkos::View<scalar_type*, TEST_MEMSPACE> q( "q", owned_points );
     
-    double bound_val = 3.0;
-    Kokkos::Array<double, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
+    scalar_type bound_val = 3.0;
+    Kokkos::Array<scalar_type, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
     // If not balanced, fill domain unevenly
     if (!balanced)
     {
@@ -69,7 +69,7 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     }
 
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
-    Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
+    Kokkos::Array<scalar_type, 2> charge_bounds = {-10.0, 10.0};
     fillRandomScalar(q, charge_bounds, 321);
 
     Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4> particle_aosoa_host("particle_aosoa", owned_points);
@@ -94,21 +94,22 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
 
     // Calculate direct potential.
     // Target point far away from domain so multipole approximation holds.
-    double Px = 15.1, Py = -20.3, Pz = 16.2;
-    double r, theta, phi;
+    scalar_type Px = 15.1, Py = -20.3, Pz = 16.2;
+    scalar_type r, theta, phi;
     Canopy::Operator::cart2sph( Px, Py, Pz, r, theta, phi );
-    double potential_direct = 0.0;
+    scalar_type potential_direct = 0.0;
     for (std::size_t i = 0; i < owned_points; ++i)
     {
-        double dx = Px - pos_slice_host( i, 0 );
-        double dy = Py - pos_slice_host( i, 1 );
-        double dz = Pz - pos_slice_host( i, 2 );
-        double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+        scalar_type dx = Px - pos_slice_host( i, 0 );
+        scalar_type dy = Py - pos_slice_host( i, 1 );
+        scalar_type dz = Pz - pos_slice_host( i, 2 );
+        scalar_type dist = std::sqrt( dx * dx + dy * dy + dz * dz );
         potential_direct += scalar_slice_host( i ) / dist;
     }
 
     // Broadcast direct potential to all other ranks.
-    MPI_Bcast(&potential_direct, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    auto data_type = Canopy::mpi_real_type<scalar_type>();
+    MPI_Bcast(&potential_direct, 1, data_type, 0, MPI_COMM_WORLD);
 
     // Copy to device
     auto particle_aosoa =
@@ -124,7 +125,7 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     auto m_root_h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), tree->M_root() );
 
     // Compute potential at P using M
-    Kokkos::complex<double> potential_M = 0.0;
+    Kokkos::complex<scalar_type> potential_M = 0.0;
     for ( int j = 0; j <= p; ++j )
     {
         for ( int k = -j; k <= j; ++k )
@@ -141,7 +142,13 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     // The error is already mathematically checked in testM2MKernel0,
     // so here we just make sure they are close to each other.
     int p_int = static_cast<int>(p);
-    double error = Kokkos::pow(10, -p_int+1);
+
+    // Error is higher using floats
+    scalar_type error;
+    if constexpr (std::is_same_v<scalar_type, float>) error = Kokkos::pow(10, -p_int+2);
+    else if constexpr (std::is_same_v<scalar_type, double>) error = Kokkos::pow(10, -p_int+1);
+    else if constexpr (std::is_same_v<scalar_type, long double>) error = Kokkos::pow(10, -p_int+1);
+    
     EXPECT_NEAR(potential_direct, potential_M.real(), error) << "p="
         << p << ": Potentials do not match. Solver depth " << tree->numLayers();
     // printf("R%d: potential: %0.8lf, M: %0.8lf\n", rank, potential_direct, potential_M.real());
