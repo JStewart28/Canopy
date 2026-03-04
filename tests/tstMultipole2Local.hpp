@@ -298,7 +298,8 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     }
 
     // Send direct_potentials view to all ranks so they can check it against their points    
-    MPI_Bcast(direct_potentials.data(), total_points, MPI_DOUBLE, 0, MPI_COMM_WORLD );
+    auto data_type = Canopy::mpi_real_type<scalar_type>();
+    MPI_Bcast(direct_potentials.data(), total_points, data_type, 0, MPI_COMM_WORLD );
 
     // Copy to device
     auto particle_aosoa =

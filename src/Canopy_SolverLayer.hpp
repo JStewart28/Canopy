@@ -243,7 +243,7 @@ class SolverLayer
     static constexpr std::size_t num_space_dim = SolverType::num_space_dim;
 
     //! Multipole/local expansion cutoff
-    static constexpr std::size_t p = SolverType::p;
+    static constexpr int p = SolverType::p;
 
     //! Sparse partitioner type
     using sparse_partitioner_type = Cabana::Grid::SparseDimPartitioner<memory_space, CellPerTileDim, num_space_dim>;

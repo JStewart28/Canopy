@@ -155,7 +155,7 @@ void testSolver(int points_per_proc_in, bool balanced)
             // Force calculation
             scalar_type dist_inv  = 1.0 / dist;
             scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
-            scalar_type fp = -1 * q(this_pid) * q(other_pid) * dist_inv3;
+            scalar_type fp = -1 * q_h(this_pid) * q_h(other_pid) * dist_inv3;
             direct_forces(this_pid, 0) += fp * dx;
             direct_forces(this_pid, 1) += fp * dy;
             direct_forces(this_pid, 2) += fp * dz;     
