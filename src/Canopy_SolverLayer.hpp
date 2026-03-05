@@ -831,8 +831,6 @@ class SolverLayer
 
         const int children_per_cell = factor * factor * factor;
 
-        printf("L%d: children per cell: %d\n", _layer_number, children_per_cell);
-
         // Map locals to ranks
         Kokkos::View<int**, memory_space> id2rank("id2rank", _locals.size(), _comm_size);
         Kokkos::deep_copy(id2rank, 0);
