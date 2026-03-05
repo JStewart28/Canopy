@@ -690,9 +690,9 @@ class SolverLayer
         // Now that cell keys are set, we can populate the multipoles
         static constexpr std::size_t num_coefficients = (p+1) * (p+1);
 
-        // We need to separate parallel for loops to correctly lambda capture
+        // We need to separate parallel for loops to correctly index
         // the data_slice, which changes depending on if layer 0 or not.
-        if constexpr (position_index == 0)
+        if constexpr (!is_multipole_aosoa_type)
         {
             // Data coming from incoming multipoles
             Kokkos::parallel_for( "set_multipoles_layer0",
@@ -739,7 +739,7 @@ class SolverLayer
                 });
         }
 
-        else if constexpr (position_index != 0)
+        else if constexpr (is_multipole_aosoa_type)
         {
             // This means we are not layer 0 and incoming data are multipoles to be translated
             Kokkos::parallel_for( "set_multipoles",
