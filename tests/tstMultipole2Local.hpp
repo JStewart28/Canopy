@@ -735,17 +735,17 @@ TEST( Helper, testCell2Bound)
 // Test with a balanced particle distribution.
 TEST( M2L, single_layer )
 { 
-    testMultipole2Local0<6>(20, true);     
+    testMultipole2Local0<6>(300, true);     
 }
 
 TEST( M2L, multi_layer_no_solver_l2p )
 { 
-    testMultipole2Local1<6>(20, 0, true); 
+    testMultipole2Local1<6>(300, 0, true); 
 }
 
 TEST( M2L, multi_layer_with_solver_l2p )
 { 
-    testMultipole2Local1<6>(20, 1, true); 
+    testMultipole2Local1<6>(300, 1, true); 
 }
 
 //---------------------------------------------------------------------------//
