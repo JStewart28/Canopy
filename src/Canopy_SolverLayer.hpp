@@ -831,6 +831,8 @@ class SolverLayer
 
         const int children_per_cell = factor * factor * factor;
 
+        printf("L%d: children per cell: %d\n", _layer_number, children_per_cell);
+
         // Map locals to ranks
         Kokkos::View<int**, memory_space> id2rank("id2rank", _locals.size(), _comm_size);
         Kokkos::deep_copy(id2rank, 0);
@@ -1229,10 +1231,13 @@ class SolverLayer
 
         // Compute neighbor list of cells within the outer cutoff
         // We look at most 10 cells in each dimension
+        // WIth a higher tile reduction factor, we must appropriately scale the 5 cells
+        // pere dimension.
+        scalar_type factor = std::ceil(2.5 * _tile_reduction_factor);
         scalar_type neighborhood_radius = Kokkos::sqrt(
-            Kokkos::pow(5.0*_cell_size[0], 2) +
-            Kokkos::pow(5.0*_cell_size[1], 2) +
-            Kokkos::pow(5.0*_cell_size[2], 2)) + 0.00001;
+            Kokkos::pow(factor*_cell_size[0], 2) +
+            Kokkos::pow(factor*_cell_size[1], 2) +
+            Kokkos::pow(factor*_cell_size[2], 2)) + 0.00001;
         auto neighbor_list = Cabana::Experimental::makeNeighborList(
             Cabana::FullNeighborTag{}, m_cell_center_slice, 0, _multipoles.size(),
             neighborhood_radius );

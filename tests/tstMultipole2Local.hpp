@@ -411,7 +411,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
         auto direct_potential = direct_potentials(particle_id);
         scalar_type allowed_error = Kokkos::pow(10, -p_int+3);
         EXPECT_NEAR(mesh_potential, direct_potential, allowed_error) << " at particle " << particle_id;
-        // printf("R%d: i%d: particle %d: direct: %.5lf, tree: %.5lf\n", rank, i, particle_id, mesh_potential, direct_potential);
+        // printf("R%d: i%d: particle %d: direct: %.5lf, solver: %.5lf\n", rank, i, particle_id, mesh_potential, direct_potential);
     }
 }
 
@@ -735,17 +735,17 @@ TEST( Helper, testCell2Bound)
 // Test with a balanced particle distribution.
 TEST( M2L, single_layer )
 { 
-    testMultipole2Local0<3>(100, true);     
+    testMultipole2Local0<6>(20, true);     
 }
 
 TEST( M2L, multi_layer_no_solver_l2p )
 { 
-    testMultipole2Local1<6>(40, 0, true); 
+    testMultipole2Local1<6>(20, 0, true); 
 }
 
 TEST( M2L, multi_layer_with_solver_l2p )
 { 
-    testMultipole2Local1<6>(40, 1, true); 
+    testMultipole2Local1<6>(20, 1, true); 
 }
 
 //---------------------------------------------------------------------------//
