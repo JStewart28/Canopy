@@ -797,6 +797,9 @@ class Solver
         if constexpr (metadata::force != no_id)
         {
             auto force = Cabana::slice<metadata::force>(_leaf_particles);
+
+            // Zero force
+            Cabana::deep_copy(force, 0.0);
             
             // Use force constructor
             ComputeWithLocals<PosSlice, ScalarSlice, LocalsSliceT, MapT>
