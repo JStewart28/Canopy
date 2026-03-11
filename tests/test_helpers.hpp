@@ -20,22 +20,24 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
-// Define complex double type
-using cdouble = Kokkos::complex<double>;
+// Define precision
+using scalar_type = float;
+using complex = Kokkos::complex<scalar_type>;
 
 // Define input aosoa data
 // pos/charge/potential/global particle id
-using particle_tuple_type = Cabana::MemberTypes<double[3], double, double, int>;
+using particle_tuple_type = Cabana::MemberTypes<scalar_type[3], scalar_type, scalar_type, int>;
 using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, TEST_MEMSPACE, 4>;
 using particle_aosoa_type_h = Cabana::AoSoA<particle_tuple_type, Kokkos::HostSpace, 4>;
-using MD = Canopy::ParticleMetadata<particle_aosoa_type, double, 0, 1, 2>; 
+using MD = Canopy::ParticleMetadata<particle_aosoa_type, scalar_type, 0, 1, 2>; 
 
 // Define input aosoa data including force
 // pos/force/charge/potential/global particle id
-using particle_tuple_type_f = Cabana::MemberTypes<double[3], double[3], double, double, int>;
+using particle_tuple_type_f = Cabana::MemberTypes<scalar_type[3], scalar_type[3], scalar_type, scalar_type, int>;
 using particle_aosoa_type_f = Cabana::AoSoA<particle_tuple_type_f, TEST_MEMSPACE, 4>;
 using particle_aosoa_type_f_h = Cabana::AoSoA<particle_tuple_type_f, Kokkos::HostSpace, 4>;
-using MD_f = Canopy::ParticleMetadata<particle_aosoa_type_f, double, 0, 2, 3, 1>; 
+using MD_f = Canopy::ParticleMetadata<particle_aosoa_type_f, scalar_type, 0, 2, 3, 1>; 
+// using MD = Canopy::ParticleMetadata<AoSoAType, float, Field::Position, Field::Gravity, Field::Potential, Field::Force>; 
 
 double distance(const Kokkos::Array<double,3>& a,
                 const Kokkos::Array<double,3>& b)
@@ -50,8 +52,8 @@ double distance(const Kokkos::Array<double,3>& a,
  * Fill a view with random (x, y, z) coordinates within the specified bounds,
  * where bounds is (x_min, y_min, z_min, x_max, y_max, z_max)
  */
-template <class PosView>
-void fillRandomCoordinates(PosView& cart_coords, Kokkos::Array<double, 6> bounds, int seed)
+template <class PosView, class ScalarType>
+void fillRandomCoordinates(PosView& cart_coords, Kokkos::Array<ScalarType, 6> bounds, int seed)
 {
     using RandomPool = Kokkos::Random_XorShift64_Pool<TEST_EXECSPACE>;
     RandomPool rand_pool( seed );
@@ -62,18 +64,18 @@ void fillRandomCoordinates(PosView& cart_coords, Kokkos::Array<double, 6> bounds
             auto rand_gen = rand_pool.get_state();
             
             // X-coordinate
-            double min_x = bounds[0];
-            double max_x = bounds[3];
+            ScalarType min_x = bounds[0];
+            ScalarType max_x = bounds[3];
             cart_coords( i, 0 ) = (max_x - min_x) * rand_gen.drand() + min_x;
 
             // Y-coordinate
-            double min_y = bounds[1];
-            double max_y = bounds[4];
+            ScalarType min_y = bounds[1];
+            ScalarType max_y = bounds[4];
             cart_coords( i, 1 ) = (max_y - min_y) * rand_gen.drand() + min_y;
             
             // Z-coordinate
-            double min_z = bounds[2];
-            double max_z = bounds[5];
+            ScalarType min_z = bounds[2];
+            ScalarType max_z = bounds[5];
             cart_coords( i, 2 ) = (max_z - min_z) * rand_gen.drand() + min_z;
             
             rand_pool.free_state( rand_gen );
@@ -84,8 +86,8 @@ void fillRandomCoordinates(PosView& cart_coords, Kokkos::Array<double, 6> bounds
 /**
  * Fill a view with random scalar values within the specified (min, max) bound.
  */
-template <class View>
-void fillRandomScalar(View& q, Kokkos::Array<double, 2> bounds, int seed)
+template <class View, class ScalarType>
+void fillRandomScalar(View& q, Kokkos::Array<ScalarType, 2> bounds, int seed)
 {
     using RandomPool = Kokkos::Random_XorShift64_Pool<TEST_EXECSPACE>;
     RandomPool rand_pool( seed );
@@ -95,12 +97,12 @@ void fillRandomScalar(View& q, Kokkos::Array<double, 2> bounds, int seed)
         KOKKOS_LAMBDA( const int i ) {
             auto rand_gen = rand_pool.get_state();
             // X-coordinate
-            double min = bounds[0];
-            double max = bounds[1];
+            ScalarType min = bounds[0];
+            ScalarType max = bounds[1];
             q( i ) = (max - min) * rand_gen.drand() + min;
             rand_pool.free_state( rand_gen );
         } );
     Kokkos::fence();
 }
 
-} // end namepace Test
+} // end namespace Test

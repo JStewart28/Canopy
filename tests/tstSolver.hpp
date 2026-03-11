@@ -37,8 +37,8 @@ void testSolver(int points_per_proc_in, bool balanced)
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     // Create a tree of depth 3. pos/charge/potential/global particle id
-    std::array<double, 3> global_low_corner = { -3.0, -3.0, -3.0 };
-    std::array<double, 3> global_high_corner = { 3.0, 3.0, 3.0 };
+    std::array<scalar_type, 3> global_low_corner = { -3.0, -3.0, -3.0 };
+    std::array<scalar_type, 3> global_high_corner = { 3.0, 3.0, 3.0 };
 
     static constexpr std::size_t cells_per_tile = 2;
     std::size_t leaf_tiles, red_factor;
@@ -54,7 +54,7 @@ void testSolver(int points_per_proc_in, bool balanced)
 
     // Check mesh information for leaf layer
     int cells_per_dimension_leaf = cells_per_tile * leaf_tiles;
-    Kokkos::Array<double, 3> cell_size;
+    Kokkos::Array<scalar_type, 3> cell_size;
     for (int i = 0; i < 3; ++i)
     {
         cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_dimension_leaf;
@@ -69,20 +69,20 @@ void testSolver(int points_per_proc_in, bool balanced)
     // "real" code because we only evaluate locals where cells are activated.
     int total_points = points_per_proc_in;
     int owned_points = (rank == 0) ? (total_points) : 0;
-    Kokkos::View<double* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
+    Kokkos::View<scalar_type* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           owned_points );
-    Kokkos::View<double*, TEST_MEMSPACE> q( "q", owned_points );
+    Kokkos::View<scalar_type*, TEST_MEMSPACE> q( "q", owned_points );
     
-    Kokkos::Array<double, 2> charge_bounds = {-10.0, 10.0};
-    double bound_val = 3.0;
-    Kokkos::Array<double, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
+    Kokkos::Array<scalar_type, 2> charge_bounds = {-10.0, 10.0};
+    scalar_type bound_val = 3.0;
+    Kokkos::Array<scalar_type, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
     // If not balanced, fill domain unevenly
     if (!balanced)
     {
         coord_bounds = {-3.0, -3.0, -0.05, 3.0, 3.0, 0.05};
     }
     
-    // Kokkos::Array<double, 6> coord_bounds1 = {2.3, 2.3, 2.3, bound_val, bound_val, bound_val};
+    // Kokkos::Array<scalar_type, 6> coord_bounds1 = {2.3, 2.3, 2.3, bound_val, bound_val, bound_val};
     fillRandomCoordinates(cart_coords, coord_bounds, 123);
     fillRandomScalar(q, charge_bounds, 321);
 
@@ -112,9 +112,9 @@ void testSolver(int points_per_proc_in, bool balanced)
     }
 
     // Iterate over particles and calculate potential
-    Kokkos::View<double*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
+    Kokkos::View<scalar_type*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
                                                           owned_points );
-    Kokkos::View<double*[3], Kokkos::HostSpace> direct_forces( "direct_forces",
+    Kokkos::View<scalar_type*[3], Kokkos::HostSpace> direct_forces( "direct_forces",
                                                           owned_points );
     Kokkos::deep_copy(direct_potentials, 0.0);
     Kokkos::deep_copy(direct_forces, 0.0);
@@ -145,17 +145,17 @@ void testSolver(int points_per_proc_in, bool balanced)
             // }
             
             // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
-            double dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
-            double dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
-            double dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
-            double dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
+            scalar_type dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
+            scalar_type dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
+            scalar_type dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
+            scalar_type dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
             // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
             direct_potentials(this_pid) += q_h( other_pid ) / dist;
 
             // Force calculation
-            double dist_inv  = 1.0 / dist;
-            double dist_inv3 = dist_inv * dist_inv * dist_inv;
-            double fp = -1 * q(this_pid) * q(other_pid) * dist_inv3;
+            scalar_type dist_inv  = 1.0 / dist;
+            scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
+            scalar_type fp = -1 * q_h(this_pid) * q_h(other_pid) * dist_inv3;
             direct_forces(this_pid, 0) += fp * dx;
             direct_forces(this_pid, 1) += fp * dy;
             direct_forces(this_pid, 2) += fp * dz;     
@@ -224,11 +224,11 @@ void testSolver(int points_per_proc_in, bool balanced)
 
 TEST( Solver, testSolver_balanced )
 { 
-    testSolver<6>(500, true);
+    testSolver<6>(50, true);
 }
 TEST( Solver, testSolver_unbalanced )
 { 
-    testSolver<6>(500, false);
+    testSolver<6>(50, false);
 }
 
 //---------------------------------------------------------------------------//

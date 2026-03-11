@@ -243,7 +243,7 @@ class SolverLayer
     static constexpr std::size_t num_space_dim = SolverType::num_space_dim;
 
     //! Multipole/local expansion cutoff
-    static constexpr std::size_t p = SolverType::p;
+    static constexpr int p = SolverType::p;
 
     //! Sparse partitioner type
     using sparse_partitioner_type = Cabana::Grid::SparseDimPartitioner<memory_space, CellPerTileDim, num_space_dim>;
@@ -574,11 +574,11 @@ class SolverLayer
         // Otherwise they are the first.
         // If positions are the 2nd element, this is not layer 0 and the first element are multipole coefficients.
         // Otherwise the values at each particle are the 2nd coefficient. 
-        static constexpr bool is_coeff =
+        static constexpr bool is_multipole_aosoa_type =
             std::is_same_v<ParticleAoSoA, multipole_aosoa_type>;
 
-        static constexpr std::size_t position_index = is_coeff ? 1 : metadata::pos;
-        static constexpr std::size_t data_index = is_coeff ? 0 : metadata::in;
+        static constexpr std::size_t position_index = is_multipole_aosoa_type ? 1 : metadata::pos;
+        static constexpr std::size_t data_index = is_multipole_aosoa_type ? 0 : metadata::in;
         auto positions = Cabana::slice<position_index>(data_aosoa);
         auto data_slice = Cabana::slice<data_index>(data_aosoa);
 
@@ -690,10 +690,11 @@ class SolverLayer
         // Now that cell keys are set, we can populate the multipoles
         static constexpr std::size_t num_coefficients = (p+1) * (p+1);
 
-        // We need to separate parallel for loops to correctly lambda capture
+        // We need to separate parallel for loops to correctly index
         // the data_slice, which changes depending on if layer 0 or not.
-        if constexpr (position_index == 0)
+        if constexpr (!is_multipole_aosoa_type)
         {
+            // Data coming from incoming multipoles
             Kokkos::parallel_for( "set_multipoles_layer0",
                 Kokkos::RangePolicy<execution_space>( 0, num_particles ),
                 KOKKOS_LAMBDA( const std::size_t pnum ) {
@@ -738,7 +739,7 @@ class SolverLayer
                 });
         }
 
-        else if constexpr (position_index == 1)
+        else if constexpr (is_multipole_aosoa_type)
         {
             // This means we are not layer 0 and incoming data are multipoles to be translated
             Kokkos::parallel_for( "set_multipoles",
@@ -1228,10 +1229,13 @@ class SolverLayer
 
         // Compute neighbor list of cells within the outer cutoff
         // We look at most 10 cells in each dimension
+        // WIth a higher tile reduction factor, we must appropriately scale the 5 cells
+        // pere dimension.
+        scalar_type factor = std::ceil(2.5 * _tile_reduction_factor);
         scalar_type neighborhood_radius = Kokkos::sqrt(
-            Kokkos::pow(5.0*_cell_size[0], 2) +
-            Kokkos::pow(5.0*_cell_size[1], 2) +
-            Kokkos::pow(5.0*_cell_size[2], 2)) + 0.00001;
+            Kokkos::pow(factor*_cell_size[0], 2) +
+            Kokkos::pow(factor*_cell_size[1], 2) +
+            Kokkos::pow(factor*_cell_size[2], 2)) + 0.00001;
         auto neighbor_list = Cabana::Experimental::makeNeighborList(
             Cabana::FullNeighborTag{}, m_cell_center_slice, 0, _multipoles.size(),
             neighborhood_radius );

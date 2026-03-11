@@ -52,6 +52,37 @@ struct ParticleMetadata
   static constexpr std::size_t force = ForceId;
 };
 
+template<class Real>
+constexpr MPI_Datatype mpi_real_type()
+{
+    if constexpr (std::is_same_v<Real, float>)  return MPI_FLOAT;
+    else if constexpr (std::is_same_v<Real, double>) return MPI_DOUBLE;
+    else if constexpr (std::is_same_v<Real, long double>) return MPI_LONG_DOUBLE;
+    else {
+        static_assert(!sizeof(Real), "Unsupported real_type for MPI");
+        return MPI_DATATYPE_NULL;
+    }
+}
+
+// MPI datatype representing Kokkos::complex<Real> as two contiguous reals.
+template<class Real>
+MPI_Datatype mpi_kokkos_complex_type()
+{
+    static_assert(std::is_floating_point_v<Real>,
+                  "mpi_kokkos_complex_type<Real>: Real must be float/scalar_type/long scalar_type");
+
+    static MPI_Datatype dt = MPI_DATATYPE_NULL;
+    static bool committed = false;
+
+    if (!committed)
+    {
+        MPI_Type_contiguous(2, mpi_real_type<Real>(), &dt);
+        MPI_Type_commit(&dt);
+        committed = true;
+    }
+    return dt;
+}
+
 template <class MemorySpace, class ExecutionSpace, class Metadata, 
           std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
 class Solver
@@ -84,7 +115,7 @@ class Solver
     //! AoSoA related types
     //! MemberType Data types
     //! Cell x/y/z center
-    static constexpr std::size_t p = ExpansionCutoff;
+    static constexpr int p = ExpansionCutoff;
     using complex = Kokkos::complex<scalar_type>;
     // MemberType must be trivially copyable, so we cannot use complex.
     // Instead, store as two doubles
@@ -309,7 +340,7 @@ class Solver
         auto M_children_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), M_children);
 
         // Create objects needed for translation of multipole coefficients.
-        Canopy::Operator::Scalar::M2M<Kokkos::HostSpace, execution_space, scalar_type> m2m( p );
+        Canopy::Operator::Scalar::M2M<Kokkos::HostSpace, Kokkos::DefaultHostExecutionSpace, scalar_type> m2m( p );
 
         // Iterate over each incoming data.
         for (std::size_t i = 0; i < cells_activated; ++i)
@@ -356,7 +387,8 @@ class Solver
         }
 
         // Now broadcast the data from the root.
-        MPI_Bcast(reinterpret_cast<scalar_type*>(_M_root.data()), 2 * num_coefficients, MPI_DOUBLE, root, _comm);
+        int count = static_cast<int>(_M_root.size());
+        MPI_Bcast(_M_root.data(), count, mpi_kokkos_complex_type<scalar_type>(), root, _comm);
     }
 
 
@@ -616,18 +648,49 @@ class Solver
         _ghost_particles = halo.numGhost();
     }
 
-    template<class PosSlice, class ScalarSlice, class PotSlice, class LocalsSlice, class ForceSlice, class IJK2Index, class ScalarArray>
+    template<class TripleScalarSlice, class SingleScalarSlice, class LocalsSlice, class IJK2Index>
     struct ComputeWithLocals
     {
-        PosSlice particle_positions;
-        ScalarSlice particle_scalars;
-        PotSlice particle_potentials;
-        LocalsSlice locals_slice;
-        ForceSlice particle_force;   // Dummy type when HasForce=false
+        TripleScalarSlice positions;
+        TripleScalarSlice force;
+        SingleScalarSlice scalars;
+        SingleScalarSlice potentials;
+        LocalsSlice locals;
         IJK2Index ijk2index;
-        ScalarArray cell_size;
-        ScalarArray low_corner;
+        Kokkos::Array<scalar_type, 3> cell_size;
+        Kokkos::Array<scalar_type, 3> low_corner;
         int p;
+
+        // Constructor without force
+        ComputeWithLocals(TripleScalarSlice positions_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
+            LocalsSlice locals_, const IJK2Index& ijk2index_,
+            Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
+            int p_)
+            : positions(positions_)
+            , scalars(scalars_)
+            , potentials(potentials_)
+            , locals(locals_)
+            , ijk2index(ijk2index_)
+            , cell_size(cell_size_)
+            , low_corner(low_corner_)
+            , p(p_)
+            {}
+
+        // Constructor with force
+        ComputeWithLocals(TripleScalarSlice positions_, TripleScalarSlice force_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
+            LocalsSlice locals_, const IJK2Index& ijk2index_,
+            Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
+            const int p_)
+            : positions(positions_)
+            , force(force_)
+            , scalars(scalars_)
+            , potentials(potentials_)
+            , locals(locals_)
+            , ijk2index(ijk2index_)
+            , cell_size(cell_size_)
+            , low_corner(low_corner_)
+            , p(p_)
+            {}
 
         KOKKOS_INLINE_FUNCTION
         void operator()(const int tpi) const
@@ -637,7 +700,7 @@ class Solver
             for (int dim = 0; dim < 3; ++dim)
             {
                 target_cell_ijk[dim] = static_cast<std::size_t>(
-                    Kokkos::floor((particle_positions(tpi, dim) - low_corner[dim]) / cell_size[dim]) );
+                    Kokkos::floor((positions(tpi, dim) - low_corner[dim]) / cell_size[dim]) );
             }
 
             // Only continue if this cell exists in the mesh.
@@ -647,15 +710,15 @@ class Solver
                 return;
 
             // Center of local expansion is the cell center
-            ScalarArray l_center;
+            Kokkos::Array<scalar_type, 3> l_center;
             for (int i = 0; i < 3; i++)
                 l_center[i] = low_corner[i] + (static_cast<scalar_type>(target_cell_ijk[i]) + 0.5) * cell_size[i];
 
             // Convert target point to spherical coordinates relative to local center
             scalar_type r, theta, phi;
-            Canopy::Operator::cart2sph( particle_positions(tpi, 0) - l_center[0],
-                                    particle_positions(tpi, 1) - l_center[1],
-                                    particle_positions(tpi, 2) - l_center[2],
+            Canopy::Operator::cart2sph( positions(tpi, 0) - l_center[0],
+                                    positions(tpi, 1) - l_center[1],
+                                    positions(tpi, 2) - l_center[2],
                                     r, theta, phi );
 
             auto ijk2l_index = ijk2index.find(target_cell_ijk);
@@ -671,7 +734,7 @@ class Solver
                     int idx = Operator::Scalar::index( n, m );
 
                     // Greengard eq. 3.59
-                    complex L_nm = complex(locals_slice(local_index, idx, 0), locals_slice(local_index, idx, 1));
+                    complex L_nm = complex(locals(local_index, idx, 0), locals(local_index, idx, 1));
                     complex Y_nm = Operator::Scalar::Ynm( n, m, theta, phi );
 
                     // Potential accumulator
@@ -682,17 +745,17 @@ class Solver
                     {
                         // d_dr term. Operator guards against r ~ 0. Kokkos::pow(r, n) term not
                         // included in operator
-                        force_accumulator[0] += (L_nm * Operator::Scalar::d_dr(r, n, Kokkos::pow( r, n ) * Y_nm)).real();
+                        force_accumulator[0] += (L_nm * Operator::Scalar::d_dr(r, n, static_cast<scalar_type>(Kokkos::pow( r, n )) * Y_nm)).real();
 
                         // d_dtheta term
                         force_accumulator[1] += (L_nm * Kokkos::pow( r, n ) * Operator::Scalar::d_dtheta(r, theta, phi, n, m)).real();
 
                         // d_dphi term. Kokkos::pow(r, j) term not included in operator.
-                        force_accumulator[2] += (L_nm * Operator::Scalar::d_dphi(m, Kokkos::pow(r, n) * Y_nm)).real();
+                        force_accumulator[2] += (L_nm * Operator::Scalar::d_dphi(m, static_cast<scalar_type>(Kokkos::pow( r, n )) * Y_nm)).real();
                     }
                 }
             }
-            particle_potentials(tpi) += potential_accumulator;
+            potentials(tpi) += potential_accumulator;
             if constexpr (metadata::force != no_id)
             {
                 // Convert potentials in spherical coordinates to potentials in cartesian coordinates.
@@ -700,7 +763,7 @@ class Solver
 
                 // Accumulate and multiply by scalar in_data to get force: F = ma
                 for (int d = 0; d < 3; d++)
-                    particle_force(tpi, d) += -1.0 * particle_scalars(tpi) * cart_pot[d];
+                    force(tpi, d) += -1.0 * scalars(tpi) * cart_pot[d];
             }
                 
         }
@@ -715,60 +778,99 @@ class Solver
 
         // int rank = _rank;
 
-        auto particle_positions = Cabana::slice<metadata::pos>(_leaf_particles);
-        auto particle_scalars = Cabana::slice<metadata::in>(_leaf_particles);
-        auto particle_potentials = Cabana::slice<metadata::out>(_leaf_particles);
+        auto positions = Cabana::slice<metadata::pos>(_leaf_particles);
+        auto scalars = Cabana::slice<metadata::in>(_leaf_particles);
+        auto potentials = Cabana::slice<metadata::out>(_leaf_particles);
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
         auto ijk2index = _tree[0]->cellijk2i();
 
-        auto locals_slice = Cabana::slice<0>(_tree[0]->locals());
+        auto locals = Cabana::slice<0>(_tree[0]->locals());
+
+        using PosSlice = decltype(positions);
+        using ScalarSlice = decltype(scalars);
+        using LocalsSliceT = decltype(locals);
+        using MapT = decltype(ijk2index);
 
         if constexpr (metadata::force != no_id)
         {
-            auto particle_force = Cabana::slice<metadata::force>(_leaf_particles);
+            auto force = Cabana::slice<metadata::force>(_leaf_particles);
+
+            // Zero force
+            Cabana::deep_copy(force, 0.0);
+            
+            // Use force constructor
+            ComputeWithLocals<PosSlice, ScalarSlice, LocalsSliceT, MapT>
+                cwl(positions, force, scalars, potentials, locals, ijk2index, cell_size, low_corner, p);
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_local",
                 Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
-                ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, locals_slice, particle_force,
-                    ijk2index, cell_size, low_corner, p});
+                cwl);
         }
         else
         {
-            // Use a dummy force slice object
-            struct NoForceSlice {
-                KOKKOS_INLINE_FUNCTION void operator()(int,int) const {}
-            } no_force;
+            // Use no force constructor
+            ComputeWithLocals<PosSlice, ScalarSlice, LocalsSliceT, MapT>
+                cwl(positions, scalars, potentials, locals, ijk2index, cell_size, low_corner, p);
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_local",
-                Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
-                ComputeWithLocals{particle_positions, particle_scalars, particle_potentials, locals_slice, no_force,
-                    ijk2index, cell_size, low_corner, p});
+                Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()), cwl);
         }
     }
 
-    template<class PosSlice, class ScalarSlice, class PotSlice, class NeighborList, class ForceSlice, class ScalarArray>
+    template<class TripleScalarSlice, class SingleScalarSlice, class NeighborList>
     struct ComputeDirectly
     {
-        PosSlice particle_positions;
-        ScalarSlice particle_scalars;
-        PotSlice particle_potentials;
+        TripleScalarSlice positions;
+        TripleScalarSlice force;
+        SingleScalarSlice scalars;
+        SingleScalarSlice potentials;
         NeighborList neighbor_list;
-        ForceSlice particle_force;   // Dummy type when HasForce=false
-        ScalarArray cell_size;
-        ScalarArray low_corner;
+        Kokkos::Array<scalar_type, 3> cell_size;
+        Kokkos::Array<scalar_type, 3> low_corner;
         int cells_per_dim;
         int p;
+
+        // Constructor without force
+        ComputeDirectly(TripleScalarSlice positions_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
+            const NeighborList& neighbor_list_,
+            Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
+            const int cells_per_dim_, const int p_)
+            : positions(positions_)
+            , scalars(scalars_)
+            , potentials(potentials_)
+            , neighbor_list(neighbor_list_)
+            , cell_size(cell_size_)
+            , low_corner(low_corner_)
+            , cells_per_dim(cells_per_dim_)
+            , p(p_)
+            {}
+
+        // Constructor with force
+        ComputeDirectly(TripleScalarSlice positions_, TripleScalarSlice force_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
+            const NeighborList& neighbor_list_,
+            Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
+            int cells_per_dim_, int p_)
+            : positions(positions_)
+            , force(force_)
+            , scalars(scalars_)
+            , potentials(potentials_)
+            , neighbor_list(neighbor_list_)
+            , cell_size(cell_size_)
+            , low_corner(low_corner_)
+            , cells_per_dim(cells_per_dim_)
+            , p(p_)
+            {}
 
         KOKKOS_INLINE_FUNCTION
         void operator()(const int my_id) const
         {
-            const scalar_type xi = particle_positions(my_id,0);
-            const scalar_type yi = particle_positions(my_id,1);
-            const scalar_type zi = particle_positions(my_id,2);
+            const scalar_type xi = positions(my_id,0);
+            const scalar_type yi = positions(my_id,1);
+            const scalar_type zi = positions(my_id,2);
 
             auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
 
@@ -781,13 +883,13 @@ class Solver
 
             int num_neighbors = Cabana::NeighborList<NeighborList>::numNeighbor(neighbor_list, my_id);
             scalar_type phi = 0.0;
-            ScalarArray fpart = {0.0, 0.0, 0.0};
+            Kokkos::Array<scalar_type, 3> fpart = {0.0, 0.0, 0.0};
             for (int j = 0; j < num_neighbors; j++) {
                 int neighbor_id = Cabana::NeighborList<NeighborList>::getNeighbor(neighbor_list, my_id, j);
 
-                const scalar_type xn = particle_positions(neighbor_id,0);
-                const scalar_type yn = particle_positions(neighbor_id,1);
-                const scalar_type zn = particle_positions(neighbor_id,2);
+                const scalar_type xn = positions(neighbor_id,0);
+                const scalar_type yn = positions(neighbor_id,1);
+                const scalar_type zn = positions(neighbor_id,2);
 
                 auto ijk_n = position2ijk(xn, yn, zn, low_corner, cell_size);
 
@@ -802,24 +904,24 @@ class Solver
                 const scalar_type dz = zi - zn;
                 const scalar_type r  = Kokkos::sqrt(dx*dx + dy*dy + dz*dz);
 
-                phi += particle_scalars(neighbor_id) / r;
+                phi += scalars(neighbor_id) / r;
                 
                 // Force calculations
                 if constexpr(metadata::force != no_id)
                 {
                     scalar_type dist_inv  = 1.0 / r;
                     scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
-                    scalar_type fp = particle_scalars(my_id) * particle_scalars(neighbor_id) * dist_inv3;
+                    scalar_type fp = scalars(my_id) * scalars(neighbor_id) * dist_inv3;
                     fpart[0] += fp * dx;
                     fpart[1] += fp * dy;
                     fpart[2] += fp * dz;
                 }
             }
-            particle_potentials(my_id) += phi;
+            potentials(my_id) += phi;
 
             if constexpr(metadata::force != no_id)
                 for (int d = 0; d < 3; d++)
-                    particle_force(my_id, d) += fpart[d];
+                    force(my_id, d) += fpart[d];
         }
     };
 
@@ -829,9 +931,9 @@ class Solver
 
         haloParticles();
 
-        auto particle_positions = Cabana::slice<metadata::pos>(_leaf_particles);
-        auto particle_scalars = Cabana::slice<metadata::in>(_leaf_particles);
-        auto particle_potentials = Cabana::slice<metadata::out>(_leaf_particles);
+        auto positions = Cabana::slice<metadata::pos>(_leaf_particles);
+        auto scalars = Cabana::slice<metadata::in>(_leaf_particles);
+        auto potentials = Cabana::slice<metadata::out>(_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
@@ -845,31 +947,34 @@ class Solver
         // all particles within cells up to 2 cells away are considered.
         const scalar_type neighborhood_radius = Kokkos::max(Kokkos::max(cell_size[0], cell_size[1]), cell_size[2]) * 3 * Kokkos::sqrt(3.0);
         auto neighbor_list = Cabana::Experimental::makeNeighborList(
-            Cabana::FullNeighborTag{}, particle_positions, 0, total_particles,
+            Cabana::FullNeighborTag{}, positions, 0, total_particles,
             neighborhood_radius );
+
+        using PosSlice = decltype(positions);
+        using ScalarSlice = decltype(scalars);
+        using NeighT = decltype(neighbor_list);
 
         if constexpr (metadata::force != no_id)
         {
-            auto particle_force = Cabana::slice<metadata::force>(_leaf_particles);
+            auto force = Cabana::slice<metadata::force>(_leaf_particles);
+
+            // Use force constructor
+            ComputeDirectly<PosSlice, ScalarSlice, NeighT> cd(positions, force, scalars, potentials, neighbor_list,
+                cell_size, low_corner, cells_per_dim, p);
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_direct",
-                Kokkos::RangePolicy<execution_space>(0, owned_particles),
-                ComputeDirectly{particle_positions, particle_scalars, particle_potentials, neighbor_list, particle_force,
-                    cell_size, low_corner, cells_per_dim, p});
+                Kokkos::RangePolicy<execution_space>(0, owned_particles), cd);
         }
         else
         {
-            // Use a dummy force slice object
-            struct NoForceSlice {
-                KOKKOS_INLINE_FUNCTION void operator()(int,int) const {}
-            } no_force;
+             // Use no force constructor
+            ComputeDirectly<PosSlice, ScalarSlice, NeighT> cd(positions, scalars, potentials, neighbor_list,
+                cell_size, low_corner, cells_per_dim, p);
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_direct",
-                Kokkos::RangePolicy<execution_space>(0, owned_particles),
-                ComputeDirectly{particle_positions, particle_scalars, particle_potentials, neighbor_list, no_force,
-                    cell_size, low_corner, cells_per_dim, p});
+                Kokkos::RangePolicy<execution_space>(0, owned_particles), cd);
         }
         Kokkos::fence();
     }

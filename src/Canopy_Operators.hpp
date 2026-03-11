@@ -165,7 +165,7 @@ Kokkos::complex<Scalar> Ynm( int n, int m, Scalar theta, Scalar phi )
                                       Kokkos::tgamma( n + mp + 1 ) );
 
     // Equation 3.32, Greengard
-    const complex y = norm * Pnm * Kokkos::polar( 1.0, Scalar( m ) * phi );
+    const complex y = norm * Pnm * Kokkos::polar( static_cast<Scalar>(1.0), Scalar( m ) * phi );
 
     const Scalar phase = ( m >= 0 ? ( ( m % 2 ) ? -1.0 : 1.0 ) // (-1)^m
                                   : ( ( ( -m ) % 2 ) ? -1.0 : 1.0 ) );
@@ -886,7 +886,7 @@ Kokkos::complex<Scalar> d_dtheta(const Scalar r, const Scalar theta, const Scala
                                 Kokkos::tgamma( n + mp + 1 ) );
     
     // Const exp(i * m* phi) from Y_nm
-    const complex e_imp = Kokkos::polar(1.0, Scalar(m) * phi);
+    const complex e_imp = Kokkos::polar(static_cast<Scalar>(1.0), Scalar(m) * phi);
 
     // Const phase from Y_nm
     const Scalar phase = ( m >= 0 ? ( ( m % 2 ) ? -1.0 : 1.0 ) // (-1)^m
