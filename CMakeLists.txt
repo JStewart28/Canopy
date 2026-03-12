@@ -28,7 +28,7 @@ include(FeatureSummary)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 # find kokkos
-find_package(Kokkos 4.1 REQUIRED)
+find_package(Kokkos 4 REQUIRED)
 
 # set supported kokkos devices
 set(CANOPY_SUPPORTED_DEVICES SERIAL THREADS OPENMP CUDA HIP SYCL OPENMPTARGET)
