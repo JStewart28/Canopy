@@ -160,7 +160,15 @@ class Solver
         5. Use Distributor to send particles to their rank of ownership in the new partition.
         6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
         */
-        }
+    }
+
+    /**
+     * Reset state from previous calls to solve on a Solver object
+     */
+    void reset()
+    {
+        _tree.clear();
+    }
     
     void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
     {
