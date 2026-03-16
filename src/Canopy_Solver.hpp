@@ -168,6 +168,7 @@ class Solver
     void reset()
     {
         _tree.clear();
+        build();
     }
     
     void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
