@@ -1011,7 +1011,7 @@ class Solver
     std::size_t numLayers() const { return _tree.size() + 1; }
 
     auto M_root() {return _M_root;}
-    auto particles() {return _leaf_particles;}
+    auto data() {return _leaf_particles;}
     auto numOwnedParticles() {return _owned_particles;}
     auto numGhostParticles() {return _ghost_particles;}
     std::array<scalar_type, 3> globalLowCorner() const { return _global_low_corner; }

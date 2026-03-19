@@ -171,7 +171,7 @@ void testSolver(int points_per_proc_in, bool balanced)
     tree->solve(particle_aosoa, run_load_balance);
 
     // Gather all particles from the tree back to rank 0 for testing
-    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->particles());
+    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->data());
     particle_aosoa_type_f_h tree_particles("tree_particles", tmp.size());
     Cabana::deep_copy(tree_particles, tmp);
 

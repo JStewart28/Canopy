@@ -318,7 +318,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     auto locals_slice = Cabana::slice<0>(locals);
 
     // Get particles
-    auto tree_particles = tree->particles();
+    auto tree_particles = tree->data();
     auto tree_particle_positions = Cabana::slice<MD_f::pos>(tree_particles);
 
     // Sort the particles by increasing cell_id
@@ -590,8 +590,8 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     if (use_solver_l2p)
         tree->computeL2P();
 
-    particle_aosoa_type tree_particles("tree_particles", tree->particles().size());
-    Cabana::deep_copy(tree_particles, tree->particles());
+    particle_aosoa_type tree_particles("tree_particles", tree->data().size());
+    Cabana::deep_copy(tree_particles, tree->data());
 
     // Remove ghost particles
     // printf("R%d: num owned particles: %d\n", rank, tree->numOwnedParticles());
