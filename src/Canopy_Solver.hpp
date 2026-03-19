@@ -148,8 +148,6 @@ class Solver
 
         // Reserve space for 10 layers
         _tree.reserve(10);
-
-        build();
         
         /*
         Steps:
@@ -168,7 +166,6 @@ class Solver
     void reset()
     {
         _tree.clear();
-        build();
     }
     
     void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
@@ -992,12 +989,17 @@ class Solver
      * Perform the fast multipole method.
      */
 
-    void solve(particle_aosoa_type aosoa, bool run_load_balance)
+    void solve(particle_aosoa_type& aosoa, bool run_load_balance)
     {
+        reset();
+        build();
         create_multipoles(aosoa, run_load_balance);
         multipole_to_local();
         computeL2P();
         computeP2P();
+
+        // Remove ghost particles
+        _leaf_particles.resize(_owned_particles);
     }
 
     int rank() const { return _rank; }
