@@ -404,22 +404,22 @@ class Solver
      * 
      * Assumes x/y/z coordinates are the first tuple element in "data"
      */
-    void create_multipoles(particle_aosoa_type& external_data, bool run_load_balance)
+    void create_multipoles(std::shared_ptr<particle_aosoa_type> external_data, bool run_load_balance)
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::Solver::create_multipoles");
 
         // Data comes from externally to populate leaf layer (layer 0)
         _leaf_particles = external_data;
-        migrateParticleData(_leaf_particles, run_load_balance);
+        migrateParticleData(*_leaf_particles, run_load_balance);
 
         // Set out data to 0
-        auto out_data_slice = Cabana::slice<metadata::out>(_leaf_particles);
+        auto out_data_slice = Cabana::slice<metadata::out>(*_leaf_particles);
         Cabana::deep_copy(out_data_slice, 0.0);
 
         // Owned particles are the number of leaf particles
-        _owned_particles = _leaf_particles.size();
+        _owned_particles = _leaf_particles->size();
 
-        _tree[0]->populateCells(_leaf_particles, 0, _leaf_particles.size());
+        _tree[0]->populateCells(*_leaf_particles, 0, _leaf_particles->size());
         for (std::size_t i = 1; i < _tree.size(); i++)
         {
             migrateAndSetLayer(i-1, i, run_load_balance);
@@ -541,9 +541,9 @@ class Solver
         auto leaf_cell_per_dim = _tree[0]->cellsPerDim();
         auto cell_base = _tree[0]->cell_offsets();
         auto cell_offsets = _tree[0]->num_owned_cell();
-        auto positions = Cabana::slice<metadata::pos>(_leaf_particles);
+        auto positions = Cabana::slice<metadata::pos>(*_leaf_particles);
 
-        auto particle_ids = Cabana::slice<3>(_leaf_particles);
+        auto particle_ids = Cabana::slice<3>(*_leaf_particles);
 
         const int rank = _rank;
         const int comm_size = _comm_size;
@@ -576,7 +576,7 @@ class Solver
         Kokkos::View<std::size_t, memory_space> num_halos("num_halos");
         Kokkos::deep_copy(num_halos, 0);
         Kokkos::parallel_for("Canopy::Solver::count halo particles",
-            Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
+            Kokkos::RangePolicy<execution_space>(0, _leaf_particles->size()),
             KOKKOS_LAMBDA(const int pid)
             {
                 const scalar_type x = positions(pid, 0);
@@ -615,7 +615,7 @@ class Solver
         auto id_slice = Cabana::slice<0>(ids_ranks);
         auto rank_slice = Cabana::slice<1>(ids_ranks);
         Kokkos::parallel_for("Canopy::Solver::fill halo particles",
-            Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
+            Kokkos::RangePolicy<execution_space>(0, _leaf_particles->size()),
             KOKKOS_LAMBDA(const int pid)
             {
                 const scalar_type x = positions(pid, 0);
@@ -643,11 +643,11 @@ class Solver
             });
         
         // Now halo the particles
-        Cabana::Halo<memory_space> halo( _comm, _leaf_particles.size(), id_slice,
+        Cabana::Halo<memory_space> halo( _comm, _leaf_particles->size(), id_slice,
                                     rank_slice );
         std::size_t num_local = halo.numLocal();
-        _leaf_particles.resize(halo.numLocal() + halo.numGhost());
-        Cabana::gather(halo, _leaf_particles);
+        _leaf_particles->resize(halo.numLocal() + halo.numGhost());
+        Cabana::gather(halo, *_leaf_particles);
 
         // Save owned and ghost information
         _owned_particles = halo.numLocal();
@@ -784,9 +784,9 @@ class Solver
 
         // int rank = _rank;
 
-        auto positions = Cabana::slice<metadata::pos>(_leaf_particles);
-        auto scalars = Cabana::slice<metadata::in>(_leaf_particles);
-        auto potentials = Cabana::slice<metadata::out>(_leaf_particles);
+        auto positions = Cabana::slice<metadata::pos>(*_leaf_particles);
+        auto scalars = Cabana::slice<metadata::in>(*_leaf_particles);
+        auto potentials = Cabana::slice<metadata::out>(*_leaf_particles);
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
@@ -802,7 +802,7 @@ class Solver
 
         if constexpr (metadata::force != no_id)
         {
-            auto force = Cabana::slice<metadata::force>(_leaf_particles);
+            auto force = Cabana::slice<metadata::force>(*_leaf_particles);
 
             // Zero force
             Cabana::deep_copy(force, 0.0);
@@ -812,7 +812,7 @@ class Solver
                 cwl(positions, force, scalars, potentials, locals, ijk2index, cell_size, low_corner, p);
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_local",
-                Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()),
+                Kokkos::RangePolicy<execution_space>(0, _leaf_particles->size()),
                 cwl);
         }
         else
@@ -823,7 +823,7 @@ class Solver
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_local",
-                Kokkos::RangePolicy<execution_space>(0, _leaf_particles.size()), cwl);
+                Kokkos::RangePolicy<execution_space>(0, _leaf_particles->size()), cwl);
         }
     }
 
@@ -937,15 +937,15 @@ class Solver
 
         haloParticles();
 
-        auto positions = Cabana::slice<metadata::pos>(_leaf_particles);
-        auto scalars = Cabana::slice<metadata::in>(_leaf_particles);
-        auto potentials = Cabana::slice<metadata::out>(_leaf_particles);
+        auto positions = Cabana::slice<metadata::pos>(*_leaf_particles);
+        auto scalars = Cabana::slice<metadata::in>(*_leaf_particles);
+        auto potentials = Cabana::slice<metadata::out>(*_leaf_particles);
 
         auto cell_size = _tree[0]->cellSize();
         auto cells_per_dim = _tree[0]->cellsPerDim();
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
-        auto total_particles = _leaf_particles.size();
+        auto total_particles = _leaf_particles->size();
         auto owned_particles = _owned_particles;
         
         // Find neighbor particles that are within 3 cells width of each other. 
@@ -962,7 +962,7 @@ class Solver
 
         if constexpr (metadata::force != no_id)
         {
-            auto force = Cabana::slice<metadata::force>(_leaf_particles);
+            auto force = Cabana::slice<metadata::force>(*_leaf_particles);
 
             // Use force constructor
             ComputeDirectly<PosSlice, ScalarSlice, NeighT> cd(positions, force, scalars, potentials, neighbor_list,
@@ -989,7 +989,7 @@ class Solver
      * Perform the fast multipole method.
      */
 
-    void solve(particle_aosoa_type& aosoa, bool run_load_balance)
+    void solve(std::shared_ptr<particle_aosoa_type> aosoa, bool run_load_balance)
     {
         reset();
         build();
@@ -999,7 +999,7 @@ class Solver
         computeP2P();
 
         // Remove ghost particles
-        _leaf_particles.resize(_owned_particles);
+        _leaf_particles->resize(_owned_particles);
     }
 
     int rank() const { return _rank; }
@@ -1049,7 +1049,7 @@ class Solver
     Kokkos::View<complex[(p+1)*(p+1)], memory_space> _M_root;
 
     // Leaf particles
-    particle_aosoa_type _leaf_particles;
+    std::shared_ptr<particle_aosoa_type> _leaf_particles;
     std::size_t _owned_particles = 0;
     std::size_t _ghost_particles = 0;
 };
