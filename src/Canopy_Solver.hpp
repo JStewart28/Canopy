@@ -13,6 +13,7 @@
 #define CANOPY_TREE_HPP
 
 
+#include <ArborX.hpp>
 #include <Canopy_SolverLayer.hpp>
 
 #include <Cabana_Core.hpp>
@@ -827,28 +828,112 @@ class Solver
         }
     }
 
-    template<class TripleScalarSlice, class SingleScalarSlice, class NeighborList>
+    template<class TripleScalarSlice, class SingleScalarSlice, class BVHType>
     struct ComputeDirectly
     {
         TripleScalarSlice positions;
         TripleScalarSlice force;
         SingleScalarSlice scalars;
         SingleScalarSlice potentials;
-        NeighborList neighbor_list;
+        BVHType bvh;
         Kokkos::Array<scalar_type, 3> cell_size;
         Kokkos::Array<scalar_type, 3> low_corner;
         int cells_per_dim;
         int p;
 
+        template <bool ComputeForce>
+        struct QueryCallback
+        {
+            TripleScalarSlice positions;
+            TripleScalarSlice force;
+            SingleScalarSlice scalars;
+            int my_id;
+            scalar_type xi, yi, zi;
+            Kokkos::Array<int, 3> lower;
+            Kokkos::Array<int, 3> upper;
+            Kokkos::Array<scalar_type, 3> cell_size;
+            Kokkos::Array<scalar_type, 3> low_corner;
+            scalar_type* phi;
+            scalar_type* fpart;
+
+            KOKKOS_FUNCTION
+            QueryCallback( TripleScalarSlice positions_, TripleScalarSlice force_,
+                           SingleScalarSlice scalars_, int my_id_,
+                           scalar_type xi_, scalar_type yi_, scalar_type zi_,
+                           Kokkos::Array<int, 3> lower_,
+                           Kokkos::Array<int, 3> upper_,
+                           Kokkos::Array<scalar_type, 3> cell_size_,
+                           Kokkos::Array<scalar_type, 3> low_corner_,
+                           scalar_type* phi_, scalar_type* fpart_ )
+                : positions( positions_ )
+                , force( force_ )
+                , scalars( scalars_ )
+                , my_id( my_id_ )
+                , xi( xi_ )
+                , yi( yi_ )
+                , zi( zi_ )
+                , lower( lower_ )
+                , upper( upper_ )
+                , cell_size( cell_size_ )
+                , low_corner( low_corner_ )
+                , phi( phi_ )
+                , fpart( fpart_ )
+            {}
+
+            template <class Predicate, class ValuePair>
+            KOKKOS_FUNCTION void operator()( Predicate const&,
+                                             ValuePair const& value_pair ) const
+            {
+                int neighbor_id = static_cast<int>( value_pair.index );
+                if ( neighbor_id == my_id )
+                    return;
+
+                const scalar_type xn = positions( neighbor_id, 0 );
+                const scalar_type yn = positions( neighbor_id, 1 );
+                const scalar_type zn = positions( neighbor_id, 2 );
+
+                auto ijk_n = position2ijk( xn, yn, zn, low_corner, cell_size );
+
+                // Keep the original exact cell-stencil filter to preserve
+                // computeP2P behavior even though the ArborX query uses a box.
+                if ( ijk_n[0] < lower[0] || ijk_n[0] >= upper[0] ||
+                     ijk_n[1] < lower[1] || ijk_n[1] >= upper[1] ||
+                     ijk_n[2] < lower[2] || ijk_n[2] >= upper[2] )
+                    return;
+
+                const scalar_type dx = xi - xn;
+                const scalar_type dy = yi - yn;
+                const scalar_type dz = zi - zn;
+                const scalar_type r2 = dx * dx + dy * dy + dz * dz;
+
+                if ( r2 == 0.0 )
+                    return;
+
+                const scalar_type r = Kokkos::sqrt( r2 );
+                *phi += scalars( neighbor_id ) / r;
+
+                if constexpr ( ComputeForce )
+                {
+                    scalar_type dist_inv = 1.0 / r;
+                    scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
+                    scalar_type fp =
+                        scalars( my_id ) * scalars( neighbor_id ) * dist_inv3;
+                    fpart[0] += fp * dx;
+                    fpart[1] += fp * dy;
+                    fpart[2] += fp * dz;
+                }
+            }
+        };
+
         // Constructor without force
         ComputeDirectly(TripleScalarSlice positions_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
-            const NeighborList& neighbor_list_,
+            const BVHType& bvh_,
             Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
             const int cells_per_dim_, const int p_)
             : positions(positions_)
             , scalars(scalars_)
             , potentials(potentials_)
-            , neighbor_list(neighbor_list_)
+            , bvh(bvh_)
             , cell_size(cell_size_)
             , low_corner(low_corner_)
             , cells_per_dim(cells_per_dim_)
@@ -857,14 +942,14 @@ class Solver
 
         // Constructor with force
         ComputeDirectly(TripleScalarSlice positions_, TripleScalarSlice force_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
-            const NeighborList& neighbor_list_,
+            const BVHType& bvh_,
             Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
             int cells_per_dim_, int p_)
             : positions(positions_)
             , force(force_)
             , scalars(scalars_)
             , potentials(potentials_)
-            , neighbor_list(neighbor_list_)
+            , bvh(bvh_)
             , cell_size(cell_size_)
             , low_corner(low_corner_)
             , cells_per_dim(cells_per_dim_)
@@ -887,42 +972,37 @@ class Solver
                 upper[d] = Kokkos::min(int(ijk_i[d]) + 3, cells_per_dim);
             }
 
-            int num_neighbors = Cabana::NeighborList<NeighborList>::numNeighbor(neighbor_list, my_id);
             scalar_type phi = 0.0;
             Kokkos::Array<scalar_type, 3> fpart = {0.0, 0.0, 0.0};
-            for (int j = 0; j < num_neighbors; j++) {
-                int neighbor_id = Cabana::NeighborList<NeighborList>::getNeighbor(neighbor_list, my_id, j);
-
-                const scalar_type xn = positions(neighbor_id,0);
-                const scalar_type yn = positions(neighbor_id,1);
-                const scalar_type zn = positions(neighbor_id,2);
-
-                auto ijk_n = position2ijk(xn, yn, zn, low_corner, cell_size);
-
-                // Check that our neighbor particle's cell is within 2 cells
-                if (ijk_n[0] < lower[0] || ijk_n[0] >= upper[0] ||
-                    ijk_n[1] < lower[1] || ijk_n[1] >= upper[1] ||
-                    ijk_n[2] < lower[2] || ijk_n[2] >= upper[2])
-                        continue;
-                
-                const scalar_type dx = xi - xn;
-                const scalar_type dy = yi - yn;
-                const scalar_type dz = zi - zn;
-                const scalar_type r  = Kokkos::sqrt(dx*dx + dy*dy + dz*dz);
-
-                phi += scalars(neighbor_id) / r;
-                
-                // Force calculations
-                if constexpr(metadata::force != no_id)
-                {
-                    scalar_type dist_inv  = 1.0 / r;
-                    scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
-                    scalar_type fp = scalars(my_id) * scalars(neighbor_id) * dist_inv3;
-                    fpart[0] += fp * dx;
-                    fpart[1] += fp * dy;
-                    fpart[2] += fp * dz;
-                }
+            ArborX::Point<3, float> min_corner;
+            ArborX::Point<3, float> max_corner;
+            for ( int d = 0; d < 3; ++d )
+            {
+                min_corner[d] =
+                    static_cast<float>( low_corner[d] + lower[d] * cell_size[d] );
+                max_corner[d] =
+                    static_cast<float>( low_corner[d] + upper[d] * cell_size[d] );
             }
+
+            ArborX::Box<3, float> query_box( min_corner, max_corner );
+
+            if constexpr ( metadata::force != no_id )
+            {
+                QueryCallback<true> callback(
+                    positions, force, scalars, my_id, xi, yi, zi, lower, upper,
+                    cell_size, low_corner, &phi, &fpart[0] );
+                bvh.query( ArborX::Experimental::PerThread{},
+                           ArborX::intersects( query_box ), callback );
+            }
+            else
+            {
+                QueryCallback<false> callback(
+                    positions, force, scalars, my_id, xi, yi, zi, lower, upper,
+                    cell_size, low_corner, &phi, &fpart[0] );
+                bvh.query( ArborX::Experimental::PerThread{},
+                           ArborX::intersects( query_box ), callback );
+            }
+
             potentials(my_id) += phi;
 
             if constexpr(metadata::force != no_id)
@@ -945,27 +1025,25 @@ class Solver
         auto cells_per_dim = _tree[0]->cellsPerDim();
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
-        auto total_particles = _leaf_particles->size();
         auto owned_particles = _owned_particles;
-        
-        // Find neighbor particles that are within 3 cells width of each other. 
-        // We need to use 3 cell width to ensure that for a particle in any given cell,
-        // all particles within cells up to 2 cells away are considered.
-        const scalar_type neighborhood_radius = Kokkos::max(Kokkos::max(cell_size[0], cell_size[1]), cell_size[2]) * 3 * Kokkos::sqrt(3.0);
-        auto neighbor_list = Cabana::Experimental::makeNeighborList(
-            Cabana::FullNeighborTag{}, positions, 0, total_particles,
-            neighborhood_radius );
+
+        // Build a BVH once, then query it per owned particle. This avoids
+        // materializing the full particle-particle adjacency graph, which can
+        // overflow for large runs before computeP2P ever begins accumulation.
+        execution_space space{};
+        ArborX::BoundingVolumeHierarchy bvh(
+            space, ArborX::Experimental::attach_indices<int>( positions ) );
 
         using PosSlice = decltype(positions);
         using ScalarSlice = decltype(scalars);
-        using NeighT = decltype(neighbor_list);
+        using BvhT = decltype(bvh);
 
         if constexpr (metadata::force != no_id)
         {
             auto force = Cabana::slice<metadata::force>(*_leaf_particles);
 
             // Use force constructor
-            ComputeDirectly<PosSlice, ScalarSlice, NeighT> cd(positions, force, scalars, potentials, neighbor_list,
+            ComputeDirectly<PosSlice, ScalarSlice, BvhT> cd(positions, force, scalars, potentials, bvh,
                 cell_size, low_corner, cells_per_dim, p);
 
             Kokkos::parallel_for(
@@ -975,7 +1053,7 @@ class Solver
         else
         {
              // Use no force constructor
-            ComputeDirectly<PosSlice, ScalarSlice, NeighT> cd(positions, scalars, potentials, neighbor_list,
+            ComputeDirectly<PosSlice, ScalarSlice, BvhT> cd(positions, scalars, potentials, bvh,
                 cell_size, low_corner, cells_per_dim, p);
 
             Kokkos::parallel_for(

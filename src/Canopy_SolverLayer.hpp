@@ -12,6 +12,8 @@
 #ifndef CANOPY_TREELAYER_HPP
 #define CANOPY_TREELAYER_HPP
 
+
+#include <ArborX.hpp>
 #include <Cabana_Core.hpp>
 #include <Cabana_Grid.hpp>
 #include <Kokkos_Core.hpp>
@@ -1197,6 +1199,170 @@ class SolverLayer
         Kokkos::fence();
     }
 
+    template <class MultipoleSlice, class CellCenterSlice, class LocalSlice,
+              class LocalCellIJKSlice, class BoundsView, class BVHType>
+    struct MultipoleToLocalFunctor
+    {
+        static constexpr int num_coefficients = ( p + 1 ) * ( p + 1 );
+
+        MultipoleSlice m_slice;
+        CellCenterSlice m_cell_center_slice;
+        LocalSlice l_slice;
+        LocalCellIJKSlice l_cell_ijk_slice;
+        BoundsView m2l_bounds;
+        BVHType bvh;
+        Kokkos::Array<scalar_type, 3> low_corner;
+        Kokkos::Array<scalar_type, 3> cell_size;
+        int cells_per_dim;
+
+        struct QueryCallback
+        {
+            MultipoleSlice m_slice;
+            CellCenterSlice m_cell_center_slice;
+            Kokkos::Array<int, 6> outer_bounds;
+            Kokkos::Array<std::size_t, 3> inner_lower_bound;
+            Kokkos::Array<std::size_t, 3> inner_upper_bound;
+            scalar_type* accum;
+            Kokkos::Array<scalar_type, 3> target_center;
+            Kokkos::Array<scalar_type, 3> low_corner;
+            Kokkos::Array<scalar_type, 3> cell_size;
+
+            KOKKOS_FUNCTION
+            QueryCallback( MultipoleSlice m_slice_,
+                           CellCenterSlice m_cell_center_slice_,
+                           Kokkos::Array<int, 6> outer_bounds_,
+                           Kokkos::Array<std::size_t, 3> inner_lower_bound_,
+                           Kokkos::Array<std::size_t, 3> inner_upper_bound_,
+                           scalar_type* accum_,
+                           Kokkos::Array<scalar_type, 3> target_center_,
+                           Kokkos::Array<scalar_type, 3> low_corner_,
+                           Kokkos::Array<scalar_type, 3> cell_size_ )
+                : m_slice( m_slice_ )
+                , m_cell_center_slice( m_cell_center_slice_ )
+                , outer_bounds( outer_bounds_ )
+                , inner_lower_bound( inner_lower_bound_ )
+                , inner_upper_bound( inner_upper_bound_ )
+                , accum( accum_ )
+                , target_center( target_center_ )
+                , low_corner( low_corner_ )
+                , cell_size( cell_size_ )
+            {}
+
+            template <class Predicate, class ValuePair>
+            KOKKOS_FUNCTION void operator()( Predicate const&,
+                                             ValuePair const& value_pair ) const
+            {
+                int neighbor_id = static_cast<int>( value_pair.index );
+
+                auto neighbor_cell_ijk =
+                    position2ijk( m_cell_center_slice( neighbor_id, 0 ),
+                                  m_cell_center_slice( neighbor_id, 1 ),
+                                  m_cell_center_slice( neighbor_id, 2 ),
+                                  low_corner, cell_size );
+
+                const bool in_outer =
+                    ( neighbor_cell_ijk[0] >=
+                          static_cast<std::size_t>( outer_bounds[0] ) &&
+                      neighbor_cell_ijk[0] <
+                          static_cast<std::size_t>( outer_bounds[3] ) ) &&
+                    ( neighbor_cell_ijk[1] >=
+                          static_cast<std::size_t>( outer_bounds[1] ) &&
+                      neighbor_cell_ijk[1] <
+                          static_cast<std::size_t>( outer_bounds[4] ) ) &&
+                    ( neighbor_cell_ijk[2] >=
+                          static_cast<std::size_t>( outer_bounds[2] ) &&
+                      neighbor_cell_ijk[2] <
+                          static_cast<std::size_t>( outer_bounds[5] ) );
+
+                const bool in_inner =
+                    ( neighbor_cell_ijk[0] >= inner_lower_bound[0] &&
+                      neighbor_cell_ijk[0] < inner_upper_bound[0] ) &&
+                    ( neighbor_cell_ijk[1] >= inner_lower_bound[1] &&
+                      neighbor_cell_ijk[1] < inner_upper_bound[1] ) &&
+                    ( neighbor_cell_ijk[2] >= inner_lower_bound[2] &&
+                      neighbor_cell_ijk[2] < inner_upper_bound[2] );
+
+                if ( !in_outer || in_inner )
+                    return;
+
+                Kokkos::Array<scalar_type, 3> m2l_vec;
+                for ( int d = 0; d < 3; ++d )
+                    m2l_vec[d] =
+                        m_cell_center_slice( neighbor_id, d ) - target_center[d];
+
+                Kokkos::Array<complex, num_coefficients> M;
+                for ( int i = 0; i < num_coefficients; ++i )
+                {
+                    M[i].real() = m_slice( neighbor_id, i, 0 );
+                    M[i].imag() = m_slice( neighbor_id, i, 1 );
+                }
+
+                Kokkos::Array<complex, num_coefficients> L;
+                Operator::Scalar::m2l<p>( M, L, m2l_vec );
+
+                for ( int i = 0; i < num_coefficients; ++i )
+                {
+                    accum[i] += L[i].real();
+                    accum[i + num_coefficients] += L[i].imag();
+                }
+            }
+        };
+
+        KOKKOS_FUNCTION void operator()( const int index ) const
+        {
+            auto cell_ijk =
+                position2ijk( m_cell_center_slice( index, 0 ),
+                              m_cell_center_slice( index, 1 ),
+                              m_cell_center_slice( index, 2 ), low_corner,
+                              cell_size );
+
+            Kokkos::Array<std::size_t, 3> inner_lower_bound;
+            Kokkos::Array<std::size_t, 3> inner_upper_bound;
+            for ( int d = 0; d < 3; ++d )
+            {
+                inner_upper_bound[d] = Kokkos::min(
+                    static_cast<int>( cell_ijk[d] ) + 3, cells_per_dim );
+                inner_lower_bound[d] =
+                    Kokkos::max( static_cast<int>( cell_ijk[d] ) - 2, 0 );
+                l_cell_ijk_slice( index, d ) = cell_ijk[d];
+            }
+
+            Kokkos::Array<int, 6> outer_bounds;
+            for ( int i = 0; i < 6; ++i )
+                outer_bounds[i] = m2l_bounds( index, i );
+
+            scalar_type accum[2 * num_coefficients];
+            for ( int i = 0; i < 2 * num_coefficients; ++i )
+                accum[i] = 0.0;
+
+            Kokkos::Array<scalar_type, 3> target_center;
+            ArborX::Point<3, scalar_type> min_corner;
+            ArborX::Point<3, scalar_type> max_corner;
+            for ( int d = 0; d < 3; ++d )
+            {
+                target_center[d] = m_cell_center_slice( index, d );
+                min_corner[d] = low_corner[d] + outer_bounds[d] * cell_size[d];
+                max_corner[d] =
+                    low_corner[d] + outer_bounds[d + 3] * cell_size[d];
+            }
+
+            ArborX::Box<3, scalar_type> query_box( min_corner, max_corner );
+
+            QueryCallback callback( m_slice, m_cell_center_slice, outer_bounds,
+                                    inner_lower_bound, inner_upper_bound,
+                                    accum, target_center, low_corner,
+                                    cell_size );
+            bvh.query( ArborX::Experimental::PerThread{},
+                       ArborX::intersects( query_box ), callback );
+
+            for ( int i = 0; i < num_coefficients; ++i )
+            {
+                l_slice( index, i, 0 ) += accum[i];
+                l_slice( index, i, 1 ) += accum[i + num_coefficients];
+            }
+        }
+    };
+
     /**
      * For each cell, iterate over all cells in its interaction list. These are cells that
      * are at least two cells away from the cell in question and have not been accounted
@@ -1212,147 +1378,35 @@ class SolverLayer
 
         haloMultipoles();
 
-        auto locals = _locals;
         auto m2l_bounds = _m2l_bounds;
-        auto map = *_map_ptr;
-        auto multipoles = _multipoles;
-        auto ijk2index = _ijk2index;
-
         auto m_slice = Cabana::slice<0>(_multipoles);
         auto m_cell_center_slice = Cabana::slice<1>(_multipoles);
         auto l_slice = Cabana::slice<0>(_locals);
         auto l_cell_ijk_slice = Cabana::slice<1>(_locals);
 
-        const int cells_per_dim = _cells_per_dim;
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
 
-        // Compute neighbor list of cells within the outer cutoff
-        // We look at most 10 cells in each dimension
-        // WIth a higher tile reduction factor, we must appropriately scale the 5 cells
-        // pere dimension.
-        scalar_type factor = std::ceil(2.5 * _tile_reduction_factor);
-        scalar_type neighborhood_radius = Kokkos::sqrt(
-            Kokkos::pow(factor*_cell_size[0], 2) +
-            Kokkos::pow(factor*_cell_size[1], 2) +
-            Kokkos::pow(factor*_cell_size[2], 2)) + 0.00001;
-        auto neighbor_list = Cabana::Experimental::makeNeighborList(
-            Cabana::FullNeighborTag{}, m_cell_center_slice, 0, _multipoles.size(),
-            neighborhood_radius );
-        using list_type = decltype(neighbor_list);
-        using team_policy = Kokkos::TeamPolicy<execution_space>;
-        using member_type = team_policy::member_type;
+        execution_space space{};
+        ArborX::BoundingVolumeHierarchy bvh(
+            space, ArborX::Experimental::attach_indices<int>( m_cell_center_slice ) );
 
-        static constexpr int num_coefficients = (p+1)*(p+1);
+        using MultipoleSlice = decltype(m_slice);
+        using CellCenterSlice = decltype(m_cell_center_slice);
+        using LocalSlice = decltype(l_slice);
+        using LocalCellIJKSlice = decltype(l_cell_ijk_slice);
+        using BoundsView = decltype(m2l_bounds);
+        using BvhT = decltype(bvh);
 
-        // Scratch: store (real, imag) as doubles for each coefficient
-        const int scratch_bytes =
-            Kokkos::View<scalar_type*, Kokkos::DefaultExecutionSpace::scratch_memory_space,
-                        Kokkos::MemoryUnmanaged>::shmem_size(2 * num_coefficients);
+        MultipoleToLocalFunctor<MultipoleSlice, CellCenterSlice, LocalSlice,
+                                LocalCellIJKSlice, BoundsView, BvhT>
+            functor{m_slice, m_cell_center_slice, l_slice, l_cell_ijk_slice,
+                    m2l_bounds, bvh, low_corner, cell_size, _cells_per_dim};
 
-        Kokkos::parallel_for(
-            "Canopy::SolverLayer::multipole_to_local team",
-            team_policy(_num_local_multipoles, Kokkos::AUTO)
-                .set_scratch_size(0, Kokkos::PerTeam(scratch_bytes)),
-            KOKKOS_LAMBDA(const member_type& team)
-            {
-                const int index = team.league_rank();
-
-                // Team scratch accumulation buffer: [0..num_coeff-1]=real, [num_coeff..2*num_coeff-1]=imag
-                using scratch_space = typename member_type::scratch_memory_space;
-                Kokkos::View<scalar_type*, scratch_space, Kokkos::MemoryUnmanaged> accum(
-                    team.team_scratch(0), 2 * num_coefficients);
-
-                // Zero scratch
-                Kokkos::parallel_for(Kokkos::TeamThreadRange(team, 2 * num_coefficients),
-                                    [&](const int t) { accum(t) = 0.0; });
-                team.team_barrier();
-
-                // Get cell ijk from cell center (same as before)
-                auto cell_ijk = position2ijk(m_cell_center_slice(index,0),
-                                            m_cell_center_slice(index,1),
-                                            m_cell_center_slice(index,2),
-                                            low_corner, cell_size);
-
-                // Inner bounds
-                Kokkos::Array<std::size_t, 3> inner_lower_bound;
-                Kokkos::Array<std::size_t, 3> inner_upper_bound;
-                for (int d = 0; d < 3; d++)
-                {
-                    inner_upper_bound[d] = Kokkos::min(static_cast<int>(cell_ijk[d]) + 3, cells_per_dim);
-                    inner_lower_bound[d] = Kokkos::max(static_cast<int>(cell_ijk[d]) - 2, 0);
-                }
-
-                // Write l_cell_ijk_slice once
-                Kokkos::single(Kokkos::PerTeam(team), [&](){
-                    for (int d = 0; d < 3; d++)
-                        l_cell_ijk_slice(index, d) = cell_ijk[d];
-                });
-
-                // Team-parallel over neighbors
-                const int num_neighbors =
-                    Cabana::NeighborList<list_type>::numNeighbor(neighbor_list, index);
-
-                Kokkos::parallel_for(Kokkos::TeamThreadRange(team, num_neighbors),
-                                    [&](const int j)
-                {
-                    const int neighbor_id =
-                        Cabana::NeighborList<list_type>::getNeighbor(neighbor_list, index, j);
-
-                    auto neighbor_cell_ijk = position2ijk(m_cell_center_slice(neighbor_id,0),
-                                                        m_cell_center_slice(neighbor_id,1),
-                                                        m_cell_center_slice(neighbor_id,2),
-                                                        low_corner, cell_size);
-
-                    const bool in_outer =
-                        (neighbor_cell_ijk[0] >= m2l_bounds(index,0) && neighbor_cell_ijk[0] < m2l_bounds(index,3)) &&
-                        (neighbor_cell_ijk[1] >= m2l_bounds(index,1) && neighbor_cell_ijk[1] < m2l_bounds(index,4)) &&
-                        (neighbor_cell_ijk[2] >= m2l_bounds(index,2) && neighbor_cell_ijk[2] < m2l_bounds(index,5));
-
-                    const bool in_inner =
-                        (neighbor_cell_ijk[0] >= inner_lower_bound[0] && neighbor_cell_ijk[0] < inner_upper_bound[0]) &&
-                        (neighbor_cell_ijk[1] >= inner_lower_bound[1] && neighbor_cell_ijk[1] < inner_upper_bound[1]) &&
-                        (neighbor_cell_ijk[2] >= inner_lower_bound[2] && neighbor_cell_ijk[2] < inner_upper_bound[2]);
-
-                    if (!in_outer || in_inner)
-                        return;
-
-                    // m2l vector
-                    Kokkos::Array<scalar_type, 3> m2l_vec;
-                    for (int d = 0; d < 3; ++d)
-                        m2l_vec[d] = m_cell_center_slice(neighbor_id, d) - m_cell_center_slice(index, d);
-
-                    // Load multipole coefficients
-                    Kokkos::Array<complex, num_coefficients> M;
-                    for (int i = 0; i < num_coefficients; i++)
-                    {
-                        M[i].real() = m_slice(neighbor_id, i, 0);
-                        M[i].imag() = m_slice(neighbor_id, i, 1);
-                    }
-
-                    // Compute local contribution
-                    Kokkos::Array<complex, num_coefficients> L;
-                    Operator::Scalar::m2l<p>(M, L, m2l_vec);
-
-                    // Accumulate into team scratch
-                    for (int i = 0; i < num_coefficients; i++)
-                    {
-                        Kokkos::atomic_add(&accum(i), L[i].real());
-                        Kokkos::atomic_add(&accum(i + num_coefficients), L[i].imag());
-                    }
-                });
-
-                team.team_barrier();
-
-                // Add from scratch
-                Kokkos::single(Kokkos::PerTeam(team), [&](){
-                    for (int i = 0; i < num_coefficients; i++)
-                    {
-                        l_slice(index, i, 0) += accum(i);
-                        l_slice(index, i, 1) += accum(i + num_coefficients);
-                    }
-                });
-            });
+        Kokkos::parallel_for( "Canopy::SolverLayer::multipole_to_local",
+                              Kokkos::RangePolicy<execution_space>(
+                                  0, _num_local_multipoles ),
+                              functor );
     }
 
     int rank() const { return _rank; }
