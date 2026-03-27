@@ -227,6 +227,44 @@ struct HaloBoundsReduce
   }
 };
 
+template <class BoundsView, class CellIJKSlice>
+struct RelativeOffsetBoundsReduce
+{
+  BoundsView m2l_bounds;
+  CellIJKSlice l_cell_ijk_slice;
+
+  using value_type = MinMax6;
+
+  KOKKOS_INLINE_FUNCTION
+  void init(value_type& dst) const
+  {
+    dst.v[0] = dst.v[1] = dst.v[2] = INT_MAX;
+    dst.v[3] = dst.v[4] = dst.v[5] = INT_MIN;
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  void join(value_type& dst, const value_type& src) const
+  {
+    for (int d = 0; d < 3; ++d)
+      dst.v[d] = dst.v[d] < src.v[d] ? dst.v[d] : src.v[d];
+
+    for (int d = 3; d < 6; ++d)
+      dst.v[d] = dst.v[d] > src.v[d] ? dst.v[d] : src.v[d];
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  void operator()(const int i, value_type& local) const
+  {
+    for (int d = 0; d < 3; ++d)
+    {
+      const int lower_offset = m2l_bounds(i, d) - l_cell_ijk_slice(i, d);
+      const int upper_offset = m2l_bounds(i, d + 3) - 1 - l_cell_ijk_slice(i, d);
+      local.v[d] = local.v[d] < lower_offset ? local.v[d] : lower_offset;
+      local.v[d + 3] = local.v[d + 3] > upper_offset ? local.v[d + 3] : upper_offset;
+    }
+  }
+};
+
 
 template <class SolverType, std::size_t CellPerTileDim>
 class SolverLayer
@@ -246,6 +284,7 @@ class SolverLayer
 
     //! Multipole/local expansion cutoff
     static constexpr int p = SolverType::p;
+    static constexpr int num_coefficients = ( p + 1 ) * ( p + 1 );
 
     //! Sparse partitioner type
     using sparse_partitioner_type = Cabana::Grid::SparseDimPartitioner<memory_space, CellPerTileDim, num_space_dim>;
@@ -259,6 +298,7 @@ class SolverLayer
     using local_member_types = typename SolverType::local_member_types;
     using multipole_aosoa_type = typename SolverType::multipole_aosoa_type;
     using local_aosoa_type = typename SolverType::local_aosoa_type;
+    typedef Kokkos::View<scalar_type*, memory_space> m2l_translation_view_type;
 
     //! Particle data
     using particle_aosoa_type = typename SolverType::particle_aosoa_type;
@@ -1226,45 +1266,191 @@ class SolverLayer
         Kokkos::fence();
     }
 
-    template <class MultipoleSlice, class CellCenterSlice,
-              class MultipoleCellIJKView, class LocalSlice,
-              class LocalCellIJKSlice, class BoundsView, class BVHType>
+    m2l_translation_view_type
+    buildM2LTranslationTable( const Kokkos::Array<int, 3>& offset_lower,
+                              const Kokkos::Array<int, 3>& offset_upper ) const
+    {
+        Kokkos::Array<int, 3> offset_extent;
+        std::size_t num_offsets = 1;
+        for ( int d = 0; d < 3; ++d )
+        {
+            offset_extent[d] = offset_upper[d] - offset_lower[d] + 1;
+            num_offsets *= static_cast<std::size_t>( offset_extent[d] );
+        }
+
+        m2l_translation_view_type translation(
+            "_m2l_translation",
+            num_offsets * num_coefficients * num_coefficients * 2 );
+        auto translation_host = Kokkos::create_mirror_view( translation );
+
+        for ( int dk_idx = 0; dk_idx < offset_extent[2]; ++dk_idx )
+        {
+            const int dk = offset_lower[2] + dk_idx;
+            for ( int dj_idx = 0; dj_idx < offset_extent[1]; ++dj_idx )
+            {
+                const int dj = offset_lower[1] + dj_idx;
+                for ( int di_idx = 0; di_idx < offset_extent[0]; ++di_idx )
+                {
+                    const int di = offset_lower[0] + di_idx;
+                    const std::size_t offset_index =
+                        static_cast<std::size_t>( di_idx ) +
+                        static_cast<std::size_t>( offset_extent[0] ) *
+                            ( static_cast<std::size_t>( dj_idx ) +
+                              static_cast<std::size_t>( offset_extent[1] ) *
+                                  static_cast<std::size_t>( dk_idx ) );
+                    const std::size_t offset_base =
+                        offset_index * num_coefficients * num_coefficients * 2;
+
+                    if ( Kokkos::abs( di ) <= 2 && Kokkos::abs( dj ) <= 2 &&
+                         Kokkos::abs( dk ) <= 2 )
+                    {
+                        for ( int out = 0; out < num_coefficients; ++out )
+                            for ( int in = 0; in < num_coefficients; ++in )
+                            {
+                                const std::size_t base =
+                                    offset_base +
+                                    ( static_cast<std::size_t>( out ) *
+                                          num_coefficients +
+                                      in ) *
+                                        2;
+                                translation_host( base ) = 0.0;
+                                translation_host( base + 1 ) = 0.0;
+                            }
+                        continue;
+                    }
+
+                    Kokkos::Array<scalar_type, 3> offset_vec = {
+                        static_cast<scalar_type>( di ) * _cell_size[0],
+                        static_cast<scalar_type>( dj ) * _cell_size[1],
+                        static_cast<scalar_type>( dk ) * _cell_size[2] };
+
+                    scalar_type rho, alpha, beta;
+                    Operator::cart2sph( offset_vec[0], offset_vec[1], offset_vec[2],
+                                        rho, alpha, beta );
+
+                    for ( int j = 0; j <= p; ++j )
+                    {
+                        for ( int k = -j; k <= j; ++k )
+                        {
+                            const int out_idx = Operator::Scalar::index( j, k );
+                            const scalar_type A_jk =
+                                Operator::Scalar::compute_A<scalar_type>( j, k );
+
+                            for ( int n = 0; n <= p; ++n )
+                            {
+                                const scalar_type sign = ( n % 2 == 0 ) ? 1.0 : -1.0;
+                                const scalar_type rho_jn =
+                                    Kokkos::pow( rho, j + n + 1 );
+
+                                for ( int m = -n; m <= n; ++m )
+                                {
+                                    const int in_idx =
+                                        Operator::Scalar::index( n, m );
+                                    const complex i_unit( 0.0, 1.0 );
+                                    const int power = Kokkos::abs( k - m ) -
+                                                      Kokkos::abs( k ) -
+                                                      Kokkos::abs( m );
+                                    const complex i_term =
+                                        Kokkos::pow( i_unit, power );
+                                    const scalar_type A_nm =
+                                        Operator::Scalar::compute_A<scalar_type>(
+                                            n, m );
+                                    const complex Y_jn_mk =
+                                        Operator::Scalar::Ynm(
+                                            j + n, m - k, alpha, beta );
+                                    const scalar_type A_jn_mk =
+                                        Operator::Scalar::compute_A<scalar_type>(
+                                            j + n, m - k );
+
+                                    const complex entry =
+                                        ( i_term * A_nm * A_jk * Y_jn_mk ) /
+                                        ( sign * A_jn_mk * rho_jn );
+
+                                    const std::size_t base =
+                                        offset_base +
+                                        ( static_cast<std::size_t>( out_idx ) *
+                                              num_coefficients +
+                                          in_idx ) *
+                                            2;
+                                    translation_host( base ) = entry.real();
+                                    translation_host( base + 1 ) = entry.imag();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Kokkos::deep_copy( translation, translation_host );
+        return translation;
+    }
+
+    template <class MultipoleSlice, class MultipoleCellIJKView, class LocalSlice,
+              class LocalCellIJKSlice, class BoundsView, class TranslationView,
+              class BVHType>
     struct MultipoleToLocalFunctor
     {
-        static constexpr int num_coefficients = ( p + 1 ) * ( p + 1 );
-
         MultipoleSlice m_slice;
-        CellCenterSlice m_cell_center_slice;
         MultipoleCellIJKView m_cell_ijk;
         LocalSlice l_slice;
         LocalCellIJKSlice l_cell_ijk_slice;
         BoundsView m2l_bounds;
+        TranslationView m2l_translation;
         BVHType bvh;
         Kokkos::Array<scalar_type, 3> low_corner;
         Kokkos::Array<scalar_type, 3> cell_size;
+        Kokkos::Array<int, 3> offset_lower;
+        Kokkos::Array<int, 3> offset_extent;
 
         struct QueryCallback
         {
             MultipoleSlice m_slice;
-            CellCenterSlice m_cell_center_slice;
             MultipoleCellIJKView m_cell_ijk;
             Kokkos::Array<int, 3> target_cell_ijk;
             scalar_type* accum;
-            Kokkos::Array<scalar_type, 3> target_center;
+            TranslationView m2l_translation;
+            Kokkos::Array<int, 3> offset_lower;
+            Kokkos::Array<int, 3> offset_extent;
+
+            KOKKOS_INLINE_FUNCTION
+            int offsetIndex( const int di, const int dj, const int dk ) const
+            {
+                return ( di - offset_lower[0] ) +
+                       offset_extent[0] *
+                           ( ( dj - offset_lower[1] ) +
+                             offset_extent[1] * ( dk - offset_lower[2] ) );
+            }
+
+            KOKKOS_INLINE_FUNCTION
+            std::size_t translationIndex( const int offset_index,
+                                          const int out_idx, const int in_idx,
+                                          const int component ) const
+            {
+                return ( static_cast<std::size_t>( offset_index ) *
+                             num_coefficients * num_coefficients +
+                         ( static_cast<std::size_t>( out_idx ) *
+                               num_coefficients +
+                           in_idx ) ) *
+                           2 +
+                       component;
+            }
 
             KOKKOS_FUNCTION
             QueryCallback( MultipoleSlice m_slice_,
-                           CellCenterSlice m_cell_center_slice_,
                            MultipoleCellIJKView m_cell_ijk_,
                            Kokkos::Array<int, 3> target_cell_ijk_,
                            scalar_type* accum_,
-                           Kokkos::Array<scalar_type, 3> target_center_ )
+                           TranslationView m2l_translation_,
+                           Kokkos::Array<int, 3> offset_lower_,
+                           Kokkos::Array<int, 3> offset_extent_ )
                 : m_slice( m_slice_ )
-                , m_cell_center_slice( m_cell_center_slice_ )
                 , m_cell_ijk( m_cell_ijk_ )
                 , target_cell_ijk( target_cell_ijk_ )
                 , accum( accum_ )
-                , target_center( target_center_ )
+                , m2l_translation( m2l_translation_ )
+                , offset_lower( offset_lower_ )
+                , offset_extent( offset_extent_ )
             {}
 
             template <class Predicate, class ValuePair>
@@ -1281,25 +1467,38 @@ class SolverLayer
                      Kokkos::abs( dk ) <= 2 )
                     return;
 
-                Kokkos::Array<scalar_type, 3> m2l_vec;
-                for ( int d = 0; d < 3; ++d )
-                    m2l_vec[d] =
-                        m_cell_center_slice( neighbor_id, d ) - target_center[d];
-
-                Kokkos::Array<complex, num_coefficients> M;
+                scalar_type source_real[num_coefficients];
+                scalar_type source_imag[num_coefficients];
                 for ( int i = 0; i < num_coefficients; ++i )
                 {
-                    M[i].real() = m_slice( neighbor_id, i, 0 );
-                    M[i].imag() = m_slice( neighbor_id, i, 1 );
+                    source_real[i] = m_slice( neighbor_id, i, 0 );
+                    source_imag[i] = m_slice( neighbor_id, i, 1 );
                 }
 
-                Kokkos::Array<complex, num_coefficients> L;
-                Operator::Scalar::m2l<p>( M, L, m2l_vec );
+                const int offset_index = offsetIndex( di, dj, dk );
 
-                for ( int i = 0; i < num_coefficients; ++i )
+                for ( int out_idx = 0; out_idx < num_coefficients; ++out_idx )
                 {
-                    accum[i] += L[i].real();
-                    accum[i + num_coefficients] += L[i].imag();
+                    scalar_type accum_real = accum[out_idx];
+                    scalar_type accum_imag = accum[out_idx + num_coefficients];
+
+                    for ( int in_idx = 0; in_idx < num_coefficients; ++in_idx )
+                    {
+                        const scalar_type tr =
+                            m2l_translation( translationIndex(
+                                offset_index, out_idx, in_idx, 0 ) );
+                        const scalar_type ti =
+                            m2l_translation( translationIndex(
+                                offset_index, out_idx, in_idx, 1 ) );
+                        const scalar_type mr = source_real[in_idx];
+                        const scalar_type mi = source_imag[in_idx];
+
+                        accum_real += tr * mr - ti * mi;
+                        accum_imag += tr * mi + ti * mr;
+                    }
+
+                    accum[out_idx] = accum_real;
+                    accum[out_idx + num_coefficients] = accum_imag;
                 }
             }
         };
@@ -1318,12 +1517,10 @@ class SolverLayer
             for ( int i = 0; i < 2 * num_coefficients; ++i )
                 accum[i] = 0.0;
 
-            Kokkos::Array<scalar_type, 3> target_center;
             ArborX::Point<3, scalar_type> min_corner;
             ArborX::Point<3, scalar_type> max_corner;
             for ( int d = 0; d < 3; ++d )
             {
-                target_center[d] = m_cell_center_slice( index, d );
                 min_corner[d] = low_corner[d] + outer_bounds[d] * cell_size[d];
                 max_corner[d] =
                     low_corner[d] + outer_bounds[d + 3] * cell_size[d];
@@ -1331,8 +1528,9 @@ class SolverLayer
 
             ArborX::Box<3, scalar_type> query_box( min_corner, max_corner );
 
-            QueryCallback callback( m_slice, m_cell_center_slice, m_cell_ijk,
-                                    cell_ijk, accum, target_center );
+            QueryCallback callback( m_slice, m_cell_ijk, cell_ijk, accum,
+                                    m2l_translation, offset_lower,
+                                    offset_extent );
             bvh.query( ArborX::Experimental::PerThread{},
                        ArborX::intersects( query_box ), callback );
 
@@ -1366,6 +1564,31 @@ class SolverLayer
         auto l_slice = Cabana::slice<0>(_locals);
         auto l_cell_ijk_slice = Cabana::slice<1>(_locals);
 
+        if ( _num_local_multipoles == 0 )
+            return;
+
+        MinMax6 offset_bounds_result;
+        Kokkos::parallel_reduce(
+            "Canopy::SolverLayer::m2l_offset_bounds",
+            Kokkos::RangePolicy<execution_space>( 0, _num_local_multipoles ),
+            RelativeOffsetBoundsReduce<decltype( m2l_bounds ),
+                                       decltype( l_cell_ijk_slice )>{
+                m2l_bounds, l_cell_ijk_slice },
+            offset_bounds_result );
+
+        Kokkos::Array<int, 3> offset_lower;
+        Kokkos::Array<int, 3> offset_upper;
+        Kokkos::Array<int, 3> offset_extent;
+        for ( int d = 0; d < 3; ++d )
+        {
+            offset_lower[d] = offset_bounds_result.v[d];
+            offset_upper[d] = offset_bounds_result.v[d + 3];
+            offset_extent[d] = offset_upper[d] - offset_lower[d] + 1;
+        }
+
+        auto m2l_translation =
+            buildM2LTranslationTable( offset_lower, offset_upper );
+
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
 
@@ -1374,19 +1597,19 @@ class SolverLayer
             space, ArborX::Experimental::attach_indices<int>( m_cell_center_slice ) );
 
         using MultipoleSlice = decltype(m_slice);
-        using CellCenterSlice = decltype(m_cell_center_slice);
         using MultipoleCellIJKView = decltype(m_cell_ijk);
         using LocalSlice = decltype(l_slice);
         using LocalCellIJKSlice = decltype(l_cell_ijk_slice);
         using BoundsView = decltype(m2l_bounds);
+        using TranslationView = decltype(m2l_translation);
         using BvhT = decltype(bvh);
 
-        MultipoleToLocalFunctor<MultipoleSlice, CellCenterSlice,
-                                MultipoleCellIJKView, LocalSlice,
-                                LocalCellIJKSlice, BoundsView, BvhT>
-            functor{m_slice, m_cell_center_slice, m_cell_ijk, l_slice,
-                    l_cell_ijk_slice, m2l_bounds, bvh, low_corner,
-                    cell_size};
+        MultipoleToLocalFunctor<MultipoleSlice, MultipoleCellIJKView,
+                                LocalSlice, LocalCellIJKSlice, BoundsView,
+                                TranslationView, BvhT>
+            functor{m_slice, m_cell_ijk, l_slice, l_cell_ijk_slice,
+                    m2l_bounds, m2l_translation, bvh, low_corner, cell_size,
+                    offset_lower, offset_extent};
 
         Kokkos::parallel_for( "Canopy::SolverLayer::multipole_to_local",
                               Kokkos::RangePolicy<execution_space>(

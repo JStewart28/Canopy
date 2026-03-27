@@ -107,7 +107,7 @@ class Solver
     //! Dimension number
     static constexpr std::size_t num_space_dim = 3;
     //! Scalar type
-    using scalar_type = metadata::scalar_type;
+    using scalar_type = typename metadata::scalar_type;
     //! Mesh type
     using mesh_type = Cabana::Grid::SparseMesh<scalar_type, num_space_dim>;
 
@@ -130,7 +130,7 @@ class Solver
     using local_aosoa_type = Cabana::AoSoA<local_member_types, memory_space, cell_per_tile_dim>;
 
     //! Particle data
-    using particle_aosoa_type = metadata::aosoa_type;
+    using particle_aosoa_type = typename metadata::aosoa_type;
     
     Solver( const std::array<scalar_type, 3>& global_low_corner,
           const std::array<scalar_type, 3>& global_high_corner,
