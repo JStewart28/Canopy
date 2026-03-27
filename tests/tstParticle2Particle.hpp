@@ -43,22 +43,6 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD_f, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
-    
-    // The tree depth should always be at least three, but this check is here just in case.
-    // If the depth is less than 3, this test may not work correctly.
-    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
-
-    // Check mesh information for leaf layer
-    int cells_per_dimension_leaf = cells_per_tile * leaf_tiles;
-    Kokkos::Array<scalar_type, 3> cell_size;
-    for (int i = 0; i < 3; ++i)
-    {
-        cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_dimension_leaf;
-    }
-    ASSERT_EQ(tree->layer(0)->cellsPerDim(), cells_per_dimension_leaf) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
-    ASSERT_EQ(tree->layer(0)->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
-    ASSERT_EQ(tree->layer(0)->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
 
     // Create the data on rank 0. It will automatically be distributed correctly when
     // filled into the tree. There must be enough particles so that the target point resides
@@ -196,17 +180,35 @@ void testParticle2Particle0(int points_per_proc_in, bool balanced)
     }
 
     // Copy to device
-    auto particle_aosoa =
-        Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
-        
+    auto particle_aosoa = std::make_shared<particle_aosoa_type_f>("particle_aosoa", particle_aosoa_host.size());
+    Cabana::deep_copy(*particle_aosoa, particle_aosoa_host);
+
     // Fill the tree. This migrates particles to their correct rank.
     bool run_load_balance = !balanced;
+    tree->reset();
+    tree->build();
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     tree->computeP2P();
 
+    // The tree depth should always be at least three, but this check is here just in case.
+    // If the depth is less than 3, this test may not work correctly.
+    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
+    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
+
+    // Check mesh information for leaf layer
+    int cells_per_dimension_leaf = cells_per_tile * leaf_tiles;
+    Kokkos::Array<scalar_type, 3> cell_size;
+    for (int i = 0; i < 3; ++i)
+    {
+        cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_dimension_leaf;
+    }
+    ASSERT_EQ(tree->layer(0)->cellsPerDim(), cells_per_dimension_leaf) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
+    ASSERT_EQ(tree->layer(0)->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
+    ASSERT_EQ(tree->layer(0)->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
+
     // Gather all particles from the tree back to rank 0 for testing
-    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), tree->data());
+    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), *(tree->data()));
     particle_aosoa_type_f_h tree_particles("tree_particles", tmp.size());
     Cabana::deep_copy(tree_particles, tmp);
 

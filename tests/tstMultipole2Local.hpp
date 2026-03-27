@@ -165,22 +165,12 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD_f, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
-    // The tree depth should always be at least three, but this check is here just in case.
-    // If the depth is less than 3, this test may not work correctly.
-    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
-
-    // Check mesh information for leaf layer (layer 0)
-    auto layer = tree->layer(0);
     int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
     Kokkos::Array<scalar_type, 3> cell_size;
     for (int i = 0; i < 3; ++i)
     {
         cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_leaf_dimension;
     }
-    ASSERT_EQ(layer->cellsPerDim(), cells_per_leaf_dimension) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
-    ASSERT_EQ(layer->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
-    ASSERT_EQ(layer->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
 
     // Create the data on rank 0. It will automatically be distributed correctly when
     // filled into the tree. There must be enough particles so that the target point resides
@@ -302,15 +292,23 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     MPI_Bcast(direct_potentials.data(), total_points, data_type, 0, MPI_COMM_WORLD );
 
     // Copy to device
-    auto particle_aosoa =
-        Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
-        
+    auto particle_aosoa = std::make_shared<particle_aosoa_type_f>("particle_aosoa", particle_aosoa_host.size());
+    Cabana::deep_copy(*particle_aosoa, particle_aosoa_host);
+
     // Fill the tree
     bool run_load_balance = !balanced;
+    tree->reset();
+    tree->build();
     tree->create_multipoles(particle_aosoa, run_load_balance);
 
     // Just test single-layer multipole to local conversion.
     tree->multipole_to_local();
+
+    // Check mesh information for leaf layer (layer 0)
+    auto layer = tree->layer(0);
+    ASSERT_EQ(layer->cellsPerDim(), cells_per_leaf_dimension) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
+    ASSERT_EQ(layer->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
+    ASSERT_EQ(layer->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
 
     // Get locals
     auto locals = layer->locals();
@@ -318,7 +316,7 @@ void testMultipole2Local0(int points_per_proc_in, bool balanced)
     auto locals_slice = Cabana::slice<0>(locals);
 
     // Get particles
-    auto tree_particles = tree->data();
+    auto& tree_particles = *(tree->data());
     auto tree_particle_positions = Cabana::slice<MD_f::pos>(tree_particles);
 
     // Sort the particles by increasing cell_id
@@ -435,11 +433,6 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     if (red_factor < 2) red_factor = 2;
     auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
-    
-    // The tree depth should always be at least three, but this check is here just in case.
-    // If the depth is less than 3, this test may not work correctly.
-    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
 
     // Check mesh information for leaf layer
     int cells_per_leaf_dimension = cells_per_tile * leaf_tiles;
@@ -448,9 +441,6 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     {
         cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_leaf_dimension;
     }
-    ASSERT_EQ(tree->layer(0)->cellsPerDim(), cells_per_leaf_dimension) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
-    ASSERT_EQ(tree->layer(0)->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
-    ASSERT_EQ(tree->layer(0)->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
 
     // Create the data on rank 0. It will automatically be distributed correctly when
     // filled into the tree. There must be enough particles so that the target point resides
@@ -578,20 +568,30 @@ void testMultipole2Local1(int points_per_proc_in, bool use_solver_l2p, bool bala
     MPI_Bcast(direct_potentials.data(), total_points, data_type, 0, MPI_COMM_WORLD );
 
     // Copy to device
-    auto particle_aosoa =
-        Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
-        
+    auto particle_aosoa = std::make_shared<particle_aosoa_type>("particle_aosoa", particle_aosoa_host.size());
+    Cabana::deep_copy(*particle_aosoa, particle_aosoa_host);
+
     // Fill the tree
     bool run_load_balance = !balanced;
+    tree->reset();
+    tree->build();
     tree->create_multipoles(particle_aosoa, run_load_balance);
-
     tree->multipole_to_local();
 
     if (use_solver_l2p)
         tree->computeL2P();
+    
+    // The tree depth should always be at least three, but this check is here just in case.
+    // If the depth is less than 3, this test may not work correctly.
+    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
+    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
 
-    particle_aosoa_type tree_particles("tree_particles", tree->data().size());
-    Cabana::deep_copy(tree_particles, tree->data());
+    ASSERT_EQ(tree->layer(0)->cellsPerDim(), cells_per_leaf_dimension) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
+    ASSERT_EQ(tree->layer(0)->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
+    ASSERT_EQ(tree->layer(0)->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
+
+    particle_aosoa_type tree_particles("tree_particles", tree->data()->size());
+    Cabana::deep_copy(tree_particles, *(tree->data()));
 
     // Remove ghost particles
     // printf("R%d: num owned particles: %d\n", rank, tree->numOwnedParticles());

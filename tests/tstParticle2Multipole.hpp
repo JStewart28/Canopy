@@ -48,13 +48,9 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD, cells_per_tile, p>(
             global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
     
-    // The tree depth should always be at least three, but this check is here just in case.
-    // If the depth is less than 3, this test may not work correctly.
-    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    // ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Solver depth must be at least 3.\n";
     
     // Create the data
-     int total_points = points_per_proc_in;
+    int total_points = points_per_proc_in;
     int owned_points = (rank == 0) ? (total_points) : 0;
     Kokkos::View<scalar_type* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
                                                           owned_points );
@@ -112,12 +108,20 @@ void testParticle2Multipole(int points_per_proc_in, bool balanced)
     MPI_Bcast(&potential_direct, 1, data_type, 0, MPI_COMM_WORLD);
 
     // Copy to device
-    auto particle_aosoa =
-        Cabana::create_mirror_view_and_copy( TEST_MEMSPACE(), particle_aosoa_host );
-        
+    auto particle_aosoa = std::make_shared<particle_aosoa_type>("particle_aosoa", particle_aosoa_host.size());
+    Cabana::deep_copy(*particle_aosoa, particle_aosoa_host);
+
     // Fill the tree
     bool run_load_balance = !balanced;
+    tree->reset();
+    tree->build();
     tree->create_multipoles(particle_aosoa, run_load_balance);
+
+    // The tree depth should always be at least three, but this check is here just in case.
+    // If the depth is less than 3, this test may not work correctly.
+    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
+    // ASSERT_GE(tree->numLayers(), 3) << "testUpwardsAggregation: Error: Solver depth must be at least 3.\n";
+
 
     /***********************************************
      * Check the data from root layer
