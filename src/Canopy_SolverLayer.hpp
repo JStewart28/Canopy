@@ -638,7 +638,9 @@ class SolverLayer
         _multipoles = multipole_aosoa_type("_multipoles", num_cells_activated);
         _locals = local_aosoa_type("_locals", num_cells_activated);
         _m2l_bounds = Kokkos::View<int*[6], memory_space>("_m2l_bounds", num_cells_activated);
+        _multipole_cell_ijk = Kokkos::View<int*[3], memory_space>("_multipole_cell_ijk", num_cells_activated);
         Kokkos::deep_copy(_m2l_bounds, 0);
+        Kokkos::deep_copy(_multipole_cell_ijk, 0);
         
         // Now use the incoming data to compute p2m, if layer 0, or m2m, if layer > 0.
         auto coefficient_view_index = _coefficient_view_index;
@@ -646,6 +648,7 @@ class SolverLayer
         auto cell_center_slice = Cabana::slice<1>(_multipoles);
         auto local_coefficients_slice = Cabana::slice<0>(_locals);
         auto local_cell_ijk_slice = Cabana::slice<1>(_locals);
+        auto multipole_cell_ijk = _multipole_cell_ijk;
 
         // Zero newly-initialized values. Cabana does not guarantee initialization to 0
         Cabana::deep_copy(multipole_coefficients_slice, 0.0);
@@ -683,7 +686,12 @@ class SolverLayer
                     // Save cell center
                     auto cell_center_array = cellCenter(cell_activated_ijk[0], cell_activated_ijk[1], cell_activated_ijk[2], low_corner, cell_size);
                     for (int i = 0; i < 3; i++)
+                    {
                         cell_center_slice(index, i) = cell_center_array[i];
+                        const int cell_ijk = static_cast<int>(cell_activated_ijk[i]);
+                        local_cell_ijk_slice(index, i) = cell_ijk;
+                        multipole_cell_ijk(index, i) = cell_ijk;
+                    }
                 }
             });
 
@@ -1128,7 +1136,7 @@ class SolverLayer
         auto id_slice = Cabana::slice<0>(ids_ranks);
         auto rank_slice = Cabana::slice<1>(ids_ranks);
         auto cell_center_slice = Cabana::slice<1>(_multipoles);
-        auto coefficient_slice = Cabana::slice<0>(_multipoles);
+        auto multipole_cell_ijk = _multipole_cell_ijk;
 
         // Hold size of exports
         Kokkos::View<int, memory_space> counter("counter");
@@ -1138,22 +1146,18 @@ class SolverLayer
         Kokkos::RangePolicy<execution_space>(0, num_cells),
         KOKKOS_LAMBDA(const int m_index)
         {
-            // Convert cell center to cell ijk
-            auto cell_ijk = position2ijk(cell_center_slice( m_index, 0 ), cell_center_slice( m_index, 1 ), cell_center_slice( m_index, 2 ),
-                low_corner, cell_size);
-
             // Check if this cell center is within a rank's halo bound
             for (int r = 0; r < comm_size; ++r)
             {
                 if (rank == r)
                     continue;
 
-                if ( cell_ijk[0] >= all_mhalo_outer_bounds(r, 0) &&
-                    cell_ijk[0] <  all_mhalo_outer_bounds(r, 3) &&
-                    cell_ijk[1] >= all_mhalo_outer_bounds(r, 1) &&
-                    cell_ijk[1] <  all_mhalo_outer_bounds(r, 4) &&
-                    cell_ijk[2] >= all_mhalo_outer_bounds(r, 2) &&
-                    cell_ijk[2] <  all_mhalo_outer_bounds(r, 5) )
+                if ( multipole_cell_ijk(m_index, 0) >= all_mhalo_outer_bounds(r, 0) &&
+                    multipole_cell_ijk(m_index, 0) <  all_mhalo_outer_bounds(r, 3) &&
+                    multipole_cell_ijk(m_index, 1) >= all_mhalo_outer_bounds(r, 1) &&
+                    multipole_cell_ijk(m_index, 1) <  all_mhalo_outer_bounds(r, 4) &&
+                    multipole_cell_ijk(m_index, 2) >= all_mhalo_outer_bounds(r, 2) &&
+                    multipole_cell_ijk(m_index, 2) <  all_mhalo_outer_bounds(r, 5) )
                 {
                     auto index = Kokkos::atomic_fetch_add(&counter(), 1);
                     id_slice(index) = m_index;
@@ -1176,30 +1180,54 @@ class SolverLayer
         _num_ghost_multipoles = halo.numGhost();
         _multipoles.resize(_num_local_multipoles + _num_ghost_multipoles);
         Cabana::gather(halo, _multipoles);
-        
+
+        const int num_local_multipoles = static_cast<int>(_num_local_multipoles);
+        const int total_multipoles =
+            static_cast<int>(_num_local_multipoles + _num_ghost_multipoles);
+        auto local_multipole_cell_ijk = _multipole_cell_ijk;
+        _multipole_cell_ijk = Kokkos::View<int*[3], memory_space>(
+            "_multipole_cell_ijk", total_multipoles);
+        multipole_cell_ijk = _multipole_cell_ijk;
+
         // Add haloed multipole data to _ijk2index map.
         cell_center_slice = Cabana::slice<1>(_multipoles);
-        coefficient_slice = Cabana::slice<0>(_multipoles);
-        Kokkos::parallel_for("add_haloed_multipoles_to_ijk2index",
-        Kokkos::RangePolicy<execution_space>(_num_local_multipoles, _num_local_multipoles + _num_ghost_multipoles),
+        Kokkos::parallel_for("fill_haloed_multipole_cell_ijk",
+        Kokkos::RangePolicy<execution_space>(0, total_multipoles),
         KOKKOS_LAMBDA(const int m_index)
         {
-            // Convert cell center to cell ijk
-            auto cell_ijk = position2ijk(cell_center_slice( m_index, 0 ), cell_center_slice( m_index, 1 ), cell_center_slice( m_index, 2 ),
-                low_corner, cell_size);
-
-            // Insert into map
-            auto result = ijk2index.insert(cell_ijk, m_index);
-            
-            if (!result.success())
+            if (m_index < num_local_multipoles)
             {
-                printf("L%d: R%d: Error inserting haloed multipole!\n", layer_number, rank);
+                for (int d = 0; d < 3; ++d)
+                    multipole_cell_ijk(m_index, d) = local_multipole_cell_ijk(m_index, d);
             }
+            else
+            {
+                auto cell_ijk = position2ijk(
+                    cell_center_slice(m_index, 0), cell_center_slice(m_index, 1),
+                    cell_center_slice(m_index, 2), low_corner, cell_size);
+                for (int d = 0; d < 3; ++d)
+                    multipole_cell_ijk(m_index, d) = static_cast<int>(cell_ijk[d]);
+            }
+        });
+        Kokkos::parallel_for("add_haloed_multipoles_to_ijk2index",
+        Kokkos::RangePolicy<execution_space>(num_local_multipoles, total_multipoles),
+        KOKKOS_LAMBDA(const int m_index)
+        {
+            Kokkos::Array<std::size_t, 3> cell_ijk = {
+                static_cast<std::size_t>(multipole_cell_ijk(m_index, 0)),
+                static_cast<std::size_t>(multipole_cell_ijk(m_index, 1)),
+                static_cast<std::size_t>(multipole_cell_ijk(m_index, 2))
+            };
+
+            auto result = ijk2index.insert(cell_ijk, m_index);
+            if (!result.success())
+                printf("L%d: R%d: Error inserting haloed multipole!\n", layer_number, rank);
         });
         Kokkos::fence();
     }
 
-    template <class MultipoleSlice, class CellCenterSlice, class LocalSlice,
+    template <class MultipoleSlice, class CellCenterSlice,
+              class MultipoleCellIJKView, class LocalSlice,
               class LocalCellIJKSlice, class BoundsView, class BVHType>
     struct MultipoleToLocalFunctor
     {
@@ -1207,45 +1235,36 @@ class SolverLayer
 
         MultipoleSlice m_slice;
         CellCenterSlice m_cell_center_slice;
+        MultipoleCellIJKView m_cell_ijk;
         LocalSlice l_slice;
         LocalCellIJKSlice l_cell_ijk_slice;
         BoundsView m2l_bounds;
         BVHType bvh;
         Kokkos::Array<scalar_type, 3> low_corner;
         Kokkos::Array<scalar_type, 3> cell_size;
-        int cells_per_dim;
 
         struct QueryCallback
         {
             MultipoleSlice m_slice;
             CellCenterSlice m_cell_center_slice;
-            Kokkos::Array<int, 6> outer_bounds;
-            Kokkos::Array<std::size_t, 3> inner_lower_bound;
-            Kokkos::Array<std::size_t, 3> inner_upper_bound;
+            MultipoleCellIJKView m_cell_ijk;
+            Kokkos::Array<int, 3> target_cell_ijk;
             scalar_type* accum;
             Kokkos::Array<scalar_type, 3> target_center;
-            Kokkos::Array<scalar_type, 3> low_corner;
-            Kokkos::Array<scalar_type, 3> cell_size;
 
             KOKKOS_FUNCTION
             QueryCallback( MultipoleSlice m_slice_,
                            CellCenterSlice m_cell_center_slice_,
-                           Kokkos::Array<int, 6> outer_bounds_,
-                           Kokkos::Array<std::size_t, 3> inner_lower_bound_,
-                           Kokkos::Array<std::size_t, 3> inner_upper_bound_,
+                           MultipoleCellIJKView m_cell_ijk_,
+                           Kokkos::Array<int, 3> target_cell_ijk_,
                            scalar_type* accum_,
-                           Kokkos::Array<scalar_type, 3> target_center_,
-                           Kokkos::Array<scalar_type, 3> low_corner_,
-                           Kokkos::Array<scalar_type, 3> cell_size_ )
+                           Kokkos::Array<scalar_type, 3> target_center_ )
                 : m_slice( m_slice_ )
                 , m_cell_center_slice( m_cell_center_slice_ )
-                , outer_bounds( outer_bounds_ )
-                , inner_lower_bound( inner_lower_bound_ )
-                , inner_upper_bound( inner_upper_bound_ )
+                , m_cell_ijk( m_cell_ijk_ )
+                , target_cell_ijk( target_cell_ijk_ )
                 , accum( accum_ )
                 , target_center( target_center_ )
-                , low_corner( low_corner_ )
-                , cell_size( cell_size_ )
             {}
 
             template <class Predicate, class ValuePair>
@@ -1254,35 +1273,12 @@ class SolverLayer
             {
                 int neighbor_id = static_cast<int>( value_pair.index );
 
-                auto neighbor_cell_ijk =
-                    position2ijk( m_cell_center_slice( neighbor_id, 0 ),
-                                  m_cell_center_slice( neighbor_id, 1 ),
-                                  m_cell_center_slice( neighbor_id, 2 ),
-                                  low_corner, cell_size );
+                const int di = m_cell_ijk( neighbor_id, 0 ) - target_cell_ijk[0];
+                const int dj = m_cell_ijk( neighbor_id, 1 ) - target_cell_ijk[1];
+                const int dk = m_cell_ijk( neighbor_id, 2 ) - target_cell_ijk[2];
 
-                const bool in_outer =
-                    ( neighbor_cell_ijk[0] >=
-                          static_cast<std::size_t>( outer_bounds[0] ) &&
-                      neighbor_cell_ijk[0] <
-                          static_cast<std::size_t>( outer_bounds[3] ) ) &&
-                    ( neighbor_cell_ijk[1] >=
-                          static_cast<std::size_t>( outer_bounds[1] ) &&
-                      neighbor_cell_ijk[1] <
-                          static_cast<std::size_t>( outer_bounds[4] ) ) &&
-                    ( neighbor_cell_ijk[2] >=
-                          static_cast<std::size_t>( outer_bounds[2] ) &&
-                      neighbor_cell_ijk[2] <
-                          static_cast<std::size_t>( outer_bounds[5] ) );
-
-                const bool in_inner =
-                    ( neighbor_cell_ijk[0] >= inner_lower_bound[0] &&
-                      neighbor_cell_ijk[0] < inner_upper_bound[0] ) &&
-                    ( neighbor_cell_ijk[1] >= inner_lower_bound[1] &&
-                      neighbor_cell_ijk[1] < inner_upper_bound[1] ) &&
-                    ( neighbor_cell_ijk[2] >= inner_lower_bound[2] &&
-                      neighbor_cell_ijk[2] < inner_upper_bound[2] );
-
-                if ( !in_outer || in_inner )
+                if ( Kokkos::abs( di ) <= 2 && Kokkos::abs( dj ) <= 2 &&
+                     Kokkos::abs( dk ) <= 2 )
                     return;
 
                 Kokkos::Array<scalar_type, 3> m2l_vec;
@@ -1310,22 +1306,9 @@ class SolverLayer
 
         KOKKOS_FUNCTION void operator()( const int index ) const
         {
-            auto cell_ijk =
-                position2ijk( m_cell_center_slice( index, 0 ),
-                              m_cell_center_slice( index, 1 ),
-                              m_cell_center_slice( index, 2 ), low_corner,
-                              cell_size );
-
-            Kokkos::Array<std::size_t, 3> inner_lower_bound;
-            Kokkos::Array<std::size_t, 3> inner_upper_bound;
+            Kokkos::Array<int, 3> cell_ijk;
             for ( int d = 0; d < 3; ++d )
-            {
-                inner_upper_bound[d] = Kokkos::min(
-                    static_cast<int>( cell_ijk[d] ) + 3, cells_per_dim );
-                inner_lower_bound[d] =
-                    Kokkos::max( static_cast<int>( cell_ijk[d] ) - 2, 0 );
-                l_cell_ijk_slice( index, d ) = cell_ijk[d];
-            }
+                cell_ijk[d] = l_cell_ijk_slice( index, d );
 
             Kokkos::Array<int, 6> outer_bounds;
             for ( int i = 0; i < 6; ++i )
@@ -1348,10 +1331,8 @@ class SolverLayer
 
             ArborX::Box<3, scalar_type> query_box( min_corner, max_corner );
 
-            QueryCallback callback( m_slice, m_cell_center_slice, outer_bounds,
-                                    inner_lower_bound, inner_upper_bound,
-                                    accum, target_center, low_corner,
-                                    cell_size );
+            QueryCallback callback( m_slice, m_cell_center_slice, m_cell_ijk,
+                                    cell_ijk, accum, target_center );
             bvh.query( ArborX::Experimental::PerThread{},
                        ArborX::intersects( query_box ), callback );
 
@@ -1381,6 +1362,7 @@ class SolverLayer
         auto m2l_bounds = _m2l_bounds;
         auto m_slice = Cabana::slice<0>(_multipoles);
         auto m_cell_center_slice = Cabana::slice<1>(_multipoles);
+        auto m_cell_ijk = _multipole_cell_ijk;
         auto l_slice = Cabana::slice<0>(_locals);
         auto l_cell_ijk_slice = Cabana::slice<1>(_locals);
 
@@ -1393,15 +1375,18 @@ class SolverLayer
 
         using MultipoleSlice = decltype(m_slice);
         using CellCenterSlice = decltype(m_cell_center_slice);
+        using MultipoleCellIJKView = decltype(m_cell_ijk);
         using LocalSlice = decltype(l_slice);
         using LocalCellIJKSlice = decltype(l_cell_ijk_slice);
         using BoundsView = decltype(m2l_bounds);
         using BvhT = decltype(bvh);
 
-        MultipoleToLocalFunctor<MultipoleSlice, CellCenterSlice, LocalSlice,
+        MultipoleToLocalFunctor<MultipoleSlice, CellCenterSlice,
+                                MultipoleCellIJKView, LocalSlice,
                                 LocalCellIJKSlice, BoundsView, BvhT>
-            functor{m_slice, m_cell_center_slice, l_slice, l_cell_ijk_slice,
-                    m2l_bounds, bvh, low_corner, cell_size, _cells_per_dim};
+            functor{m_slice, m_cell_center_slice, m_cell_ijk, l_slice,
+                    l_cell_ijk_slice, m2l_bounds, bvh, low_corner,
+                    cell_size};
 
         Kokkos::parallel_for( "Canopy::SolverLayer::multipole_to_local",
                               Kokkos::RangePolicy<execution_space>(
@@ -1491,6 +1476,7 @@ class SolverLayer
 
     // Multipole coefficients for each cell.
     multipole_aosoa_type _multipoles;
+    Kokkos::View<int*[3], memory_space> _multipole_cell_ijk;
     std::size_t _num_local_multipoles;
     std::size_t _num_ghost_multipoles;
 
