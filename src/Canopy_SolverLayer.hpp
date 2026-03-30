@@ -1278,6 +1278,10 @@ class SolverLayer
             num_offsets *= static_cast<std::size_t>( offset_extent[d] );
         }
 
+        // Store all translation matrices in a flat view indexed by:
+        //   offset -> output coefficient -> input coefficient -> real/imag part.
+        // Each entry is the complex scalar that maps one multipole coefficient
+        // into one local coefficient for a fixed relative cell offset.
         m2l_translation_view_type translation(
             "_m2l_translation",
             num_offsets * num_coefficients * num_coefficients * 2 );
@@ -1301,9 +1305,11 @@ class SolverLayer
                     const std::size_t offset_base =
                         offset_index * num_coefficients * num_coefficients * 2;
 
+                    // The near-field (less than 2 cells away) is handled by direct interactions.
+                    // Leave those entries zero and never use them in M2L.
                     if ( Kokkos::abs( di ) <= 2 && Kokkos::abs( dj ) <= 2 &&
                          Kokkos::abs( dk ) <= 2 )
-                    {
+                    { 
                         for ( int out = 0; out < num_coefficients; ++out )
                             for ( int in = 0; in < num_coefficients; ++in )
                             {
@@ -1328,6 +1334,9 @@ class SolverLayer
                     Operator::cart2sph( offset_vec[0], offset_vec[1], offset_vec[2],
                                         rho, alpha, beta );
 
+                    // Fill the dense translation matrix for this offset once.
+                    // The callback can then reuse these coefficients instead of
+                    // recomputing the analytic M2L formula for every neighbor.
                     for ( int j = 0; j <= p; ++j )
                     {
                         for ( int k = -j; k <= j; ++k )
@@ -1459,14 +1468,19 @@ class SolverLayer
             {
                 int neighbor_id = static_cast<int>( value_pair.index );
 
+                // Recover the relative cell offset. This is the key into the
+                // precomputed translation table for this source-target pair.
                 const int di = m_cell_ijk( neighbor_id, 0 ) - target_cell_ijk[0];
                 const int dj = m_cell_ijk( neighbor_id, 1 ) - target_cell_ijk[1];
                 const int dk = m_cell_ijk( neighbor_id, 2 ) - target_cell_ijk[2];
 
                 if ( Kokkos::abs( di ) <= 2 && Kokkos::abs( dj ) <= 2 &&
                      Kokkos::abs( dk ) <= 2 )
+                    // Cells too close for M2L calc
                     return;
 
+                // Load the source multipole coefficients once, then reuse them
+                // for all output coefficients in the dense mat-vec below.
                 scalar_type source_real[num_coefficients];
                 scalar_type source_imag[num_coefficients];
                 for ( int i = 0; i < num_coefficients; ++i )
@@ -1477,6 +1491,8 @@ class SolverLayer
 
                 const int offset_index = offsetIndex( di, dj, dk );
 
+                // Apply the cached complex translation matrix for this offset
+                // directly into the running accumulator for the target cell.
                 for ( int out_idx = 0; out_idx < num_coefficients; ++out_idx )
                 {
                     scalar_type accum_real = accum[out_idx];
@@ -1517,6 +1533,9 @@ class SolverLayer
             for ( int i = 0; i < 2 * num_coefficients; ++i )
                 accum[i] = 0.0;
 
+            // Query the haloed multipole BVH with this cell's interaction box;
+            // the callback turns each matching source cell into a cached M2L
+            // matrix application and accumulates into these local coefficients.
             ArborX::Point<3, scalar_type> min_corner;
             ArborX::Point<3, scalar_type> max_corner;
             for ( int d = 0; d < 3; ++d )
