@@ -298,6 +298,7 @@ class SolverLayer
     using local_member_types = typename SolverType::local_member_types;
     using multipole_aosoa_type = typename SolverType::multipole_aosoa_type;
     using local_aosoa_type = typename SolverType::local_aosoa_type;
+    using size_type = typename SolverType::size_type;
     typedef Kokkos::View<scalar_type*, memory_space> m2l_translation_view_type;
 
     //! Particle data
@@ -1271,11 +1272,11 @@ class SolverLayer
                               const Kokkos::Array<int, 3>& offset_upper ) const
     {
         Kokkos::Array<int, 3> offset_extent;
-        std::size_t num_offsets = 1;
+        size_type num_offsets = 1;
         for ( int d = 0; d < 3; ++d )
         {
             offset_extent[d] = offset_upper[d] - offset_lower[d] + 1;
-            num_offsets *= static_cast<std::size_t>( offset_extent[d] );
+            num_offsets *= static_cast<size_type>( offset_extent[d] );
         }
 
         // Store all translation matrices in a flat view indexed by:
@@ -1285,113 +1286,92 @@ class SolverLayer
         m2l_translation_view_type translation(
             "_m2l_translation",
             num_offsets * num_coefficients * num_coefficients * 2 );
-        auto translation_host = Kokkos::create_mirror_view( translation );
+        const size_type entries_per_offset = num_coefficients * num_coefficients;
+        const size_type total_entries = num_offsets * entries_per_offset;
+        const auto cell_size = _cell_size;
 
-        for ( int dk_idx = 0; dk_idx < offset_extent[2]; ++dk_idx )
-        {
-            const int dk = offset_lower[2] + dk_idx;
-            for ( int dj_idx = 0; dj_idx < offset_extent[1]; ++dj_idx )
-            {
+        using policy_type =
+            Kokkos::RangePolicy<execution_space, Kokkos::IndexType<size_type>>;
+        Kokkos::parallel_for(
+            "Canopy::SolverLayer::buildM2LTranslationTable",
+            policy_type( 0, total_entries ),
+            KOKKOS_LAMBDA( const size_type entry_index ) {
+                const size_type offset_index = entry_index / entries_per_offset;
+                const size_type coefficient_index =
+                    entry_index - offset_index * entries_per_offset;
+                const int out_idx = static_cast<int>(
+                    coefficient_index / num_coefficients );
+                const int in_idx = static_cast<int>(
+                    coefficient_index - static_cast<size_type>( out_idx ) *
+                                            num_coefficients );
+
+                const int di_idx = static_cast<int>(
+                    offset_index % static_cast<size_type>( offset_extent[0] ) );
+                const size_type tmp_index =
+                    offset_index / static_cast<size_type>( offset_extent[0] );
+                const int dj_idx = static_cast<int>(
+                    tmp_index % static_cast<size_type>( offset_extent[1] ) );
+                const int dk_idx = static_cast<int>(
+                    tmp_index / static_cast<size_type>( offset_extent[1] ) );
+
+                const int di = offset_lower[0] + di_idx;
                 const int dj = offset_lower[1] + dj_idx;
-                for ( int di_idx = 0; di_idx < offset_extent[0]; ++di_idx )
+                const int dk = offset_lower[2] + dk_idx;
+
+                const size_type base = entry_index * 2;
+
+                // The near-field (less than 2 cells away) is handled by direct
+                // interactions. Leave those entries zero and never use them in M2L.
+                if ( Kokkos::abs( di ) <= 2 && Kokkos::abs( dj ) <= 2 &&
+                     Kokkos::abs( dk ) <= 2 )
                 {
-                    const int di = offset_lower[0] + di_idx;
-                    const std::size_t offset_index =
-                        static_cast<std::size_t>( di_idx ) +
-                        static_cast<std::size_t>( offset_extent[0] ) *
-                            ( static_cast<std::size_t>( dj_idx ) +
-                              static_cast<std::size_t>( offset_extent[1] ) *
-                                  static_cast<std::size_t>( dk_idx ) );
-                    const std::size_t offset_base =
-                        offset_index * num_coefficients * num_coefficients * 2;
-
-                    // The near-field (less than 2 cells away) is handled by direct interactions.
-                    // Leave those entries zero and never use them in M2L.
-                    if ( Kokkos::abs( di ) <= 2 && Kokkos::abs( dj ) <= 2 &&
-                         Kokkos::abs( dk ) <= 2 )
-                    { 
-                        for ( int out = 0; out < num_coefficients; ++out )
-                            for ( int in = 0; in < num_coefficients; ++in )
-                            {
-                                const std::size_t base =
-                                    offset_base +
-                                    ( static_cast<std::size_t>( out ) *
-                                          num_coefficients +
-                                      in ) *
-                                        2;
-                                translation_host( base ) = 0.0;
-                                translation_host( base + 1 ) = 0.0;
-                            }
-                        continue;
-                    }
-
-                    Kokkos::Array<scalar_type, 3> offset_vec = {
-                        static_cast<scalar_type>( di ) * _cell_size[0],
-                        static_cast<scalar_type>( dj ) * _cell_size[1],
-                        static_cast<scalar_type>( dk ) * _cell_size[2] };
-
-                    scalar_type rho, alpha, beta;
-                    Operator::cart2sph( offset_vec[0], offset_vec[1], offset_vec[2],
-                                        rho, alpha, beta );
-
-                    // Fill the dense translation matrix for this offset once.
-                    // The callback can then reuse these coefficients instead of
-                    // recomputing the analytic M2L formula for every neighbor.
-                    for ( int j = 0; j <= p; ++j )
-                    {
-                        for ( int k = -j; k <= j; ++k )
-                        {
-                            const int out_idx = Operator::Scalar::index( j, k );
-                            const scalar_type A_jk =
-                                Operator::Scalar::compute_A<scalar_type>( j, k );
-
-                            for ( int n = 0; n <= p; ++n )
-                            {
-                                const scalar_type sign = ( n % 2 == 0 ) ? 1.0 : -1.0;
-                                const scalar_type rho_jn =
-                                    Kokkos::pow( rho, j + n + 1 );
-
-                                for ( int m = -n; m <= n; ++m )
-                                {
-                                    const int in_idx =
-                                        Operator::Scalar::index( n, m );
-                                    const complex i_unit( 0.0, 1.0 );
-                                    const int power = Kokkos::abs( k - m ) -
-                                                      Kokkos::abs( k ) -
-                                                      Kokkos::abs( m );
-                                    const complex i_term =
-                                        Kokkos::pow( i_unit, power );
-                                    const scalar_type A_nm =
-                                        Operator::Scalar::compute_A<scalar_type>(
-                                            n, m );
-                                    const complex Y_jn_mk =
-                                        Operator::Scalar::Ynm(
-                                            j + n, m - k, alpha, beta );
-                                    const scalar_type A_jn_mk =
-                                        Operator::Scalar::compute_A<scalar_type>(
-                                            j + n, m - k );
-
-                                    const complex entry =
-                                        ( i_term * A_nm * A_jk * Y_jn_mk ) /
-                                        ( sign * A_jn_mk * rho_jn );
-
-                                    const std::size_t base =
-                                        offset_base +
-                                        ( static_cast<std::size_t>( out_idx ) *
-                                              num_coefficients +
-                                          in_idx ) *
-                                            2;
-                                    translation_host( base ) = entry.real();
-                                    translation_host( base + 1 ) = entry.imag();
-                                }
-                            }
-                        }
-                    }
+                    translation( base ) = 0.0;
+                    translation( base + 1 ) = 0.0;
+                    return;
                 }
-            }
-        }
 
-        Kokkos::deep_copy( translation, translation_host );
+                Kokkos::Array<scalar_type, 3> offset_vec = {
+                    static_cast<scalar_type>( di ) * cell_size[0],
+                    static_cast<scalar_type>( dj ) * cell_size[1],
+                    static_cast<scalar_type>( dk ) * cell_size[2] };
+
+                scalar_type rho, alpha, beta;
+                Operator::cart2sph( offset_vec[0], offset_vec[1], offset_vec[2],
+                                    rho, alpha, beta );
+
+                // Fill one entry of the dense translation matrix for this
+                // offset. The callback can then reuse these coefficients instead
+                // of recomputing the analytic M2L formula for every neighbor.
+                const int j = static_cast<int>( Kokkos::sqrt(
+                    static_cast<scalar_type>( out_idx ) ) );
+                const int k = out_idx - j * j - j;
+                const int n = static_cast<int>( Kokkos::sqrt(
+                    static_cast<scalar_type>( in_idx ) ) );
+                const int m = in_idx - n * n - n;
+
+                const scalar_type A_jk =
+                    Operator::Scalar::compute_A<scalar_type>( j, k );
+                const scalar_type sign = ( n % 2 == 0 ) ? 1.0 : -1.0;
+                const scalar_type rho_jn = Kokkos::pow( rho, j + n + 1 );
+                const complex i_unit( 0.0, 1.0 );
+                const int power =
+                    Kokkos::abs( k - m ) - Kokkos::abs( k ) - Kokkos::abs( m );
+                const complex i_term = Kokkos::pow( i_unit, power );
+                const scalar_type A_nm =
+                    Operator::Scalar::compute_A<scalar_type>( n, m );
+                const complex Y_jn_mk =
+                    Operator::Scalar::Ynm( j + n, m - k, alpha, beta );
+                const scalar_type A_jn_mk =
+                    Operator::Scalar::compute_A<scalar_type>( j + n, m - k );
+
+                const complex entry =
+                    ( i_term * A_nm * A_jk * Y_jn_mk ) /
+                    ( sign * A_jn_mk * rho_jn );
+
+                translation( base ) = entry.real();
+                translation( base + 1 ) = entry.imag();
+            } );
+        Kokkos::fence();
         return translation;
     }
 
