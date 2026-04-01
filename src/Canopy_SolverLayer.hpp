@@ -1279,6 +1279,10 @@ class SolverLayer
             num_offsets *= static_cast<size_type>( offset_extent[d] );
         }
 
+        // Precompute the FMM multipole-to-local (M2L) operator for each
+        // source-target cell offset in this interaction list. This table maps
+        // source multipole coefficients to target local coefficients, so this
+        // is not an M2M or L2L translation.
         // Store all translation matrices in a flat view indexed by:
         //   offset -> output coefficient -> input coefficient -> real/imag part.
         // Each entry is the complex scalar that maps one multipole coefficient
