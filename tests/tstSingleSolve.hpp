@@ -224,11 +224,11 @@ void testSolver(int points_per_proc_in, bool balanced)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
-TEST( Solver, testSolver_balanced )
+TEST( SingleSolve, testSingleSolve_balanced )
 { 
     testSolver<6>(500, true);
 }
-TEST( Solver, testSolver_unbalanced )
+TEST( SingleSolve, testSingleSolve_unbalanced )
 { 
     testSolver<6>(500, false);
 }
