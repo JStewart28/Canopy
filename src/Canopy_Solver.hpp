@@ -485,6 +485,26 @@ class Solver
         _tree[to_layer]->populateCells(multipoles, halo.numLocal(), halo.numLocal() + halo.numGhost());
     }
 
+    struct FirstValidLayerInfo
+    {
+        int layer = -1;
+        int cells_per_dim = 0;
+    };
+
+    FirstValidLayerInfo firstValidMultipoleLayerInfo() const
+    {
+        const int starting_layer = static_cast<int>(_tree.size()) - 1;
+
+        for (int L = starting_layer; L >= 0; --L)
+        {
+            const auto cpd = static_cast<int>(_tree[L]->cellsPerDim());
+            if (cpd >= 4)
+                return {L, cpd};
+        }
+
+        return {};
+    }
+
     /**
      * For each layer, convert multipole coefficients to local coefficients centered
      * around each cell.
@@ -493,21 +513,10 @@ class Solver
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::Solver::multipole_to_local");
 
-        const int starting_layer = static_cast<int>(_tree.size()) - 1;
-
-        // Find the first valid layer
-        int first_valid_layer = -1;
-        std::size_t starting_cells_per_dimension;
-        for (int L = starting_layer; L >= 0; --L)
-        {
-            auto cpd = _tree[L]->cellsPerDim();
-            if (cpd >= 4)
-            {
-                first_valid_layer = L;
-                starting_cells_per_dimension = cpd;
-                break;
-            }
-        }
+        const auto first_valid_layer_info = firstValidMultipoleLayerInfo();
+        const int first_valid_layer = first_valid_layer_info.layer;
+        const int starting_cells_per_dimension =
+            first_valid_layer_info.cells_per_dim;
 
         if (first_valid_layer < 0)
         {
@@ -544,28 +553,69 @@ class Solver
         auto cell_offsets = _tree[0]->num_owned_cell();
         auto positions = Cabana::slice<metadata::pos>(*_leaf_particles);
 
-        auto particle_ids = Cabana::slice<3>(*_leaf_particles);
-
         const int rank = _rank;
         const int comm_size = _comm_size;
+        const int cell_incr_factor = static_cast<int>(_tile_reduction_factor);
+
+        const auto first_valid_layer_info = firstValidMultipoleLayerInfo();
+        const int direct_start_layer = first_valid_layer_info.layer;
+        const int direct_start_cpd = first_valid_layer_info.cells_per_dim;
+        const bool direct_all_pairs = direct_start_layer < 0;
 
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
-        // For particle-to-particle calculations, we need to halo all particles within
-        // two cells in each direction.
+        // Build the rank halo domains from the same direct-interaction bounds
+        // used in computeP2P so the direct/M2L split stays consistent.
         using domain_type = Kokkos::View<int*[6], memory_space>;
         domain_type halo_domains("halo_domains", _comm_size);
         Kokkos::parallel_for("Canopy::Solver::compute halo domains",
             Kokkos::RangePolicy<execution_space>(0, _comm_size),
             KOKKOS_LAMBDA(const int r)
             {
-                for (int i = 0; i < 3; i++)
+                if (direct_all_pairs)
                 {
-                    int rank_min = Kokkos::max(cell_base(r, i) - 2, 0);
-                    int rank_max = Kokkos::min(cell_base(r, i) + cell_offsets(r, i) + 3, leaf_cell_per_dim);
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        halo_domains(r, i) = 0;
+                        halo_domains(r, i + 3) = leaf_cell_per_dim;
+                    }
+                    return;
+                }
 
-                    halo_domains(r, i) = rank_min;
-                    halo_domains(r, i+3) = rank_max;
+                bool rank_has_cells = true;
+                Kokkos::Array<int, 3> rank_low_cell;
+                Kokkos::Array<int, 3> rank_high_cell;
+                for (int i = 0; i < 3; ++i)
+                {
+                    rank_low_cell[i] = cell_base(r, i);
+                    rank_has_cells = rank_has_cells && (cell_offsets(r, i) > 0);
+                    rank_high_cell[i] =
+                        cell_base(r, i) + cell_offsets(r, i) - 1;
+                }
+
+                if (!rank_has_cells)
+                {
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        halo_domains(r, i) = 0;
+                        halo_domains(r, i + 3) = 0;
+                    }
+                    return;
+                }
+
+                const auto lower_bounds =
+                    cell2Bound(rank_low_cell, 0, direct_start_layer,
+                               direct_start_cpd, cell_incr_factor)
+                        .second;
+                const auto upper_bounds =
+                    cell2Bound(rank_high_cell, 0, direct_start_layer,
+                               direct_start_cpd, cell_incr_factor)
+                        .second;
+
+                for (int i = 0; i < 3; ++i)
+                {
+                    halo_domains(r, i) = lower_bounds[i];
+                    halo_domains(r, i + 3) = upper_bounds[i + 3];
                 }
             }
         );
@@ -828,179 +878,155 @@ class Solver
         }
     }
 
-    template<class TripleScalarSlice, class SingleScalarSlice, class BVHType>
+    template<class TripleScalarSlice, class SingleScalarSlice,
+             class ParticleCellIJKView, class CellOffsetView,
+             class CellParticleView>
     struct ComputeDirectly
     {
         TripleScalarSlice positions;
         TripleScalarSlice force;
         SingleScalarSlice scalars;
         SingleScalarSlice potentials;
-        BVHType bvh;
-        Kokkos::Array<scalar_type, 3> cell_size;
-        Kokkos::Array<scalar_type, 3> low_corner;
+        ParticleCellIJKView particle_cell_ijk;
+        CellOffsetView cell_offsets;
+        CellParticleView cell_particles;
         int cells_per_dim;
-        int p;
+        int direct_start_layer;
+        int direct_start_cpd;
+        int cell_incr_factor;
+        bool direct_all_pairs;
 
-        template <bool ComputeForce>
-        struct QueryCallback
+        KOKKOS_INLINE_FUNCTION
+        size_type cellLinearId(const int i, const int j, const int k) const
         {
-            TripleScalarSlice positions;
-            TripleScalarSlice force;
-            SingleScalarSlice scalars;
-            int my_id;
-            scalar_type xi, yi, zi;
-            Kokkos::Array<int, 3> lower;
-            Kokkos::Array<int, 3> upper;
-            Kokkos::Array<scalar_type, 3> cell_size;
-            Kokkos::Array<scalar_type, 3> low_corner;
-            scalar_type* phi;
-            scalar_type* fpart;
-
-            KOKKOS_FUNCTION
-            QueryCallback( TripleScalarSlice positions_, TripleScalarSlice force_,
-                           SingleScalarSlice scalars_, int my_id_,
-                           scalar_type xi_, scalar_type yi_, scalar_type zi_,
-                           Kokkos::Array<int, 3> lower_,
-                           Kokkos::Array<int, 3> upper_,
-                           Kokkos::Array<scalar_type, 3> cell_size_,
-                           Kokkos::Array<scalar_type, 3> low_corner_,
-                           scalar_type* phi_, scalar_type* fpart_ )
-                : positions( positions_ )
-                , force( force_ )
-                , scalars( scalars_ )
-                , my_id( my_id_ )
-                , xi( xi_ )
-                , yi( yi_ )
-                , zi( zi_ )
-                , lower( lower_ )
-                , upper( upper_ )
-                , cell_size( cell_size_ )
-                , low_corner( low_corner_ )
-                , phi( phi_ )
-                , fpart( fpart_ )
-            {}
-
-            template <class Predicate, class ValuePair>
-            KOKKOS_FUNCTION void operator()( Predicate const&,
-                                             ValuePair const& value_pair ) const
-            {
-                int neighbor_id = static_cast<int>( value_pair.index );
-                if ( neighbor_id == my_id )
-                    return;
-
-                const scalar_type xn = positions( neighbor_id, 0 );
-                const scalar_type yn = positions( neighbor_id, 1 );
-                const scalar_type zn = positions( neighbor_id, 2 );
-
-                auto ijk_n = position2ijk( xn, yn, zn, low_corner, cell_size );
-
-                // Keep the original exact cell-stencil filter to preserve
-                // computeP2P behavior even though the ArborX query uses a box.
-                if ( ijk_n[0] < lower[0] || ijk_n[0] >= upper[0] ||
-                     ijk_n[1] < lower[1] || ijk_n[1] >= upper[1] ||
-                     ijk_n[2] < lower[2] || ijk_n[2] >= upper[2] )
-                    return;
-
-                const scalar_type dx = xi - xn;
-                const scalar_type dy = yi - yn;
-                const scalar_type dz = zi - zn;
-                const scalar_type r2 = dx * dx + dy * dy + dz * dz;
-
-                if ( r2 == 0.0 )
-                    return;
-
-                const scalar_type r = Kokkos::sqrt( r2 );
-                *phi += scalars( neighbor_id ) / r;
-
-                if constexpr ( ComputeForce )
-                {
-                    scalar_type dist_inv = 1.0 / r;
-                    scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
-                    scalar_type fp =
-                        scalars( my_id ) * scalars( neighbor_id ) * dist_inv3;
-                    fpart[0] += fp * dx;
-                    fpart[1] += fp * dy;
-                    fpart[2] += fp * dz;
-                }
-            }
-        };
+            return static_cast<size_type>(i) +
+                   static_cast<size_type>(cells_per_dim) *
+                       (static_cast<size_type>(j) +
+                        static_cast<size_type>(cells_per_dim) *
+                            static_cast<size_type>(k));
+        }
 
         // Constructor without force
-        ComputeDirectly(TripleScalarSlice positions_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
-            const BVHType& bvh_,
-            Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
-            const int cells_per_dim_, const int p_)
+        ComputeDirectly(TripleScalarSlice positions_, SingleScalarSlice scalars_,
+            SingleScalarSlice potentials_, ParticleCellIJKView particle_cell_ijk_,
+            CellOffsetView cell_offsets_, CellParticleView cell_particles_,
+            const int cells_per_dim_, const int direct_start_layer_,
+            const int direct_start_cpd_, const int cell_incr_factor_,
+            const bool direct_all_pairs_)
             : positions(positions_)
             , scalars(scalars_)
             , potentials(potentials_)
-            , bvh(bvh_)
-            , cell_size(cell_size_)
-            , low_corner(low_corner_)
+            , particle_cell_ijk(particle_cell_ijk_)
+            , cell_offsets(cell_offsets_)
+            , cell_particles(cell_particles_)
             , cells_per_dim(cells_per_dim_)
-            , p(p_)
+            , direct_start_layer(direct_start_layer_)
+            , direct_start_cpd(direct_start_cpd_)
+            , cell_incr_factor(cell_incr_factor_)
+            , direct_all_pairs(direct_all_pairs_)
             {}
 
         // Constructor with force
-        ComputeDirectly(TripleScalarSlice positions_, TripleScalarSlice force_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
-            const BVHType& bvh_,
-            Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
-            int cells_per_dim_, int p_)
+        ComputeDirectly(TripleScalarSlice positions_, TripleScalarSlice force_,
+            SingleScalarSlice scalars_, SingleScalarSlice potentials_,
+            ParticleCellIJKView particle_cell_ijk_, CellOffsetView cell_offsets_,
+            CellParticleView cell_particles_, const int cells_per_dim_,
+            const int direct_start_layer_, const int direct_start_cpd_,
+            const int cell_incr_factor_, const bool direct_all_pairs_)
             : positions(positions_)
             , force(force_)
             , scalars(scalars_)
             , potentials(potentials_)
-            , bvh(bvh_)
-            , cell_size(cell_size_)
-            , low_corner(low_corner_)
+            , particle_cell_ijk(particle_cell_ijk_)
+            , cell_offsets(cell_offsets_)
+            , cell_particles(cell_particles_)
             , cells_per_dim(cells_per_dim_)
-            , p(p_)
+            , direct_start_layer(direct_start_layer_)
+            , direct_start_cpd(direct_start_cpd_)
+            , cell_incr_factor(cell_incr_factor_)
+            , direct_all_pairs(direct_all_pairs_)
             {}
 
         KOKKOS_INLINE_FUNCTION
-        void operator()(const int my_id) const
+        void operator()(const size_type my_id) const
         {
             const scalar_type xi = positions(my_id,0);
             const scalar_type yi = positions(my_id,1);
             const scalar_type zi = positions(my_id,2);
-
-            auto ijk_i = position2ijk(xi, yi, zi, low_corner, cell_size);
-
-            // Cell bounds for this particle
-            Kokkos::Array<int,3> lower, upper;
-            for (int d = 0; d < 3; ++d) {
-                lower[d] = Kokkos::max(int(ijk_i[d]) - 2, 0);
-                upper[d] = Kokkos::min(int(ijk_i[d]) + 3, cells_per_dim);
-            }
-
             scalar_type phi = 0.0;
             Kokkos::Array<scalar_type, 3> fpart = {0.0, 0.0, 0.0};
-            ArborX::Point<3, float> min_corner;
-            ArborX::Point<3, float> max_corner;
-            for ( int d = 0; d < 3; ++d )
-            {
-                min_corner[d] =
-                    static_cast<float>( low_corner[d] + lower[d] * cell_size[d] );
-                max_corner[d] =
-                    static_cast<float>( low_corner[d] + upper[d] * cell_size[d] );
-            }
+            const scalar_type q_i = scalars(my_id);
 
-            ArborX::Box<3, float> query_box( min_corner, max_corner );
-
-            if constexpr ( metadata::force != no_id )
+            Kokkos::Array<int, 6> direct_bounds;
+            if (direct_all_pairs)
             {
-                QueryCallback<true> callback(
-                    positions, force, scalars, my_id, xi, yi, zi, lower, upper,
-                    cell_size, low_corner, &phi, &fpart[0] );
-                bvh.query( ArborX::Experimental::PerThread{},
-                           ArborX::intersects( query_box ), callback );
+                for (int d = 0; d < 3; ++d)
+                {
+                    direct_bounds[d] = 0;
+                    direct_bounds[d + 3] = cells_per_dim;
+                }
             }
             else
             {
-                QueryCallback<false> callback(
-                    positions, force, scalars, my_id, xi, yi, zi, lower, upper,
-                    cell_size, low_corner, &phi, &fpart[0] );
-                bvh.query( ArborX::Experimental::PerThread{},
-                           ArborX::intersects( query_box ), callback );
+                Kokkos::Array<int, 3> cell_ijk;
+                for (int d = 0; d < 3; ++d)
+                    cell_ijk[d] = particle_cell_ijk(my_id, d);
+
+                const auto bounds =
+                    cell2Bound(cell_ijk, 0, direct_start_layer,
+                               direct_start_cpd, cell_incr_factor);
+                for (int d = 0; d < 3; ++d)
+                {
+                    direct_bounds[d] = bounds.second[d];
+                    direct_bounds[d + 3] = bounds.second[d + 3];
+                }
+            }
+
+            for (int k = direct_bounds[2]; k < direct_bounds[5]; ++k)
+            {
+                for (int j = direct_bounds[1]; j < direct_bounds[4]; ++j)
+                {
+                    for (int i = direct_bounds[0]; i < direct_bounds[3]; ++i)
+                    {
+                        const auto cell_id = cellLinearId(i, j, k);
+                        for (size_type cell_index = cell_offsets(cell_id);
+                             cell_index < cell_offsets(cell_id + 1);
+                             ++cell_index)
+                        {
+                            const size_type neighbor_id =
+                                cell_particles(cell_index);
+                            if (neighbor_id == my_id)
+                                continue;
+
+                            const scalar_type dx =
+                                xi - positions(neighbor_id, 0);
+                            const scalar_type dy =
+                                yi - positions(neighbor_id, 1);
+                            const scalar_type dz =
+                                zi - positions(neighbor_id, 2);
+                            const scalar_type r2 =
+                                dx * dx + dy * dy + dz * dz;
+
+                            if (r2 == 0.0)
+                                continue;
+
+                            const scalar_type dist_inv =
+                                1.0 / Kokkos::sqrt(r2);
+                            phi += scalars(neighbor_id) * dist_inv;
+
+                            if constexpr(metadata::force != no_id)
+                            {
+                                const scalar_type dist_inv3 =
+                                    dist_inv * dist_inv * dist_inv;
+                                const scalar_type fp =
+                                    q_i * scalars(neighbor_id) * dist_inv3;
+                                fpart[0] += fp * dx;
+                                fpart[1] += fp * dy;
+                                fpart[2] += fp * dz;
+                            }
+                        }
+                    }
+                }
             }
 
             potentials(my_id) += phi;
@@ -1026,39 +1052,129 @@ class Solver
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
         auto owned_particles = _owned_particles;
+        const auto total_particles =
+            static_cast<size_type>(_leaf_particles->size());
+        const auto total_cells =
+            static_cast<size_type>(cells_per_dim) *
+            static_cast<size_type>(cells_per_dim) *
+            static_cast<size_type>(cells_per_dim);
 
-        // Build a BVH once, then query it per owned particle. This avoids
-        // materializing the full particle-particle adjacency graph, which can
-        // overflow for large runs before computeP2P ever begins accumulation.
-        execution_space space{};
-        ArborX::BoundingVolumeHierarchy bvh(
-            space, ArborX::Experimental::attach_indices<int>( positions ) );
+        const auto first_valid_layer_info = firstValidMultipoleLayerInfo();
+        const int direct_start_layer = first_valid_layer_info.layer;
+        const int direct_start_cpd = first_valid_layer_info.cells_per_dim;
+        const bool direct_all_pairs = direct_start_layer < 0;
+        const int cell_incr_factor = static_cast<int>(_tile_reduction_factor);
+
+        using policy_type =
+            Kokkos::RangePolicy<execution_space, Kokkos::IndexType<size_type>>;
+        const policy_type particle_policy(0, total_particles);
+        const policy_type cell_policy(0, total_cells);
+
+        Kokkos::View<int*[3], memory_space> particle_cell_ijk(
+            "direct_particle_cell_ijk", total_particles);
+        Kokkos::View<size_type*, memory_space> particle_cell_ids(
+            "direct_particle_cell_ids", total_particles);
+
+        Kokkos::parallel_for(
+            "Canopy::Solver::compute_direct_particle_cells", particle_policy,
+            KOKKOS_LAMBDA(const size_type pid)
+            {
+                const auto ijk = position2ijk(
+                    positions(pid, 0), positions(pid, 1), positions(pid, 2),
+                    low_corner, cell_size);
+
+                for (int d = 0; d < 3; ++d)
+                    particle_cell_ijk(pid, d) = static_cast<int>(ijk[d]);
+
+                particle_cell_ids(pid) =
+                    static_cast<size_type>(ijk[0]) +
+                    static_cast<size_type>(cells_per_dim) *
+                        (static_cast<size_type>(ijk[1]) +
+                         static_cast<size_type>(cells_per_dim) *
+                             static_cast<size_type>(ijk[2]));
+            });
+
+        Kokkos::View<size_type*, memory_space> cell_counts(
+            "direct_cell_counts", total_cells);
+        Kokkos::deep_copy(cell_counts, static_cast<size_type>(0));
+        Kokkos::parallel_for(
+            "Canopy::Solver::count_direct_cell_particles", particle_policy,
+            KOKKOS_LAMBDA(const size_type pid)
+            {
+                Kokkos::atomic_fetch_add(&cell_counts(particle_cell_ids(pid)),
+                                         static_cast<size_type>(1));
+            });
+
+        Kokkos::View<size_type*, memory_space> cell_offsets_view(
+            "direct_cell_offsets", total_cells + 1);
+        Kokkos::parallel_scan(
+            "Canopy::Solver::scan_direct_cell_offsets",
+            policy_type(0, total_cells + 1),
+            KOKKOS_LAMBDA(const size_type cell_id, size_type& update,
+                          const bool final)
+            {
+                if (final)
+                    cell_offsets_view(cell_id) = update;
+
+                if (cell_id < total_cells)
+                    update += cell_counts(cell_id);
+            });
+
+        Kokkos::View<size_type*, memory_space> cell_fill_offsets(
+            "direct_cell_fill_offsets", total_cells);
+        Kokkos::parallel_for(
+            "Canopy::Solver::init_direct_cell_fill_offsets", cell_policy,
+            KOKKOS_LAMBDA(const size_type cell_id)
+            {
+                cell_fill_offsets(cell_id) = cell_offsets_view(cell_id);
+            });
+
+        Kokkos::View<size_type*, memory_space> cell_particles(
+            "direct_cell_particles", total_particles);
+        Kokkos::parallel_for(
+            "Canopy::Solver::fill_direct_cell_particles", particle_policy,
+            KOKKOS_LAMBDA(const size_type pid)
+            {
+                const auto cell_id = particle_cell_ids(pid);
+                const auto write_index =
+                    Kokkos::atomic_fetch_add(&cell_fill_offsets(cell_id),
+                                             static_cast<size_type>(1));
+                cell_particles(write_index) = pid;
+            });
 
         using PosSlice = decltype(positions);
         using ScalarSlice = decltype(scalars);
-        using BvhT = decltype(bvh);
+        using ParticleCellIJKView = decltype(particle_cell_ijk);
+        using CellOffsetsView = decltype(cell_offsets_view);
+        using CellParticlesView = decltype(cell_particles);
 
         if constexpr (metadata::force != no_id)
         {
             auto force = Cabana::slice<metadata::force>(*_leaf_particles);
 
-            // Use force constructor
-            ComputeDirectly<PosSlice, ScalarSlice, BvhT> cd(positions, force, scalars, potentials, bvh,
-                cell_size, low_corner, cells_per_dim, p);
+            ComputeDirectly<PosSlice, ScalarSlice, ParticleCellIJKView,
+                            CellOffsetsView, CellParticlesView>
+                cd(positions, force, scalars, potentials, particle_cell_ijk,
+                   cell_offsets_view, cell_particles, cells_per_dim,
+                   direct_start_layer, direct_start_cpd, cell_incr_factor,
+                   direct_all_pairs);
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_direct",
-                Kokkos::RangePolicy<execution_space>(0, owned_particles), cd);
+                policy_type(0, static_cast<size_type>(owned_particles)), cd);
         }
         else
         {
-             // Use no force constructor
-            ComputeDirectly<PosSlice, ScalarSlice, BvhT> cd(positions, scalars, potentials, bvh,
-                cell_size, low_corner, cells_per_dim, p);
+            ComputeDirectly<PosSlice, ScalarSlice, ParticleCellIJKView,
+                            CellOffsetsView, CellParticlesView>
+                cd(positions, scalars, potentials, particle_cell_ijk,
+                   cell_offsets_view, cell_particles, cells_per_dim,
+                   direct_start_layer, direct_start_cpd, cell_incr_factor,
+                   direct_all_pairs);
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_direct",
-                Kokkos::RangePolicy<execution_space>(0, owned_particles), cd);
+                policy_type(0, static_cast<size_type>(owned_particles)), cd);
         }
         Kokkos::fence();
     }
