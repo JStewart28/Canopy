@@ -895,6 +895,7 @@ class Solver
         int direct_start_cpd;
         int cell_incr_factor;
         bool direct_all_pairs;
+        size_type owned_particles;
 
         KOKKOS_INLINE_FUNCTION
         size_type cellLinearId(const int i, const int j, const int k) const
@@ -912,7 +913,7 @@ class Solver
             CellOffsetView cell_offsets_, CellParticleView cell_particles_,
             const int cells_per_dim_, const int direct_start_layer_,
             const int direct_start_cpd_, const int cell_incr_factor_,
-            const bool direct_all_pairs_)
+            const bool direct_all_pairs_, const size_type owned_particles_)
             : positions(positions_)
             , scalars(scalars_)
             , potentials(potentials_)
@@ -924,6 +925,7 @@ class Solver
             , direct_start_cpd(direct_start_cpd_)
             , cell_incr_factor(cell_incr_factor_)
             , direct_all_pairs(direct_all_pairs_)
+            , owned_particles(owned_particles_)
             {}
 
         // Constructor with force
@@ -932,7 +934,8 @@ class Solver
             ParticleCellIJKView particle_cell_ijk_, CellOffsetView cell_offsets_,
             CellParticleView cell_particles_, const int cells_per_dim_,
             const int direct_start_layer_, const int direct_start_cpd_,
-            const int cell_incr_factor_, const bool direct_all_pairs_)
+            const int cell_incr_factor_, const bool direct_all_pairs_,
+            const size_type owned_particles_)
             : positions(positions_)
             , force(force_)
             , scalars(scalars_)
@@ -945,6 +948,7 @@ class Solver
             , direct_start_cpd(direct_start_cpd_)
             , cell_incr_factor(cell_incr_factor_)
             , direct_all_pairs(direct_all_pairs_)
+            , owned_particles(owned_particles_)
             {}
 
         KOKKOS_INLINE_FUNCTION
@@ -1010,30 +1014,55 @@ class Solver
                             if (r2 == 0.0)
                                 continue;
 
+                            const scalar_type q_j = scalars(neighbor_id);
                             const scalar_type dist_inv =
                                 1.0 / Kokkos::sqrt(r2);
-                            phi += scalars(neighbor_id) * dist_inv;
+                            const bool neighbor_is_owned =
+                                neighbor_id < owned_particles;
+
+                            if (neighbor_is_owned)
+                            {
+                                if (neighbor_id < my_id)
+                                    continue;
+
+                                phi += q_j * dist_inv;
+                                Kokkos::atomic_add(&potentials(neighbor_id),
+                                                   q_i * dist_inv);
+                            }
+                            else
+                            {
+                                phi += q_j * dist_inv;
+                            }
 
                             if constexpr(metadata::force != no_id)
                             {
                                 const scalar_type dist_inv3 =
                                     dist_inv * dist_inv * dist_inv;
-                                const scalar_type fp =
-                                    q_i * scalars(neighbor_id) * dist_inv3;
+                                const scalar_type fp = q_i * q_j * dist_inv3;
                                 fpart[0] += fp * dx;
                                 fpart[1] += fp * dy;
                                 fpart[2] += fp * dz;
+
+                                if (neighbor_is_owned)
+                                {
+                                    Kokkos::atomic_add(
+                                        &force(neighbor_id, 0), -fp * dx);
+                                    Kokkos::atomic_add(
+                                        &force(neighbor_id, 1), -fp * dy);
+                                    Kokkos::atomic_add(
+                                        &force(neighbor_id, 2), -fp * dz);
+                                }
                             }
                         }
                     }
                 }
             }
 
-            potentials(my_id) += phi;
+            Kokkos::atomic_add(&potentials(my_id), phi);
 
             if constexpr(metadata::force != no_id)
                 for (int d = 0; d < 3; d++)
-                    force(my_id, d) += fpart[d];
+                    Kokkos::atomic_add(&force(my_id, d), fpart[d]);
         }
     };
 
@@ -1051,7 +1080,8 @@ class Solver
         auto cells_per_dim = _tree[0]->cellsPerDim();
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
 
-        auto owned_particles = _owned_particles;
+        const size_type owned_particles =
+            static_cast<size_type>(_owned_particles);
         const auto total_particles =
             static_cast<size_type>(_leaf_particles->size());
         const auto total_cells =
@@ -1157,7 +1187,7 @@ class Solver
                 cd(positions, force, scalars, potentials, particle_cell_ijk,
                    cell_offsets_view, cell_particles, cells_per_dim,
                    direct_start_layer, direct_start_cpd, cell_incr_factor,
-                   direct_all_pairs);
+                   direct_all_pairs, owned_particles);
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_direct",
@@ -1170,11 +1200,11 @@ class Solver
                 cd(positions, scalars, potentials, particle_cell_ijk,
                    cell_offsets_view, cell_particles, cells_per_dim,
                    direct_start_layer, direct_start_cpd, cell_incr_factor,
-                   direct_all_pairs);
+                   direct_all_pairs, owned_particles);
 
             Kokkos::parallel_for(
                 "Canopy::Solver::populate_direct",
-                policy_type(0, static_cast<size_type>(owned_particles)), cd);
+                policy_type(0, owned_particles), cd);
         }
         Kokkos::fence();
     }
