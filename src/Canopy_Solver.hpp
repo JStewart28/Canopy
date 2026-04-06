@@ -879,7 +879,7 @@ class Solver
     }
 
     template<class TripleScalarSlice, class SingleScalarSlice,
-             class ParticleCellIJKView, class CellOffsetView,
+             class ParticleCellIJKView, class CellLookupMap, class CellOffsetView,
              class CellParticleView>
     struct ComputeDirectly
     {
@@ -888,6 +888,7 @@ class Solver
         SingleScalarSlice scalars;
         SingleScalarSlice potentials;
         ParticleCellIJKView particle_cell_ijk;
+        CellLookupMap cell_id_to_index;
         CellOffsetView cell_offsets;
         CellParticleView cell_particles;
         int cells_per_dim;
@@ -910,7 +911,8 @@ class Solver
         // Constructor without force
         ComputeDirectly(TripleScalarSlice positions_, SingleScalarSlice scalars_,
             SingleScalarSlice potentials_, ParticleCellIJKView particle_cell_ijk_,
-            CellOffsetView cell_offsets_, CellParticleView cell_particles_,
+            CellLookupMap cell_id_to_index_, CellOffsetView cell_offsets_,
+            CellParticleView cell_particles_,
             const int cells_per_dim_, const int direct_start_layer_,
             const int direct_start_cpd_, const int cell_incr_factor_,
             const bool direct_all_pairs_, const size_type owned_particles_)
@@ -918,6 +920,7 @@ class Solver
             , scalars(scalars_)
             , potentials(potentials_)
             , particle_cell_ijk(particle_cell_ijk_)
+            , cell_id_to_index(cell_id_to_index_)
             , cell_offsets(cell_offsets_)
             , cell_particles(cell_particles_)
             , cells_per_dim(cells_per_dim_)
@@ -931,8 +934,9 @@ class Solver
         // Constructor with force
         ComputeDirectly(TripleScalarSlice positions_, TripleScalarSlice force_,
             SingleScalarSlice scalars_, SingleScalarSlice potentials_,
-            ParticleCellIJKView particle_cell_ijk_, CellOffsetView cell_offsets_,
-            CellParticleView cell_particles_, const int cells_per_dim_,
+            ParticleCellIJKView particle_cell_ijk_, CellLookupMap cell_id_to_index_,
+            CellOffsetView cell_offsets_, CellParticleView cell_particles_,
+            const int cells_per_dim_,
             const int direct_start_layer_, const int direct_start_cpd_,
             const int cell_incr_factor_, const bool direct_all_pairs_,
             const size_type owned_particles_)
@@ -941,6 +945,7 @@ class Solver
             , scalars(scalars_)
             , potentials(potentials_)
             , particle_cell_ijk(particle_cell_ijk_)
+            , cell_id_to_index(cell_id_to_index_)
             , cell_offsets(cell_offsets_)
             , cell_particles(cell_particles_)
             , cells_per_dim(cells_per_dim_)
@@ -993,8 +998,16 @@ class Solver
                     for (int i = direct_bounds[0]; i < direct_bounds[3]; ++i)
                     {
                         const auto cell_id = cellLinearId(i, j, k);
-                        for (size_type cell_index = cell_offsets(cell_id);
-                             cell_index < cell_offsets(cell_id + 1);
+                        if ( !cell_id_to_index.exists( cell_id ) )
+                            continue;
+
+                        const auto map_index = cell_id_to_index.find(cell_id);
+                        const auto occupied_cell_index =
+                            cell_id_to_index.value_at(map_index) - 1;
+                        for (size_type cell_index =
+                                 cell_offsets(occupied_cell_index);
+                             cell_index <
+                             cell_offsets(occupied_cell_index + 1);
                              ++cell_index)
                         {
                             const size_type neighbor_id =
@@ -1084,10 +1097,6 @@ class Solver
             static_cast<size_type>(_owned_particles);
         const auto total_particles =
             static_cast<size_type>(_leaf_particles->size());
-        const auto total_cells =
-            static_cast<size_type>(cells_per_dim) *
-            static_cast<size_type>(cells_per_dim) *
-            static_cast<size_type>(cells_per_dim);
 
         const auto first_valid_layer_info = firstValidMultipoleLayerInfo();
         const int direct_start_layer = first_valid_layer_info.layer;
@@ -1098,7 +1107,6 @@ class Solver
         using policy_type =
             Kokkos::RangePolicy<execution_space, Kokkos::IndexType<size_type>>;
         const policy_type particle_policy(0, total_particles);
-        const policy_type cell_policy(0, total_cells);
 
         Kokkos::View<int*[3], memory_space> particle_cell_ijk(
             "direct_particle_cell_ijk", total_particles);
@@ -1124,36 +1132,87 @@ class Solver
                              static_cast<size_type>(ijk[2]));
             });
 
+        using direct_cell_map_type =
+            Kokkos::UnorderedMap<size_type, size_type, memory_space>;
+        direct_cell_map_type cell_id_to_index;
+        const auto cell_capacity_hint =
+            total_particles > 0 ? total_particles : static_cast<size_type>( 1 );
+        cell_id_to_index.rehash( cell_capacity_hint );
+
+        Kokkos::parallel_for(
+            "Canopy::Solver::index_direct_cells", particle_policy,
+            KOKKOS_LAMBDA(const size_type pid)
+            {
+                cell_id_to_index.insert( particle_cell_ids(pid),
+                                         static_cast<size_type>(0) );
+            });
+        Kokkos::fence();
+
+        const auto num_occupied_cells = cell_id_to_index.size();
+
         Kokkos::View<size_type*, memory_space> cell_counts(
-            "direct_cell_counts", total_cells);
+            "direct_cell_counts", num_occupied_cells);
         Kokkos::deep_copy(cell_counts, static_cast<size_type>(0));
+
+        Kokkos::View<size_type, memory_space> occupied_cell_counter(
+            "occupied_cell_counter");
+        Kokkos::deep_copy(occupied_cell_counter, static_cast<size_type>(0));
+
+        using value_view_type = Kokkos::View<size_type*, memory_space>;
+        using map_op_type =
+            Kokkos::UnorderedMapInsertOpTypes<value_view_type, size_type>;
+        using atomic_add_type = typename map_op_type::AtomicAdd;
+        atomic_add_type atomic_add;
+
+        Kokkos::parallel_for(
+            "Canopy::Solver::set_direct_cell_indices",
+            policy_type(0, static_cast<size_type>(cell_id_to_index.capacity())),
+            KOKKOS_LAMBDA(const size_type slot)
+            {
+                if (cell_id_to_index.valid_at(slot))
+                {
+                    const auto cell_id = cell_id_to_index.key_at(slot);
+                    const auto occupied_cell_index =
+                        Kokkos::atomic_fetch_add(
+                            &occupied_cell_counter(),
+                            static_cast<size_type>(1));
+                    cell_id_to_index.insert(cell_id, occupied_cell_index + 1,
+                                            atomic_add);
+                }
+            });
+
         Kokkos::parallel_for(
             "Canopy::Solver::count_direct_cell_particles", particle_policy,
             KOKKOS_LAMBDA(const size_type pid)
             {
-                Kokkos::atomic_fetch_add(&cell_counts(particle_cell_ids(pid)),
+                const auto map_index =
+                    cell_id_to_index.find(particle_cell_ids(pid));
+                const auto occupied_cell_index =
+                    cell_id_to_index.value_at(map_index) - 1;
+                Kokkos::atomic_fetch_add(&cell_counts(occupied_cell_index),
                                          static_cast<size_type>(1));
             });
 
         Kokkos::View<size_type*, memory_space> cell_offsets_view(
-            "direct_cell_offsets", total_cells + 1);
+            "direct_cell_offsets", num_occupied_cells + 1);
         Kokkos::parallel_scan(
             "Canopy::Solver::scan_direct_cell_offsets",
-            policy_type(0, total_cells + 1),
+            policy_type(0, num_occupied_cells + 1),
             KOKKOS_LAMBDA(const size_type cell_id, size_type& update,
                           const bool final)
             {
                 if (final)
                     cell_offsets_view(cell_id) = update;
 
-                if (cell_id < total_cells)
+                if (cell_id < num_occupied_cells)
                     update += cell_counts(cell_id);
             });
 
         Kokkos::View<size_type*, memory_space> cell_fill_offsets(
-            "direct_cell_fill_offsets", total_cells);
+            "direct_cell_fill_offsets", num_occupied_cells);
         Kokkos::parallel_for(
-            "Canopy::Solver::init_direct_cell_fill_offsets", cell_policy,
+            "Canopy::Solver::init_direct_cell_fill_offsets",
+            policy_type(0, num_occupied_cells),
             KOKKOS_LAMBDA(const size_type cell_id)
             {
                 cell_fill_offsets(cell_id) = cell_offsets_view(cell_id);
@@ -1165,9 +1224,12 @@ class Solver
             "Canopy::Solver::fill_direct_cell_particles", particle_policy,
             KOKKOS_LAMBDA(const size_type pid)
             {
-                const auto cell_id = particle_cell_ids(pid);
+                const auto map_index =
+                    cell_id_to_index.find(particle_cell_ids(pid));
+                const auto occupied_cell_index =
+                    cell_id_to_index.value_at(map_index) - 1;
                 const auto write_index =
-                    Kokkos::atomic_fetch_add(&cell_fill_offsets(cell_id),
+                    Kokkos::atomic_fetch_add(&cell_fill_offsets(occupied_cell_index),
                                              static_cast<size_type>(1));
                 cell_particles(write_index) = pid;
             });
@@ -1175,6 +1237,7 @@ class Solver
         using PosSlice = decltype(positions);
         using ScalarSlice = decltype(scalars);
         using ParticleCellIJKView = decltype(particle_cell_ijk);
+        using CellLookupMap = decltype(cell_id_to_index);
         using CellOffsetsView = decltype(cell_offsets_view);
         using CellParticlesView = decltype(cell_particles);
 
@@ -1183,9 +1246,11 @@ class Solver
             auto force = Cabana::slice<metadata::force>(*_leaf_particles);
 
             ComputeDirectly<PosSlice, ScalarSlice, ParticleCellIJKView,
+                            CellLookupMap,
                             CellOffsetsView, CellParticlesView>
                 cd(positions, force, scalars, potentials, particle_cell_ijk,
-                   cell_offsets_view, cell_particles, cells_per_dim,
+                   cell_id_to_index, cell_offsets_view, cell_particles,
+                   cells_per_dim,
                    direct_start_layer, direct_start_cpd, cell_incr_factor,
                    direct_all_pairs, owned_particles);
 
@@ -1196,9 +1261,11 @@ class Solver
         else
         {
             ComputeDirectly<PosSlice, ScalarSlice, ParticleCellIJKView,
+                            CellLookupMap,
                             CellOffsetsView, CellParticlesView>
                 cd(positions, scalars, potentials, particle_cell_ijk,
-                   cell_offsets_view, cell_particles, cells_per_dim,
+                   cell_id_to_index, cell_offsets_view, cell_particles,
+                   cells_per_dim,
                    direct_start_layer, direct_start_cpd, cell_incr_factor,
                    direct_all_pairs, owned_particles);
 
