@@ -344,17 +344,12 @@ class SolverLayer
             _cells_per_dim,
             _cells_per_dim
             };
-        
-        // sparse partitioner
-        float max_workload_coeff = 1.5;
-        int workload_num = _cells_per_dim * _cells_per_dim * _cells_per_dim;
+
         _num_step_rebalance = 200;
         _max_optimize_iteration = 10;
-        _partitioner_ptr = std::make_shared<sparse_partitioner_type>(
-            _comm, max_workload_coeff, workload_num, _num_step_rebalance,
-            _global_num_cell, _max_optimize_iteration );
-        auto ranks_per_dim =
-            _partitioner_ptr->ranksPerDimension( comm, _global_num_cell );
+
+        std::array<int, 3> ranks_per_dim = {0, 0, 0};
+        MPI_Dims_create( _comm_size, 3, ranks_per_dim.data() );
         std::array<int, 3> periodic_dims = { 0, 0, 0 };
 
         // rank-related information
@@ -384,38 +379,23 @@ class SolverLayer
         std::vector<int> y_partition = compute_partition(_tiles_per_dim, dims[1]);
         std::vector<int> z_partition = compute_partition(_tiles_per_dim, dims[2]);
 
-        _partitioner_ptr->initializeRecPartition(x_partition, y_partition, z_partition);
+        _current_partition[0] = std::move(x_partition);
+        _current_partition[1] = std::move(y_partition);
+        _current_partition[2] = std::move(z_partition);
 
         initialize();
     }
 
     /**
-     * Use the sparse partitioner to initialize the global and local grids, sparse map,
-     * and sparse array objects.
+     * Initialize the layer bookkeeping for the current partition.
      */
     void initialize()
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::initialize");
 
-        // mesh/grid related initialization
-        auto global_mesh = Cabana::Grid::createSparseGlobalMesh(
-            _global_low_corner, _global_high_corner, _global_num_cell );
-        
-        std::array<bool, 3> is_dim_periodic = { false, false, false };
-        auto& partitioner_ref = *_partitioner_ptr;
-        auto global_grid = Cabana::Grid::createGlobalGrid( _comm, global_mesh,
-                                            is_dim_periodic, partitioner_ref );
-        auto local_grid =
-            Cabana::Grid::Experimental::createSparseLocalGrid( global_grid, _halo_width, cell_per_tile_dim );
-        sparse_map_type sparse_map =
-            Cabana::Grid::createSparseMap<memory_space, scalar_type, cell_per_tile_dim>( global_mesh, 1.2 );
-        // Save sparse map as shared pointer
-        _map_ptr = std::make_shared<sparse_map_type>(sparse_map);
-        
-        // initializeRecPartition(sparse_map);
-        _layout_ptr =
-            Cabana::Grid::Experimental::createSparseArrayLayout<multipole_member_types>( local_grid, *_map_ptr, Cabana::Grid::Node() );
-        
+        _layout_ptr.reset();
+        _map_ptr.reset();
+
         // Store cell size
         updateCellSize();
 
@@ -430,9 +410,12 @@ class SolverLayer
 
     void updateCellSize()
     {
-        auto local_grid = _layout_ptr->localGrid();
-        auto sparse_mesh = local_grid->globalGrid().globalMesh();
-        _cell_size = {sparse_mesh.cellSize( 0 ), sparse_mesh.cellSize( 1 ), sparse_mesh.cellSize( 2 )};
+        for ( int d = 0; d < 3; ++d )
+        {
+            _cell_size[d] =
+                ( _global_high_corner[d] - _global_low_corner[d] ) /
+                static_cast<scalar_type>( _cells_per_dim );
+        }
     }
 
     template <class ParticlePositions>
@@ -440,8 +423,13 @@ class SolverLayer
     {
         Kokkos::Profiling::ScopedRegion region("Canopy::SolverLayer::optimizePartition");
 
+        if ( _comm_size == 1 )
+            return;
+
+        initializePartitioner();
         _partitioner_ptr->optimizePartition( positions, num_particles, _global_low_corner,
             _cell_size[0], _comm);
+        _current_partition = _partitioner_ptr->getCurrentPartition();
 
         // Reinitialize sparse data structures after updating the partition.
         initialize();
@@ -455,7 +443,7 @@ class SolverLayer
     {
         // Get x/y/z domains. The domains are also needed to correctly filter invalid
         // cell counts and offsets
-        auto current_partition = _partitioner_ptr->getCurrentPartition();
+        const auto& current_partition = _current_partition;
 
         // Allocate vectors
         std::vector<Kokkos::Array<int, 3>> cell_offsets_vec(_comm_size);
@@ -597,20 +585,18 @@ class SolverLayer
 
         std::size_t num_particles = end - start;
 
-        // Size _ijk2index to hold the number of incoming particles. This is an
-        // overestimate. Assuming the particles are evenly distributed, size
-        // _ijk2index to hold the number of incoming particles * the
-        // communicator size on layers > 0. This is the number of activated
-        // cells for layers > 0. At layer 0, assume the number of incoming
-        // particles >> the number of incoming particles, and size to the number
-        // of incoming particles. We need this overestimate to hold ijk2index
-        // maps of ghosted cells.
-        // XXX - size this correctly
+        // Size _ijk2index using the number of incoming items rather than the
+        // full dense cell count. Activated cells cannot exceed the incoming
+        // particles/multipoles, and this avoids overflow on very fine grids.
         _ijk2index.clear();
-        if ( _layer_number == 0 )
-            _ijk2index.rehash( _cells_per_dim * _cells_per_dim * _cells_per_dim );
-        else
-            _ijk2index.rehash( num_particles * _comm_size );
+        const std::size_t map_capacity_hint =
+            _layer_number == 0
+                ? ( num_particles > 0 ? num_particles : std::size_t( 1 ) )
+                : ( num_particles > 0
+                        ? num_particles *
+                              static_cast<std::size_t>( _comm_size )
+                        : std::size_t( 1 ) );
+        _ijk2index.rehash( map_capacity_hint );
         auto ijk2index = _ijk2index;
 
         // If ParticleAoSoA type is data_aosoa_type, then the positions are the second tuple element.
@@ -625,18 +611,15 @@ class SolverLayer
         auto positions = Cabana::slice<position_index>(data_aosoa);
         auto data_slice = Cabana::slice<data_index>(data_aosoa);
 
-        auto map = *_map_ptr;
-
         auto cell_size = _cell_size;
 
         // Convert std::array to Kokkos::Array
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         
-        // Register cells in the sparse map and count the number of cells that will
-        // be activated in this layer for sizing data structures. Use the _ijk2index
-        // map as a temporary counter.
+        // Count the number of cells that will be activated in this layer for sizing
+        // data structures. Use the _ijk2index map as a temporary counter.
         Kokkos::parallel_for(
-            "registerSparseMap",
+            "countActivatedCells",
             Kokkos::RangePolicy<execution_space>( 0, num_particles ),
             KOKKOS_LAMBDA( const std::size_t index ) {
 
@@ -645,15 +628,6 @@ class SolverLayer
                 auto cell_activated_ijk =
                     position2ijk(positions( pid, 0 ), positions( pid, 1 ), positions( pid, 2 ),
                                  low_corner, cell_size);                   
-
-                // Register cell in sparse map for load balancing
-                map.insertCell( cell_activated_ijk[0], cell_activated_ijk[1],
-                                cell_activated_ijk[2] );
-                                        
-                // Local cell id
-                auto cell_id = map.queryCell(cell_activated_ijk[0],
-                                         cell_activated_ijk[1],
-                                         cell_activated_ijk[2]);
 
                 // Insert into map to count cells activated. Use dummy values
                 // because we will clear the map after this.
@@ -1166,8 +1140,6 @@ class SolverLayer
 
         const auto num_cells = numCells();
 
-        auto ijk2index = _ijk2index;
-
         // For cell center calculations
         Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
         auto cell_size = _cell_size;
@@ -1225,6 +1197,11 @@ class SolverLayer
         const int num_local_multipoles = static_cast<int>(_num_local_multipoles);
         const int total_multipoles =
             static_cast<int>(_num_local_multipoles + _num_ghost_multipoles);
+
+        if ( _ijk2index.capacity() < static_cast<std::size_t>( total_multipoles ) )
+            _ijk2index.rehash( static_cast<std::size_t>( total_multipoles ) );
+        auto ijk2index = _ijk2index;
+
         auto local_multipole_cell_ijk = _multipole_cell_ijk;
         _multipole_cell_ijk = Kokkos::View<int*[3], memory_space>(
             "_multipole_cell_ijk", total_multipoles);
@@ -1660,6 +1637,32 @@ class SolverLayer
     }
 
   private:
+    void initializePartitioner()
+    {
+        if ( _partitioner_ptr )
+            return;
+
+        constexpr float max_workload_coeff = 1.5f;
+        const std::size_t workload_num =
+            static_cast<std::size_t>( _cells_per_dim ) * _cells_per_dim *
+            _cells_per_dim;
+        const int workload_num_int =
+            workload_num > static_cast<std::size_t>(
+                               std::numeric_limits<int>::max() )
+                ? std::numeric_limits<int>::max()
+                : static_cast<int>( workload_num );
+
+        _partitioner_ptr = std::make_shared<sparse_partitioner_type>(
+            _comm, max_workload_coeff, workload_num_int,
+            _num_step_rebalance, _global_num_cell, _max_optimize_iteration );
+
+        auto x_partition = _current_partition[0];
+        auto y_partition = _current_partition[1];
+        auto z_partition = _current_partition[2];
+        _partitioner_ptr->initializeRecPartition( x_partition, y_partition,
+                                                  z_partition );
+    }
+
     const std::array<scalar_type, 3> _global_high_corner;
     const std::array<scalar_type, 3> _global_low_corner;
     std::array<int, 3> _global_num_cell;
@@ -1687,6 +1690,7 @@ class SolverLayer
     MPI_Comm _cart_comm;
     
     std::shared_ptr<sparse_partitioner_type> _partitioner_ptr;
+    std::array<std::vector<int>, num_space_dim> _current_partition;
     std::shared_ptr<sparse_layout_type> _layout_ptr;
     std::shared_ptr<sparse_map_type> _map_ptr;
 
