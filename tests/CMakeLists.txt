@@ -20,6 +20,7 @@ set(SERIAL_TESTS
   )
 
 set(MPI_TESTS
+  LoadBalance
   Particle2Multipole
   Multipole2Local
   Particle2Particle

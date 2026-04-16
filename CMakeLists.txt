@@ -46,6 +46,9 @@ if(Kokkos_ENABLE_CUDA)
   kokkos_check(OPTIONS CUDA_LAMBDA)
 endif()
 
+# find trilinos
+find_package(Trilinos REQUIRED)
+
 # find cabana
 find_package(Cabana REQUIRED COMPONENTS Cabana::Grid Cabana::Core)
 if( NOT Cabana_ENABLE_MPI )

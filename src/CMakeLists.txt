@@ -23,10 +23,13 @@ target_link_libraries(Canopy INTERFACE MPI::MPI_CXX)
 
 target_link_libraries(Canopy INTERFACE Cabana::Core Cabana::Grid)
 
+target_link_libraries(Canopy INTERFACE ${Trilinos_LIBRARIES})
+
 target_include_directories(Canopy INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  ${Trilinos_INCLUDE_DIRS}
   )
 
 install(TARGETS Canopy
