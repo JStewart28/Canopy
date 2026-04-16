@@ -163,7 +163,7 @@ void run()
     MPI_Comm_rank(comm, &rank);
 
     // Create some particles
-    const std::size_t num_local = 10000;
+    const std::size_t num_local = 10;
     AoSoA_t particles("particles", num_local);
 
 
@@ -183,9 +183,17 @@ void run()
         pos(i, 0) = x;
         pos(i, 1) = y;
         pos(i, 2) = z;
+        printf("Before (%.2lf, %.2lf, %.2lf), R%d\n",
+            pos(i, 0), pos(i, 1), pos(i, 2), rank);
     }
 
     loadBalanceParticles(particles, comm);
+
+    for (std::size_t i = 0; i < particles.size(); i++)
+    {
+        printf("After (%.2lf, %.2lf, %.2lf), R%d\n",
+            pos(i, 0), pos(i, 1), pos(i, 2), rank);
+    }
 
     // particles now holds the load-balanced subset for this rank.
     return;
