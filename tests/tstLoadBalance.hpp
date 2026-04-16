@@ -6,7 +6,10 @@
 #include <Zoltan2_PartitioningProblem.hpp>
 #include <Zoltan2_PartitioningSolution.hpp>
 
+#include <gtest/gtest.h>
+
 #include <mpi.h>
+#include <random>
 #include <vector>
 
 // ---------------------------------------------------------------
@@ -60,12 +63,12 @@ struct ParticleCoords
     }
 };
 
-Zoltan2::BasicVectorAdapter
-    Tpetra::Map<>>  // The adapter is templated on a "User" type;
-                     // Tpetra::Map<> is the common lightweight choice.
+// The adapter is templated on a "User" type;
+// Tpetra::Map<> is the common lightweight choice.
+Zoltan2::BasicVectorAdapter<Tpetra::Map<>>
 buildAdapter(const ParticleCoords& coords)
 {
-    const int dim = 3;
+    // const int dim = 3;
     const auto n  = static_cast<int>(coords.global_ids.size());
 
     // Pointers to coordinate arrays – one per dimension
@@ -114,9 +117,7 @@ void loadBalanceParticles(AoSoA_t& particles, MPI_Comm comm)
 
     // Create and solve the partitioning problem.
     Zoltan2::PartitioningProblem<Zoltan2::BasicVectorAdapter<Tpetra::Map<>>>
-        problem(&adapter, &params, Teuchos::rcp_implicit_cast
-                    const Teuchos::Comm<int>>(
-                    Teuchos::rcp(new Teuchos::MpiComm<int>(comm))));
+        problem(&adapter, &params, comm);
 
     problem.solve();
 
@@ -157,17 +158,32 @@ void loadBalanceParticles(AoSoA_t& particles, MPI_Comm comm)
 // ---------------------------------------------------------------
 void run()
 {
-   
     MPI_Comm comm = MPI_COMM_WORLD;
     int rank;
     MPI_Comm_rank(comm, &rank);
 
-    // Create some particles (placeholder – fill with real data).
+    // Create some particles
     const std::size_t num_local = 10000;
     AoSoA_t particles("particles", num_local);
 
+
+    // std::random_device rd; 
+    std::mt19937 gen(1000 + rank); 
+    std::uniform_real_distribution<double> dis(0.0, 5.0);
+
+    // 4. Generate the number
+    double randomNum = dis(gen);
+
     auto pos = Cabana::slice<POS>(particles, "position");
-    // ... fill positions, velocities, mass ...
+    for (std::size_t i = 0; i < num_local; i++)
+    {
+        auto x = dis(gen);
+        auto y = dis(gen);
+        auto z = dis(gen);
+        pos(i, 0) = x;
+        pos(i, 1) = y;
+        pos(i, 2) = z;
+    }
 
     loadBalanceParticles(particles, comm);
 
