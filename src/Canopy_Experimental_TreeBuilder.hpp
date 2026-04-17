@@ -12,21 +12,17 @@
 #ifndef CANOPY_SOLVER_HPP
 #define CANOPY_SOLVER_HPP
 
-
-#include <ArborX.hpp>
-#include <Canopy_SolverLayer.hpp>
-
 #include <Cabana_Core.hpp>
-#include <Cabana_Grid.hpp>
-
 #include <Kokkos_Core.hpp>
 #include <Kokkos_Sort.hpp>
-
-#include <memory>
+#include <Kokkos_UnorderedMap.hpp>
 
 #include <mpi.h>
 
-#include <limits>
+#include <cstdint>
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace Canopy
 {
@@ -92,7 +88,7 @@ struct CellInfo
     int depth;
     double center[3];
     double half_width; // half the side length of this cell's cube
-    int global_count;  // total particles across all ranks
+    int global_count;  // total particles across all ranks that live in this cell
     bool is_leaf;
 };
 
@@ -131,18 +127,6 @@ class TreeBuilder
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
     
-    //! Self type
-    // using solver_type = Solver<MemorySpace, ExecutionSpace, Metadata, P>;
-
-    //! Dimension number
-    static constexpr int num_space_dim = 3;
-    //! P-term for expansions
-    static constexpr int p = P;
-    //! Memory space size type
-    using size_type = typename memory_space::size_type;
-    //! Scalar type
-    using scalar_type = typename metadata::scalar_type;
-    
     // Host mirror types for tree data
     using host_execution_space = Kokkos::DefaultHostExecutionSpace;
     using host_memory_space = typename host_execution_space::memory_space;
@@ -163,7 +147,9 @@ class TreeBuilder
     //! Maximum tree depth
     int _max_depth;
     //! Tolerance factor on global bounding box
-    double _tolerance_factor
+    double _bb_tf;
+    //! Tolerance factor on gncrit
+    double _ncrit_tf;
 
     // Tree state
     bool _tree_valid;
@@ -182,11 +168,15 @@ class TreeBuilder
 
   public:
     // Constructor
-    TreeBuilder( const int ncrit, const int max_depth, const int tolerance_factor = 0.1, MPI_Comm comm ) 
+    TreeBuilder( const int ncrit, const int max_depth,
+        MPI_Comm comm,
+        const double bb_tolerance_factor = 0.1,
+        const double ncrit_tolerance_factor = 0.1) 
         : _ncrit( ncrit )
         , _max_depth( max_depth )
-        , _tolerance_factor( tolerance_factor )
         , _comm( comm )
+        , _bb_tf( bb_tolerance_factor )
+        , _ncrit_tf( ncrit_tolerance_factor )
     {
         MPI_Comm_rank( _comm, &_rank );
         MPI_Comm_size( _comm, &_comm_size );
@@ -265,8 +255,8 @@ class TreeBuilder
             Kokkos::Max<double>( local_max[2] ) );
 
         BoundingBox box;
-        MPI_Allreduce( local_min, box.min, 3, MPI_DOUBLE, MPI_MIN, comm_ );
-        MPI_Allreduce( local_max, box.max, 3, MPI_DOUBLE, MPI_MAX, comm_ );
+        MPI_Allreduce( local_min, box.min, 3, MPI_DOUBLE, MPI_MIN, _comm );
+        MPI_Allreduce( local_max, box.max, 3, MPI_DOUBLE, MPI_MAX, _comm );
 
         double pad = 1.0e-10;
         for ( int d = 0; d < 3; ++d )
@@ -290,6 +280,229 @@ class TreeBuilder
             _cell_lookup[_cells[i].key] = i;
     }
 
+    // Walk each particle from the root of the tree down to its correct leaf.
+    // This runs on host because the tree structure is in _cells and
+    // _cell_lookup which are on the host. The resulting leaf keys are then
+    // copied back to the device view.
+    template <class PositionType>
+    void reassign_all_particle_keys( PositionType positions,
+                                    int num_local_particles )
+    {
+        // Workaround to copy a device-side slice into a host-side view
+        using value_type = typename decltype(positions)::value_type;
+        Kokkos::View<value_type*[3], memory_space> d_pos("d_pos", num_local_particles);
+        Kokkos::parallel_for(
+            "SliceToView",
+            Kokkos::RangePolicy<execution_space>(0, num_local_particles),
+            KOKKOS_LAMBDA(int i) {
+                d_pos(i, 0) = positions(i, 0);
+                d_pos(i, 1) = positions(i, 1);
+                d_pos(i, 2) = positions(i, 2);
+            });
+        Kokkos::fence();
+        auto h_positions = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_pos);
+
+        // Allocate host keys
+        key_host_view_type h_keys( "h_particle_keys", num_local_particles );
+
+        // Find the root cell info
+        auto root_it = _cell_lookup.find( ROOT_KEY );
+        if ( root_it == _cell_lookup.end() )
+        {
+            // Tree has no root — shouldn't happen after build()
+            Kokkos::deep_copy( _particle_keys, ROOT_KEY );
+            return;
+        }
+
+        for ( int i = 0; i < num_local_particles; ++i )
+        {
+            double px = h_positions( i, 0 );
+            double py = h_positions( i, 1 );
+            double pz = h_positions( i, 2 );
+
+            // Walk down from root
+            MortonKey current = ROOT_KEY;
+            while ( true )
+            {
+                auto it = _cell_lookup.find( current );
+                if ( it == _cell_lookup.end() )
+                {
+                    // Cell doesn't exist in the tree — walk back to parent.
+                    // This shouldn't happen after the fix below, but is a
+                    // safety fallback.
+                    current = parent_key( current );
+                    break;
+                }
+
+                const CellInfo& ci = _cells[it->second];
+                if ( ci.is_leaf )
+                    break; // found the leaf
+
+                // Determine which child octant this particle falls into
+                int oct = which_octant( px, py, pz,
+                                        ci.center[0], ci.center[1],
+                                        ci.center[2] );
+                MortonKey child = child_key( current, oct );
+
+                // Check if this child exists
+                auto child_it = _cell_lookup.find( child );
+                if ( child_it == _cell_lookup.end() )
+                {
+                    // Child was pruned (empty at build time) but a particle
+                    // has now moved into this octant. Create a new leaf cell
+                    // for it so the particle has a proper leaf assignment.
+                    CellInfo new_leaf;
+                    new_leaf.key = child;
+                    new_leaf.depth = ci.depth + 1;
+                    child_center( ci.center[0], ci.center[1], ci.center[2],
+                                ci.half_width, oct,
+                                new_leaf.center[0], new_leaf.center[1],
+                                new_leaf.center[2] );
+                    new_leaf.half_width = ci.half_width * 0.5;
+                    new_leaf.global_count = 0; // will be filled by recount
+                    new_leaf.is_leaf = true;
+
+                    _cell_lookup[child] =
+                        static_cast<int>( _cells.size() );
+                    _cells.push_back( new_leaf );
+
+                    current = child;
+                    break; // new leaf — particle goes here
+                }
+
+                current = child;
+            }
+
+            h_keys( i ) = current;
+        }
+
+        // Copy back to device
+        if ( static_cast<int>( _particle_keys.extent( 0 ) ) !=
+            num_local_particles )
+        {
+            _particle_keys =
+                key_view_type( "particle_keys", num_local_particles );
+        }
+        Kokkos::deep_copy( _particle_keys, h_keys );
+    }
+
+    // --------------------------------------------------------------------------
+    // Merge 8 sibling leaves back into their parent only if the parent will
+    // have at least than ncrit*(1 - nc_tf) particles after merge.
+    // Return true if coarsened.
+    // --------------------------------------------------------------------------
+    bool try_coarsen(MortonKey parent_key_val )
+    {
+        // Can't coarsen root cell
+        if ( parent_key_val < ROOT_KEY )
+            return false;
+
+        // Cell not in _cells
+        auto parent_it = _cell_lookup.find( parent_key_val );
+        if ( parent_it == _cell_lookup.end() )
+            return false;
+
+        CellInfo& parent_ci = _cells[parent_it->second];
+
+        // Parent must currently be a non-leaf cell
+        if ( parent_ci.is_leaf )
+            return false;
+
+        // All 8 children must exist and be leaves
+        int total_count = 0;
+        std::vector<MortonKey> child_keys_to_remove;
+
+        for ( int oct = 0; oct < 8; oct++ )
+        {
+            MortonKey ck = child_key( parent_key_val, oct );
+            auto child_it = _cell_lookup.find( ck );
+            if ( child_it == _cell_lookup.end() )
+            {
+                // Child doesn't exist (was pruned). It had 0
+                // particles. We can still coarsen if we want.
+                continue;
+            }
+
+            const CellInfo& child_ci = _cells[child_it->second];
+            if ( !child_ci.is_leaf )
+                return false; // can't coarsen if any child is internal
+
+            total_count += child_ci.global_count;
+            child_keys_to_remove.push_back( ck );
+        }
+
+        // Only coarsen if the combined count falls below the lower
+        // hysteresis threshold. This prevents thrashing: a cell that was
+        // just split won't immediately re-merge if a few particles leave.
+        int coarsen_threshold = static_cast<int>(
+            _ncrit * ( 1.0 - _ncrit_tf ) );
+        if ( total_count > coarsen_threshold )
+            return false;
+
+        // Remove children from lookup (mark for lazy cleanup)
+        // Don't actually erase from _cells to avoid invalidating indices.
+        // Instead mark them with key=0 and rebuild the lookup later.
+        for ( auto ck : child_keys_to_remove )
+        {
+            auto child_it = _cell_lookup.find( ck );
+            if ( child_it != _cell_lookup.end() )
+            {
+                _cells[child_it->second].key = 0;
+                _cell_lookup.erase( child_it );
+            }
+        }
+
+        // Convert parent back to leaf
+        parent_ci.is_leaf = true;
+        parent_ci.global_count = total_count;
+
+        return true;
+    }
+
+    // Split a leaf cell into an internal cell + 8 children
+    void refine_leaf(MortonKey leaf_key )
+    {
+        auto it = _cell_lookup.find( leaf_key );
+        if ( it == _cell_lookup.end() )
+            return;
+
+        int idx = it->second;
+        CellInfo& ci = _cells[idx];
+
+        if ( !ci.is_leaf )
+            return; // already internal
+
+        if ( ci.depth >= _max_depth )
+            return; // can't refine further
+
+        // Convert to internal cell
+        ci.is_leaf = false;
+
+        // Create 8 children
+        double parent_cx = ci.center[0];
+        double parent_cy = ci.center[1];
+        double parent_cz = ci.center[2];
+        double parent_hw = ci.half_width;
+        double ch_hw = parent_hw * 0.5;
+
+        for ( int oct = 0; oct < 8; oct++ )
+        {
+            CellInfo child_ci;
+            child_ci.key = child_key( leaf_key, oct );
+            child_ci.depth = ci.depth + 1;
+            child_center( parent_cx, parent_cy, parent_cz, parent_hw, oct,
+                        child_ci.center[0], child_ci.center[1],
+                        child_ci.center[2] );
+            child_ci.half_width = ch_hw;
+            child_ci.global_count = 0; // will be filled by recount
+            child_ci.is_leaf = true;
+
+            _cell_lookup[child_ci.key] =
+                static_cast<int>( _cells.size() );
+            _cells.push_back( child_ci );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Main functions
     // -----------------------------------------------------------------------
@@ -311,17 +524,16 @@ class TreeBuilder
     void build( PositionType positions, int num_local_particles )
     {
         // Compute global bounding box
-        root_box_ =
-            compute_global_bounding_box( positions, num_local_particles );
+        _root_box = compute_global_bounding_box( positions, num_local_particles );
 
         // Expand the root box by the tolerance factor so particles have room
         // to move before leaving the domain.
-        if ( _tolerance_factor > 0.0 )
+        if ( _bb_tf > 0.0 )
         {
             for ( int d = 0; d < 3; ++d )
             {
                 double width = _root_box.max[d] - _root_box.min[d];
-                double expansion = _tolerance_factor * width;
+                double expansion = _bb_tf * width;
                 _root_box.min[d] -= expansion;
                 _root_box.max[d] += expansion;
             }
@@ -329,17 +541,17 @@ class TreeBuilder
 
         // Coordinates of root box center
         double root_cx =
-            0.5 * ( root_box_.min[0] + root_box_.max[0] );
+            0.5 * ( _root_box.min[0] + _root_box.max[0] );
         double root_cy =
-            0.5 * ( root_box_.min[1] + root_box_.max[1] );
+            0.5 * ( _root_box.min[1] + _root_box.max[1] );
         double root_cz =
-            0.5 * ( root_box_.min[2] + root_box_.max[2] );
+            0.5 * ( _root_box.min[2] + _root_box.max[2] );
         
         // Use the max dimension to compute the half-width of the root box
         double root_hw = 0.0;
         for ( int d = 0; d < 3; ++d )
         {
-            double hw = 0.5 * ( root_box_.max[d] - root_box_.min[d] );
+            double hw = 0.5 * ( _root_box.max[d] - _root_box.min[d] );
             if ( hw > root_hw )
                 root_hw = hw;
         }
@@ -448,8 +660,6 @@ class TreeBuilder
             auto h_local_counts = Kokkos::create_mirror_view_and_copy(
                 Kokkos::HostSpace(), local_counts );
             std::vector<int> global_counts( num_candidates );
-            for ( int c = 0; c < num_candidates; ++c )
-                send_counts[c] = h_local_counts( c );
 
             // All reduce the number of particles in each cell.
             MPI_Allreduce( h_local_counts.data(), global_counts.data(),
@@ -497,7 +707,7 @@ class TreeBuilder
 
                     // Split cell into its 8 children and add them to
                     // next_cells_to_refine vector as refinement candidates.
-                    for ( int oct = 0; oct < 8; oct+ )
+                    for ( int oct = 0; oct < 8; oct++ )
                     {
                         Cell cell;
                         cell.key = child_key( cells_to_refine[c].key, oct );
@@ -515,7 +725,7 @@ class TreeBuilder
                                                     num_candidates );
             auto h_splits = Kokkos::create_mirror_view( splits );
             for ( int c = 0; c < num_candidates; ++c )
-                h_splits( c ) = split_decision[c];
+                h_splits( c ) = should_split[c];
             Kokkos::deep_copy( splits, h_splits );
 
             Kokkos::parallel_for(
@@ -550,13 +760,13 @@ class TreeBuilder
 
     // Check if particles have left the root bounding box
     template <class PositionType>
-    needs_rebuild(PositionType positions, int num_local_particles ) const
+    bool needs_rebuild(PositionType positions, int num_local_particles ) const
     {
         // Check against the root box
-        double bmin0 = root_box_.min[0], bmin1 = root_box_.min[1],
-            bmin2 = root_box_.min[2];
-        double bmax0 = root_box_.max[0], bmax1 = root_box_.max[1],
-            bmax2 = root_box_.max[2];
+        double bmin0 = _root_box.min[0], bmin1 = _root_box.min[1],
+            bmin2 = _root_box.min[2];
+        double bmax0 = _root_box.max[0], bmax1 = _root_box.max[1],
+            bmax2 = _root_box.max[2];
 
         int local_escaped = 0;
         Kokkos::parallel_reduce(
@@ -586,7 +796,7 @@ class TreeBuilder
     // update() — incremental tree adaptation
     // --------------------------------------------------------------------------
     template <class PositionType>
-    update(PositionType positions, int num_local_particles )
+    UpdateResult update(PositionType positions, int num_local_particles )
     {
         // Particles moved to different leaf
         // Leaf cells split
@@ -594,7 +804,7 @@ class TreeBuilder
         // Full rebuild due to bounding box change
         UpdateResult result = { 0, 0, 0, false };
 
-        // If the tree was never built, do a full build
+        // Step 0: If the tree was never built, do a full build
         if ( !_tree_valid )
         {
             build( positions, num_local_particles );
@@ -602,7 +812,7 @@ class TreeBuilder
             return result;
         }
 
-        // Check if any particles escaped the root bounding box, which
+        // Step 1: Check if any particles escaped the root bounding box, which
         // also requires a full rebuild
         if ( needs_rebuild( positions, num_local_particles ) )
         {
@@ -612,7 +822,7 @@ class TreeBuilder
         }
 
         // --------------------------------------------------------------------------
-        // Detect which particles have left their current leaf cell.
+        // Step 2: Detect which particles have left their current leaf cell.
         // If so, it needs reassignment.
         // --------------------------------------------------------------------------
 
@@ -683,24 +893,18 @@ class TreeBuilder
             } );
         Kokkos::fence();
 
-        // Check each particle: is it still inside its leaf cell's buffered
-        // region?  The buffered region is the cell expanded by
-        // tolerance_factor * half_width on each side.
-        //
-        // A particle is "escaped" if it's outside the buffered bounds.
-        // We flag these and count them.
-
+        // Check for each particle if it has moved into a new cell.
+        // Flag these and count them.
         Kokkos::View<int*, memory_space> escaped_flag( "escaped_flag",
                                                     num_local_particles );
-        double tol = tolerance_factor_;
-        auto p_keys = particle_keys_;
+        auto particle_keys = _particle_keys;
 
         int local_migrated = 0;
         Kokkos::parallel_reduce(
             "DetectEscaped",
             Kokkos::RangePolicy<execution_space>( 0, num_local_particles ),
             KOKKOS_LAMBDA( int i, int& count ) {
-                MortonKey my_key = p_keys( i );
+                MortonKey my_key = particle_keys( i );
                 auto idx = leaf_map.find( my_key );
                 if ( !leaf_map.valid_at( idx ) )
                 {
@@ -716,17 +920,15 @@ class TreeBuilder
                 double cy = d_leaf_cy( j );
                 double cz = d_leaf_cz( j );
                 double hw = d_leaf_hw( j );
-                double buffer = hw * tol;
-                double buffered_hw = hw + buffer;
 
                 double px = positions( i, 0 );
                 double py = positions( i, 1 );
                 double pz = positions( i, 2 );
 
-                // Check if outside the buffered cell
-                if ( px < cx - buffered_hw || px > cx + buffered_hw ||
-                    py < cy - buffered_hw || py > cy + buffered_hw ||
-                    pz < cz - buffered_hw || pz > cz + buffered_hw )
+                // Check if outside its cell
+                if ( px < cx - hw || px > cx + hw ||
+                    py < cy - hw || py > cy + hw ||
+                    pz < cz - hw || pz > cz + hw )
                 {
                     escaped_flag( i ) = 1;
                     count++;
@@ -738,148 +940,85 @@ class TreeBuilder
         // Global count of migrated particles (for reporting)
         int global_migrated = 0;
         MPI_Allreduce( &local_migrated, &global_migrated, 1, MPI_INT,
-                    MPI_SUM, comm_ );
+                    MPI_SUM, _comm );
         result.particles_migrated = global_migrated;
 
-        // ==================================================================
-        // Step 3: If no particles migrated, we're done — tree is unchanged
-        // ==================================================================
+        // Step 3: If no particles migrated, return. The tree is unchanged.
         if ( global_migrated == 0 )
             return result;
 
-        // ==================================================================
-        // Step 4: Reassign ALL particle keys by walking the tree
-        //
-        // This is simpler and more robust than trying to incrementally fix
-        // only the escaped particles (which may land in cells that don't
-        // exist yet, or cross multiple cell boundaries). The cost is
-        // O(N * tree_depth) which is modest since tree_depth is typically
-        // 5-15 levels.
-        // ==================================================================
+        // Step 4: Otherwise, reassign all particle keys by walking the tree.
+        // The cost is O(N * tree_depth) 
         reassign_all_particle_keys( positions, num_local_particles );
 
         // ==================================================================
         // Step 5: Recount particles per leaf cell (global)
+        //
+        // Since reassign_all_particle_keys may have created new leaf cells
+        // (for previously empty octants that now have particles), do the
+        // recount on the host side using the authoritative _cell_lookup.
         // ==================================================================
 
-        // Local counts via device kernel
-        Kokkos::View<int*, memory_space> d_leaf_local_counts(
-            "d_leaf_local_counts", num_leaves );
+        // Reset all leaf counts
+        for ( auto& ci : _cells )
+        {
+            if ( ci.is_leaf )
+                ci.global_count = 0;
+        }
 
-        auto pk = particle_keys_;
-        Kokkos::parallel_for(
-            "RecountLocal",
-            Kokkos::RangePolicy<execution_space>( 0, num_local_particles ),
-            KOKKOS_LAMBDA( int i ) {
-                MortonKey my_key = pk( i );
-                auto idx = leaf_map.find( my_key );
-                if ( leaf_map.valid_at( idx ) )
-                {
-                    int j = leaf_map.value_at( idx );
-                    Kokkos::atomic_increment( &d_leaf_local_counts( j ) );
-                }
-                // Particles assigned to internal nodes (empty-child case)
-                // are handled in the refinement pass below.
-            } );
-        Kokkos::fence();
-
-        auto h_leaf_local =
-            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
-                                                d_leaf_local_counts );
-
-        // Also count particles assigned to internal (non-leaf) nodes.
-        // These are particles that landed in previously empty octants.
-        // We count them per cell on the host side.
         auto h_pkeys = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace{}, particle_keys_ );
+            Kokkos::HostSpace(), _particle_keys );
 
-        std::unordered_map<MortonKey, int> internal_local_counts;
+        // Local counts per cell key
+        std::unordered_map<MortonKey, int> local_counts_map;
         for ( int i = 0; i < num_local_particles; ++i )
+            local_counts_map[h_pkeys( i )]++;
+
+        // Gather all unique keys and their local counts for allreduce.
+        // Use allgather + merge since the number of unique keys is
+        // bounded by the (modest) number of leaf cells.
+        std::vector<MortonKey> count_keys;
+        std::vector<int> count_vals;
+        for ( auto& [k, v] : local_counts_map )
         {
-            MortonKey k = h_pkeys( i );
-            auto it = cell_lookup_.find( k );
-            if ( it != cell_lookup_.end() && !cells_[it->second].is_leaf )
-            {
-                internal_local_counts[k]++;
-            }
+            count_keys.push_back( k );
+            count_vals.push_back( v );
         }
 
-        // Allreduce leaf counts
-        std::vector<int> leaf_send( num_leaves ), leaf_global( num_leaves );
-        for ( int j = 0; j < num_leaves; ++j )
-            leaf_send[j] = h_leaf_local( j );
+        int num_local_keys = static_cast<int>( count_keys.size() );
+        int num_max_keys = 0;
+        MPI_Allreduce( &num_local_keys, &num_max_keys, 1, MPI_INT,
+                    MPI_MAX, _comm );
 
-        MPI_Allreduce( leaf_send.data(), leaf_global.data(), num_leaves,
-                    MPI_INT, MPI_SUM, comm_ );
-
-        // Update leaf global_count in cells_
-        for ( int j = 0; j < num_leaves; ++j )
+        std::vector<MortonKey> pk_padded( num_max_keys, 0 );
+        std::vector<int> pv_padded( num_max_keys, 0 );
+        for ( int j = 0; j < num_local_keys; ++j )
         {
-            auto it = cell_lookup_.find( leaf_keys_vec[j] );
-            if ( it != cell_lookup_.end() )
-                cells_[it->second].global_count = leaf_global[j];
+            pk_padded[j] = count_keys[j];
+            pv_padded[j] = count_vals[j];
         }
 
-        // Allreduce internal node counts (only the ones that have particles
-        // landing in them — typically very few)
-        // Gather all internal keys that have local counts > 0
-        std::vector<MortonKey> internal_keys_with_particles;
-        std::vector<int> internal_local_vec;
-        for ( auto& [k, cnt] : internal_local_counts )
+        std::vector<MortonKey> all_pk( num_max_keys * _comm_size );
+        std::vector<int> all_pv( num_max_keys * _comm_size );
+
+        MPI_Allgather( pk_padded.data(), num_max_keys, MPI_UINT64_T,
+                    all_pk.data(), num_max_keys, MPI_UINT64_T,
+                    _comm );
+        MPI_Allgather( pv_padded.data(), num_max_keys, MPI_INT,
+                    all_pv.data(), num_max_keys, MPI_INT, _comm );
+
+        std::unordered_map<MortonKey, int> global_counts_map;
+        for ( int j = 0; j < num_max_keys * _comm_size; ++j )
         {
-            internal_keys_with_particles.push_back( k );
-            internal_local_vec.push_back( cnt );
+            if ( all_pk[j] != 0 )
+                global_counts_map[all_pk[j]] += all_pv[j];
         }
 
-        // For simplicity, broadcast the set of keys and allreduce counts.
-        // In practice this is a very small set.
-        // We use a simple gather-and-merge approach.
-        int num_internal_local =
-            static_cast<int>( internal_keys_with_particles.size() );
-        int num_internal_max = 0;
-        MPI_Allreduce( &num_internal_local, &num_internal_max, 1, MPI_INT,
-                    MPI_MAX, comm_ );
-
-        // If any rank has particles in internal nodes, we need to handle it.
-        // For now, a simple approach: allgather the keys and counts, then
-        // merge. This is fine because this set is tiny.
-        if ( num_internal_max > 0 )
+        for ( auto& [k, cnt] : global_counts_map )
         {
-            // Pad local arrays to uniform size for allgather
-            std::vector<MortonKey> padded_keys( num_internal_max, 0 );
-            std::vector<int> padded_counts( num_internal_max, 0 );
-            for ( int j = 0; j < num_internal_local; ++j )
-            {
-                padded_keys[j] = internal_keys_with_particles[j];
-                padded_counts[j] = internal_local_vec[j];
-            }
-
-            std::vector<MortonKey> all_keys(
-                num_internal_max * nprocs_ );
-            std::vector<int> all_counts( num_internal_max * nprocs_ );
-
-            MPI_Allgather( padded_keys.data(), num_internal_max,
-                        MPI_UINT64_T, all_keys.data(),
-                        num_internal_max, MPI_UINT64_T, comm_ );
-            MPI_Allgather( padded_counts.data(), num_internal_max, MPI_INT,
-                        all_counts.data(), num_internal_max, MPI_INT,
-                        comm_ );
-
-            // Merge
-            std::unordered_map<MortonKey, int> internal_global_counts;
-            for ( int j = 0; j < num_internal_max * nprocs_; ++j )
-            {
-                if ( all_keys[j] != 0 )
-                    internal_global_counts[all_keys[j]] += all_counts[j];
-            }
-
-            // Update cells_ with these counts
-            for ( auto& [k, cnt] : internal_global_counts )
-            {
-                auto it = cell_lookup_.find( k );
-                if ( it != cell_lookup_.end() )
-                    cells_[it->second].global_count = cnt;
-            }
+            auto it = _cell_lookup.find( k );
+            if ( it != _cell_lookup.end() )
+                _cells[it->second].global_count = cnt;
         }
 
         // ==================================================================
@@ -892,10 +1031,10 @@ class TreeBuilder
 
             // Collect leaves that need refinement
             std::vector<MortonKey> to_refine;
-            for ( const auto& ci : cells_ )
+            for ( const auto& ci : _cells )
             {
-                if ( ci.is_leaf && ci.global_count > ncrit_ &&
-                    ci.depth < max_depth_ )
+                if ( ci.is_leaf && ci.global_count > _ncrit &&
+                    ci.depth < _max_depth )
                 {
                     to_refine.push_back( ci.key );
                 }
@@ -918,14 +1057,14 @@ class TreeBuilder
 
             // Recount for newly created leaves
             // Reset all leaf counts to 0
-            for ( auto& ci : cells_ )
+            for ( auto& ci : _cells )
             {
                 if ( ci.is_leaf )
                     ci.global_count = 0;
             }
 
             auto h_pk = Kokkos::create_mirror_view_and_copy(
-                Kokkos::HostSpace{}, particle_keys_ );
+                Kokkos::HostSpace{}, _particle_keys );
 
             // Local counts
             std::unordered_map<MortonKey, int> local_leaf_counts;
@@ -945,7 +1084,7 @@ class TreeBuilder
             int num_local_keys = static_cast<int>( count_keys.size() );
             int num_max_keys = 0;
             MPI_Allreduce( &num_local_keys, &num_max_keys, 1, MPI_INT,
-                        MPI_MAX, comm_ );
+                        MPI_MAX, _comm );
 
             std::vector<MortonKey> pk_padded( num_max_keys, 0 );
             std::vector<int> pv_padded( num_max_keys, 0 );
@@ -955,17 +1094,17 @@ class TreeBuilder
                 pv_padded[j] = count_vals[j];
             }
 
-            std::vector<MortonKey> all_pk( num_max_keys * nprocs_ );
-            std::vector<int> all_pv( num_max_keys * nprocs_ );
+            std::vector<MortonKey> all_pk( num_max_keys * _comm_size );
+            std::vector<int> all_pv( num_max_keys * _comm_size );
 
             MPI_Allgather( pk_padded.data(), num_max_keys, MPI_UINT64_T,
                         all_pk.data(), num_max_keys, MPI_UINT64_T,
-                        comm_ );
+                        _comm );
             MPI_Allgather( pv_padded.data(), num_max_keys, MPI_INT,
-                        all_pv.data(), num_max_keys, MPI_INT, comm_ );
+                        all_pv.data(), num_max_keys, MPI_INT, _comm );
 
             std::unordered_map<MortonKey, int> global_leaf_counts;
-            for ( int j = 0; j < num_max_keys * nprocs_; ++j )
+            for ( int j = 0; j < num_max_keys * _comm_size; ++j )
             {
                 if ( all_pk[j] != 0 )
                     global_leaf_counts[all_pk[j]] += all_pv[j];
@@ -973,18 +1112,20 @@ class TreeBuilder
 
             for ( auto& [k, cnt] : global_leaf_counts )
             {
-                auto it = cell_lookup_.find( k );
-                if ( it != cell_lookup_.end() )
-                    cells_[it->second].global_count = cnt;
+                auto it = _cell_lookup.find( k );
+                if ( it != _cell_lookup.end() )
+                    _cells[it->second].global_count = cnt;
             }
         }
 
         // ==================================================================
-        // Step 7: Coarsen — check if sibling groups can be merged
+        // Coarsen — check if sibling groups can be merged into a
+        // single parent cell
         // ==================================================================
+
         // Collect unique parent keys of all leaves
         std::unordered_set<MortonKey> candidate_parents;
-        for ( const auto& ci : cells_ )
+        for ( const auto& ci : _cells )
         {
             if ( ci.is_leaf && ci.key != ROOT_KEY )
                 candidate_parents.insert( parent_key( ci.key ) );
@@ -998,13 +1139,13 @@ class TreeBuilder
 
         if ( result.cells_coarsened > 0 )
         {
-            // Remove tombstoned cells and rebuild lookup
-            cells_.erase(
-                std::remove_if( cells_.begin(), cells_.end(),
+            // Remove zero-particle cells and rebuild lookup
+            _cells.erase(
+                std::remove_if( _cells.begin(), _cells.end(),
                                 []( const CellInfo& ci ) {
                                     return ci.key == 0;
                                 } ),
-                cells_.end() );
+                _cells.end() );
             rebuild_cell_lookup();
 
             // Reassign particle keys one final time after coarsening
@@ -1015,22 +1156,6 @@ class TreeBuilder
     }
 
 };
-
-    
-
-template <class MemorySpace, class ExecutionSpace, class Metadata, 
-          std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-std::shared_ptr<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>
-        createSolver( const std::array<typename Metadata::scalar_type, 3>& global_low_corner,
-                    const std::array<typename Metadata::scalar_type, 3>& global_high_corner,
-                    const std::size_t leaf_tiles_per_dim,
-                    const std::size_t tile_reduction_factor,
-                    MPI_Comm comm)
-{
-    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
-            global_high_corner, leaf_tiles_per_dim, tile_reduction_factor,
-            comm);
-}
 
 } // end namespace Experimental
 

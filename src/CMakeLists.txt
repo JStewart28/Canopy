@@ -5,6 +5,7 @@ set(HEADERS_PUBLIC
   Canopy_Operators.hpp
   Canopy_Solver.hpp
   Canopy_SolverLayer.hpp
+  Canopy_Experimental_TreeBuilder.hpp
   )
 
 # Currently no impl headers

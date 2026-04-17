@@ -9,348 +9,297 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Solver.hpp>
+#include <Canopy_Experimental_TreeBuilder.hpp>
 
-#include <helpers.hpp>
-
-#include <algorithm>
-#include <fstream>
-#include <iostream>
-#include <random>
-#include <set>
-#include <sstream>
-#include <string>
-#include <vector>
+#include <Cabana_Core.hpp>
+#include <Kokkos_Core.hpp>
 
 #include <mpi.h>
 
-// vortex sheet methods
-// BR rott vortex sheet methods
+#include <cstdio>
+#include <random>
+
+using namespace Canopy::Experimental;
+
+// ============================================================================
+// Example: Adaptive octree with incremental updates over timesteps
 //
+// Demonstrates:
+//   1. Initial full tree build
+//   2. Small particle displacements absorbed by tolerance (no tree change)
+//   3. Moderate displacements causing local refinement/coarsening
+//   4. Large displacements triggering a full rebuild
+// ============================================================================
 
-//---------------------------------------------------------------------------//
-
-// Used to sum positions in the following AverageValueFunctor struct.
-template <class ScalarType>
-struct Triple {
-    ScalarType x, y, z;
-
-    KOKKOS_INLINE_FUNCTION
-    Triple()
-        : x(ScalarType(0)), y(ScalarType(0)), z(ScalarType(0)) {}
-
-    KOKKOS_INLINE_FUNCTION
-    Triple& operator+=(const Triple& rhs) {
-        x += rhs.x;
-        y += rhs.y;
-        z += rhs.z;
-        return *this;
-    }
-};
-
-/**
- * Aggregates the first slice (positions) based on average and 
- * the second slice based on sum.
- */
-template <class MemorySpace, class ExecutionSpace, class AoSoAType>
-struct KernelFunction {
-public:
-
-    using memory_space = MemorySpace;
-    using execution_space = ExecutionSpace;
-    using aosoa_type = AoSoAType;
-    using member_types = typename AoSoAType::member_types;
-
-    KernelFunction() 
-    {
-        _avgs = aosoa_type("avgs", 1);
-    }
-
-    aosoa_type _avgs;
-
-    aosoa_type vals() {return _avgs;}
-
-    void operator()(const aosoa_type& data) const
-    {
-        std::size_t data_size = data.size();
-
-        auto slice0 = Cabana::slice<0>(data);
-
-        // Calculate average position of slice 0
-        Triple<double> sum;
-        Kokkos::parallel_reduce(
-            "aggregate_xyz",
-            Kokkos::RangePolicy<execution_space>(0, data_size),
-            KOKKOS_LAMBDA(const int i, Triple<double>& local_sum) {
-                local_sum.x += slice0(i, 0);
-                local_sum.y += slice0(i, 1);
-                local_sum.z += slice0(i, 2);
-            }, sum );
-        
-        sum.x /= static_cast<double>(data_size);
-        sum.y /= static_cast<double>(data_size);
-        sum.z /= static_cast<double>(data_size);
-
-        Cabana::Tuple<member_types> tp;
-        Cabana::get<0>( tp, 0 ) = sum.x;
-        Cabana::get<0>( tp, 1 ) = sum.y;
-        Cabana::get<0>( tp, 2 ) = sum.z;
-
-        _avgs.setTuple(0, tp);
-    }
-};
-
-/**
- * User-defined struct to collect data from the Octree cells
- */
-struct DataGather
+// Define particle data layout
+enum FieldIdx
 {
-    template<class SrcAoSoA, class DstAoSoA>
-    KOKKOS_INLINE_FUNCTION
-    void operator()(const SrcAoSoA& src,
-                    const int tid,
-                    const int cid,
-                    DstAoSoA& dst,
-                    const int dstIndex) const
-    {
-        for (int d = 0; d < 3; d++)
-            dst.template get<0>(dstIndex, d) = src.template get<0>(tid, cid, d);
-        for (int d = 0; d < 2; d++)
-            dst.template get<1>(dstIndex, d) = src.template get<1>(tid, cid, d);
-    }
+    Position = 0
 };
 
+using DataTypes = Cabana::MemberTypes<double[3]>;
 
-template <class MemorySpace, class ExecutionSpace>
-void octreeExperiments( std::string view_size )
+using MemorySpace = Kokkos::HostSpace;
+using ExecutionSpace = Kokkos::DefaultHostExecutionSpace;
+
+using AoSoA_t = Cabana::AoSoA<DataTypes, MemorySpace>;
+using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
+
+// ============================================================================
+// Generate test particles with a non-uniform distribution
+// ============================================================================
+void generate_test_particles( AoSoA_t& particles, int num_particles,
+                              int rank, int /* nprocs */ )
 {
-    using execution_space = ExecutionSpace;
-    using memory_space = MemorySpace;
+    AoSoA_ht particles_h("particles_h", num_particles);
+    auto h_positions = Cabana::slice<Position>(particles_h);
 
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    std::mt19937 gen( 42 + rank );
+    std::uniform_real_distribution<double> uniform( 0.0, 1.0 );
+    std::normal_distribution<double> clustered( 0.1, 0.02 );
 
-    int comm_size;
-    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
-
-    std::cout << "view_size: " << view_size << std::endl;
-    std::string z_path = "../data/" + view_size + "/" + std::to_string(comm_size) + "/";
-    std::string w_path = "../data/" + view_size + "/" + std::to_string(comm_size) + "/";
-    int mesh_size = 64;
-    if (view_size == "small") mesh_size = 16;
-    int periodic_flag = 0;
-    std::string z_name = Utils::get_filename(rank, comm_size, mesh_size, periodic_flag, 'z');
-    std::string w_name = Utils::get_filename(rank, comm_size, mesh_size, periodic_flag, 'w');
-    z_path += z_name;
-    w_path += w_name;
-
-    auto positions = Utils::read_z<memory_space>(z_path);
-    auto vorticities = Utils::read_w<memory_space>(w_path);
-
-    // using T = double;
-    // Create global mesh
-    // global low corners: random numbers
-    std::array<double, 3> global_low_corner = { -1.5, -1.5, -1.5 };
-    std::array<double, 3> global_high_corner = { 1.5, 1.5, 1.5 };
-
-    /*
-    small size (16x16 mesh), comm_size 4 view extents and owned index space from rocketrig:
-
-    R0: extents: z: 13, 13, w: 13, 13
-    R0: d1: [2, 10), d2: [2, 10)
-
-    R1: extents: z: 13, 12, w: 13, 12
-    R1: d1: [2, 10), d2: [2, 10)
-
-    R2: extents: z: 12, 13, w: 12, 13
-    R2: d1: [2, 10), d2: [2, 10)
-
-    R3: extents: z: 12, 12, w: 12, 12
-    R3: d1: [2, 10), d2: [2, 10)
-
-    ------------------------------------
-    large size (64x64 mesh), comm_size 4:
-
-    R0: extents: z: 37, 37, w: 37, 37
-    R0: d1: [2, 34), d2: [2, 34)
-
-    R1: extents: z: 37, 36, w: 37, 36
-    R1: d1: [2, 34), d2: [2, 34)
-
-    R2: extents: z: 36, 37, w: 36, 37
-    R2: d1: [2, 34), d2: [2, 34)
-
-    R3: extents: z: 36, 36, w: 36, 36
-    R3: d1: [2, 34), d2: [2, 34)
-
-    ------------------------------------
-    large size (64x64 mesh), comm_size 16:
-
-    R0: extents: z: 21, 21, w: 21, 21
-    R0: d1: [2, 18), d2: [2, 18)
-
-    R1: extents: z: 21, 21, w: 21, 21
-    R1: d1: [2, 18), d2: [2, 18)
-
-    R2: extents: z: 21, 21, w: 21, 21
-    R2: d1: [2, 18), d2: [2, 18)
-
-    R3: extents: z: 21, 20, w: 21, 20
-    R3: d1: [2, 18), d2: [2, 18)
-
-    R4: extents: z: 21, 21, w: 21, 21
-    R4: d1: [2, 18), d2: [2, 18)
-
-    R5: extents: z: 21, 21, w: 21, 21
-    R5: d1: [2, 18), d2: [2, 18)
-
-    R6: extents: z: 21, 21, w: 21, 21
-    R6: d1: [2, 18), d2: [2, 18)
-
-    R7: extents: z: 21, 20, w: 21, 20
-    R7: d1: [2, 18), d2: [2, 18)
-
-    R8: extents: z: 21, 21, w: 21, 21
-    R8: d1: [2, 18), d2: [2, 18)
-
-    R9: extents: z: 21, 21, w: 21, 21
-    R9: d1: [2, 18), d2: [2, 18)
-
-    R10: extents: z: 21, 21, w: 21, 21
-    R10: d1: [2, 18), d2: [2, 18)
-
-    R11: extents: z: 21, 20, w: 21, 20
-    R11: d1: [2, 18), d2: [2, 18)
-
-    R12: extents: z: 20, 21, w: 20, 21
-    R12: d1: [2, 18), d2: [2, 18)
-
-    R13: extents: z: 20, 21, w: 20, 21
-    R13: d1: [2, 18), d2: [2, 18)
-
-    R14: extents: z: 20, 21, w: 20, 21
-    R14: d1: [2, 18), d2: [2, 18)
-
-    R15: extents: z: 20, 20, w: 20, 20
-    R15: d1: [2, 18), d2: [2, 18)
-
-    */
-    std::size_t num_particles;
-    int istart = 2, jstart = 2;
-    int iend, jend;
-    if ((view_size == "small") && (comm_size == 4))
+    for ( int i = 0; i < num_particles; ++i )
     {
-        iend = 10; jend = 10;
+        if ( uniform( gen ) < 0.3 )
+        {
+            h_positions( i, 0 ) =
+                std::clamp( clustered( gen ), 0.0, 1.0 );
+            h_positions( i, 1 ) =
+                std::clamp( clustered( gen ), 0.0, 1.0 );
+            h_positions( i, 2 ) =
+                std::clamp( clustered( gen ), 0.0, 1.0 );
+        }
+        else
+        {
+            h_positions( i, 0 ) = uniform( gen );
+            h_positions( i, 1 ) = uniform( gen );
+            h_positions( i, 2 ) = uniform( gen );
+        }
     }
-    else if ((view_size == "large") && (comm_size == 4))
-    {
-        iend = 34; jend = 34;
-    }
-    else if ((view_size == "large") && (comm_size == 16))
-    {
-        iend = 18; jend = 18;
-    }
-    else
-    {
-        throw std::runtime_error("Unsuported comm_size and mesh size combo.\n");
-    }
-    int ni = iend - istart;
-    int nj = jend - jstart;
-    num_particles = ni * nj;
-    
-    // Distribute points to the correct 3D rank of owwnership
-    // Step 1: Move data from 2D Kokkos views to Canopy AoSoAs
-    using particle_tuple_type = Cabana::MemberTypes<double[3], // xyz position
-                                                    double[2], // vorticity
-                                                    >;
-    using particle_aosoa_type = Cabana::AoSoA<particle_tuple_type, memory_space, 4>;
-    particle_aosoa_type particle_aosoa("particle_aosoa", num_particles);
-    auto pos_slice = Cabana::slice<0>(particle_aosoa);
-    auto vort_slice = Cabana::slice<1>(particle_aosoa);
 
-    // Adjust start/end for ghost values from read-in views.
-    Kokkos::parallel_for("populate_particles", Kokkos::RangePolicy<execution_space>(0, num_particles),
-        KOKKOS_LAMBDA(int particle_id) {
-            int i = particle_id / nj + istart;
-            int j = particle_id % nj + jstart;
+    particles.resize( num_particles );
 
-            for (int dim = 0; dim < 3; ++dim) {
-                pos_slice(particle_id, dim) = positions(i, j, dim);
-                if (dim < 2)
-                    vort_slice(particle_id, dim) = vorticities(i, j, dim);
-            }
-    });
-
-    printf("R%d: num_particles: %d\n", rank, num_particles);
-    
-    using entity_type = Cabana::Grid::Cell;
-    static constexpr std::size_t num_dim = 3;
-    static constexpr std::size_t cells_per_tile = 4; // Why does this not compile when != 4
-    // The slice that us used to determine which cell the particle belongs in
-    // Here, slice 0 is the x/y/z position.
-    static constexpr std::size_t cell_slice_id = 0; 
-    std::size_t leaf_tiles, root_tiles, red_factor;
-    root_tiles = 1, red_factor = comm_size / 2, leaf_tiles = comm_size * 4;
-    if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createSolver<execution_space, memory_space, particle_tuple_type, entity_type,
-        num_dim, cells_per_tile, cell_slice_id>(
-            global_low_corner, global_high_corner, leaf_tiles, red_factor, root_tiles, MPI_COMM_WORLD);
-
-    
-    Kokkos::View<int*, memory_space> owner3D("owner3D", num_particles);
-    tree->mapParticles(pos_slice, owner3D, num_particles, 0);
-    // for (size_t i = 0; i < num_particles; i++)
-    // {
-    //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf) -> R%d\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2), owner3D(i));
-    // }
-
-    Cabana::Distributor<MemorySpace> distributor(MPI_COMM_WORLD, owner3D);
-    Cabana::migrate( distributor, particle_aosoa );
-    num_particles = particle_aosoa.size();
-    pos_slice = Cabana::slice<0>(particle_aosoa);
-    vort_slice = Cabana::slice<1>(particle_aosoa);
-    // for (size_t i = 0; i < particle_aosoa.size(); i++)
-    // {
-    //     if (rank == 0) printf("R%d: p(%0.2lf, %0.2lf, %0.2lf)\n", rank, pos_slice(i, 0), pos_slice(i, 1), pos_slice(i, 2));
-    // }
-    KernelFunction<memory_space, execution_space,
-         particle_aosoa_type> kernel;
-
-    tree->aggregateDataUp(particle_aosoa, kernel);    
+    Cabana::deep_copy( particles, particles_h );
 }
 
-//---------------------------------------------------------------------------//
-// main
+// ============================================================================
+// Displace particles by a given magnitude (simulating a timestep)
+// ============================================================================
+void displace_particles( AoSoA_t& particles, int num_particles,
+                         double displacement_magnitude, int seed )
+{
+    AoSoA_ht particles_h("particles_h", num_particles);
+    Cabana::deep_copy(particles_h, particles);
+    auto h_positions = Cabana::slice<Position>(particles_h);
+
+    std::mt19937 gen( seed );
+    std::normal_distribution<double> disp( 0.0, displacement_magnitude );
+
+    for ( int i = 0; i < num_particles; ++i )
+    {
+        for ( int d = 0; d < 3; ++d )
+        {
+            h_positions( i, d ) += disp( gen );
+            // Don't clamp — let particles escape the box if they move
+            // far enough, which tests the full-rebuild path
+        }
+    }
+
+    Cabana::deep_copy( particles, particles_h );
+}
+
+// ============================================================================
+// Print tree statistics
+// ============================================================================
+void print_tree_stats( const std::vector<CellInfo>& cells, int rank,
+                       const char* label )
+{
+    if ( rank != 0 )
+        return;
+
+    int total_cells = static_cast<int>( cells.size() );
+    int num_leaves = 0;
+    int num_internal = 0;
+    int max_depth = 0;
+    int total_particles_in_leaves = 0;
+
+    std::map<int, int> cells_per_depth;
+
+    for ( const auto& c : cells )
+    {
+        cells_per_depth[c.depth]++;
+        if ( c.depth > max_depth )
+            max_depth = c.depth;
+
+        if ( c.is_leaf )
+        {
+            num_leaves++;
+            total_particles_in_leaves += c.global_count;
+        }
+        else
+        {
+            num_internal++;
+        }
+    }
+
+    std::printf( "\n--- %s ---\n", label );
+    std::printf( "  Total cells: %d (internal: %d, leaves: %d)\n",
+                 total_cells, num_internal, num_leaves );
+    std::printf( "  Max depth: %d, Particles in leaves: %d\n",
+                 max_depth, total_particles_in_leaves );
+}
+
+// ============================================================================
+// Main
+// ============================================================================
 int main( int argc, char* argv[] )
 {
-    using exec_space = Kokkos::DefaultHostExecutionSpace;
-    using memory_space = Kokkos::HostSpace;
-
-    std::string mesh_size;
-    
-    if (argc > 1) {
-        // Access the first command-line argument (index 1) as a C-style string
-        // char* mesh_size = argv[1];
-        // std::cout << "Mesh size: " << mesh_size << std::endl;
-
-        // Convert the C-style string to a std::string
-        mesh_size = argv[1];
-        // std::cout << "std::string argument: " << mesh_size << std::endl;
-    } else {
-        std::cout << "No command-line argument provided." << std::endl;
-        std::cout << "Usage: " << argv[0] << " <mesh_size (small or large)>" << std::endl;
-        return 0;
-    }
-    
-    // Initialize environment
     MPI_Init( &argc, &argv );
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
     Kokkos::initialize( argc, argv );
+    {
+        // Parameters
+        int num_particles_per_rank = 10000;
+        int ncrit = 128;
+        int max_depth = 15;
+        double tolerance = 0.1; // 10% buffer on bounding box and leaf
+                                // cell particle count.
+        int num_timesteps = 20;
 
-    // sparseExperiments<memory_space, exec_space>(Cabana::Grid::Cell());
+        if ( argc > 1 )
+            num_particles_per_rank = std::atoi( argv[1] );
+        if ( argc > 2 )
+            ncrit = std::atoi( argv[2] );
+        if ( argc > 3 )
+            max_depth = std::atoi( argv[3] );
+        if ( argc > 4 )
+            tolerance = std::atof( argv[4] );
 
-    octreeExperiments<memory_space, exec_space>(mesh_size);
+        if ( rank == 0 )
+        {
+            std::printf(
+                "Running with %d ranks, %d particles/rank, "
+                "ncrit=%d, max_depth=%d, bb tol=%.3f, leaf tol=%.3f\n",
+                nprocs, num_particles_per_rank, ncrit, max_depth,
+                tolerance, tolerance );
+        }
 
-    // Finalize
+        // Create and fill particles
+        AoSoA_t particles( "particles", num_particles_per_rank );
+        generate_test_particles( particles, num_particles_per_rank, rank,
+                                 nprocs );
+
+        auto positions = Cabana::slice<Position>( particles );
+
+        // Build the tree builder with tolerance
+        // using PositionSlice = decltype( positions );
+        TreeBuilder<MemorySpace, ExecutionSpace> builder(
+            ncrit, max_depth, MPI_COMM_WORLD, tolerance, tolerance );
+
+        // -----------------------------------------------------------
+        // Initial full build
+        // -----------------------------------------------------------
+        builder.build( positions, num_particles_per_rank );
+        print_tree_stats( builder.cells(), rank, "Initial build" );
+
+        // -----------------------------------------------------------
+        // Simulate timesteps with increasing displacement
+        // -----------------------------------------------------------
+        for ( int step = 1; step <= num_timesteps; ++step )
+        {
+            // Displacement grows over time to exercise all code paths:
+            //   Steps 1-5:   tiny (well within tolerance)
+            //   Steps 6-12:  moderate (some cells refine/coarsen)
+            //   Steps 13-20: large (may trigger full rebuild)
+            double disp;
+            if ( step <= 5 )
+                disp = 0.0001; // tiny
+            else if ( step <= 12 )
+                disp = 0.005; // moderate
+            else
+                disp = 0.05; // large
+
+            displace_particles( particles, num_particles_per_rank, disp,
+                                step * 137 + rank );
+
+            // Re-slice after potential resize (not strictly needed here
+            // since we don't change particle count, but good practice)
+            positions = Cabana::slice<Position>( particles );
+
+            // Incremental update
+            auto result =
+                builder.update( positions, num_particles_per_rank );
+
+            if ( rank == 0 )
+            {
+                char label[256];
+                if ( result.full_rebuild_done )
+                {
+                    std::snprintf( label, sizeof( label ),
+                                   "Step %2d (disp=%.4f): FULL REBUILD",
+                                   step, disp );
+                }
+                else
+                {
+                    std::snprintf(
+                        label, sizeof( label ),
+                        "Step %2d (disp=%.4f): migrated=%d "
+                        "refined=%d coarsened=%d",
+                        step, disp, result.particles_migrated,
+                        result.cells_refined, result.cells_coarsened );
+                }
+                print_tree_stats( builder.cells(), rank, label );
+            }
+        }
+
+        // -----------------------------------------------------------
+        // Final verification
+        // -----------------------------------------------------------
+        auto particle_keys = builder.particle_keys();
+        auto h_keys = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), particle_keys );
+
+        std::set<MortonKey> leaf_keys;
+        for ( const auto& c : builder.cells() )
+        {
+            if ( c.is_leaf )
+                leaf_keys.insert( c.key );
+        }
+
+        int bad_count = 0;
+        for ( int i = 0; i < num_particles_per_rank; ++i )
+        {
+            if ( leaf_keys.find( h_keys( i ) ) == leaf_keys.end() )
+            {
+                bad_count++;
+                if ( bad_count <= 5 )
+                {
+                    std::printf(
+                        "Rank %d: particle %d has key %lu which is "
+                        "not a leaf cell!\n",
+                        rank, i,
+                        static_cast<unsigned long>( h_keys( i ) ) );
+                }
+            }
+        }
+
+        if ( bad_count > 0 )
+        {
+            std::printf( "Rank %d: %d particles not in leaf cells!\n",
+                         rank, bad_count );
+        }
+        else if ( rank == 0 )
+        {
+            std::printf(
+                "\nVerification passed: all particles are in "
+                "leaf cells after %d timesteps.\n",
+                num_timesteps );
+        }
+    }
     Kokkos::finalize();
     MPI_Finalize();
     return 0;
