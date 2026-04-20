@@ -179,6 +179,12 @@ class TreeBuilder
     {
         MPI_Comm_rank( _comm, &_rank );
         MPI_Comm_size( _comm, &_comm_size );
+
+        // Check that max depth is not greater than Morton key storage size
+        if (_max_depth > 19)
+        {
+            throw std::runtime_error("Canopy::TreeBuilder only supports depths up to 20!");
+        }
     }
 
     // -----------------------------------------------------------------------
