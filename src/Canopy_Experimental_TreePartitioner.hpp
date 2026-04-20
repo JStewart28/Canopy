@@ -12,8 +12,6 @@
 #ifndef CANOPY_TREE_PARTITIONER_HPP
 #define CANOPY_TREE_PARTITIONER_HPP
 
-#pragma once
-
 #include <Canopy_Experimental_TreeBuilder.hpp>
 
 #include <Cabana_Core.hpp>
