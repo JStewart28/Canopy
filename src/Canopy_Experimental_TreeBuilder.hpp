@@ -9,8 +9,8 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#ifndef CANOPY_SOLVER_HPP
-#define CANOPY_SOLVER_HPP
+#ifndef CANOPY_TREE_BUILDER_HPP
+#define CANOPY_TREE_BUILDER_HPP
 
 #include <Cabana_Core.hpp>
 #include <Kokkos_Core.hpp>
@@ -228,7 +228,7 @@ class TreeBuilder
     BoundingBox compute_global_bounding_box( PositionType positions,
                                              int num_local_particles )
     {
-        double local_min[3], local_max[3];
+        Kokkos::Array<double, 3> local_min, local_max;
         double inf = std::numeric_limits<double>::max();
 
         Kokkos::parallel_reduce(
@@ -254,9 +254,17 @@ class TreeBuilder
             Kokkos::Max<double>( local_max[1] ),
             Kokkos::Max<double>( local_max[2] ) );
 
+        // Copy Kokkos arrays into c-style arrays
+        double lmin[3], lmax[3];
+        for (int i = 0; i < 3; i++)
+        {
+            lmin[i] = local_min[i];
+            lmax[i] = local_max[i];
+        }
+
         BoundingBox box;
-        MPI_Allreduce( local_min, box.min, 3, MPI_DOUBLE, MPI_MIN, _comm );
-        MPI_Allreduce( local_max, box.max, 3, MPI_DOUBLE, MPI_MAX, _comm );
+        MPI_Allreduce( lmin, box.min, 3, MPI_DOUBLE, MPI_MIN, _comm );
+        MPI_Allreduce( lmax, box.max, 3, MPI_DOUBLE, MPI_MAX, _comm );
 
         double pad = 1.0e-10;
         for ( int d = 0; d < 3; ++d )
@@ -1161,4 +1169,4 @@ class TreeBuilder
 
 } // end namespace Canopy
 
-#endif // CANOPY_SOLVER_HPP
+#endif // CANOPY_TREE_BUILDER_HPP
