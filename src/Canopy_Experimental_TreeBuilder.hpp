@@ -20,9 +20,9 @@
 #include <mpi.h>
 
 #include <cstdint>
-#include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace Canopy
 {
@@ -88,7 +88,7 @@ struct CellInfo
     int depth;
     double center[3];
     double half_width; // half the side length of this cell's cube
-    int global_count;  // total particles across all ranks that live in this cell
+    int global_count; // total particles across all ranks that live in this cell
     bool is_leaf;
 };
 
@@ -106,11 +106,11 @@ struct BoundingBox
 // ============================================================================
 struct UpdateResult
 {
-    int particles_migrated;  // particles that moved to a different leaf
-    int cells_refined;       // leaf cells that were split
-    int cells_coarsened;     // groups of siblings collapsed to parent
-    bool full_rebuild_done;  // true if the bounding box changed and a
-                             // full rebuild was triggered instead
+    int particles_migrated; // particles that moved to a different leaf
+    int cells_refined;      // leaf cells that were split
+    int cells_coarsened;    // groups of siblings collapsed to parent
+    bool full_rebuild_done; // true if the bounding box changed and a
+                            // full rebuild was triggered instead
 };
 
 template <class MemorySpace, class ExecutionSpace>
@@ -118,23 +118,23 @@ class TreeBuilder
 {
   public:
     // Check metadata
-    // static_assert(Metadata::pos != no_id, "metadata must define position index");
-    // static_assert(Metadata::in != no_id, "metadata must define in_data index");
-    // static_assert(Metadata::out != no_id, "metadata must define out_data index");
+    // static_assert(Metadata::pos != no_id, "metadata must define position
+    // index"); static_assert(Metadata::in != no_id, "metadata must define
+    // in_data index"); static_assert(Metadata::out != no_id, "metadata must
+    // define out_data index");
 
     // using metadata = Metadata;
 
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
-    
+
     // Host mirror types for tree data
     using host_execution_space = Kokkos::DefaultHostExecutionSpace;
     using host_memory_space = typename host_execution_space::memory_space;
 
     // The particle-to-leaf mapping lives on device for fast particle kernels
     using key_view_type = Kokkos::View<MortonKey*, memory_space>;
-    using key_host_view_type =
-        Kokkos::View<MortonKey*, host_memory_space>;
+    using key_host_view_type = Kokkos::View<MortonKey*, host_memory_space>;
 
   private:
     // MPI
@@ -168,10 +168,9 @@ class TreeBuilder
 
   public:
     // Constructor
-    TreeBuilder( const int ncrit, const int max_depth,
-        MPI_Comm comm,
-        const double bb_tolerance_factor = 0.1,
-        const double ncrit_tolerance_factor = 0.1) 
+    TreeBuilder( const int ncrit, const int max_depth, MPI_Comm comm,
+                 const double bb_tolerance_factor = 0.1,
+                 const double ncrit_tolerance_factor = 0.1 )
         : _ncrit( ncrit )
         , _max_depth( max_depth )
         , _comm( comm )
@@ -213,9 +212,8 @@ class TreeBuilder
     // Compute child cell center given parent center, half_width, and octant
     KOKKOS_INLINE_FUNCTION
     static void child_center( double parent_cx, double parent_cy,
-                              double parent_cz, double parent_hw,
-                              int octant, double& cx, double& cy,
-                              double& cz )
+                              double parent_cz, double parent_hw, int octant,
+                              double& cx, double& cy, double& cz )
     {
         double quarter = parent_hw * 0.5;
         cx = parent_cx + ( ( octant & 1 ) ? quarter : -quarter );
@@ -235,17 +233,23 @@ class TreeBuilder
             "ComputeLocalBBox",
             Kokkos::RangePolicy<execution_space>( 0, num_local_particles ),
             KOKKOS_LAMBDA( int i, double& lmin_x, double& lmin_y,
-                        double& lmin_z, double& lmax_x, double& lmax_y,
-                        double& lmax_z ) {
+                           double& lmin_z, double& lmax_x, double& lmax_y,
+                           double& lmax_z ) {
                 double px = positions( i, 0 );
                 double py = positions( i, 1 );
                 double pz = positions( i, 2 );
-                if ( px < lmin_x ) lmin_x = px;
-                if ( py < lmin_y ) lmin_y = py;
-                if ( pz < lmin_z ) lmin_z = pz;
-                if ( px > lmax_x ) lmax_x = px;
-                if ( py > lmax_y ) lmax_y = py;
-                if ( pz > lmax_z ) lmax_z = pz;
+                if ( px < lmin_x )
+                    lmin_x = px;
+                if ( py < lmin_y )
+                    lmin_y = py;
+                if ( pz < lmin_z )
+                    lmin_z = pz;
+                if ( px > lmax_x )
+                    lmax_x = px;
+                if ( py > lmax_y )
+                    lmax_y = py;
+                if ( pz > lmax_z )
+                    lmax_z = pz;
             },
             Kokkos::Min<double>( local_min[0] ),
             Kokkos::Min<double>( local_min[1] ),
@@ -256,7 +260,7 @@ class TreeBuilder
 
         // Copy Kokkos arrays into c-style arrays
         double lmin[3], lmax[3];
-        for (int i = 0; i < 3; i++)
+        for ( int i = 0; i < 3; i++ )
         {
             lmin[i] = local_min[i];
             lmax[i] = local_max[i];
@@ -294,21 +298,23 @@ class TreeBuilder
     // copied back to the device view.
     template <class PositionType>
     void reassign_all_particle_keys( PositionType positions,
-                                    int num_local_particles )
+                                     int num_local_particles )
     {
         // Workaround to copy a device-side slice into a host-side view
-        using value_type = typename decltype(positions)::value_type;
-        Kokkos::View<value_type*[3], memory_space> d_pos("d_pos", num_local_particles);
+        using value_type = typename decltype( positions )::value_type;
+        Kokkos::View<value_type* [3], memory_space> d_pos(
+            "d_pos", num_local_particles );
         Kokkos::parallel_for(
             "SliceToView",
-            Kokkos::RangePolicy<execution_space>(0, num_local_particles),
-            KOKKOS_LAMBDA(int i) {
-                d_pos(i, 0) = positions(i, 0);
-                d_pos(i, 1) = positions(i, 1);
-                d_pos(i, 2) = positions(i, 2);
-            });
+            Kokkos::RangePolicy<execution_space>( 0, num_local_particles ),
+            KOKKOS_LAMBDA( int i ) {
+                d_pos( i, 0 ) = positions( i, 0 );
+                d_pos( i, 1 ) = positions( i, 1 );
+                d_pos( i, 2 ) = positions( i, 2 );
+            } );
         Kokkos::fence();
-        auto h_positions = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_pos);
+        auto h_positions =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
 
         // Allocate host keys
         key_host_view_type h_keys( "h_particle_keys", num_local_particles );
@@ -347,8 +353,7 @@ class TreeBuilder
                     break; // found the leaf
 
                 // Determine which child octant this particle falls into
-                int oct = which_octant( px, py, pz,
-                                        ci.center[0], ci.center[1],
+                int oct = which_octant( px, py, pz, ci.center[0], ci.center[1],
                                         ci.center[2] );
                 MortonKey child = child_key( current, oct );
 
@@ -363,15 +368,13 @@ class TreeBuilder
                     new_leaf.key = child;
                     new_leaf.depth = ci.depth + 1;
                     child_center( ci.center[0], ci.center[1], ci.center[2],
-                                ci.half_width, oct,
-                                new_leaf.center[0], new_leaf.center[1],
-                                new_leaf.center[2] );
+                                  ci.half_width, oct, new_leaf.center[0],
+                                  new_leaf.center[1], new_leaf.center[2] );
                     new_leaf.half_width = ci.half_width * 0.5;
                     new_leaf.global_count = 0; // will be filled by recount
                     new_leaf.is_leaf = true;
 
-                    _cell_lookup[child] =
-                        static_cast<int>( _cells.size() );
+                    _cell_lookup[child] = static_cast<int>( _cells.size() );
                     _cells.push_back( new_leaf );
 
                     current = child;
@@ -386,7 +389,7 @@ class TreeBuilder
 
         // Copy back to device
         if ( static_cast<int>( _particle_keys.extent( 0 ) ) !=
-            num_local_particles )
+             num_local_particles )
         {
             _particle_keys =
                 key_view_type( "particle_keys", num_local_particles );
@@ -399,7 +402,7 @@ class TreeBuilder
     // have at least than ncrit*(1 - nc_tf) particles after merge.
     // Return true if coarsened.
     // --------------------------------------------------------------------------
-    bool try_coarsen(MortonKey parent_key_val )
+    bool try_coarsen( MortonKey parent_key_val )
     {
         // Can't coarsen root cell
         if ( parent_key_val < ROOT_KEY )
@@ -442,8 +445,8 @@ class TreeBuilder
         // Only coarsen if the combined count falls below the lower
         // hysteresis threshold. This prevents thrashing: a cell that was
         // just split won't immediately re-merge if a few particles leave.
-        int coarsen_threshold = static_cast<int>(
-            _ncrit * ( 1.0 - _ncrit_tf ) );
+        int coarsen_threshold =
+            static_cast<int>( _ncrit * ( 1.0 - _ncrit_tf ) );
         if ( total_count > coarsen_threshold )
             return false;
 
@@ -468,7 +471,7 @@ class TreeBuilder
     }
 
     // Split a leaf cell into an internal cell + 8 children
-    void refine_leaf(MortonKey leaf_key )
+    void refine_leaf( MortonKey leaf_key )
     {
         auto it = _cell_lookup.find( leaf_key );
         if ( it == _cell_lookup.end() )
@@ -499,14 +502,13 @@ class TreeBuilder
             child_ci.key = child_key( leaf_key, oct );
             child_ci.depth = ci.depth + 1;
             child_center( parent_cx, parent_cy, parent_cz, parent_hw, oct,
-                        child_ci.center[0], child_ci.center[1],
-                        child_ci.center[2] );
+                          child_ci.center[0], child_ci.center[1],
+                          child_ci.center[2] );
             child_ci.half_width = ch_hw;
             child_ci.global_count = 0; // will be filled by recount
             child_ci.is_leaf = true;
 
-            _cell_lookup[child_ci.key] =
-                static_cast<int>( _cells.size() );
+            _cell_lookup[child_ci.key] = static_cast<int>( _cells.size() );
             _cells.push_back( child_ci );
         }
     }
@@ -532,7 +534,8 @@ class TreeBuilder
     void build( PositionType positions, int num_local_particles )
     {
         // Compute global bounding box
-        _root_box = compute_global_bounding_box( positions, num_local_particles );
+        _root_box =
+            compute_global_bounding_box( positions, num_local_particles );
 
         // Expand the root box by the tolerance factor so particles have room
         // to move before leaving the domain.
@@ -548,13 +551,10 @@ class TreeBuilder
         }
 
         // Coordinates of root box center
-        double root_cx =
-            0.5 * ( _root_box.min[0] + _root_box.max[0] );
-        double root_cy =
-            0.5 * ( _root_box.min[1] + _root_box.max[1] );
-        double root_cz =
-            0.5 * ( _root_box.min[2] + _root_box.max[2] );
-        
+        double root_cx = 0.5 * ( _root_box.min[0] + _root_box.max[0] );
+        double root_cy = 0.5 * ( _root_box.min[1] + _root_box.max[1] );
+        double root_cz = 0.5 * ( _root_box.min[2] + _root_box.max[2] );
+
         // Use the max dimension to compute the half-width of the root box
         double root_hw = 0.0;
         for ( int d = 0; d < 3; ++d )
@@ -565,8 +565,7 @@ class TreeBuilder
         }
 
         // Initialize particle-to-cell mapping on device
-        _particle_keys =
-            key_view_type( "particle_keys", num_local_particles );
+        _particle_keys = key_view_type( "particle_keys", num_local_particles );
         // All particles initially live in root box
         Kokkos::deep_copy( _particle_keys, ROOT_KEY );
 
@@ -584,7 +583,8 @@ class TreeBuilder
         cells_to_refine.push_back(
             { ROOT_KEY, { root_cx, root_cy, root_cz }, root_hw } );
 
-        // Iteratively refine the root box until all cells have less than ncrit particles
+        // Iteratively refine the root box until all cells have less than ncrit
+        // particles
         for ( int depth = 0; depth <= _max_depth; depth++ )
         {
             if ( cells_to_refine.empty() )
@@ -594,11 +594,11 @@ class TreeBuilder
 
             // Move candidate cells into views
             Kokkos::View<MortonKey*, memory_space> cand_keys( "cand_keys",
-                                                            num_candidates );
+                                                              num_candidates );
             Kokkos::View<double* [3], memory_space> cand_centers(
                 "cand_centers", num_candidates );
             Kokkos::View<double*, memory_space> cand_hw( "cand_hw",
-                                                        num_candidates );
+                                                         num_candidates );
 
             auto h_cand_keys = Kokkos::create_mirror_view( cand_keys );
             auto h_cand_centers = Kokkos::create_mirror_view( cand_centers );
@@ -617,7 +617,7 @@ class TreeBuilder
             Kokkos::deep_copy( cand_hw, h_cand_hw );
 
             Kokkos::View<int*, memory_space> local_counts( "local_counts",
-                                                        num_candidates );
+                                                           num_candidates );
             Kokkos::View<int* [8], memory_space> local_octant_counts(
                 "local_octant_counts", num_candidates );
 
@@ -660,8 +660,7 @@ class TreeBuilder
 
                     int oct = which_octant( px, py, pz, cx, cy, cz );
                     particle_octant( i ) = oct;
-                    Kokkos::atomic_increment(
-                        &local_octant_counts( c, oct ) );
+                    Kokkos::atomic_increment( &local_octant_counts( c, oct ) );
                 } );
             Kokkos::fence();
 
@@ -671,13 +670,13 @@ class TreeBuilder
 
             // All reduce the number of particles in each cell.
             MPI_Allreduce( h_local_counts.data(), global_counts.data(),
-                        num_candidates, MPI_INT, MPI_SUM, _comm );
+                           num_candidates, MPI_INT, MPI_SUM, _comm );
 
             std::vector<int> should_split( num_candidates, 0 );
             std::vector<Cell> next_cells_to_refine;
 
-            // Loop over candidate cells. If there are globally greater than 'ncrit'
-            // particles in a candidate cell, refine the cell.
+            // Loop over candidate cells. If there are globally greater than
+            // 'ncrit' particles in a candidate cell, refine the cell.
             for ( int c = 0; c < num_candidates; ++c )
             {
                 // No particles exist in this cell; do not add it
@@ -720,8 +719,8 @@ class TreeBuilder
                         Cell cell;
                         cell.key = child_key( cells_to_refine[c].key, oct );
                         child_center( parent_cx, parent_cy, parent_cz,
-                                    parent_hw, oct, cell.center[0],
-                                    cell.center[1], cell.center[2] );
+                                      parent_hw, oct, cell.center[0],
+                                      cell.center[1], cell.center[2] );
                         cell.half_width = ch_hw;
                         next_cells_to_refine.push_back( cell );
                     }
@@ -729,8 +728,7 @@ class TreeBuilder
             }
 
             // Update particle keys to be in a child cell if the cell was split.
-            Kokkos::View<int*, memory_space> splits( "splits",
-                                                    num_candidates );
+            Kokkos::View<int*, memory_space> splits( "splits", num_candidates );
             auto h_splits = Kokkos::create_mirror_view( splits );
             for ( int c = 0; c < num_candidates; ++c )
                 h_splits( c ) = should_split[c];
@@ -756,7 +754,8 @@ class TreeBuilder
                 } );
             Kokkos::fence();
 
-            // Move next_cells_to_refine into cells_to_refine for next iteration.
+            // Move next_cells_to_refine into cells_to_refine for next
+            // iteration.
             cells_to_refine = std::move( next_cells_to_refine );
 
         } // end tree build loop
@@ -768,13 +767,13 @@ class TreeBuilder
 
     // Check if particles have left the root bounding box
     template <class PositionType>
-    bool needs_rebuild(PositionType positions, int num_local_particles ) const
+    bool needs_rebuild( PositionType positions, int num_local_particles ) const
     {
         // Check against the root box
         double bmin0 = _root_box.min[0], bmin1 = _root_box.min[1],
-            bmin2 = _root_box.min[2];
+               bmin2 = _root_box.min[2];
         double bmax0 = _root_box.max[0], bmax1 = _root_box.max[1],
-            bmax2 = _root_box.max[2];
+               bmax2 = _root_box.max[2];
 
         int local_escaped = 0;
         Kokkos::parallel_reduce(
@@ -784,9 +783,8 @@ class TreeBuilder
                 double px = positions( i, 0 );
                 double py = positions( i, 1 );
                 double pz = positions( i, 2 );
-                if ( px < bmin0 || px > bmax0 ||
-                    py < bmin1 || py > bmax1 ||
-                    pz < bmin2 || pz > bmax2 )
+                if ( px < bmin0 || px > bmax0 || py < bmin1 || py > bmax1 ||
+                     pz < bmin2 || pz > bmax2 )
                 {
                     count++;
                 }
@@ -795,7 +793,7 @@ class TreeBuilder
 
         int global_escaped = 0;
         MPI_Allreduce( &local_escaped, &global_escaped, 1, MPI_INT, MPI_SUM,
-                    _comm );
+                       _comm );
 
         return global_escaped > 0;
     }
@@ -804,7 +802,7 @@ class TreeBuilder
     // update() — incremental tree adaptation
     // --------------------------------------------------------------------------
     template <class PositionType>
-    UpdateResult update(PositionType positions, int num_local_particles )
+    UpdateResult update( PositionType positions, int num_local_particles )
     {
         // Particles moved to different leaf
         // Leaf cells split
@@ -862,13 +860,13 @@ class TreeBuilder
         Kokkos::View<MortonKey*, memory_space> d_leaf_keys( "d_leaf_keys",
                                                             num_leaves );
         Kokkos::View<double*, memory_space> d_leaf_cx( "d_leaf_cx",
-                                                    num_leaves );
+                                                       num_leaves );
         Kokkos::View<double*, memory_space> d_leaf_cy( "d_leaf_cy",
-                                                    num_leaves );
+                                                       num_leaves );
         Kokkos::View<double*, memory_space> d_leaf_cz( "d_leaf_cz",
-                                                    num_leaves );
+                                                       num_leaves );
         Kokkos::View<double*, memory_space> d_leaf_hw( "d_leaf_hw",
-                                                    num_leaves );
+                                                       num_leaves );
 
         // Create host mirrors, copy data, move to device.
         {
@@ -904,7 +902,7 @@ class TreeBuilder
         // Check for each particle if it has moved into a new cell.
         // Flag these and count them.
         Kokkos::View<int*, memory_space> escaped_flag( "escaped_flag",
-                                                    num_local_particles );
+                                                       num_local_particles );
         auto particle_keys = _particle_keys;
 
         int local_migrated = 0;
@@ -934,9 +932,8 @@ class TreeBuilder
                 double pz = positions( i, 2 );
 
                 // Check if outside its cell
-                if ( px < cx - hw || px > cx + hw ||
-                    py < cy - hw || py > cy + hw ||
-                    pz < cz - hw || pz > cz + hw )
+                if ( px < cx - hw || px > cx + hw || py < cy - hw ||
+                     py > cy + hw || pz < cz - hw || pz > cz + hw )
                 {
                     escaped_flag( i ) = 1;
                     count++;
@@ -947,8 +944,8 @@ class TreeBuilder
 
         // Global count of migrated particles (for reporting)
         int global_migrated = 0;
-        MPI_Allreduce( &local_migrated, &global_migrated, 1, MPI_INT,
-                    MPI_SUM, _comm );
+        MPI_Allreduce( &local_migrated, &global_migrated, 1, MPI_INT, MPI_SUM,
+                       _comm );
         result.particles_migrated = global_migrated;
 
         // Step 3: If no particles migrated, return. The tree is unchanged.
@@ -956,7 +953,7 @@ class TreeBuilder
             return result;
 
         // Step 4: Otherwise, reassign all particle keys by walking the tree.
-        // The cost is O(N * tree_depth) 
+        // The cost is O(N * tree_depth)
         reassign_all_particle_keys( positions, num_local_particles );
 
         // ==================================================================
@@ -974,8 +971,8 @@ class TreeBuilder
                 ci.global_count = 0;
         }
 
-        auto h_pkeys = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace(), _particle_keys );
+        auto h_pkeys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                            _particle_keys );
 
         // Local counts per cell key
         std::unordered_map<MortonKey, int> local_counts_map;
@@ -995,8 +992,8 @@ class TreeBuilder
 
         int num_local_keys = static_cast<int>( count_keys.size() );
         int num_max_keys = 0;
-        MPI_Allreduce( &num_local_keys, &num_max_keys, 1, MPI_INT,
-                    MPI_MAX, _comm );
+        MPI_Allreduce( &num_local_keys, &num_max_keys, 1, MPI_INT, MPI_MAX,
+                       _comm );
 
         std::vector<MortonKey> pk_padded( num_max_keys, 0 );
         std::vector<int> pv_padded( num_max_keys, 0 );
@@ -1010,10 +1007,9 @@ class TreeBuilder
         std::vector<int> all_pv( num_max_keys * _comm_size );
 
         MPI_Allgather( pk_padded.data(), num_max_keys, MPI_UINT64_T,
-                    all_pk.data(), num_max_keys, MPI_UINT64_T,
-                    _comm );
-        MPI_Allgather( pv_padded.data(), num_max_keys, MPI_INT,
-                    all_pv.data(), num_max_keys, MPI_INT, _comm );
+                       all_pk.data(), num_max_keys, MPI_UINT64_T, _comm );
+        MPI_Allgather( pv_padded.data(), num_max_keys, MPI_INT, all_pv.data(),
+                       num_max_keys, MPI_INT, _comm );
 
         std::unordered_map<MortonKey, int> global_counts_map;
         for ( int j = 0; j < num_max_keys * _comm_size; ++j )
@@ -1042,7 +1038,7 @@ class TreeBuilder
             for ( const auto& ci : _cells )
             {
                 if ( ci.is_leaf && ci.global_count > _ncrit &&
-                    ci.depth < _max_depth )
+                     ci.depth < _max_depth )
                 {
                     to_refine.push_back( ci.key );
                 }
@@ -1091,8 +1087,8 @@ class TreeBuilder
             // Use allgather + merge (same small-set approach)
             int num_local_keys = static_cast<int>( count_keys.size() );
             int num_max_keys = 0;
-            MPI_Allreduce( &num_local_keys, &num_max_keys, 1, MPI_INT,
-                        MPI_MAX, _comm );
+            MPI_Allreduce( &num_local_keys, &num_max_keys, 1, MPI_INT, MPI_MAX,
+                           _comm );
 
             std::vector<MortonKey> pk_padded( num_max_keys, 0 );
             std::vector<int> pv_padded( num_max_keys, 0 );
@@ -1106,10 +1102,9 @@ class TreeBuilder
             std::vector<int> all_pv( num_max_keys * _comm_size );
 
             MPI_Allgather( pk_padded.data(), num_max_keys, MPI_UINT64_T,
-                        all_pk.data(), num_max_keys, MPI_UINT64_T,
-                        _comm );
+                           all_pk.data(), num_max_keys, MPI_UINT64_T, _comm );
             MPI_Allgather( pv_padded.data(), num_max_keys, MPI_INT,
-                        all_pv.data(), num_max_keys, MPI_INT, _comm );
+                           all_pv.data(), num_max_keys, MPI_INT, _comm );
 
             std::unordered_map<MortonKey, int> global_leaf_counts;
             for ( int j = 0; j < num_max_keys * _comm_size; ++j )
@@ -1148,12 +1143,10 @@ class TreeBuilder
         if ( result.cells_coarsened > 0 )
         {
             // Remove zero-particle cells and rebuild lookup
-            _cells.erase(
-                std::remove_if( _cells.begin(), _cells.end(),
-                                []( const CellInfo& ci ) {
-                                    return ci.key == 0;
-                                } ),
-                _cells.end() );
+            _cells.erase( std::remove_if( _cells.begin(), _cells.end(),
+                                          []( const CellInfo& ci )
+                                          { return ci.key == 0; } ),
+                          _cells.end() );
             rebuild_cell_lookup();
 
             // Reassign particle keys one final time after coarsening
@@ -1162,7 +1155,6 @@ class TreeBuilder
 
         return result;
     }
-
 };
 
 } // end namespace Experimental

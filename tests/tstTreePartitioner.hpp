@@ -39,7 +39,7 @@ enum FieldIdx
 };
 
 using DataTypes = Cabana::MemberTypes<double[3]>;
-using AoSoA_t  = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
+using AoSoA_t = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
 using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
 
 void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
@@ -113,7 +113,7 @@ void testPartitioner( int num_particles_per_rank, int ncrit, int max_depth,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    partitioner.partition(builder, particles, num_particles_per_rank );
+    partitioner.partition( builder, particles, num_particles_per_rank );
 
     // -----------------------------------------------------------------------
     // Check 1: ownership vector aligns with cells vector
@@ -127,7 +127,7 @@ void testPartitioner( int num_particles_per_rank, int ncrit, int max_depth,
     for ( std::size_t i = 0; i < builder.cells().size(); ++i )
     {
         const auto& c = builder.cells()[i];
-        int owner     = partitioner.ownership()[i].owner_rank;
+        int owner = partitioner.ownership()[i].owner_rank;
 
         if ( owner == OWNER_SHARED )
         {
@@ -139,11 +139,9 @@ void testPartitioner( int num_particles_per_rank, int ncrit, int max_depth,
         }
         else
         {
-            EXPECT_GE( owner, 0 )
-                << "Cell " << i << " has negative owner rank";
-            EXPECT_LT( owner, nprocs )
-                << "Cell " << i << " owner " << owner
-                << " >= nprocs " << nprocs;
+            EXPECT_GE( owner, 0 ) << "Cell " << i << " has negative owner rank";
+            EXPECT_LT( owner, nprocs ) << "Cell " << i << " owner " << owner
+                                       << " >= nprocs " << nprocs;
         }
     }
 
@@ -173,7 +171,7 @@ void testPartitioner( int num_particles_per_rank, int ncrit, int max_depth,
     for ( int i = 0; i < new_local_count; ++i )
     {
         MortonKey key = h_keys( i );
-        int owner     = partitioner.cell_owner( key );
+        int owner = partitioner.cell_owner( key );
         if ( owner != rank && owner != OWNER_SHARED )
             bad_count++;
     }

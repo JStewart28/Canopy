@@ -95,10 +95,10 @@ void displace_particles( AoSoA_t& particles, int num_particles,
 }
 
 // Count how many particles map to a key that is actually a leaf cell.
-int count_particles_in_leaves( const std::vector<CellInfo>& cells,
-                               const Kokkos::View<const MortonKey*,
-                                                  Kokkos::HostSpace>& h_keys,
-                               int num_particles )
+int count_particles_in_leaves(
+    const std::vector<CellInfo>& cells,
+    const Kokkos::View<const MortonKey*, Kokkos::HostSpace>& h_keys,
+    int num_particles )
 {
     std::set<MortonKey> leaf_keys;
     for ( const auto& c : cells )
@@ -197,8 +197,8 @@ void testTreeBuilder( int num_particles_per_rank, int ncrit, int max_depth,
         int bad = count_particles_in_leaves( builder.cells(), h_keys,
                                              num_particles_per_rank );
         ASSERT_EQ( bad, 0 )
-            << "After step " << step << " (disp=" << disp << ", rank "
-            << rank << "), " << bad << " particles are not in leaf cells";
+            << "After step " << step << " (disp=" << disp << ", rank " << rank
+            << "), " << bad << " particles are not in leaf cells";
     }
 }
 
@@ -211,10 +211,7 @@ TEST( TreeBuilder, testIncrementalUpdates )
     testTreeBuilder( 10000, 128, 15, 0.1, 20 );
 }
 
-TEST( TreeBuilder, testSmallTree )
-{
-    testTreeBuilder( 500, 32, 10, 0.1, 10 );
-}
+TEST( TreeBuilder, testSmallTree ) { testTreeBuilder( 500, 32, 10, 0.1, 10 ); }
 
 //---------------------------------------------------------------------------//
 
