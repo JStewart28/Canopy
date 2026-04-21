@@ -58,6 +58,18 @@ struct CellOwnership
 };
 
 // ============================================================================
+// RedistributeResult — returned by redistribute() to report what happened
+// ============================================================================
+
+struct RedistributeResult
+{
+    int particles_sent;     // particles this rank sent to other ranks
+    int particles_received; // particles this rank received from others
+    int num_local_after;    // local particle count after redistribution
+};
+
+
+// ============================================================================
 // TreePartitioner
 //
 // Given a globally-agreed adaptive octree (from TreeBuilder),
@@ -112,11 +124,14 @@ class TreePartitioner
     }
 
     // -----------------------------------------------------------------------
-    // Accessors (valid after partition())
+    // Accessors (valid after partition(), redistribute(), or repartition())
     // -----------------------------------------------------------------------
 
-    // Full ownership map, indexes map to tree_builder.cells()
-    const std::vector<CellOwnership>& ownership() const { return _ownership; }
+    // Full ownership map, indexed parallel to tree_builder.cells()
+    const std::vector<CellOwnership>& ownership() const
+    {
+        return _ownership;
+    }
 
     // Lookup owner of a specific cell by Morton key.
     // Returns OWNER_SHARED for replicated cells, or the owning rank.
@@ -128,7 +143,16 @@ class TreePartitioner
         return OWNER_SHARED; // unknown cells default to shared
     }
 
-    // Number of local particles after migration
+    // Access the full owner map (for CommunicationPlan)
+    const std::unordered_map<MortonKey, int>& cell_owner_map() const
+    {
+        return _cell_owner_map;
+    }
+
+    // Replication depth (for CommunicationPlan)
+    int replication_depth() const { return _replication_depth; }
+
+    // Number of local particles after most recent migration
     int num_local_particles() const { return _num_local_after; }
 
   private:
@@ -375,6 +399,71 @@ class TreePartitioner
         }
     }
 
+    // --------------------------------------------------------------------------
+    // migrate_particles — shared migration logic
+    //
+    // Looks up each particle's leaf key in the ownership map, builds a
+    // destination-rank array, and calls Cabana::Distributor to migrate.
+    //
+    // Returns the number of particles sent to other ranks (i.e., particles
+    // whose destination is not this rank).
+    // --------------------------------------------------------------------------
+    template <class AoSoAType>
+    int migrate_particles(
+            const const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+            AoSoAType& particles,
+            int num_local_particles_before )
+    {
+        // Copy particle keys to host to build the destination array
+        auto particle_keys = tree_builder.particle_keys();
+        auto h_keys = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace{}, particle_keys );
+
+        // Build destination ranks on host
+        Kokkos::View<int*, memory_space> dest_ranks(
+            "dest_ranks", num_local_particles_before );
+        auto h_dest = Kokkos::create_mirror_view( dest_ranks );
+
+        int num_sent = 0;
+
+        for ( int i = 0; i < num_local_particles_before; i++ )
+        {
+            MortonKey key = h_keys( i );
+            auto it = _cell_owner_map.find( key );
+            if ( it != _cell_owner_map.end() )
+            {
+                int owner = it->second;
+                // If the leaf is OWNER_SHARED (-1, shouldn't happen for leaves,
+                // but guard against it), keep particle on current rank
+                if ( owner >= 0 )
+                {
+                    h_dest( i ) = owner;
+                    if ( owner != _rank )
+                        num_sent++;
+                }
+                else
+                {
+                    h_dest( i ) = _rank;
+                }
+            }
+            else
+            {
+                // Key not found — keep on current rank (safety fallback)
+                h_dest( i ) = _rank;
+            }
+        }
+
+        Kokkos::deep_copy( dest_ranks, h_dest );
+
+        // Use Cabana::Distributor to migrate particles
+        Cabana::Distributor<memory_space> distributor( _comm, dest_ranks );
+        Cabana::migrate( distributor, particles );
+
+        _num_local_after = static_cast<int>( particles.size() );
+
+        return num_sent;
+    }
+
     // -----------------------------------------------------------------------
     // partition()
     // num_local_particles_before - particles.size() if nothing is ghosted.
@@ -402,59 +491,87 @@ class TreePartitioner
     {
         const auto& cells = tree_builder.cells();
 
-        // ==================================================================
         // Step 1: Partition leaf cells via Zoltan2
-        // ==================================================================
         auto leaf_owners = partition_leaves( cells );
 
-        // ==================================================================
         // Step 2: Derive internal cell ownership
-        // ==================================================================
         derive_internal_ownership( cells, leaf_owners );
 
-        // ==================================================================
-        // Step 3: Migrate particles to the rank that owns their leaf cell
-        //
-        // Each particle's current leaf key is stored in
-        // tree_builder.particle_keys(). Look up the owner of that leaf
-        // and build a destination-rank array for Cabana::Distributor.
-        // ==================================================================
+        // Step 3: Migrate particles
+        migrate_particles( tree_builder, particles,
+                        num_local_particles_before );
+    }
 
-        // Copy particle keys to host to build the destination array.
-        auto particle_keys = tree_builder.particle_keys();
-        auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                           particle_keys );
-        Kokkos::View<int*, memory_space> dest_ranks(
-            "dest_ranks", num_local_particles_before );
-        auto h_dest = Kokkos::create_mirror_view( dest_ranks );
+    // -----------------------------------------------------------------------
+    // redistribute()
+    //
+    // Lightweight per-timestep particle migration. Uses the EXISTING
+    // ownership map (no Zoltan2 re-solve). After particles move and the
+    // tree builder updates particle keys (via update()), some particles
+    // may now be in leaf cells owned by a different rank.
+    //
+    // This method:
+    //   1. Checks each particle's leaf key against the ownership map.
+    //   2. Migrates particles whose leaf is owned by another rank.
+    //
+    // Call this every timestep when the tree topology has NOT changed
+    // (no cells refined or coarsened). If the topology did change,
+    // call repartition() instead.
+    //
+    // Returns a RedistributeResult with migration statistics.
+    // -----------------------------------------------------------------------
+    template <class AoSoAType>
+    RedistributeResult redistribute(
+        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        AoSoAType& particles,
+        int num_local_particles_before )
+    {
+        RedistributeResult result;
 
-        // Build destination ranks on host.
-        for ( int i = 0; i < num_local_particles_before; i++ )
-        {
-            // Get the cell this particle resides in.
-            MortonKey key = h_keys( i );
-            auto it = _cell_owner_map.find( key );
-            if ( it != _cell_owner_map.end() )
-            {
-                int owner = it->second;
-                // If the leaf is OWNER_SHARED (shouldn't happen for leaves,
-                // but guard against it), keep particle on current rank.
-                h_dest( i ) = ( owner >= 0 ) ? owner : _rank;
-            }
-            else
-            {
-                // Key not found — keep on current rank (safety fallback)
-                h_dest( i ) = _rank;
-            }
-        }
+        int num_before = num_local_particles_before;
+        result.particles_sent = migrate_particles(
+            tree_builder, particles, num_local_particles_before );
 
-        Kokkos::deep_copy( dest_ranks, h_dest );
+        result.num_local_after = _num_local_after;
 
-        // Use Cabana::Distributor to migrate particles.
-        Cabana::Distributor<memory_space> distributor( _comm, dest_ranks );
-        Cabana::migrate( distributor, particles );
+        // particles_received = new count - (old count - sent)
+        // i.e., the particles we have now minus the ones we kept
+        result.particles_received =
+            _num_local_after - ( num_before - result.particles_sent );
 
-        _num_local_after = static_cast<int>( particles.size() );
+        return result;
+    }
+
+    // --------------------------------------------------------------------------
+    // repartition() — full re-partitioning after tree topology change
+    //
+    // Re-runs Zoltan2 on the new leaf set, recomputes all ownership, and
+    // migrates particles. Call when the tree builder reports cells_refined,
+    // cells_coarsened, or full_rebuild_done.
+    //
+    // This is identical to partition() — the only difference is semantic:
+    // partition() is called once during initialization, repartition() is
+    // called during the simulation when the tree changes. The implementation
+    // is the same because we need a fresh Zoltan2 solve any time the leaf
+    // set changes.
+    // --------------------------------------------------------------------------
+    template <class AoSoAType>
+    void repartition(
+        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        AoSoAType& particles,
+        int num_local_particles_before )
+    {
+        const auto& cells = tree_builder.cells();
+
+        // Step 1: Re-partition leaf cells via Zoltan2
+        auto leaf_owners = partition_leaves( cells );
+
+        // Step 2: Re-derive internal cell ownership
+        derive_internal_ownership( cells, leaf_owners );
+
+        // Step 3: Migrate particles to new owners
+        migrate_particles( tree_builder, particles,
+                        num_local_particles_before );
     }
 };
 
