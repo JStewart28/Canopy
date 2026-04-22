@@ -9,8 +9,8 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#ifndef CANOPY_PARTITIONER_HPP
-#define CANOPY_PARTITIONER_HPP
+#ifndef CANOPY_COMMUNICATIONPLAN_HPP
+#define CANOPY_COMMUNICATIONPLAN_HPP
 
 #include <Canopy_Experimental_TreeBuilder.hpp>
 #include <Canopy_Experimental_TreePartitioner.hpp>
@@ -80,7 +80,7 @@ struct VerticalPlan
 // list. If a source cell is owned by a different rank (or is shared),
 // the data must be communicated.
 //
-// Precompute the full interaction list for every cell this rank
+// We precompute the full interaction list for every cell this rank
 // processes, then extract the cross-rank subset as sends/receives.
 // ============================================================================
 
@@ -139,13 +139,13 @@ struct P2PPlan
 //   DeviceType - Kokkos device type
 // ============================================================================
 
-template <class DeviceType>
+template <class MemorySpace, class ExecutionSpace>
 class CommunicationPlan
 {
   public:
-    using execution_space = typename DeviceType::execution_space;
-    using memory_space = typename DeviceType::memory_space;
-
+    using memory_space = MemorySpace;
+    using execution_space = ExecutionSpace;
+    
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
@@ -278,8 +278,8 @@ class CommunicationPlan
 // Walk from root to leaf following the octant that contains the point.
 // If we reach a cell that doesn't exist, return the last valid ancestor.
 // --------------------------------------------------------------------------
-template <class DeviceType>
-MortonKey CommunicationPlan<DeviceType>::find_leaf_containing_point(
+template <class MemorySpace, class ExecutionSpace>
+MortonKey CommunicationPlan<MemorySpace, ExecutionSpace>::find_leaf_containing_point(
     double px, double py, double pz ) const
 {
     MortonKey current = ROOT_KEY;
@@ -333,8 +333,8 @@ MortonKey CommunicationPlan<DeviceType>::find_leaf_containing_point(
 // We only return cells that exist in the tree and are distinct from
 // the query cell.
 // --------------------------------------------------------------------------
-template <class DeviceType>
-std::vector<MortonKey> CommunicationPlan<DeviceType>::find_neighbors(
+template <class MemorySpace, class ExecutionSpace>
+std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::find_neighbors(
     MortonKey key, const CellInfo& cell ) const
 {
     std::set<MortonKey> neighbor_set;
@@ -387,8 +387,8 @@ std::vector<MortonKey> CommunicationPlan<DeviceType>::find_neighbors(
 //   3. Exclude any cell that is a neighbor of C.
 //   4. The remaining cells form the interaction list.
 // --------------------------------------------------------------------------
-template <class DeviceType>
-std::vector<MortonKey> CommunicationPlan<DeviceType>::
+template <class MemorySpace, class ExecutionSpace>
+std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
     build_interaction_list( MortonKey key, const CellInfo& cell ) const
 {
     if ( key == ROOT_KEY )
@@ -468,8 +468,8 @@ std::vector<MortonKey> CommunicationPlan<DeviceType>::
 // to descend into its children to find the actual leaves that border
 // this cell.
 // --------------------------------------------------------------------------
-template <class DeviceType>
-std::vector<MortonKey> CommunicationPlan<DeviceType>::
+template <class MemorySpace, class ExecutionSpace>
+std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
     build_p2p_neighbor_list( MortonKey key,
                              const CellInfo& cell ) const
 {
@@ -617,8 +617,8 @@ std::vector<MortonKey> CommunicationPlan<DeviceType>::
 // M2M: child owner sends to parent owner
 // L2L: parent owner sends to child owner
 // --------------------------------------------------------------------------
-template <class DeviceType>
-void CommunicationPlan<DeviceType>::build_vertical_plans(
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
     const std::vector<CellInfo>& cells )
 {
     _m2m_plan.sends.clear();
@@ -699,12 +699,14 @@ void CommunicationPlan<DeviceType>::build_vertical_plans(
             }
 
             // ----- L2L: parent → child -----
+            // When parent_owner == OWNER_SHARED, all ranks already hold
+            // the parent local expansion (from the M2M allreduce), so
+            // the child's owner can apply it locally — no p2p needed.
             if ( child_owner != OWNER_SHARED )
             {
-                if ( parent_owner == _rank ||
-                     parent_owner == OWNER_SHARED )
+                if ( parent_owner == _rank )
                 {
-                    // This rank has the parent data — send to child owner
+                    // This rank owns the parent — send to child owner
                     if ( child_owner != _rank )
                     {
                         _l2l_plan.sends.push_back(
@@ -737,8 +739,8 @@ void CommunicationPlan<DeviceType>::build_vertical_plans(
 // Identify which source cells are on remote ranks, and build the
 // send/receive manifests.
 // --------------------------------------------------------------------------
-template <class DeviceType>
-void CommunicationPlan<DeviceType>::build_m2l_plan(
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::build_m2l_plan(
     const std::vector<CellInfo>& cells )
 {
     _m2l_plan.interaction_lists.clear();
@@ -764,6 +766,11 @@ void CommunicationPlan<DeviceType>::build_m2l_plan(
 
         if ( !ilist.empty() )
             _m2l_plan.interaction_lists[ci.key] = ilist;
+
+        // Shared cells use collective M2L communication across all ranks;
+        // their interaction-list data is not exchanged point-to-point here.
+        if ( owner_of( ci.key ) == OWNER_SHARED )
+            continue;
 
         // Check which sources are on remote ranks
         for ( MortonKey source : ilist )
@@ -836,8 +843,8 @@ void CommunicationPlan<DeviceType>::build_m2l_plan(
 // leaf cells). Identify which neighbors are on remote ranks — those
 // will need particle halo exchange.
 // --------------------------------------------------------------------------
-template <class DeviceType>
-void CommunicationPlan<DeviceType>::build_p2p_plan(
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_plan(
     const std::vector<CellInfo>& cells )
 {
     _p2p_plan.neighbor_lists.clear();
@@ -882,8 +889,8 @@ void CommunicationPlan<DeviceType>::build_p2p_plan(
 // --------------------------------------------------------------------------
 // build() — main entry point
 // --------------------------------------------------------------------------
-template <class DeviceType>
-void CommunicationPlan<DeviceType>::build(
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     const std::vector<CellInfo>& cells,
     const std::vector<CellOwnership>& ownership,
     const std::unordered_map<MortonKey, int>& cell_owner_map,
@@ -910,4 +917,4 @@ void CommunicationPlan<DeviceType>::build(
 
 } // namespace Canopy
 
-#endif // CANOPY_PARTITIONER_HPP
+#endif // CANOPY_COMMUNICATIONPLAN_HPP

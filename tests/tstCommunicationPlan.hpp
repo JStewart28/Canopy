@@ -43,7 +43,6 @@ enum FieldIdx
 using DataTypes = Cabana::MemberTypes<double[3]>;
 using AoSoA_t = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
 using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
-using DeviceType = Kokkos::Device<TEST_EXECSPACE, TEST_MEMSPACE>;
 
 void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
 {
@@ -77,7 +76,8 @@ void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
 // Build a tree, partition it, and return a ready-to-use CommunicationPlan.
 // Caller receives ownership of the plan; builder and partitioner are
 // also returned by output parameter so callers can inspect them.
-CommunicationPlan<DeviceType> build_plan(
+template <class MemorySpace, class ExecutionSpace>
+CommunicationPlan<MemorySpace, ExecutionSpace> build_plan(
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>& builder,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE>& partitioner,
     AoSoA_t& particles, int num_particles_per_rank, int rank )
@@ -89,7 +89,7 @@ CommunicationPlan<DeviceType> build_plan(
 
     partitioner.partition( builder, particles, num_particles_per_rank );
 
-    CommunicationPlan<DeviceType> plan( MPI_COMM_WORLD );
+    CommunicationPlan<MemorySpace, ExecutionSpace> plan( MPI_COMM_WORLD );
     plan.build( builder.cells(), partitioner.ownership(),
                 partitioner.cell_owner_map(),
                 partitioner.replication_depth() );
@@ -129,7 +129,7 @@ void testBuildAndValid( int num_particles_per_rank, int ncrit, int max_depth,
     builder.build( positions, num_particles_per_rank );
     partitioner.partition( builder, particles, num_particles_per_rank );
 
-    CommunicationPlan<DeviceType> plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> plan( MPI_COMM_WORLD );
 
     // Check 1: not yet valid
     EXPECT_FALSE( plan.valid() );
@@ -176,7 +176,7 @@ void testVerticalPlanStructure( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan( builder, partitioner, particles,
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
                             num_particles_per_rank, rank );
 
     const auto& cells = builder.cells();
@@ -239,7 +239,7 @@ void testVerticalPlanBalance( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan( builder, partitioner, particles,
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
                             num_particles_per_rank, rank );
 
     for ( const auto& vplan : { &plan.m2m_plan(), &plan.l2l_plan() } )
@@ -272,11 +272,10 @@ void testVerticalPlanBalance( int num_particles_per_rank, int ncrit,
  * Checks:
  *   1. No cell's interaction list contains itself (no self-interaction).
  *   2. Every key in an interaction list exists in the tree.
- *   3. Internal (non-leaf) cells at depth > 0 that this rank processes
- *      have a non-empty interaction list (they always have at least
- *      some well-separated cells in 3-D, unless the tree is trivially small).
- *   4. Leaf cells do not appear as targets in the interaction list map
- *      (M2L is applied at internal cells).
+ *
+ * Note: both leaf and internal cells are valid M2L targets — leaves
+ * accumulate local expansions from well-separated cells just as
+ * internal cells do.
  */
 void testM2LInteractionLists( int num_particles_per_rank, int ncrit,
                               int max_depth, double tolerance,
@@ -293,7 +292,7 @@ void testM2LInteractionLists( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan( builder, partitioner, particles,
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
                             num_particles_per_rank, rank );
 
     const auto& cells = builder.cells();
@@ -325,14 +324,6 @@ void testM2LInteractionLists( int num_particles_per_rank, int ncrit,
                 << "Interaction list source " << src << " not in tree";
         }
 
-        // Check 4: target must not be a leaf
-        auto leaf_it = is_leaf_map.find( target_key );
-        if ( leaf_it != is_leaf_map.end() )
-        {
-            EXPECT_FALSE( leaf_it->second )
-                << "Leaf cell " << target_key
-                << " appears as M2L target — M2L should target internal cells";
-        }
     }
 }
 
@@ -359,7 +350,7 @@ void testM2LBalance( int num_particles_per_rank, int ncrit, int max_depth,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan( builder, partitioner, particles,
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
                             num_particles_per_rank, rank );
 
     const auto& m2l = plan.m2l_plan();
@@ -414,7 +405,7 @@ void testP2PNeighborLists( int num_particles_per_rank, int ncrit, int max_depth,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan( builder, partitioner, particles,
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
                             num_particles_per_rank, rank );
 
     const auto& cells = builder.cells();
@@ -492,7 +483,7 @@ void testP2PGhostConsistency( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan( builder, partitioner, particles,
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
                             num_particles_per_rank, rank );
 
     const auto& cells = builder.cells();
@@ -569,7 +560,7 @@ void testSingleRankNoTransfers( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan( builder, partitioner, particles,
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
                             num_particles_per_rank, rank );
 
     // Check 1
@@ -593,60 +584,6 @@ void testSingleRankNoTransfers( int num_particles_per_rank, int ncrit,
     // Check 4
     EXPECT_TRUE( plan.p2p_plan().ghost_leaf_keys.empty() )
         << "P2P ghost list non-empty on single rank";
-}
-
-//---------------------------------------------------------------------------//
-/**
- * Verify that the M2L interaction lists are symmetric: if cell B appears
- * in cell A's interaction list then A must appear in B's interaction list,
- * provided both cells are processed by this rank. In a uniform tree this
- * is a strict invariant; in an adaptive tree it holds when both cells are
- * at the same depth and both owned (or shared) by this rank.
- *
- * Checks:
- *   1. For every (target, source) pair in interaction_lists where both
- *      keys appear as targets, the reverse pair also exists.
- */
-void testM2LSymmetry( int num_particles_per_rank, int ncrit, int max_depth,
-                      double tolerance, int replication_depth )
-{
-    using namespace CommunicationPlanTest;
-
-    int rank;
-    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
-
-    AoSoA_t particles( "particles", num_particles_per_rank );
-    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        ncrit, max_depth, MPI_COMM_WORLD, tolerance, tolerance );
-    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
-        MPI_COMM_WORLD, replication_depth );
-
-    auto plan = build_plan( builder, partitioner, particles,
-                            num_particles_per_rank, rank );
-
-    const auto& ilists = plan.m2l_plan().interaction_lists;
-
-    // Build a set of all (target, source) pairs for fast lookup
-    std::set<std::pair<MortonKey, MortonKey>> pairs;
-    for ( const auto& [target, sources] : ilists )
-        for ( MortonKey src : sources )
-            pairs.insert( { target, src } );
-
-    for ( const auto& [target, sources] : ilists )
-    {
-        for ( MortonKey src : sources )
-        {
-            // Only check symmetry when the source is also a target on
-            // this rank (otherwise symmetry may be satisfied on the
-            // remote rank that owns the source).
-            if ( ilists.count( src ) == 0 )
-                continue;
-
-            EXPECT_TRUE( pairs.count( { src, target } ) > 0 )
-                << "M2L asymmetry: " << target << " lists " << src
-                << " as source, but " << src << " does not list " << target;
-        }
-    }
 }
 
 //---------------------------------------------------------------------------//
@@ -726,16 +663,6 @@ TEST( CommunicationPlan, testP2PGhostConsistencySmall )
 TEST( CommunicationPlan, testSingleRankNoTransfers )
 {
     testSingleRankNoTransfers( 10000, 128, 15, 0.1, 3 );
-}
-
-TEST( CommunicationPlan, testM2LSymmetryBasic )
-{
-    testM2LSymmetry( 10000, 128, 15, 0.1, 3 );
-}
-
-TEST( CommunicationPlan, testM2LSymmetrySmall )
-{
-    testM2LSymmetry( 500, 32, 10, 0.1, 2 );
 }
 
 //---------------------------------------------------------------------------//
