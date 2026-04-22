@@ -9,11 +9,9 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Experimental_CommunicationPlan.hpp>
-#include <Canopy_Experimental_TreeBuilder.hpp>
-#include <Canopy_Experimental_TreePartitioner.hpp>
-
-#include <test_helpers.hpp>
+#include <Canopy_CommunicationPlan.hpp>
+#include <Canopy_TreeBuilder.hpp>
+#include <Canopy_TreePartitioner.hpp>
 
 #include <Cabana_Core.hpp>
 #include <Kokkos_Core.hpp>
@@ -30,7 +28,7 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
-using namespace Canopy::Experimental;
+using namespace Canopy;
 
 namespace CommunicationPlanTest
 {
@@ -77,10 +75,10 @@ void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
 // Caller receives ownership of the plan; builder and partitioner are
 // also returned by output parameter so callers can inspect them.
 template <class MemorySpace, class ExecutionSpace>
-CommunicationPlan<MemorySpace, ExecutionSpace> build_plan(
-    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>& builder,
-    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE>& partitioner,
-    AoSoA_t& particles, int num_particles_per_rank, int rank )
+CommunicationPlan<MemorySpace, ExecutionSpace>
+build_plan( TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>& builder,
+            TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE>& partitioner,
+            AoSoA_t& particles, int num_particles_per_rank, int rank )
 {
     generate_test_particles( particles, num_particles_per_rank, rank );
 
@@ -91,8 +89,7 @@ CommunicationPlan<MemorySpace, ExecutionSpace> build_plan(
 
     CommunicationPlan<MemorySpace, ExecutionSpace> plan( MPI_COMM_WORLD );
     plan.build( builder.cells(), partitioner.ownership(),
-                partitioner.cell_owner_map(),
-                partitioner.replication_depth() );
+                partitioner.cell_owner_map(), partitioner.replication_depth() );
     return plan;
 }
 
@@ -136,8 +133,7 @@ void testBuildAndValid( int num_particles_per_rank, int ncrit, int max_depth,
 
     // Check 2: valid after build
     plan.build( builder.cells(), partitioner.ownership(),
-                partitioner.cell_owner_map(),
-                partitioner.replication_depth() );
+                partitioner.cell_owner_map(), partitioner.replication_depth() );
     EXPECT_TRUE( plan.valid() );
 
     // Check 3: invalidate clears it
@@ -146,8 +142,7 @@ void testBuildAndValid( int num_particles_per_rank, int ncrit, int max_depth,
 
     // Check 4: rebuild restores it
     plan.build( builder.cells(), partitioner.ownership(),
-                partitioner.cell_owner_map(),
-                partitioner.replication_depth() );
+                partitioner.cell_owner_map(), partitioner.replication_depth() );
     EXPECT_TRUE( plan.valid() );
 }
 
@@ -176,8 +171,8 @@ void testVerticalPlanStructure( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
-                            num_particles_per_rank, rank );
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>(
+        builder, partitioner, particles, num_particles_per_rank, rank );
 
     const auto& cells = builder.cells();
 
@@ -239,8 +234,8 @@ void testVerticalPlanBalance( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
-                            num_particles_per_rank, rank );
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>(
+        builder, partitioner, particles, num_particles_per_rank, rank );
 
     for ( const auto& vplan : { &plan.m2m_plan(), &plan.l2l_plan() } )
     {
@@ -292,8 +287,8 @@ void testM2LInteractionLists( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
-                            num_particles_per_rank, rank );
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>(
+        builder, partitioner, particles, num_particles_per_rank, rank );
 
     const auto& cells = builder.cells();
 
@@ -323,7 +318,6 @@ void testM2LInteractionLists( int num_particles_per_rank, int ncrit,
             EXPECT_TRUE( cell_key_set.count( src ) > 0 )
                 << "Interaction list source " << src << " not in tree";
         }
-
     }
 }
 
@@ -350,8 +344,8 @@ void testM2LBalance( int num_particles_per_rank, int ncrit, int max_depth,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
-                            num_particles_per_rank, rank );
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>(
+        builder, partitioner, particles, num_particles_per_rank, rank );
 
     const auto& m2l = plan.m2l_plan();
 
@@ -405,8 +399,8 @@ void testP2PNeighborLists( int num_particles_per_rank, int ncrit, int max_depth,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
-                            num_particles_per_rank, rank );
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>(
+        builder, partitioner, particles, num_particles_per_rank, rank );
 
     const auto& cells = builder.cells();
 
@@ -430,14 +424,14 @@ void testP2PNeighborLists( int num_particles_per_rank, int ncrit, int max_depth,
 
         // Check 1: locally-owned leaf must have an entry
         auto it = nlists.find( c.key );
-        ASSERT_NE( it, nlists.end() )
-            << "Locally-owned leaf " << c.key << " missing from P2P neighbor lists";
+        ASSERT_NE( it, nlists.end() ) << "Locally-owned leaf " << c.key
+                                      << " missing from P2P neighbor lists";
 
         const auto& nbrs = it->second;
 
         // Check 2: self-interaction present
-        bool has_self = std::find( nbrs.begin(), nbrs.end(), c.key ) !=
-                        nbrs.end();
+        bool has_self =
+            std::find( nbrs.begin(), nbrs.end(), c.key ) != nbrs.end();
         EXPECT_TRUE( has_self )
             << "Leaf " << c.key << " missing self-interaction in P2P list";
 
@@ -483,8 +477,8 @@ void testP2PGhostConsistency( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
-                            num_particles_per_rank, rank );
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>(
+        builder, partitioner, particles, num_particles_per_rank, rank );
 
     const auto& cells = builder.cells();
     const auto& p2p = plan.p2p_plan();
@@ -512,7 +506,8 @@ void testP2PGhostConsistency( int num_particles_per_rank, int ncrit,
 
         // Check 2
         EXPECT_NE( gowner, OWNER_SHARED )
-            << "Ghost leaf " << gk << " has OWNER_SHARED — ghosts must have a "
+            << "Ghost leaf " << gk
+            << " has OWNER_SHARED — ghosts must have a "
                "unique owner";
         EXPECT_GE( gowner, 0 );
         EXPECT_LT( gowner, nprocs );
@@ -525,8 +520,7 @@ void testP2PGhostConsistency( int num_particles_per_rank, int ncrit,
         auto li = is_leaf_map.find( gk );
         ASSERT_NE( li, is_leaf_map.end() )
             << "Ghost key " << gk << " not found in tree";
-        EXPECT_TRUE( li->second )
-            << "Ghost key " << gk << " is not a leaf";
+        EXPECT_TRUE( li->second ) << "Ghost key " << gk << " is not a leaf";
     }
 }
 
@@ -560,8 +554,8 @@ void testSingleRankNoTransfers( int num_particles_per_rank, int ncrit,
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
-    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>( builder, partitioner, particles,
-                            num_particles_per_rank, rank );
+    auto plan = build_plan<TEST_MEMSPACE, TEST_EXECSPACE>(
+        builder, partitioner, particles, num_particles_per_rank, rank );
 
     // Check 1
     EXPECT_TRUE( plan.m2m_plan().sends.empty() )

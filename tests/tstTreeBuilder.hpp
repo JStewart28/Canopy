@@ -9,9 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Experimental_TreeBuilder.hpp>
-
-#include <test_helpers.hpp>
+#include <Canopy_TreeBuilder.hpp>
 
 #include <Cabana_Core.hpp>
 #include <Kokkos_Core.hpp>
@@ -28,7 +26,7 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
-using namespace Canopy::Experimental;
+using namespace Canopy;
 
 namespace TreeBuilderTest
 {

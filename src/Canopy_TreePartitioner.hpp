@@ -12,7 +12,7 @@
 #ifndef CANOPY_TREE_PARTITIONER_HPP
 #define CANOPY_TREE_PARTITIONER_HPP
 
-#include <Canopy_Experimental_TreeBuilder.hpp>
+#include <Canopy_TreeBuilder.hpp>
 
 #include <Cabana_Core.hpp>
 #include <Kokkos_Core.hpp>
@@ -32,9 +32,6 @@
 #include <vector>
 
 namespace Canopy
-{
-
-namespace Experimental
 {
 
 // ============================================================================
@@ -67,7 +64,6 @@ struct RedistributeResult
     int particles_received; // particles this rank received from others
     int num_local_after;    // local particle count after redistribution
 };
-
 
 // ============================================================================
 // TreePartitioner
@@ -128,10 +124,7 @@ class TreePartitioner
     // -----------------------------------------------------------------------
 
     // Full ownership map, indexed parallel to tree_builder.cells()
-    const std::vector<CellOwnership>& ownership() const
-    {
-        return _ownership;
-    }
+    const std::vector<CellOwnership>& ownership() const { return _ownership; }
 
     // Lookup owner of a specific cell by Morton key.
     // Returns OWNER_SHARED for replicated cells, or the owning rank.
@@ -202,8 +195,7 @@ class TreePartitioner
     template <class AoSoAType>
     int migrate_particles(
         const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-        AoSoAType& particles,
-        int num_local_particles_before );
+        AoSoAType& particles, int num_local_particles_before );
 
     // -----------------------------------------------------------------------
     // partition()
@@ -225,8 +217,9 @@ class TreePartitioner
     //   - num_local_particles() returns the new local particle count.
     // -----------------------------------------------------------------------
     template <class AoSoAType>
-    void partition( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-                    AoSoAType& particles, int num_local_particles_before );
+    void
+    partition( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+               AoSoAType& particles, int num_local_particles_before );
 
     // -----------------------------------------------------------------------
     // redistribute()
@@ -247,10 +240,9 @@ class TreePartitioner
     // Returns a RedistributeResult with migration statistics.
     // -----------------------------------------------------------------------
     template <class AoSoAType>
-    RedistributeResult redistribute(
-        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-        AoSoAType& particles,
-        int num_local_particles_before );
+    RedistributeResult
+    redistribute( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+                  AoSoAType& particles, int num_local_particles_before );
 
     // --------------------------------------------------------------------------
     // repartition() — full re-partitioning after tree topology change
@@ -266,10 +258,9 @@ class TreePartitioner
     // set changes.
     // --------------------------------------------------------------------------
     template <class AoSoAType>
-    void repartition(
-        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-        AoSoAType& particles,
-        int num_local_particles_before );
+    void
+    repartition( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+                 AoSoAType& particles, int num_local_particles_before );
 };
 
 // ============================================================================
@@ -327,16 +318,14 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     // Create Zoltan2 adapter
     // BasicVectorAdapter needs:
     //   numIds, globalIds, coords, weights
-    using adapter_t =
-        Zoltan2::BasicVectorAdapter<Tpetra::Map<int, int64_t>>;
+    using adapter_t = Zoltan2::BasicVectorAdapter<Tpetra::Map<int, int64_t>>;
     // Must also use Zoltan types
     using glbl_id_t = typename adapter_t::gno_t;
     using scalar_t = typename adapter_t::scalar_t;
     using longint_t = typename adapter_t::lno_t;
 
     // Zoltan2 needs coordinates as an array of pointers, one per dim
-    const scalar_t* coords[3] = { leaf_x.data(), leaf_y.data(),
-                                  leaf_z.data() };
+    const scalar_t* coords[3] = { leaf_x.data(), leaf_y.data(), leaf_z.data() };
     // const int strides[3] = { 1, 1, 1 };
 
     // Global IDs for the leaves
@@ -403,8 +392,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::derive_internal_ownership(
     // rank contributes.
     // vote_map[internal_key][rank] = total descendant particle count
     // from leaves owned by that rank
-    std::unordered_map<MortonKey, std::unordered_map<int, int64_t>>
-        vote_map;
+    std::unordered_map<MortonKey, std::unordered_map<int, int64_t>> vote_map;
 
     for ( const auto& c : cells )
     {
@@ -448,9 +436,8 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::derive_internal_ownership(
         {
             // Leaf ownership was determined by Zoltan2
             auto it = leaf_owners.find( c.key );
-            co.owner_rank = ( it != leaf_owners.end() )
-                                ? it->second
-                                : 0; // shouldn't happen
+            co.owner_rank = ( it != leaf_owners.end() ) ? it->second
+                                                        : 0; // shouldn't happen
         }
         else if ( c.depth <= _replication_depth )
         {
@@ -492,17 +479,16 @@ template <class MemorySpace, class ExecutionSpace>
 template <class AoSoAType>
 int TreePartitioner<MemorySpace, ExecutionSpace>::migrate_particles(
     const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-    AoSoAType& particles,
-    int num_local_particles_before )
+    AoSoAType& particles, int num_local_particles_before )
 {
     // Copy particle keys to host to build the destination array
     auto particle_keys = tree_builder.particle_keys();
-    auto h_keys = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace{}, particle_keys );
+    auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
+                                                       particle_keys );
 
     // Build destination ranks on host
-    Kokkos::View<int*, memory_space> dest_ranks(
-        "dest_ranks", num_local_particles_before );
+    Kokkos::View<int*, memory_space> dest_ranks( "dest_ranks",
+                                                 num_local_particles_before );
     auto h_dest = Kokkos::create_mirror_view( dest_ranks );
 
     int num_sent = 0;
@@ -567,14 +553,13 @@ template <class MemorySpace, class ExecutionSpace>
 template <class AoSoAType>
 RedistributeResult TreePartitioner<MemorySpace, ExecutionSpace>::redistribute(
     const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-    AoSoAType& particles,
-    int num_local_particles_before )
+    AoSoAType& particles, int num_local_particles_before )
 {
     RedistributeResult result;
 
     int num_before = num_local_particles_before;
-    result.particles_sent = migrate_particles(
-        tree_builder, particles, num_local_particles_before );
+    result.particles_sent = migrate_particles( tree_builder, particles,
+                                               num_local_particles_before );
 
     result.num_local_after = _num_local_after;
 
@@ -590,8 +575,7 @@ template <class MemorySpace, class ExecutionSpace>
 template <class AoSoAType>
 void TreePartitioner<MemorySpace, ExecutionSpace>::repartition(
     const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-    AoSoAType& particles,
-    int num_local_particles_before )
+    AoSoAType& particles, int num_local_particles_before )
 {
     const auto& cells = tree_builder.cells();
 
@@ -604,8 +588,6 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::repartition(
     // Step 3: Migrate particles to new owners
     migrate_particles( tree_builder, particles, num_local_particles_before );
 }
-
-} // end namespace Experimental
 
 } // end namespace Canopy
 

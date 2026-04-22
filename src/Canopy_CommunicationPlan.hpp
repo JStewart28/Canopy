@@ -12,8 +12,8 @@
 #ifndef CANOPY_COMMUNICATIONPLAN_HPP
 #define CANOPY_COMMUNICATIONPLAN_HPP
 
-#include <Canopy_Experimental_TreeBuilder.hpp>
-#include <Canopy_Experimental_TreePartitioner.hpp>
+#include <Canopy_TreeBuilder.hpp>
+#include <Canopy_TreePartitioner.hpp>
 
 #include <Cabana_Core.hpp>
 #include <Kokkos_Core.hpp>
@@ -28,9 +28,6 @@
 #include <vector>
 
 namespace Canopy
-{
-
-namespace Experimental
 {
 
 // ============================================================================
@@ -145,7 +142,7 @@ class CommunicationPlan
   public:
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
-    
+
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
@@ -170,11 +167,10 @@ class CommunicationPlan
     //   cell_owner_fn - function to look up a cell's owner by key
     //   replication_depth - depth at or below which cells are shared
     // -----------------------------------------------------------------------
-    void build(
-        const std::vector<CellInfo>& cells,
-        const std::vector<CellOwnership>& ownership,
-        const std::unordered_map<MortonKey, int>& cell_owner_map,
-        int replication_depth );
+    void build( const std::vector<CellInfo>& cells,
+                const std::vector<CellOwnership>& ownership,
+                const std::unordered_map<MortonKey, int>& cell_owner_map,
+                int replication_depth );
 
     // Accessors (valid after build())
     const VerticalPlan& m2m_plan() const { return _m2m_plan; }
@@ -247,25 +243,25 @@ class CommunicationPlan
     // Find all existing cells that are neighbors of the given cell.
     // Returns cells at the same depth if they exist, or their ancestor
     // leaf if they were not refined to that depth.
-    std::vector<MortonKey> find_neighbors(
-        MortonKey key, const CellInfo& cell ) const;
+    std::vector<MortonKey> find_neighbors( MortonKey key,
+                                           const CellInfo& cell ) const;
 
     // Find the leaf cell containing a given point by walking down
     // from the root.
-    MortonKey find_leaf_containing_point(
-        double px, double py, double pz ) const;
+    MortonKey find_leaf_containing_point( double px, double py,
+                                          double pz ) const;
 
     // Build the M2L interaction list for a single cell.
     // The interaction list consists of children of the parent's
     // neighbors that are NOT neighbors of the cell itself.
-    std::vector<MortonKey> build_interaction_list(
-        MortonKey key, const CellInfo& cell ) const;
+    std::vector<MortonKey> build_interaction_list( MortonKey key,
+                                                   const CellInfo& cell ) const;
 
     // Build the P2P neighbor list for a single leaf cell.
     // In an adaptive tree, this includes leaf cells at the same or
     // different depths whose spatial extents are adjacent.
-    std::vector<MortonKey> build_p2p_neighbor_list(
-        MortonKey key, const CellInfo& cell ) const;
+    std::vector<MortonKey>
+    build_p2p_neighbor_list( MortonKey key, const CellInfo& cell ) const;
 };
 
 // ============================================================================
@@ -279,7 +275,8 @@ class CommunicationPlan
 // If we reach a cell that doesn't exist, return the last valid ancestor.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-MortonKey CommunicationPlan<MemorySpace, ExecutionSpace>::find_leaf_containing_point(
+MortonKey
+CommunicationPlan<MemorySpace, ExecutionSpace>::find_leaf_containing_point(
     double px, double py, double pz ) const
 {
     MortonKey current = ROOT_KEY;
@@ -334,7 +331,8 @@ MortonKey CommunicationPlan<MemorySpace, ExecutionSpace>::find_leaf_containing_p
 // the query cell.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::find_neighbors(
+std::vector<MortonKey>
+CommunicationPlan<MemorySpace, ExecutionSpace>::find_neighbors(
     MortonKey key, const CellInfo& cell ) const
 {
     std::set<MortonKey> neighbor_set;
@@ -355,8 +353,7 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::find_neig
                 double ny = cell.center[1] + dy * step;
                 double nz = cell.center[2] + dz * step;
 
-                MortonKey neighbor = find_leaf_containing_point(
-                    nx, ny, nz );
+                MortonKey neighbor = find_leaf_containing_point( nx, ny, nz );
 
                 if ( neighbor != key && neighbor >= ROOT_KEY )
                     neighbor_set.insert( neighbor );
@@ -364,8 +361,7 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::find_neig
         }
     }
 
-    return std::vector<MortonKey>( neighbor_set.begin(),
-                                   neighbor_set.end() );
+    return std::vector<MortonKey>( neighbor_set.begin(), neighbor_set.end() );
 }
 
 // --------------------------------------------------------------------------
@@ -388,8 +384,9 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::find_neig
 //   4. The remaining cells form the interaction list.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
-    build_interaction_list( MortonKey key, const CellInfo& cell ) const
+std::vector<MortonKey>
+CommunicationPlan<MemorySpace, ExecutionSpace>::build_interaction_list(
+    MortonKey key, const CellInfo& cell ) const
 {
     if ( key == ROOT_KEY )
         return {}; // root has no interaction list
@@ -407,8 +404,8 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
     // Step 2: Find the cell's own neighbors (to exclude from
     //         interaction list)
     auto my_neighbors = find_neighbors( key, cell );
-    std::unordered_set<MortonKey> my_neighbor_set(
-        my_neighbors.begin(), my_neighbors.end() );
+    std::unordered_set<MortonKey> my_neighbor_set( my_neighbors.begin(),
+                                                   my_neighbors.end() );
     my_neighbor_set.insert( key ); // exclude self too
 
     // Step 3: For each parent neighbor, collect its children or itself
@@ -444,8 +441,7 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
                     continue; // child was pruned (empty)
 
                 // Exclude if this child is a neighbor of C
-                if ( my_neighbor_set.find( ck ) !=
-                     my_neighbor_set.end() )
+                if ( my_neighbor_set.find( ck ) != my_neighbor_set.end() )
                     continue;
 
                 interaction_list.push_back( ck );
@@ -469,9 +465,9 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
 // this cell.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
-    build_p2p_neighbor_list( MortonKey key,
-                             const CellInfo& cell ) const
+std::vector<MortonKey>
+CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_neighbor_list(
+    MortonKey key, const CellInfo& cell ) const
 {
     std::set<MortonKey> neighbor_leaves;
 
@@ -495,8 +491,7 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
                 double ny = cell.center[1] + dy * step;
                 double nz = cell.center[2] + dz * step;
 
-                MortonKey neighbor = find_leaf_containing_point(
-                    nx, ny, nz );
+                MortonKey neighbor = find_leaf_containing_point( nx, ny, nz );
 
                 if ( neighbor < ROOT_KEY )
                     continue;
@@ -547,12 +542,10 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
                             bool adjacent = true;
                             for ( int d = 0; d < 3; d++ )
                             {
-                                double dist = std::abs(
-                                    s_ci->center[d] -
-                                    cell.center[d] );
+                                double dist = std::abs( s_ci->center[d] -
+                                                        cell.center[d] );
                                 double threshold =
-                                    hw + s_ci->half_width +
-                                    1.0e-10;
+                                    hw + s_ci->half_width + 1.0e-10;
                                 if ( dist > threshold )
                                 {
                                     adjacent = false;
@@ -575,18 +568,14 @@ std::vector<MortonKey> CommunicationPlan<MemorySpace, ExecutionSpace>::
 
                                 // Quick check: could this child
                                 // be adjacent to our cell?
-                                const CellInfo* ck_ci =
-                                    ck_it->second;
+                                const CellInfo* ck_ci = ck_it->second;
                                 bool could_touch = true;
                                 for ( int d = 0; d < 3; d++ )
                                 {
-                                    double dist = std::abs(
-                                        ck_ci->center[d] -
-                                        cell.center[d] );
+                                    double dist = std::abs( ck_ci->center[d] -
+                                                            cell.center[d] );
                                     double threshold =
-                                        hw +
-                                        ck_ci->half_width +
-                                        1.0e-10;
+                                        hw + ck_ci->half_width + 1.0e-10;
                                     if ( dist > threshold )
                                     {
                                         could_touch = false;
@@ -659,8 +648,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
             int child_owner = owner_of( ck );
 
             // Skip if both are shared (allreduce handles it)
-            if ( parent_owner == OWNER_SHARED &&
-                 child_owner == OWNER_SHARED )
+            if ( parent_owner == OWNER_SHARED && child_owner == OWNER_SHARED )
                 continue;
 
             // Skip if same owner (no communication needed)
@@ -675,25 +663,21 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
 
             if ( parent_owner != OWNER_SHARED )
             {
-                if ( child_owner == _rank ||
-                     child_owner == OWNER_SHARED )
+                if ( child_owner == _rank || child_owner == OWNER_SHARED )
                 {
                     // This rank has the child data — send to parent owner
-                    _m2m_plan.sends.push_back(
-                        { ck, parent_owner } );
+                    _m2m_plan.sends.push_back( { ck, parent_owner } );
                 }
 
                 if ( parent_owner == _rank )
                 {
                     // This rank owns the parent — expect data from
                     // child's owner
-                    int source = ( child_owner == OWNER_SHARED )
-                                     ? _rank
-                                     : child_owner;
+                    int source =
+                        ( child_owner == OWNER_SHARED ) ? _rank : child_owner;
                     if ( source != _rank )
                     {
-                        _m2m_plan.receives.push_back(
-                            { ck, source } );
+                        _m2m_plan.receives.push_back( { ck, source } );
                     }
                 }
             }
@@ -709,8 +693,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
                     // This rank owns the parent — send to child owner
                     if ( child_owner != _rank )
                     {
-                        _l2l_plan.sends.push_back(
-                            { ci.key, child_owner } );
+                        _l2l_plan.sends.push_back( { ci.key, child_owner } );
                     }
                 }
 
@@ -718,8 +701,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
                 {
                     // This rank owns the child — expect data from
                     // parent's owner
-                    if ( parent_owner != _rank &&
-                         parent_owner != OWNER_SHARED )
+                    if ( parent_owner != _rank && parent_owner != OWNER_SHARED )
                     {
                         _l2l_plan.receives.push_back(
                             { ci.key, parent_owner } );
@@ -912,8 +894,6 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
 
     _valid = true;
 }
-
-} // namespace Experimental
 
 } // namespace Canopy
 

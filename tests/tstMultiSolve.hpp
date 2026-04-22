@@ -35,21 +35,20 @@ using particle_aosoa_type_mv_h =
 using MD_mv =
     Canopy::ParticleMetadata<particle_aosoa_type_mv, scalar_type, 0, 2, 3, 1>;
 
-
 /**
  * Regression test that advances an n-body system for multiple timesteps and
  * compares final exact and Canopy particle positions.
  */
 template <int p>
-void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
+void testSolver( int points_per_proc_in, bool balanced, int num_timesteps )
 {
-    static_assert(p > 0);
+    static_assert( p > 0 );
 
     int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
 
     int comm_size;
-    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+    MPI_Comm_size( MPI_COMM_WORLD, &comm_size );
 
     (void)comm_size;
 
@@ -60,11 +59,10 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
     static constexpr std::size_t cells_per_tile = 2;
     std::size_t leaf_tiles = 16;
     std::size_t red_factor = 2;
-    auto tree =
-        Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD_mv,
-                             cells_per_tile, p>( global_low_corner,
-                                                 global_high_corner, leaf_tiles,
-                                                 red_factor, MPI_COMM_WORLD );
+    auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD_mv,
+                                     cells_per_tile, p>(
+        global_low_corner, global_high_corner, leaf_tiles, red_factor,
+        MPI_COMM_WORLD );
 
     int total_points = points_per_proc_in;
     int owned_points = ( rank == 0 ) ? total_points : 0;
@@ -74,7 +72,8 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
     auto pos_slice_host = Cabana::slice<MD_mv::pos>( particle_aosoa_host );
     auto force_slice_host = Cabana::slice<MD_mv::force>( particle_aosoa_host );
     auto mass_slice_host = Cabana::slice<MD_mv::in>( particle_aosoa_host );
-    auto potential_slice_host = Cabana::slice<MD_mv::out>( particle_aosoa_host );
+    auto potential_slice_host =
+        Cabana::slice<MD_mv::out>( particle_aosoa_host );
     auto velocity_slice_host = Cabana::slice<4>( particle_aosoa_host );
     auto id_slice_host = Cabana::slice<5>( particle_aosoa_host );
     Cabana::deep_copy( force_slice_host, 0.0 );
@@ -165,7 +164,8 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
     const bool run_load_balance = !balanced;
 
     auto clamp_position = [&]( scalar_type& pos, scalar_type& vel,
-                               scalar_type low, scalar_type high ) {
+                               scalar_type low, scalar_type high )
+    {
         if ( pos < low )
         {
             pos = low;
@@ -190,15 +190,12 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
                     if ( this_pid == other_pid )
                         continue;
 
-                    const scalar_type dx =
-                        exact_positions( other_pid, 0 ) -
-                        exact_positions( this_pid, 0 );
-                    const scalar_type dy =
-                        exact_positions( other_pid, 1 ) -
-                        exact_positions( this_pid, 1 );
-                    const scalar_type dz =
-                        exact_positions( other_pid, 2 ) -
-                        exact_positions( this_pid, 2 );
+                    const scalar_type dx = exact_positions( other_pid, 0 ) -
+                                           exact_positions( this_pid, 0 );
+                    const scalar_type dy = exact_positions( other_pid, 1 ) -
+                                           exact_positions( this_pid, 1 );
+                    const scalar_type dz = exact_positions( other_pid, 2 ) -
+                                           exact_positions( this_pid, 2 );
                     const scalar_type dist_sq = dx * dx + dy * dy + dz * dz;
 
                     if ( dist_sq == 0.0 )
@@ -208,9 +205,9 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
                     const scalar_type dist_inv = 1.0 / dist;
                     const scalar_type dist_inv3 =
                         dist_inv * dist_inv * dist_inv;
-                    const scalar_type fp =
-                        -1.0 * exact_masses( this_pid ) *
-                        exact_masses( other_pid ) * dist_inv3;
+                    const scalar_type fp = -1.0 * exact_masses( this_pid ) *
+                                           exact_masses( other_pid ) *
+                                           dist_inv3;
 
                     exact_forces( this_pid, 0 ) += fp * dx;
                     exact_forces( this_pid, 1 ) += fp * dy;
@@ -305,8 +302,8 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
         Kokkos::fence();
     }
 
-    auto tmp =
-        Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(), *( tree->data() ) );
+    auto tmp = Cabana::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                    *( tree->data() ) );
     particle_aosoa_type_mv_h tree_particles( "tree_particles", tmp.size() );
     Cabana::deep_copy( tree_particles, tmp );
 
@@ -315,7 +312,8 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
     Kokkos::View<int*, Kokkos::HostSpace> send_to( "send_to",
                                                    tree->numOwnedParticles() );
     Kokkos::deep_copy( send_to, 0 );
-    Cabana::Distributor<Kokkos::HostSpace> distributor( MPI_COMM_WORLD, send_to );
+    Cabana::Distributor<Kokkos::HostSpace> distributor( MPI_COMM_WORLD,
+                                                        send_to );
     Cabana::migrate( distributor, tree_particles );
 
     auto tree_id_slice = Cabana::slice<5>( tree_particles );
@@ -336,8 +334,7 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
             {
                 const scalar_type exact_position =
                     exact_positions( particle_id, dim );
-                const scalar_type canopy_position =
-                    tree_positions( i, dim );
+                const scalar_type canopy_position = tree_positions( i, dim );
                 EXPECT_NEAR( canopy_position, exact_position,
                              position_tolerance )
                     << " at particle " << particle_id << " dim " << dim;
@@ -359,13 +356,10 @@ void testSolver(int points_per_proc_in, bool balanced, int num_timesteps)
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
-TEST( MultiSolve, testMultiSolve_balanced )
-{ 
-    testSolver<4>(300, true, 8);
-}
+TEST( MultiSolve, testMultiSolve_balanced ) { testSolver<4>( 300, true, 8 ); }
 TEST( MultiSolve, testMultiSolve_unbalanced )
-{ 
-    testSolver<4>(300, false, 8);
+{
+    testSolver<4>( 300, false, 8 );
 }
 
 //---------------------------------------------------------------------------//

@@ -1,11 +1,10 @@
 configure_file(Canopy_Config.hpp.cmakein Canopy_Config.hpp)
 
 set(HEADERS_PUBLIC
+  Canopy_CommunicationPlan.hpp
   Canopy_Core.hpp
-  Canopy_Operators.hpp
-  Canopy_Solver.hpp
-  Canopy_SolverLayer.hpp
-  Canopy_Experimental_TreeBuilder.hpp
+  Canopy_TreeBuilder.hpp
+  Canopy_TreePartitioner.hpp
   )
 
 # Currently no impl headers

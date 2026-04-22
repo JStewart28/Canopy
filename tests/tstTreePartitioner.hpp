@@ -9,10 +9,8 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Experimental_TreeBuilder.hpp>
-#include <Canopy_Experimental_TreePartitioner.hpp>
-
-#include <test_helpers.hpp>
+#include <Canopy_TreeBuilder.hpp>
+#include <Canopy_TreePartitioner.hpp>
 
 #include <Cabana_Core.hpp>
 #include <Kokkos_Core.hpp>
@@ -28,7 +26,7 @@ namespace Test
 {
 //---------------------------------------------------------------------------//
 
-using namespace Canopy::Experimental;
+using namespace Canopy;
 
 namespace TreePartitionerTest
 {
@@ -294,8 +292,8 @@ void testRedistributeNoOp( int num_particles_per_rank, int ncrit, int max_depth,
     // Call redistribute() with NO particle motion. Every particle's leaf
     // key already maps to this rank, so nothing should be sent.
     // -----------------------------------------------------------------------
-    auto result = partitioner.redistribute( builder, particles,
-                                            num_after_partition );
+    auto result =
+        partitioner.redistribute( builder, particles, num_after_partition );
 
     int new_local = partitioner.num_local_particles();
 
@@ -312,12 +310,10 @@ void testRedistributeNoOp( int num_particles_per_rank, int ncrit, int max_depth,
                    MPI_COMM_WORLD );
     MPI_Allreduce( &result.particles_received, &global_recv, 1, MPI_INT,
                    MPI_SUM, MPI_COMM_WORLD );
-    EXPECT_EQ( global_sent, 0 )
-        << "redistribute() sent " << global_sent
-        << " particles despite no motion";
-    EXPECT_EQ( global_recv, 0 )
-        << "redistribute() received " << global_recv
-        << " particles despite no motion";
+    EXPECT_EQ( global_sent, 0 ) << "redistribute() sent " << global_sent
+                                << " particles despite no motion";
+    EXPECT_EQ( global_recv, 0 ) << "redistribute() received " << global_recv
+                                << " particles despite no motion";
 
     // Check 3: result fields consistent.
     EXPECT_EQ( result.num_local_after, new_local );
@@ -458,8 +454,8 @@ void testRedistributeWithMotion( int num_particles_per_rank, int ncrit,
     // -----------------------------------------------------------------------
     // Run redistribute.
     // -----------------------------------------------------------------------
-    auto result = partitioner.redistribute( builder, particles,
-                                            num_after_partition );
+    auto result =
+        partitioner.redistribute( builder, particles, num_after_partition );
 
     int new_local = partitioner.num_local_particles();
 
