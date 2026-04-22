@@ -138,7 +138,7 @@ void testTreeBuilder( int num_particles_per_rank, int ncrit, int max_depth,
     auto positions = Cabana::slice<Position>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        ncrit, max_depth, MPI_COMM_WORLD, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
 
     // Initial full build
     builder.build( positions, num_particles_per_rank );

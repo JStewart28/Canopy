@@ -198,7 +198,7 @@ int main( int argc, char* argv[] )
         // Build the tree builder with tolerance
         // using PositionSlice = decltype( positions );
         TreeBuilder<MemorySpace, ExecutionSpace> builder(
-            ncrit, max_depth, MPI_COMM_WORLD, tolerance, tolerance );
+            MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
 
         // -----------------------------------------------------------
         // Initial full build

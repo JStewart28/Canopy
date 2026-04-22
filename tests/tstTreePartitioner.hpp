@@ -155,7 +155,7 @@ void testPartitioner( int num_particles_per_rank, int ncrit, int max_depth,
     auto positions = Cabana::slice<Position>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        ncrit, max_depth, MPI_COMM_WORLD, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
 
     builder.build( positions, num_particles_per_rank );
 
@@ -270,7 +270,7 @@ void testRedistributeNoOp( int num_particles_per_rank, int ncrit, int max_depth,
     auto positions = Cabana::slice<Position>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        ncrit, max_depth, MPI_COMM_WORLD, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     // Initial partition. This migrates particles onto their owning ranks and
@@ -371,7 +371,7 @@ void testRedistributeWithMotion( int num_particles_per_rank, int ncrit,
     auto positions = Cabana::slice<Position>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        ncrit, max_depth, MPI_COMM_WORLD, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -527,7 +527,7 @@ void testRepartition( int num_particles_per_rank, int ncrit, int max_depth,
     auto positions = Cabana::slice<Position>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        ncrit, max_depth, MPI_COMM_WORLD, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     // Initial partition.

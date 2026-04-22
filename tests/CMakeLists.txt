@@ -16,18 +16,17 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 #   )
 
 set(SERIAL_TESTS
+  Laplace
   Operators
   )
 
 set(MPI_TESTS
   CommunicationPlan
   TreePartitioner
-  Particle2Multipole
-  Multipole2Local
-  Particle2Particle
   SingleSolve
   MultiSolve
   TreeBuilder
+  UpwardSweep
   )
 
 Canopy_add_tests_nobackend(PACKAGE Canopy NAMES ${NOBACKEND_TESTS})

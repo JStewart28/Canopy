@@ -46,9 +46,6 @@ if(Kokkos_ENABLE_CUDA)
   kokkos_check(OPTIONS CUDA_LAMBDA)
 endif()
 
-# find trilinos
-find_package(Trilinos REQUIRED)
-
 # find cabana
 find_package(Cabana REQUIRED COMPONENTS Cabana::Grid Cabana::Core)
 if( NOT Cabana_ENABLE_MPI )
@@ -71,6 +68,10 @@ macro(Canopy_add_dependency)
   endif()
   set(Canopy_ENABLE_${CANOPY_DEPENDENCY_OPTION} ${${CANOPY_DEPENDENCY_PACKAGE}_FOUND})
 endmacro()
+
+# find trilinos
+Canopy_add_dependency( PACKAGE Trilinos )
+set_package_properties(Trilinos PROPERTIES TYPE REQUIRED PURPOSE "Used for load balancing")
 
 # find MPI
 Canopy_add_dependency( PACKAGE MPI COMPONENTS CXX )

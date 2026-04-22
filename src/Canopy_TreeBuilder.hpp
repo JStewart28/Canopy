@@ -157,7 +157,7 @@ class TreeBuilder
 
   public:
     // Constructor
-    TreeBuilder( const int ncrit, const int max_depth, MPI_Comm comm,
+    TreeBuilder( MPI_Comm comm, const int ncrit, const int max_depth, 
                  const double bb_tolerance_factor = 0.1,
                  const double ncrit_tolerance_factor = 0.1 )
         : _ncrit( ncrit )
@@ -1099,7 +1099,7 @@ TreeBuilder<MemorySpace, ExecutionSpace>::update( PositionType positions,
                 ci.global_count = 0;
         }
 
-        auto h_pk = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
+        auto h_pk = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                          _particle_keys );
 
         // Local counts

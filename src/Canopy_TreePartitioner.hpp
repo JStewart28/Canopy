@@ -483,7 +483,7 @@ int TreePartitioner<MemorySpace, ExecutionSpace>::migrate_particles(
 {
     // Copy particle keys to host to build the destination array
     auto particle_keys = tree_builder.particle_keys();
-    auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
+    auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        particle_keys );
 
     // Build destination ranks on host
