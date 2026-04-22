@@ -20,6 +20,7 @@ set(SERIAL_TESTS
   )
 
 set(MPI_TESTS
+  CommunicationPlan
   TreePartitioner
   Particle2Multipole
   Multipole2Local
