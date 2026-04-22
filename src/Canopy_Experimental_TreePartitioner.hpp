@@ -175,122 +175,11 @@ class TreePartitioner
     int _num_local_after;
 
   public:
-    // -----------------------------------------------------------------------
     // Internal: partition leaf cells using Zoltan2 RCB
-    //
     // Returns a map: leaf MortonKey -> owning rank
-    // -----------------------------------------------------------------------
     std::unordered_map<MortonKey, int>
-    partition_leaves( const std::vector<CellInfo>& cells )
-    {
-        // Collect leaf cells
-        std::vector<MortonKey> leaf_keys;
-        std::vector<double> leaf_x, leaf_y, leaf_z;
-        std::vector<double> leaf_weights;
+    partition_leaves( const std::vector<CellInfo>& cells );
 
-        for ( const auto& c : cells )
-        {
-            if ( c.is_leaf )
-            {
-                leaf_keys.push_back( c.key );
-                leaf_x.push_back( c.center[0] );
-                leaf_y.push_back( c.center[1] );
-                leaf_z.push_back( c.center[2] );
-                // User particle count for zoltan weights
-                leaf_weights.push_back( static_cast<double>( c.global_count ) );
-            }
-        }
-
-        int num_leaves = static_cast<int>( leaf_keys.size() );
-
-        // If only one rank, all leaves are owned by rank 0
-        // and can skip partitioning.
-        if ( _comm_size == 1 )
-        {
-            std::unordered_map<MortonKey, int> result;
-            for ( int i = 0; i < num_leaves; i++ )
-                result[leaf_keys[i]] = 0;
-            return result;
-        }
-
-        // ---------------------------------------------------------------
-        // Build Zoltan2 adapter
-        //
-        // Every rank has the identical set of leaves (the tree structure is
-        // replciated globally), so run Zoltan2 with the full leaf set on every
-        // rank. Zoltan2 RCB is deterministic given the same input, so all ranks
-        // will produce the same assignment.
-        //
-        // Use global IDs = leaf index (0..num_leaves-1), which are the
-        // same on every rank since _cells from TreeBuilder is identical on all
-        // ranks.
-        // ---------------------------------------------------------------
-
-        // Create Zoltan2 adapter
-        // BasicVectorAdapter needs:
-        //   numIds, globalIds, coords, weights
-        using adapter_t =
-            Zoltan2::BasicVectorAdapter<Tpetra::Map<int, int64_t>>;
-        // Must also use Zoltan types
-        using glbl_id_t = typename adapter_t::gno_t;
-        using scalar_t = typename adapter_t::scalar_t;
-        using longint_t = typename adapter_t::lno_t;
-
-        // Zoltan2 needs coordinates as an array of pointers, one per dim
-        const scalar_t* coords[3] = { leaf_x.data(), leaf_y.data(),
-                                      leaf_z.data() };
-        // const int strides[3] = { 1, 1, 1 };
-
-        // Global IDs for the leaves
-        std::vector<glbl_id_t> global_ids( num_leaves );
-        for ( int i = 0; i < num_leaves; i++ )
-            global_ids[i] = static_cast<glbl_id_t>( i );
-
-        // Build a Teuchos communicator for Zoltan2
-        // Note: Use MPI_COMM_SELF because every rank is running the same
-        // deterministic partitioning on the same data. This avoids Zoltan2
-        // trying to do distributed partitioning (which would fail since
-        // each rank claims to have ALL leaves).
-        auto teuchos_comm =
-            Teuchos::rcp( new Teuchos::MpiComm<int>( MPI_COMM_SELF ) );
-
-        const glbl_id_t* ids_ptr = global_ids.data();
-        const scalar_t* x_ptr = leaf_x.data();
-        const scalar_t* y_ptr = leaf_y.data();
-        const scalar_t* z_ptr = leaf_z.data();
-        const scalar_t* w_ptr = leaf_weights.data();
-
-        adapter_t adapter( static_cast<longint_t>( num_leaves ), ids_ptr, x_ptr,
-                           y_ptr, z_ptr, 1, 1, 1, // strides for x, y, z
-                           true,                  // use weights
-                           w_ptr,
-                           1 ); // weight stride
-
-        // Configure Zoltan2
-        Teuchos::ParameterList params;
-        params.set( "algorithm", "rcb" );
-        params.set( "num_global_parts", _comm_size );
-        params.set( "imbalance_tolerance", _imbalance_tolerance );
-
-        // Solve
-        Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
-                                                         teuchos_comm );
-        problem.solve();
-
-        // Extract assignments
-        const auto& solution = problem.getSolution();
-        // Array of which rank should get which particle.
-        const int* parts = solution.getPartListView();
-
-        std::unordered_map<MortonKey, int> result;
-        result.reserve( num_leaves );
-        for ( int i = 0; i < num_leaves; i++ )
-            result[leaf_keys[i]] = parts[i];
-
-        return result;
-    }
-
-    // --------------------------------------------------------------------------
     // derive_internal_ownership
     //
     // Two-phase approach:
@@ -299,107 +188,10 @@ class TreePartitioner
     //   Phase 2: For each internal cell, the owner is the rank with the
     //            most descendant particles, unless the cell is at or above
     //            the replication depth cutoff, in which case it's SHARED.
-    // --------------------------------------------------------------------------
     void derive_internal_ownership(
         const std::vector<CellInfo>& cells,
-        const std::unordered_map<MortonKey, int>& leaf_owners )
-    {
-        // Build a key -> CellInfo lookup
-        std::unordered_map<MortonKey, const CellInfo*> cell_map;
-        for ( const auto& c : cells )
-            cell_map[c.key] = &c;
+        const std::unordered_map<MortonKey, int>& leaf_owners );
 
-        // Phase 1: accumulate votes
-        // For each internal cell, track how many descendant particles each
-        // rank contributes.
-        // vote_map[internal_key][rank] = total descendant particle count
-        // from leaves owned by that rank
-        std::unordered_map<MortonKey, std::unordered_map<int, int64_t>>
-            vote_map;
-
-        for ( const auto& c : cells )
-        {
-            // Must start at leaf cells
-            if ( !c.is_leaf )
-                continue;
-
-            auto owner_it = leaf_owners.find( c.key );
-            if ( owner_it == leaf_owners.end() )
-                continue;
-
-            int leaf_rank = owner_it->second;
-            // Get particle count in this leaf cell
-            int64_t count = static_cast<int64_t>( c.global_count );
-
-            // Walk up from this leaf to the root, adding votes
-            MortonKey parent = parent_key( c.key );
-            while ( parent >= ROOT_KEY )
-            {
-                // Count how many particle each rank owns in parent cells
-                vote_map[parent][leaf_rank] += count;
-
-                if ( parent == ROOT_KEY )
-                    break;
-                parent = parent_key( parent );
-            }
-        }
-
-        // Phase 2: assign ownership
-        _ownership.clear();
-        _ownership.reserve( cells.size() );
-        _cell_owner_map.clear();
-        _cell_owner_map.reserve( cells.size() );
-
-        for ( const auto& c : cells )
-        {
-            CellOwnership co;
-            co.key = c.key;
-
-            if ( c.is_leaf )
-            {
-                // Leaf ownership was determined by Zoltan2
-                auto it = leaf_owners.find( c.key );
-                co.owner_rank = ( it != leaf_owners.end() )
-                                    ? it->second
-                                    : 0; // shouldn't happen
-            }
-            else if ( c.depth <= _replication_depth )
-            {
-                // Coarse layer — replicated on all ranks
-                co.owner_rank = OWNER_SHARED;
-            }
-            else
-            {
-                // Deep internal cell — pick the rank with the most
-                // descendant particles
-                auto vote_it = vote_map.find( c.key );
-                if ( vote_it != vote_map.end() )
-                {
-                    int best_rank = 0;
-                    int64_t best_count = -1;
-                    for ( const auto& [r, cnt] : vote_it->second )
-                    {
-                        if ( cnt > best_count )
-                        {
-                            best_count = cnt;
-                            best_rank = r;
-                        }
-                    }
-                    co.owner_rank = best_rank;
-                }
-                else
-                {
-                    // No votes — empty internal cell, assign to rank 0
-                    co.owner_rank = 0;
-                }
-            }
-
-            _ownership.push_back( co );
-            _cell_owner_map[co.key] = co.owner_rank;
-        }
-    }
-
-    // --------------------------------------------------------------------------
     // migrate_particles — shared migration logic
     //
     // Looks up each particle's leaf key in the ownership map, builds a
@@ -407,62 +199,11 @@ class TreePartitioner
     //
     // Returns the number of particles sent to other ranks (i.e., particles
     // whose destination is not this rank).
-    // --------------------------------------------------------------------------
     template <class AoSoAType>
     int migrate_particles(
-            const const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-            AoSoAType& particles,
-            int num_local_particles_before )
-    {
-        // Copy particle keys to host to build the destination array
-        auto particle_keys = tree_builder.particle_keys();
-        auto h_keys = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace{}, particle_keys );
-
-        // Build destination ranks on host
-        Kokkos::View<int*, memory_space> dest_ranks(
-            "dest_ranks", num_local_particles_before );
-        auto h_dest = Kokkos::create_mirror_view( dest_ranks );
-
-        int num_sent = 0;
-
-        for ( int i = 0; i < num_local_particles_before; i++ )
-        {
-            MortonKey key = h_keys( i );
-            auto it = _cell_owner_map.find( key );
-            if ( it != _cell_owner_map.end() )
-            {
-                int owner = it->second;
-                // If the leaf is OWNER_SHARED (-1, shouldn't happen for leaves,
-                // but guard against it), keep particle on current rank
-                if ( owner >= 0 )
-                {
-                    h_dest( i ) = owner;
-                    if ( owner != _rank )
-                        num_sent++;
-                }
-                else
-                {
-                    h_dest( i ) = _rank;
-                }
-            }
-            else
-            {
-                // Key not found — keep on current rank (safety fallback)
-                h_dest( i ) = _rank;
-            }
-        }
-
-        Kokkos::deep_copy( dest_ranks, h_dest );
-
-        // Use Cabana::Distributor to migrate particles
-        Cabana::Distributor<memory_space> distributor( _comm, dest_ranks );
-        Cabana::migrate( distributor, particles );
-
-        _num_local_after = static_cast<int>( particles.size() );
-
-        return num_sent;
-    }
+        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        AoSoAType& particles,
+        int num_local_particles_before );
 
     // -----------------------------------------------------------------------
     // partition()
@@ -482,25 +223,10 @@ class TreePartitioner
     //   - The AoSoA has been redistributed so each rank holds only the
     //     particles in its owned leaves.
     //   - num_local_particles() returns the new local particle count.
-    //
     // -----------------------------------------------------------------------
     template <class AoSoAType>
-    void
-    partition( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-               AoSoAType& particles, int num_local_particles_before )
-    {
-        const auto& cells = tree_builder.cells();
-
-        // Step 1: Partition leaf cells via Zoltan2
-        auto leaf_owners = partition_leaves( cells );
-
-        // Step 2: Derive internal cell ownership
-        derive_internal_ownership( cells, leaf_owners );
-
-        // Step 3: Migrate particles
-        migrate_particles( tree_builder, particles,
-                        num_local_particles_before );
-    }
+    void partition( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+                    AoSoAType& particles, int num_local_particles_before );
 
     // -----------------------------------------------------------------------
     // redistribute()
@@ -524,23 +250,7 @@ class TreePartitioner
     RedistributeResult redistribute(
         const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
         AoSoAType& particles,
-        int num_local_particles_before )
-    {
-        RedistributeResult result;
-
-        int num_before = num_local_particles_before;
-        result.particles_sent = migrate_particles(
-            tree_builder, particles, num_local_particles_before );
-
-        result.num_local_after = _num_local_after;
-
-        // particles_received = new count - (old count - sent)
-        // i.e., the particles we have now minus the ones we kept
-        result.particles_received =
-            _num_local_after - ( num_before - result.particles_sent );
-
-        return result;
-    }
+        int num_local_particles_before );
 
     // --------------------------------------------------------------------------
     // repartition() — full re-partitioning after tree topology change
@@ -559,21 +269,341 @@ class TreePartitioner
     void repartition(
         const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
         AoSoAType& particles,
-        int num_local_particles_before )
-    {
-        const auto& cells = tree_builder.cells();
-
-        // Step 1: Re-partition leaf cells via Zoltan2
-        auto leaf_owners = partition_leaves( cells );
-
-        // Step 2: Re-derive internal cell ownership
-        derive_internal_ownership( cells, leaf_owners );
-
-        // Step 3: Migrate particles to new owners
-        migrate_particles( tree_builder, particles,
-                        num_local_particles_before );
-    }
+        int num_local_particles_before );
 };
+
+// ============================================================================
+// Implementation
+// ============================================================================
+
+template <class MemorySpace, class ExecutionSpace>
+std::unordered_map<MortonKey, int>
+TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
+    const std::vector<CellInfo>& cells )
+{
+    // Collect leaf cells
+    std::vector<MortonKey> leaf_keys;
+    std::vector<double> leaf_x, leaf_y, leaf_z;
+    std::vector<double> leaf_weights;
+
+    for ( const auto& c : cells )
+    {
+        if ( c.is_leaf )
+        {
+            leaf_keys.push_back( c.key );
+            leaf_x.push_back( c.center[0] );
+            leaf_y.push_back( c.center[1] );
+            leaf_z.push_back( c.center[2] );
+            // User particle count for zoltan weights
+            leaf_weights.push_back( static_cast<double>( c.global_count ) );
+        }
+    }
+
+    int num_leaves = static_cast<int>( leaf_keys.size() );
+
+    // If only one rank, all leaves are owned by rank 0
+    // and can skip partitioning.
+    if ( _comm_size == 1 )
+    {
+        std::unordered_map<MortonKey, int> result;
+        for ( int i = 0; i < num_leaves; i++ )
+            result[leaf_keys[i]] = 0;
+        return result;
+    }
+
+    // ---------------------------------------------------------------
+    // Build Zoltan2 adapter
+    //
+    // Every rank has the identical set of leaves (the tree structure is
+    // replciated globally), so run Zoltan2 with the full leaf set on every
+    // rank. Zoltan2 RCB is deterministic given the same input, so all ranks
+    // will produce the same assignment.
+    //
+    // Use global IDs = leaf index (0..num_leaves-1), which are the
+    // same on every rank since _cells from TreeBuilder is identical on all
+    // ranks.
+    // ---------------------------------------------------------------
+
+    // Create Zoltan2 adapter
+    // BasicVectorAdapter needs:
+    //   numIds, globalIds, coords, weights
+    using adapter_t =
+        Zoltan2::BasicVectorAdapter<Tpetra::Map<int, int64_t>>;
+    // Must also use Zoltan types
+    using glbl_id_t = typename adapter_t::gno_t;
+    using scalar_t = typename adapter_t::scalar_t;
+    using longint_t = typename adapter_t::lno_t;
+
+    // Zoltan2 needs coordinates as an array of pointers, one per dim
+    const scalar_t* coords[3] = { leaf_x.data(), leaf_y.data(),
+                                  leaf_z.data() };
+    // const int strides[3] = { 1, 1, 1 };
+
+    // Global IDs for the leaves
+    std::vector<glbl_id_t> global_ids( num_leaves );
+    for ( int i = 0; i < num_leaves; i++ )
+        global_ids[i] = static_cast<glbl_id_t>( i );
+
+    // Build a Teuchos communicator for Zoltan2
+    // Note: Use MPI_COMM_SELF because every rank is running the same
+    // deterministic partitioning on the same data. This avoids Zoltan2
+    // trying to do distributed partitioning (which would fail since
+    // each rank claims to have ALL leaves).
+    auto teuchos_comm =
+        Teuchos::rcp( new Teuchos::MpiComm<int>( MPI_COMM_SELF ) );
+
+    const glbl_id_t* ids_ptr = global_ids.data();
+    const scalar_t* x_ptr = leaf_x.data();
+    const scalar_t* y_ptr = leaf_y.data();
+    const scalar_t* z_ptr = leaf_z.data();
+    const scalar_t* w_ptr = leaf_weights.data();
+
+    adapter_t adapter( static_cast<longint_t>( num_leaves ), ids_ptr, x_ptr,
+                       y_ptr, z_ptr, 1, 1, 1, // strides for x, y, z
+                       true,                  // use weights
+                       w_ptr,
+                       1 ); // weight stride
+
+    // Configure Zoltan2
+    Teuchos::ParameterList params;
+    params.set( "algorithm", "rcb" );
+    params.set( "num_global_parts", _comm_size );
+    params.set( "imbalance_tolerance", _imbalance_tolerance );
+
+    // Solve
+    Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
+                                                     teuchos_comm );
+    problem.solve();
+
+    // Extract assignments
+    const auto& solution = problem.getSolution();
+    // Array of which rank should get which particle.
+    const int* parts = solution.getPartListView();
+
+    std::unordered_map<MortonKey, int> result;
+    result.reserve( num_leaves );
+    for ( int i = 0; i < num_leaves; i++ )
+        result[leaf_keys[i]] = parts[i];
+
+    return result;
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void TreePartitioner<MemorySpace, ExecutionSpace>::derive_internal_ownership(
+    const std::vector<CellInfo>& cells,
+    const std::unordered_map<MortonKey, int>& leaf_owners )
+{
+    // Build a key -> CellInfo lookup
+    std::unordered_map<MortonKey, const CellInfo*> cell_map;
+    for ( const auto& c : cells )
+        cell_map[c.key] = &c;
+
+    // Phase 1: accumulate votes
+    // For each internal cell, track how many descendant particles each
+    // rank contributes.
+    // vote_map[internal_key][rank] = total descendant particle count
+    // from leaves owned by that rank
+    std::unordered_map<MortonKey, std::unordered_map<int, int64_t>>
+        vote_map;
+
+    for ( const auto& c : cells )
+    {
+        // Must start at leaf cells
+        if ( !c.is_leaf )
+            continue;
+
+        auto owner_it = leaf_owners.find( c.key );
+        if ( owner_it == leaf_owners.end() )
+            continue;
+
+        int leaf_rank = owner_it->second;
+        // Get particle count in this leaf cell
+        int64_t count = static_cast<int64_t>( c.global_count );
+
+        // Walk up from this leaf to the root, adding votes
+        MortonKey parent = parent_key( c.key );
+        while ( parent >= ROOT_KEY )
+        {
+            // Count how many particle each rank owns in parent cells
+            vote_map[parent][leaf_rank] += count;
+
+            if ( parent == ROOT_KEY )
+                break;
+            parent = parent_key( parent );
+        }
+    }
+
+    // Phase 2: assign ownership
+    _ownership.clear();
+    _ownership.reserve( cells.size() );
+    _cell_owner_map.clear();
+    _cell_owner_map.reserve( cells.size() );
+
+    for ( const auto& c : cells )
+    {
+        CellOwnership co;
+        co.key = c.key;
+
+        if ( c.is_leaf )
+        {
+            // Leaf ownership was determined by Zoltan2
+            auto it = leaf_owners.find( c.key );
+            co.owner_rank = ( it != leaf_owners.end() )
+                                ? it->second
+                                : 0; // shouldn't happen
+        }
+        else if ( c.depth <= _replication_depth )
+        {
+            // Coarse layer — replicated on all ranks
+            co.owner_rank = OWNER_SHARED;
+        }
+        else
+        {
+            // Deep internal cell — pick the rank with the most
+            // descendant particles
+            auto vote_it = vote_map.find( c.key );
+            if ( vote_it != vote_map.end() )
+            {
+                int best_rank = 0;
+                int64_t best_count = -1;
+                for ( const auto& [r, cnt] : vote_it->second )
+                {
+                    if ( cnt > best_count )
+                    {
+                        best_count = cnt;
+                        best_rank = r;
+                    }
+                }
+                co.owner_rank = best_rank;
+            }
+            else
+            {
+                // No votes — empty internal cell, assign to rank 0
+                co.owner_rank = 0;
+            }
+        }
+
+        _ownership.push_back( co );
+        _cell_owner_map[co.key] = co.owner_rank;
+    }
+}
+
+template <class MemorySpace, class ExecutionSpace>
+template <class AoSoAType>
+int TreePartitioner<MemorySpace, ExecutionSpace>::migrate_particles(
+    const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+    AoSoAType& particles,
+    int num_local_particles_before )
+{
+    // Copy particle keys to host to build the destination array
+    auto particle_keys = tree_builder.particle_keys();
+    auto h_keys = Kokkos::create_mirror_view_and_copy(
+        Kokkos::HostSpace{}, particle_keys );
+
+    // Build destination ranks on host
+    Kokkos::View<int*, memory_space> dest_ranks(
+        "dest_ranks", num_local_particles_before );
+    auto h_dest = Kokkos::create_mirror_view( dest_ranks );
+
+    int num_sent = 0;
+
+    for ( int i = 0; i < num_local_particles_before; i++ )
+    {
+        MortonKey key = h_keys( i );
+        auto it = _cell_owner_map.find( key );
+        if ( it != _cell_owner_map.end() )
+        {
+            int owner = it->second;
+            // If the leaf is OWNER_SHARED (-1, shouldn't happen for leaves,
+            // but guard against it), keep particle on current rank
+            if ( owner >= 0 )
+            {
+                h_dest( i ) = owner;
+                if ( owner != _rank )
+                    num_sent++;
+            }
+            else
+            {
+                h_dest( i ) = _rank;
+            }
+        }
+        else
+        {
+            // Key not found — keep on current rank (safety fallback)
+            h_dest( i ) = _rank;
+        }
+    }
+
+    Kokkos::deep_copy( dest_ranks, h_dest );
+
+    // Use Cabana::Distributor to migrate particles
+    Cabana::Distributor<memory_space> distributor( _comm, dest_ranks );
+    Cabana::migrate( distributor, particles );
+
+    _num_local_after = static_cast<int>( particles.size() );
+
+    return num_sent;
+}
+
+template <class MemorySpace, class ExecutionSpace>
+template <class AoSoAType>
+void TreePartitioner<MemorySpace, ExecutionSpace>::partition(
+    const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+    AoSoAType& particles, int num_local_particles_before )
+{
+    const auto& cells = tree_builder.cells();
+
+    // Step 1: Partition leaf cells via Zoltan2
+    auto leaf_owners = partition_leaves( cells );
+
+    // Step 2: Derive internal cell ownership
+    derive_internal_ownership( cells, leaf_owners );
+
+    // Step 3: Migrate particles
+    migrate_particles( tree_builder, particles, num_local_particles_before );
+}
+
+template <class MemorySpace, class ExecutionSpace>
+template <class AoSoAType>
+RedistributeResult TreePartitioner<MemorySpace, ExecutionSpace>::redistribute(
+    const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+    AoSoAType& particles,
+    int num_local_particles_before )
+{
+    RedistributeResult result;
+
+    int num_before = num_local_particles_before;
+    result.particles_sent = migrate_particles(
+        tree_builder, particles, num_local_particles_before );
+
+    result.num_local_after = _num_local_after;
+
+    // particles_received = new count - (old count - sent)
+    // i.e., the particles we have now minus the ones we kept
+    result.particles_received =
+        _num_local_after - ( num_before - result.particles_sent );
+
+    return result;
+}
+
+template <class MemorySpace, class ExecutionSpace>
+template <class AoSoAType>
+void TreePartitioner<MemorySpace, ExecutionSpace>::repartition(
+    const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+    AoSoAType& particles,
+    int num_local_particles_before )
+{
+    const auto& cells = tree_builder.cells();
+
+    // Step 1: Re-partition leaf cells via Zoltan2
+    auto leaf_owners = partition_leaves( cells );
+
+    // Step 2: Re-derive internal cell ownership
+    derive_internal_ownership( cells, leaf_owners );
+
+    // Step 3: Migrate particles to new owners
+    migrate_particles( tree_builder, particles, num_local_particles_before );
+}
 
 } // end namespace Experimental
 
