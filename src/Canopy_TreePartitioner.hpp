@@ -358,7 +358,13 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     params.set( "algorithm", "rcb" );
     params.set( "num_global_parts", _comm_size );
     params.set( "imbalance_tolerance", _imbalance_tolerance );
-    params.set( "debug_level", "no_status" );
+    params.set("debug_level", "no_status");
+
+    // Need these lines to disable Zoltan-level
+    // status printouts
+    Teuchos::ParameterList zoltanParams;
+    zoltanParams.set("DEBUG_LEVEL", "0");
+    params.set("zoltan_parameters", zoltanParams);
 
     // Solve
     Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
