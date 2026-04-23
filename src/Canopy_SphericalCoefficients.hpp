@@ -24,8 +24,9 @@ namespace Canopy
 // SphericalCoefficients — storage and indexing helpers for FMM expansion
 // coefficients M_{n,m} and L_{n,m}.
 //
-// For real-sourced kernels (Laplace, gravity), the coefficients satisfy
-//   M_{n,-m} = (-1)^m * conj(M_{n,m})
+// For real-sourced kernels (Laplace, gravity) in this code's Ynm
+// convention (Y_{n,-m} = conj(Y_{n,m})), the coefficients satisfy
+//   M_{n,-m} = conj(M_{n,m})
 // so we only store m >= 0, reducing storage and work by roughly 2x.
 //
 // Storage layout (triangular, per cell):
@@ -89,8 +90,7 @@ Kokkos::complex<Scalar> get_coeff( const View& coeffs, int cell_idx,
     if ( m >= 0 )
         return val;
 
-    // m < 0: M_{n,-|m|} = conj(M_{n,|m|}) in Greengard convention
-    // where Y_n^{-m} = conj(Y_n^m), so M_n^{-m} = conj(M_n^m)
+    // m < 0: apply symmetry  M_{n,-|m|} = conj(M_{n,|m|})
     return complex( val.real(), -val.imag() );
 }
 

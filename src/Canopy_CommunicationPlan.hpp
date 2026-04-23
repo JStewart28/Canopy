@@ -118,6 +118,12 @@ struct P2PPlan
 
     // Which rank owns each ghost leaf
     std::vector<int> ghost_leaf_owners;
+
+    // Locally-owned leaves that this rank must send to other ranks, because
+    // a remote rank has this leaf in its P2P neighbor list.
+    // cell_key is the local leaf; remote_rank is the destination rank.
+    // A single leaf may appear multiple times (once per destination rank).
+    std::vector<CellTransfer> send_leaves;
 };
 
 // ============================================================================
@@ -832,9 +838,13 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_plan(
     _p2p_plan.neighbor_lists.clear();
     _p2p_plan.ghost_leaf_keys.clear();
     _p2p_plan.ghost_leaf_owners.clear();
+    _p2p_plan.send_leaves.clear();
 
     std::set<MortonKey> ghost_set;
 
+    // Build the incoming side: for each leaf we own, compute its
+    // neighbor list. Any neighbor whose owner is a remote rank is a
+    // ghost we need to receive.
     for ( const auto& ci : cells )
     {
         if ( !ci.is_leaf )
@@ -842,7 +852,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_plan(
 
         int leaf_owner = owner_of( ci.key );
         if ( leaf_owner != _rank )
-            continue; // only build for leaves we own
+            continue;
 
         auto neighbors = build_p2p_neighbor_list( ci.key, ci );
         _p2p_plan.neighbor_lists[ci.key] = neighbors;
@@ -850,7 +860,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_plan(
         for ( MortonKey nk : neighbors )
         {
             if ( nk == ci.key )
-                continue; // skip self
+                continue;
 
             int nk_owner = owner_of( nk );
             if ( nk_owner != _rank && nk_owner != OWNER_SHARED )
@@ -860,12 +870,56 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_plan(
         }
     }
 
-    // Convert ghost set to vectors
     for ( MortonKey gk : ghost_set )
     {
         _p2p_plan.ghost_leaf_keys.push_back( gk );
         _p2p_plan.ghost_leaf_owners.push_back( owner_of( gk ) );
     }
+
+    // --------------------------------------------------------------------
+    // Build the outgoing side: for each leaf I own, for each of its
+    // neighbors, if that neighbor's owner is a different rank, then that
+    // rank has ME in its ghost list and needs to receive this leaf.
+    //
+    // Adjacency is symmetric: if N is a P2P neighbor of L, then L is a
+    // P2P neighbor of N. Since the tree is replicated, we can compute
+    // sends locally with no MPI.
+    //
+    // Duplicates: if the same remote rank owns multiple of a leaf's
+    // neighbors, we'd add the send multiple times. Deduplicate via a
+    // set of (leaf_key, remote_rank) pairs.
+    // --------------------------------------------------------------------
+    std::set<std::pair<MortonKey, int>> send_set;
+
+    for ( const auto& ci : cells )
+    {
+        if ( !ci.is_leaf )
+            continue;
+
+        int leaf_owner = owner_of( ci.key );
+        if ( leaf_owner != _rank )
+            continue;
+
+        // We already built the neighbor list for this leaf above;
+        // look it up.
+        auto nit = _p2p_plan.neighbor_lists.find( ci.key );
+        if ( nit == _p2p_plan.neighbor_lists.end() )
+            continue;
+
+        for ( MortonKey nk : nit->second )
+        {
+            if ( nk == ci.key )
+                continue;
+            int nk_owner = owner_of( nk );
+            if ( nk_owner == _rank || nk_owner == OWNER_SHARED )
+                continue;
+            // nk_owner is a remote rank that needs my leaf ci.key
+            send_set.insert( { ci.key, nk_owner } );
+        }
+    }
+
+    for ( const auto& [k, r] : send_set )
+        _p2p_plan.send_leaves.push_back( { k, r } );
 }
 
 // --------------------------------------------------------------------------

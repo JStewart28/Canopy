@@ -31,10 +31,12 @@ namespace LaplaceTest
 {
 
 static constexpr int P_ORDER = 6;
-using Kernel    = LaplaceKernel<double, P_ORDER>;
-using complex   = Kokkos::complex<double>;
-using CoeffView = Kokkos::View<complex*, TEST_MEMSPACE>;
-using CoeffView2D = Kokkos::View<complex**, TEST_MEMSPACE>;
+using Kernel      = LaplaceKernel<double, P_ORDER>;
+using complex     = Kokkos::complex<double>;
+using CoeffView2D = Kokkos::View<complex**,  TEST_MEMSPACE>;
+using CoeffView3D = Kokkos::View<complex***, TEST_MEMSPACE>;
+using ScalarView1D = Kokkos::View<double*,   TEST_MEMSPACE>;
+using ScalarView2D = Kokkos::View<double**,  TEST_MEMSPACE>;
 
 } // namespace LaplaceTest
 
@@ -143,14 +145,16 @@ void testP2MSingleParticleOnAxis()
     const double q  = 2.5;
     const double dz = 0.7;
 
-    CoeffView M_dev( "M", Kernel::num_coeffs_per_cell );
+    CoeffView3D M_dev( "M", 1, Kernel::num_coeffs_per_cell, 1 );
     Kokkos::deep_copy( M_dev, complex( 0.0, 0.0 ) );
 
     Kokkos::parallel_for(
         "P2M_axis",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, 1 ),
         KOKKOS_LAMBDA( int ) {
-            Kernel::p2m_contribution( q, 0.0, 0.0, dz, M_dev );
+            double charges[1] = { q };
+            auto M_out = Kokkos::subview( M_dev, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::p2m_contribution( charges, 0.0, 0.0, dz, M_out );
         } );
     Kokkos::fence();
 
@@ -159,16 +163,16 @@ void testP2MSingleParticleOnAxis()
     double rho_n = 1.0;
     for ( int n = 0; n <= P_ORDER; n++ )
     {
-        EXPECT_NEAR( h_M( coeff_index( n, 0 ) ).real(), q * rho_n, 1e-12 )
+        EXPECT_NEAR( h_M( 0, coeff_index( n, 0 ), 0 ).real(), q * rho_n, 1e-12 )
             << "M_{" << n << ",0} real, n=" << n;
-        EXPECT_NEAR( h_M( coeff_index( n, 0 ) ).imag(), 0.0, 1e-12 )
+        EXPECT_NEAR( h_M( 0, coeff_index( n, 0 ), 0 ).imag(), 0.0, 1e-12 )
             << "M_{" << n << ",0} imag, n=" << n;
 
         for ( int m = 1; m <= n; m++ )
         {
-            EXPECT_NEAR( h_M( coeff_index( n, m ) ).real(), 0.0, 1e-12 )
+            EXPECT_NEAR( h_M( 0, coeff_index( n, m ), 0 ).real(), 0.0, 1e-12 )
                 << "M_{" << n << "," << m << "} real";
-            EXPECT_NEAR( h_M( coeff_index( n, m ) ).imag(), 0.0, 1e-12 )
+            EXPECT_NEAR( h_M( 0, coeff_index( n, m ), 0 ).imag(), 0.0, 1e-12 )
                 << "M_{" << n << "," << m << "} imag";
         }
 
@@ -185,8 +189,7 @@ TEST( LaplaceKernel, testP2MSingleParticleOnAxis )
  * P2M reference comparison for a random particle cloud.
  *
  * Compute P2M with the device kernel (atomics over RangePolicy) and compare
- * to a CPU reference that applies the same formula serially. This checks
- * the indexing, normalization, and atomic accumulation without any tree.
+ * to a CPU reference that applies the same formula serially.
  */
 void testP2MRefComparison()
 {
@@ -210,7 +213,6 @@ void testP2MRefComparison()
         q[i]  = q_dist( gen );
     }
 
-    // Upload to device
     Kokkos::View<double*, TEST_MEMSPACE> d_px( "px", N_PARTICLES );
     Kokkos::View<double*, TEST_MEMSPACE> d_py( "py", N_PARTICLES );
     Kokkos::View<double*, TEST_MEMSPACE> d_pz( "pz", N_PARTICLES );
@@ -229,15 +231,17 @@ void testP2MRefComparison()
         Kokkos::deep_copy( d_pz, h_pz ); Kokkos::deep_copy( d_q,  h_q  );
     }
 
-    CoeffView M_dev( "M", Kernel::num_coeffs_per_cell );
+    CoeffView3D M_dev( "M", 1, Kernel::num_coeffs_per_cell, 1 );
     Kokkos::deep_copy( M_dev, complex( 0.0, 0.0 ) );
 
     Kokkos::parallel_for(
         "P2M_cloud",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, N_PARTICLES ),
         KOKKOS_LAMBDA( int p ) {
-            Kernel::p2m_contribution( d_q( p ), d_px( p ), d_py( p ),
-                                      d_pz( p ), M_dev );
+            double charges[1] = { d_q( p ) };
+            auto M_out = Kokkos::subview( M_dev, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::p2m_contribution( charges, d_px( p ), d_py( p ),
+                                      d_pz( p ), M_out );
         } );
     Kokkos::fence();
 
@@ -266,7 +270,7 @@ void testP2MRefComparison()
     double max_rel_err = 0.0;
     for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
     {
-        const complex diff    = h_M( idx ) - M_ref[idx];
+        const complex diff    = h_M( 0, idx, 0 ) - M_ref[idx];
         const double abs_err  = std::sqrt( diff.real()*diff.real() +
                                            diff.imag()*diff.imag() );
         const double ref_mag  = std::sqrt( M_ref[idx].real()*M_ref[idx].real() +
@@ -291,14 +295,12 @@ TEST( LaplaceKernel, testP2MRefComparison )
  *
  * Per the Greengard M2M theorem, translating a multipole computed at a child
  * center to a parent center gives the same coefficients as a direct P2M at
- * the parent center. This must hold exactly for any P, any translation
- * vector, and any particle positions inside the child cell.
+ * the parent center.
  */
 void testM2MTranslationVsDirectP2M()
 {
     using namespace LaplaceTest;
 
-    // Child center offset from parent center
     const double tx = 0.25, ty = 0.15, tz = -0.10;
     const double child_hw = 0.25;
     const int N_PARTICLES = 50;
@@ -307,7 +309,6 @@ void testM2MTranslationVsDirectP2M()
     std::uniform_real_distribution<double> pos_dist( -child_hw, child_hw );
     std::uniform_real_distribution<double> q_dist( -1.0, 1.0 );
 
-    // Particle positions relative to child center
     std::vector<double> lx( N_PARTICLES ), ly( N_PARTICLES ),
                         lz( N_PARTICLES ), q( N_PARTICLES );
     for ( int i = 0; i < N_PARTICLES; i++ )
@@ -316,7 +317,7 @@ void testM2MTranslationVsDirectP2M()
         lz[i] = pos_dist( gen ); q[i]  = q_dist( gen );
     }
 
-    // CPU reference: direct P2M to parent center (offset = child_c + local)
+    // CPU reference: direct P2M to parent center
     std::vector<complex> M_direct( Kernel::num_coeffs_per_cell,
                                     complex( 0.0, 0.0 ) );
     for ( int p = 0; p < N_PARTICLES; p++ )
@@ -340,7 +341,6 @@ void testM2MTranslationVsDirectP2M()
         }
     }
 
-    // Device path: P2M to child, then M2M translate to parent
     Kokkos::View<double*, TEST_MEMSPACE> d_lx( "lx", N_PARTICLES );
     Kokkos::View<double*, TEST_MEMSPACE> d_ly( "ly", N_PARTICLES );
     Kokkos::View<double*, TEST_MEMSPACE> d_lz( "lz", N_PARTICLES );
@@ -359,41 +359,45 @@ void testM2MTranslationVsDirectP2M()
         Kokkos::deep_copy( d_lz, h_lz ); Kokkos::deep_copy( d_q,  h_q  );
     }
 
-    // Step 1: P2M into child (stored as 2D view, 1 cell)
-    CoeffView2D M_child_2d( "M_child", 1, Kernel::num_coeffs_per_cell );
-    Kokkos::deep_copy( M_child_2d, complex( 0.0, 0.0 ) );
+    // P2M into child (3D view: 1 cell x num_coeffs x 1 comp)
+    CoeffView3D M_child( "M_child", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( M_child, complex( 0.0, 0.0 ) );
 
     Kokkos::parallel_for(
         "P2M_child",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, N_PARTICLES ),
         KOKKOS_LAMBDA( int p ) {
-            auto M_out = Kokkos::subview( M_child_2d, 0, Kokkos::ALL );
-            Kernel::p2m_contribution( d_q(p), d_lx(p), d_ly(p), d_lz(p),
+            double charges[1] = { d_q( p ) };
+            auto M_out = Kokkos::subview( M_child, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::p2m_contribution( charges, d_lx(p), d_ly(p), d_lz(p),
                                       M_out );
         } );
     Kokkos::fence();
 
-    // Step 2: M2M translate into parent (1D output)
-    CoeffView M_parent_dev( "M_parent", Kernel::num_coeffs_per_cell );
-    Kokkos::deep_copy( M_parent_dev, complex( 0.0, 0.0 ) );
+    // A-coefficient table
+    auto A = build_A_coefficients<double, TEST_MEMSPACE>( P_ORDER );
+
+    // M2M translate child (cell 0) into parent (2D output: num_coeffs x 1)
+    CoeffView2D M_parent( "M_parent", Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( M_parent, complex( 0.0, 0.0 ) );
 
     using team_policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
     Kokkos::parallel_for(
         "M2M_translate",
         team_policy( 1, Kokkos::AUTO ),
         KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
-            Kernel::m2m_translate( team, M_child_2d, tx, ty, tz,
-                                   M_parent_dev );
+            Kernel::m2m_translate( team, M_child, 0, tx, ty, tz,
+                                   A, M_parent );
         } );
     Kokkos::fence();
 
     auto h_M_parent = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), M_parent_dev );
+        Kokkos::HostSpace(), M_parent );
 
     double max_rel_err = 0.0;
     for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
     {
-        const complex diff   = h_M_parent( idx ) - M_direct[idx];
+        const complex diff   = h_M_parent( idx, 0 ) - M_direct[idx];
         const double abs_err = std::sqrt( diff.real()*diff.real() +
                                           diff.imag()*diff.imag() );
         const double ref_mag = std::sqrt( M_direct[idx].real()*M_direct[idx].real() +
@@ -447,6 +451,363 @@ TEST( LaplaceKernel, testGetCoeffSymmetry )
                 << "symmetry imag  n=" << n << " m=" << m;
         }
     }
+}
+
+//---------------------------------------------------------------------------//
+/**
+ * M2L correctness: P2M at source + M2L + L2P matches direct 1/r sum.
+ *
+ * Source particles are randomly distributed within a box at the origin.
+ * The target cell is 5 units away along x. The observation point is
+ * slightly off-center inside the target cell. At P=6 with a 5:0.4 separation
+ * ratio the FMM truncation error is O((0.4/5)^7) ~ 2e-8.
+ */
+void testM2LThenL2P()
+{
+    using namespace LaplaceTest;
+
+    const int    N_PARTICLES = 50;
+    const double src_hw      = 0.4;
+    const double sep         = 5.0;   // target cell center along x
+
+    std::mt19937 gen( 2345 );
+    std::uniform_real_distribution<double> pos_dist( -src_hw, src_hw );
+    std::uniform_real_distribution<double> q_dist( -1.0, 1.0 );
+
+    std::vector<double> sx( N_PARTICLES ), sy( N_PARTICLES ),
+                        sz( N_PARTICLES ), sq( N_PARTICLES );
+    for ( int i = 0; i < N_PARTICLES; i++ )
+    {
+        sx[i] = pos_dist( gen ); sy[i] = pos_dist( gen );
+        sz[i] = pos_dist( gen ); sq[i] = q_dist( gen );
+    }
+
+    // Observation point relative to target cell center
+    const double test_dx = 0.12, test_dy = -0.08, test_dz = 0.05;
+
+    // Direct potential
+    double phi_direct = 0.0;
+    for ( int i = 0; i < N_PARTICLES; i++ )
+    {
+        double rx = ( sep + test_dx ) - sx[i];
+        double ry = test_dy - sy[i];
+        double rz = test_dz - sz[i];
+        phi_direct += sq[i] / std::sqrt( rx*rx + ry*ry + rz*rz );
+    }
+
+    // Upload source particles
+    Kokkos::View<double*, TEST_MEMSPACE> d_sx( "sx", N_PARTICLES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sy( "sy", N_PARTICLES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sz( "sz", N_PARTICLES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sq( "sq", N_PARTICLES );
+    {
+        auto h_sx = Kokkos::create_mirror_view( d_sx );
+        auto h_sy = Kokkos::create_mirror_view( d_sy );
+        auto h_sz = Kokkos::create_mirror_view( d_sz );
+        auto h_sq = Kokkos::create_mirror_view( d_sq );
+        for ( int i = 0; i < N_PARTICLES; i++ )
+        {
+            h_sx(i) = sx[i]; h_sy(i) = sy[i];
+            h_sz(i) = sz[i]; h_sq(i) = sq[i];
+        }
+        Kokkos::deep_copy( d_sx, h_sx ); Kokkos::deep_copy( d_sy, h_sy );
+        Kokkos::deep_copy( d_sz, h_sz ); Kokkos::deep_copy( d_sq, h_sq );
+    }
+
+    // P2M at source cell (cell 0)
+    CoeffView3D M( "M", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( M, complex( 0.0, 0.0 ) );
+    Kokkos::parallel_for(
+        "P2M",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, N_PARTICLES ),
+        KOKKOS_LAMBDA( int p ) {
+            double charges[1] = { d_sq( p ) };
+            auto M_out = Kokkos::subview( M, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::p2m_contribution( charges, d_sx(p), d_sy(p), d_sz(p),
+                                      M_out );
+        } );
+    Kokkos::fence();
+
+    // A table must cover orders up to 2*P for M2L (accesses A_{n+j, m-k})
+    auto A = build_A_coefficients<double, TEST_MEMSPACE>( 2 * P_ORDER );
+
+    // M2L: translation vector = source_center - target_center = (0,0,0)-(sep,0,0)
+    CoeffView3D L( "L", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( L, complex( 0.0, 0.0 ) );
+
+    using team_policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
+    Kokkos::parallel_for(
+        "M2L",
+        team_policy( 1, Kokkos::AUTO ),
+        KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
+            auto L_out = Kokkos::subview( L, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, A, L_out );
+        } );
+    Kokkos::fence();
+
+    // L2P: evaluate at observation point (no gradient needed)
+    ScalarView1D phi_dev( "phi", 1 );
+    ScalarView2D grad_dev( "grad", 1, 3 );  // (comp, dim); unused here
+    Kokkos::parallel_for(
+        "L2P",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, 1 ),
+        KOKKOS_LAMBDA( int ) {
+            double phi_out[1];
+            Kernel::l2p_evaluate( L, 0, test_dx, test_dy, test_dz,
+                                  phi_out, grad_dev, false );
+            phi_dev(0) = phi_out[0];
+        } );
+    Kokkos::fence();
+
+    auto h_phi = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                       phi_dev );
+
+    const double abs_err = std::abs( h_phi(0) - phi_direct );
+    const double ref_mag = std::abs( phi_direct );
+    const double rel_err = ( ref_mag > 1e-14 ) ? abs_err / ref_mag : abs_err;
+
+    EXPECT_LT( rel_err, 1e-6 )
+        << "M2L+L2P deviates from direct sum; "
+           "relative error = " << rel_err
+        << "  phi_fmm=" << h_phi(0) << "  phi_direct=" << phi_direct;
+}
+TEST( LaplaceKernel, testM2LThenL2P )
+{
+    testM2LThenL2P();
+}
+
+//---------------------------------------------------------------------------//
+/**
+ * L2L translation correctness: P2M + M2L to parent + L2L to child + L2P
+ * matches the direct 1/r sum at the same observation point.
+ *
+ * Source at origin, parent target at (5,0,0), child center at (5.25,0,0).
+ * L2L is exact for finite expansions; any error is purely from P truncation.
+ */
+void testL2LTranslation()
+{
+    using namespace LaplaceTest;
+
+    const int    N_PARTICLES   = 50;
+    const double src_hw        = 0.4;
+    const double sep           = 5.0;    // parent cell center along x
+    const double child_off_x   = 0.25;  // child center relative to parent
+
+    std::mt19937 gen( 3456 );
+    std::uniform_real_distribution<double> pos_dist( -src_hw, src_hw );
+    std::uniform_real_distribution<double> q_dist( -1.0, 1.0 );
+
+    std::vector<double> sx( N_PARTICLES ), sy( N_PARTICLES ),
+                        sz( N_PARTICLES ), sq( N_PARTICLES );
+    for ( int i = 0; i < N_PARTICLES; i++ )
+    {
+        sx[i] = pos_dist( gen ); sy[i] = pos_dist( gen );
+        sz[i] = pos_dist( gen ); sq[i] = q_dist( gen );
+    }
+
+    // Observation point relative to child cell center
+    const double test_dx = 0.05, test_dy = 0.03, test_dz = -0.04;
+
+    // Direct potential at global position (sep + child_off_x + test_dx, ...)
+    double phi_direct = 0.0;
+    for ( int i = 0; i < N_PARTICLES; i++ )
+    {
+        double rx = ( sep + child_off_x + test_dx ) - sx[i];
+        double ry = test_dy - sy[i];
+        double rz = test_dz - sz[i];
+        phi_direct += sq[i] / std::sqrt( rx*rx + ry*ry + rz*rz );
+    }
+
+    // Upload source particles
+    Kokkos::View<double*, TEST_MEMSPACE> d_sx( "sx", N_PARTICLES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sy( "sy", N_PARTICLES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sz( "sz", N_PARTICLES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sq( "sq", N_PARTICLES );
+    {
+        auto h_sx = Kokkos::create_mirror_view( d_sx );
+        auto h_sy = Kokkos::create_mirror_view( d_sy );
+        auto h_sz = Kokkos::create_mirror_view( d_sz );
+        auto h_sq = Kokkos::create_mirror_view( d_sq );
+        for ( int i = 0; i < N_PARTICLES; i++ )
+        {
+            h_sx(i) = sx[i]; h_sy(i) = sy[i];
+            h_sz(i) = sz[i]; h_sq(i) = sq[i];
+        }
+        Kokkos::deep_copy( d_sx, h_sx ); Kokkos::deep_copy( d_sy, h_sy );
+        Kokkos::deep_copy( d_sz, h_sz ); Kokkos::deep_copy( d_sq, h_sq );
+    }
+
+    // P2M at source cell
+    CoeffView3D M( "M", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( M, complex( 0.0, 0.0 ) );
+    Kokkos::parallel_for(
+        "P2M",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, N_PARTICLES ),
+        KOKKOS_LAMBDA( int p ) {
+            double charges[1] = { d_sq( p ) };
+            auto M_out = Kokkos::subview( M, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::p2m_contribution( charges, d_sx(p), d_sy(p), d_sz(p),
+                                      M_out );
+        } );
+    Kokkos::fence();
+
+    auto A = build_A_coefficients<double, TEST_MEMSPACE>( 2 * P_ORDER );
+
+    // M2L into parent local (cell 0)
+    CoeffView3D L_parent( "L_parent", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( L_parent, complex( 0.0, 0.0 ) );
+
+    using team_policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
+    Kokkos::parallel_for(
+        "M2L",
+        team_policy( 1, Kokkos::AUTO ),
+        KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
+            auto L_out = Kokkos::subview( L_parent, 0, Kokkos::ALL,
+                                          Kokkos::ALL );
+            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, A, L_out );
+        } );
+    Kokkos::fence();
+
+    // L2L: translate parent local (at sep,0,0) to child local (at sep+child_off_x,0,0)
+    // translation = child_center - parent_center = (child_off_x, 0, 0)
+    CoeffView3D L_child( "L_child", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( L_child, complex( 0.0, 0.0 ) );
+
+    Kokkos::parallel_for(
+        "L2L",
+        team_policy( 1, Kokkos::AUTO ),
+        KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
+            auto L_out = Kokkos::subview( L_child, 0, Kokkos::ALL,
+                                          Kokkos::ALL );
+            Kernel::l2l_translate( team, L_parent, 0,
+                                   child_off_x, 0.0, 0.0, A, L_out );
+        } );
+    Kokkos::fence();
+
+    // L2P at child observation point
+    ScalarView1D phi_dev( "phi", 1 );
+    ScalarView2D grad_dev( "grad", 1, 3 );
+    Kokkos::parallel_for(
+        "L2P",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, 1 ),
+        KOKKOS_LAMBDA( int ) {
+            double phi_out[1];
+            Kernel::l2p_evaluate( L_child, 0, test_dx, test_dy, test_dz,
+                                  phi_out, grad_dev, false );
+            phi_dev(0) = phi_out[0];
+        } );
+    Kokkos::fence();
+
+    auto h_phi = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                       phi_dev );
+
+    const double abs_err = std::abs( h_phi(0) - phi_direct );
+    const double ref_mag = std::abs( phi_direct );
+    const double rel_err = ( ref_mag > 1e-14 ) ? abs_err / ref_mag : abs_err;
+
+    EXPECT_LT( rel_err, 1e-6 )
+        << "P2M+M2L+L2L+L2P deviates from direct sum; "
+           "relative error = " << rel_err
+        << "  phi_fmm=" << h_phi(0) << "  phi_direct=" << phi_direct;
+}
+TEST( LaplaceKernel, testL2LTranslation )
+{
+    testL2LTranslation();
+}
+
+//---------------------------------------------------------------------------//
+/**
+ * L2P gradient check against analytical 1/r gradient.
+ *
+ * A single particle at the source cell center contributes only M_{0,0}=q
+ * (all higher multipoles vanish because rho=0). After M2L the local expansion
+ * at the target cell represents the exact Coulomb field, so the gradient
+ * computed by L2P via central finite differences must match -q*r/r^3 to
+ * the accuracy of the FD step (h=1e-5 gives ~1e-10 FD error here).
+ */
+void testL2PGradient()
+{
+    using namespace LaplaceTest;
+
+    const double q_charge = 1.5;
+    const double sep      = 6.0;  // target cell center at (sep, 0, 0)
+
+    // Observation point relative to target cell center
+    const double test_dx = 0.10, test_dy = 0.06, test_dz = -0.04;
+
+    // P2M: single particle at source cell center (rho=0, only M_{0,0} nonzero)
+    CoeffView3D M( "M", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( M, complex( 0.0, 0.0 ) );
+    Kokkos::parallel_for(
+        "P2M_single",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, 1 ),
+        KOKKOS_LAMBDA( int ) {
+            double charges[1] = { q_charge };
+            auto M_out = Kokkos::subview( M, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::p2m_contribution( charges, 0.0, 0.0, 0.0, M_out );
+        } );
+    Kokkos::fence();
+
+    auto A = build_A_coefficients<double, TEST_MEMSPACE>( 2 * P_ORDER );
+
+    // M2L
+    CoeffView3D L( "L", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( L, complex( 0.0, 0.0 ) );
+
+    using team_policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
+    Kokkos::parallel_for(
+        "M2L",
+        team_policy( 1, Kokkos::AUTO ),
+        KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
+            auto L_out = Kokkos::subview( L, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, A, L_out );
+        } );
+    Kokkos::fence();
+
+    // L2P with gradient
+    ScalarView1D phi_dev( "phi", 1 );
+    ScalarView2D grad_dev( "grad", 1, 3 );  // (comp=0, dim=0,1,2)
+    Kokkos::parallel_for(
+        "L2P_grad",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, 1 ),
+        KOKKOS_LAMBDA( int ) {
+            double phi_out[1];
+            Kernel::l2p_evaluate( L, 0, test_dx, test_dy, test_dz,
+                                  phi_out, grad_dev, true );
+            phi_dev(0) = phi_out[0];
+        } );
+    Kokkos::fence();
+
+    auto h_phi  = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                        phi_dev );
+    auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                        grad_dev );
+
+    // Analytical: source at (0,0,0), obs at (sep+test_dx, test_dy, test_dz)
+    const double rx = sep + test_dx, ry = test_dy, rz = test_dz;
+    const double r  = std::sqrt( rx*rx + ry*ry + rz*rz );
+    const double phi_analytic     =  q_charge / r;
+    const double grad_analytic[3] = { -q_charge * rx / ( r*r*r ),
+                                      -q_charge * ry / ( r*r*r ),
+                                      -q_charge * rz / ( r*r*r ) };
+
+    // Potential tolerance: FMM truncation ~ O((0/sep)^7) = 0 for point at origin,
+    // but residual from P-truncation of the expansion is ~1e-12; use 1e-8.
+    EXPECT_NEAR( h_phi(0), phi_analytic, 1e-8 )
+        << "L2P potential mismatch";
+
+    // Gradient tolerance: FD step h=1e-5 contributes O(h^2 phi''') ~ 1e-12;
+    // FMM/FD combined error budget is 1e-7.
+    const char* dim_name[3] = { "x", "y", "z" };
+    for ( int d = 0; d < 3; d++ )
+    {
+        EXPECT_NEAR( h_grad(0, d), grad_analytic[d], 1e-7 )
+            << "L2P gradient mismatch in " << dim_name[d];
+    }
+}
+TEST( LaplaceKernel, testL2PGradient )
+{
+    testL2PGradient();
 }
 
 //---------------------------------------------------------------------------//

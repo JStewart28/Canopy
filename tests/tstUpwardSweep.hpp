@@ -42,12 +42,15 @@ enum FieldIdx
     Charge   = 1
 };
 
-using DataTypes  = Cabana::MemberTypes<double[3], double>;
-using AoSoA_t    = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
-using AoSoA_ht   = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
-
 static constexpr int P_ORDER = 6;
 using Kernel = LaplaceKernel<double, P_ORDER>;
+
+// Charges are stored as double[NComps] so the AoSoA layout matches what
+// UpwardSweep expects: particle_charges(p, comp_idx).
+using DataTypes = Cabana::MemberTypes<double[3],
+                                      double[Kernel::num_components]>;
+using AoSoA_t   = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
+using AoSoA_ht  = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
 
 // Generate particles with random positions in [0, 1)^3 and charges in [-1, 1].
 void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
@@ -65,7 +68,8 @@ void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
         h_pos( i, 0 ) = pos_dist( gen );
         h_pos( i, 1 ) = pos_dist( gen );
         h_pos( i, 2 ) = pos_dist( gen );
-        h_q( i )      = q_dist( gen );
+        // Component 0 is the only component for a single Laplace solve.
+        h_q( i, 0 )   = q_dist( gen );
     }
 
     particles.resize( num_particles );
@@ -75,6 +79,7 @@ void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
 // Direct P2M: accumulate multipole coefficients from all particles in
 // particles_h to the expansion center (cx, cy, cz).  Returns the result
 // in M_ref, sized to Kernel::num_coeffs_per_cell.
+// Only component 0 is used (single Laplace solve).
 void direct_p2m_to_center(
     const AoSoA_ht& particles_h, int num_particles,
     double cx, double cy, double cz,
@@ -95,7 +100,8 @@ void direct_p2m_to_center(
         const double rho   = std::sqrt( dx * dx + dy * dy + dz * dz );
         const double theta = ( rho > 0 ) ? std::acos( dz / rho ) : 0.0;
         const double phi   = std::atan2( dy, dx );
-        const double q     = h_q( p );
+        // Component 0 only for a single Laplace solve.
+        const double q     = h_q( p, 0 );
 
         double rho_pow_n = 1.0;
         for ( int n = 0; n <= P_ORDER; n++ )
@@ -148,7 +154,6 @@ void testRootMultipoleMatchesDirectP2M(
 
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
-    using PositionSlice = decltype( positions );
 
     // Phase 1: Build tree
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
@@ -189,7 +194,8 @@ void testRootMultipoleMatchesDirectP2M(
     std::vector<Kokkos::complex<double>> M_ref;
     direct_p2m_to_center( particles_h, num_local, cx, cy, cz, M_ref );
 
-    // Phase 6: Compare coefficient by coefficient
+    // Phase 6: Compare coefficient by coefficient.
+    // Multipoles are stored as (cell_idx, coeff_idx, comp_idx); use comp 0.
     int root_idx = sweep.cell_index( ROOT_KEY );
     ASSERT_GE( root_idx, 0 ) << "Root cell not found in sweep index";
 
@@ -199,7 +205,7 @@ void testRootMultipoleMatchesDirectP2M(
     double max_rel_err = 0.0;
     for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
     {
-        auto fmm  = h_M( root_idx, idx );
+        auto fmm  = h_M( root_idx, idx, 0 );
         auto ref  = M_ref[idx];
         auto diff = fmm - ref;
 
@@ -259,7 +265,7 @@ void testMultipolesNonzeroAfterSweep(
             h_pos( i, 0 ) = pos_dist( gen );
             h_pos( i, 1 ) = pos_dist( gen );
             h_pos( i, 2 ) = pos_dist( gen );
-            h_q( i )      = q_dist( gen );
+            h_q( i, 0 )   = q_dist( gen );
         }
     }
 
@@ -268,7 +274,6 @@ void testMultipolesNonzeroAfterSweep(
 
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
-    using PositionSlice = decltype( positions );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -301,7 +306,7 @@ void testMultipolesNonzeroAfterSweep(
     double max_abs = 0.0;
     for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
     {
-        const auto c   = h_M( root_idx, idx );
+        const auto c   = h_M( root_idx, idx, 0 );
         const double m = std::sqrt( c.real() * c.real() + c.imag() * c.imag() );
         if ( m > max_abs )
             max_abs = m;
@@ -339,7 +344,6 @@ void testIdempotentExecution(
 
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
-    using PositionSlice = decltype( positions );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -377,13 +381,13 @@ void testIdempotentExecution(
     {
         for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
         {
-            EXPECT_EQ( h_M_first( c, idx ).real(),
-                       h_M_second( c, idx ).real() )
+            EXPECT_EQ( h_M_first( c, idx, 0 ).real(),
+                       h_M_second( c, idx, 0 ).real() )
                 << "Real part mismatch at cell " << c
                 << ", coeff " << idx
                 << " between first and second execute()";
-            EXPECT_EQ( h_M_first( c, idx ).imag(),
-                       h_M_second( c, idx ).imag() )
+            EXPECT_EQ( h_M_first( c, idx, 0 ).imag(),
+                       h_M_second( c, idx, 0 ).imag() )
                 << "Imaginary part mismatch at cell " << c
                 << ", coeff " << idx
                 << " between first and second execute()";
@@ -428,7 +432,7 @@ void testZeroChargesGiveZeroMultipoles(
             h_pos( i, 0 ) = pos_dist( gen );
             h_pos( i, 1 ) = pos_dist( gen );
             h_pos( i, 2 ) = pos_dist( gen );
-            h_q( i )      = 0.0;
+            h_q( i, 0 )   = 0.0;
         }
     }
 
@@ -437,7 +441,6 @@ void testZeroChargesGiveZeroMultipoles(
 
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
-    using PositionSlice = decltype( positions );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -469,10 +472,10 @@ void testZeroChargesGiveZeroMultipoles(
     {
         for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
         {
-            EXPECT_EQ( h_M( c, idx ).real(), 0.0 )
+            EXPECT_EQ( h_M( c, idx, 0 ).real(), 0.0 )
                 << "Non-zero real part at cell " << c
                 << ", coeff " << idx << " with all-zero charges";
-            EXPECT_EQ( h_M( c, idx ).imag(), 0.0 )
+            EXPECT_EQ( h_M( c, idx, 0 ).imag(), 0.0 )
                 << "Non-zero imaginary part at cell " << c
                 << ", coeff " << idx << " with all-zero charges";
         }
@@ -522,7 +525,6 @@ void testRootMultipoleMatchesDirectP2MMultiRank(
 
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
-    using PositionSlice = decltype( positions );
 
     // Phase 1: Build tree
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
@@ -554,15 +556,13 @@ void testRootMultipoleMatchesDirectP2MMultiRank(
     // Phase 5: Gather all post-migration particle data to rank 0
     //
     // Each rank packs its local positions (3 doubles/particle) and charges
-    // (1 double/particle) into flat host buffers, then MPI_Gatherv sends
-    // them to rank 0 for the global reference computation.
+    // (1 double/particle, component 0) into flat host buffers, then
+    // MPI_Gatherv sends them to rank 0 for the global reference computation.
 
-    // Workaround to copy a device-side slice into a host-side view
-    using value_type_pos = typename decltype( positions )::value_type;
-    Kokkos::View<value_type_pos* [3], TEST_MEMSPACE> d_pos( "d_pos",
-                                                       num_local );
+    // Workaround to copy the device-side position slice into a host view
+    Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
     Kokkos::parallel_for(
-        "SliceToView",
+        "SlicePosToView",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
         KOKKOS_LAMBDA( int i ) {
             d_pos( i, 0 ) = positions( i, 0 );
@@ -572,16 +572,15 @@ void testRootMultipoleMatchesDirectP2MMultiRank(
     Kokkos::fence();
     auto h_pos =
         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
-    
-    // Workaround to copy a device-side slice into a host-side view
-    using value_type_crg = typename decltype( charges )::value_type;
-    Kokkos::View<value_type_crg*, TEST_MEMSPACE> d_crg( "d_pos",
-                                                       num_local );
+
+    // Workaround to copy the device-side charge slice (component 0) into a
+    // host view
+    Kokkos::View<double*, TEST_MEMSPACE> d_crg( "d_crg", num_local );
     Kokkos::parallel_for(
-        "SliceToView",
+        "SliceCrgToView",
         Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
         KOKKOS_LAMBDA( int i ) {
-            d_crg( i ) = charges( i );
+            d_crg( i ) = charges( i, 0 );
         } );
     Kokkos::fence();
     auto h_q =
@@ -645,7 +644,7 @@ void testRootMultipoleMatchesDirectP2MMultiRank(
             all_pos( i, 0 ) = gathered_pos[3 * i + 0];
             all_pos( i, 1 ) = gathered_pos[3 * i + 1];
             all_pos( i, 2 ) = gathered_pos[3 * i + 2];
-            all_q( i )      = gathered_q[i];
+            all_q( i, 0 )   = gathered_q[i];
         }
 
         // Root cell center (the global bounding box is the same on all ranks)
@@ -667,7 +666,7 @@ void testRootMultipoleMatchesDirectP2MMultiRank(
         double max_rel_err = 0.0;
         for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
         {
-            auto fmm  = h_M( root_idx, idx );
+            auto fmm  = h_M( root_idx, idx, 0 );
             auto ref  = M_ref[idx];
             auto diff = fmm - ref;
 
