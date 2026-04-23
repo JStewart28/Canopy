@@ -358,6 +358,7 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     params.set( "algorithm", "rcb" );
     params.set( "num_global_parts", _comm_size );
     params.set( "imbalance_tolerance", _imbalance_tolerance );
+    params.set( "debug_level", "no_status" );
 
     // Solve
     Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
