@@ -12,6 +12,7 @@
 #ifndef CANOPY_P2P_HPP
 #define CANOPY_P2P_HPP
 
+#include "Canopy_Helpers.hpp"
 #include "Canopy_CommunicationPlan.hpp"
 #include "Canopy_TreeBuilder.hpp"
 #include "Canopy_TreePartitioner.hpp"
@@ -353,14 +354,14 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::
     const int ntargets = static_cast<int>( target_cells.size() );
 
     auto upload_int =
-        []( const std::vector<int>& src,
-            Kokkos::View<int*, memory_space>& dest, const char* name ) {
-            const int n = static_cast<int>( src.size() );
-            dest = Kokkos::View<int*, memory_space>( name, n );
+        [&]( const std::vector<int>& src,
+             Kokkos::View<int*, memory_space>& dest, const char* name ) {
+            const size_t n = src.size();
+            dest = Kokkos::View<int*, memory_space>( std::string( name ), n );
             if ( n > 0 )
             {
                 auto h = Kokkos::create_mirror_view( dest );
-                for ( int i = 0; i < n; i++ )
+                for ( size_t i = 0; i < n; i++ )
                     h( i ) = src[i];
                 Kokkos::deep_copy( dest, h );
             }
@@ -460,9 +461,9 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     }
 
     // --- Particle data exchange ---
-    auto h_pos = Kokkos::create_mirror_view_and_copy(
+    auto h_pos = Canopy::create_mirror_view_and_copy(
         Kokkos::HostSpace(), positions );
-    auto h_chg = Kokkos::create_mirror_view_and_copy(
+    auto h_chg = Canopy::create_mirror_view_and_copy(
         Kokkos::HostSpace(), charges );
 
     auto h_gpos = Kokkos::create_mirror_view( _ghost_positions );

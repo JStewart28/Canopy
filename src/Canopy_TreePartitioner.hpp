@@ -620,70 +620,56 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        particle_keys );
 
-    std::vector<int> cell_idx_host( N, -1 );
-    for ( int i = 0; i < N; i++ )
+    // Build a sort-key view: sort_keys(i) = cell index of particle i.
+    // Cabana::sortByKey groups particles with the same integer key into bins,
+    // one bin per cell, which is exactly the sorted-by-leaf layout we need.
+    Kokkos::View<int*, memory_space> sort_keys( std::string( "sort_keys" ),
+                                                static_cast<size_t>( N ) );
     {
-        auto it = key_to_idx.find( h_keys( i ) );
-        cell_idx_host[i] = ( it != key_to_idx.end() ) ? it->second : -1;
+        auto h = Kokkos::create_mirror_view( sort_keys );
+        for ( int i = 0; i < N; i++ )
+        {
+            auto it = key_to_idx.find( h_keys( i ) );
+            h( i ) = ( it != key_to_idx.end() ) ? it->second : 0;
+        }
+        Kokkos::deep_copy( sort_keys, h );
     }
 
-    // Build sort permutation (stable sort by cell index).
-    // perm[new_pos] = old_pos, so we gather AoSoA[perm[i]] into new[i].
-    std::vector<int> perm( N );
-    for ( int i = 0; i < N; i++ )
-        perm[i] = i;
-    std::stable_sort( perm.begin(), perm.end(), [&]( int a, int b ) {
-        return cell_idx_host[a] < cell_idx_host[b];
-    } );
+    // Sort and permute the AoSoA in one step.
+    // bin_data.binOffset(c) is the sorted start of cell c's particles;
+    // bin_data.binSize(c) is the count.
+    auto bin_data = Cabana::sortByKey<execution_space>(
+        sort_keys, std::size_t( 0 ), std::size_t( N ) );
+    Cabana::permute( bin_data, particles );
 
-    // Apply permutation to the AoSoA using a Cabana distributor where
-    // each particle's destination on this rank is perm-dictated. A
-    // simpler route: use Cabana::permute on an index view.
-    Kokkos::View<int*, memory_space> d_perm( "sort_perm", N );
-    auto h_perm = Kokkos::create_mirror_view( d_perm );
-    for ( int i = 0; i < N; i++ )
-        h_perm( i ) = perm[i];
-    Kokkos::deep_copy( d_perm, h_perm );
-
-    // Cabana::permute expects a "destination" array: new_index = dest[i].
-    // Our perm[new] = old means for old index o, new index is inv_perm[o].
-    std::vector<int> inv_perm( N );
-    for ( int i = 0; i < N; i++ )
-        inv_perm[perm[i]] = i;
-
-    Kokkos::View<int*, memory_space> d_inv_perm( "sort_inv_perm", N );
-    auto h_inv = Kokkos::create_mirror_view( d_inv_perm );
-    for ( int i = 0; i < N; i++ )
-        h_inv( i ) = inv_perm[i];
-    Kokkos::deep_copy( d_inv_perm, h_inv );
-
-    Cabana::permute( d_inv_perm, particles );
-
-    // Build per-particle cell index view in the NEW (post-sort) order
-    _particle_leaf_cell_idx =
-        Kokkos::View<int*, memory_space>( "particle_leaf_cell_idx", N );
-    auto h_pli = Kokkos::create_mirror_view( _particle_leaf_cell_idx );
-    for ( int i = 0; i < N; i++ )
-        h_pli( i ) = cell_idx_host[perm[i]]; // new_i -> old particle
-    Kokkos::deep_copy( _particle_leaf_cell_idx, h_pli );
-
-    // Build leaf_particle_offsets via counting sort
-    std::vector<int> counts( num_cells, 0 );
-    for ( int i = 0; i < N; i++ )
+    // Build leaf_particle_offsets from the bin boundaries.
+    _leaf_particle_offsets = Kokkos::View<int*, memory_space>(
+        std::string( "leaf_particle_offsets" ),
+        static_cast<size_t>( num_cells + 1 ) );
     {
-        int cidx = cell_idx_host[perm[i]];
-        if ( cidx >= 0 && cidx < num_cells )
-            counts[cidx]++;
+        auto h = Kokkos::create_mirror_view( _leaf_particle_offsets );
+        h( 0 ) = 0;
+        for ( int c = 0; c < num_cells; c++ )
+            h( c + 1 ) = static_cast<int>( bin_data.binOffset( c ) +
+                                            bin_data.binSize( c ) );
+        Kokkos::deep_copy( _leaf_particle_offsets, h );
     }
 
-    _leaf_particle_offsets =
-        Kokkos::View<int*, memory_space>( "leaf_particle_offsets",
-                                          num_cells + 1 );
-    auto h_off = Kokkos::create_mirror_view( _leaf_particle_offsets );
-    h_off( 0 ) = 0;
-    for ( int i = 0; i < num_cells; i++ )
-        h_off( i + 1 ) = h_off( i ) + counts[i];
-    Kokkos::deep_copy( _leaf_particle_offsets, h_off );
+    // Build per-particle cell index in the new sorted order.
+    _particle_leaf_cell_idx = Kokkos::View<int*, memory_space>(
+        std::string( "particle_leaf_cell_idx" ),
+        static_cast<size_t>( N ) );
+    {
+        auto h = Kokkos::create_mirror_view( _particle_leaf_cell_idx );
+        for ( int c = 0; c < num_cells; c++ )
+        {
+            const int start = static_cast<int>( bin_data.binOffset( c ) );
+            const int count = static_cast<int>( bin_data.binSize( c ) );
+            for ( int k = 0; k < count; k++ )
+                h( start + k ) = c;
+        }
+        Kokkos::deep_copy( _particle_leaf_cell_idx, h );
+    }
 }
 
 } // end namespace Canopy

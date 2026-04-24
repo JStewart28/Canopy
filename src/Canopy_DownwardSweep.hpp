@@ -87,6 +87,19 @@ class DownwardSweep
 
     using a_view_type = Kokkos::View<scalar_type*, memory_space>;
 
+    // Gradient accessor passed to l2p_evaluate — avoids nested device lambdas
+    // (CUDA does not allow extended __host__ __device__ lambdas nested inside
+    // another extended lambda).
+    struct GradWriter
+    {
+        gradient_view_type grad;
+        int p;
+        KOKKOS_INLINE_FUNCTION scalar_type& operator()( int c, int d ) const
+        {
+            return grad( p, c, d );
+        }
+    };
+
     // Match UpwardSweep's cell metadata layout
     using cell_view_type =
         typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::cell_view_type;
@@ -309,26 +322,26 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
 
     for ( int d = 0; d <= _max_depth; d++ )
     {
-        auto upload = []( const std::vector<int>& src,
-                          Kokkos::View<int*, memory_space>& dest,
-                          const char* name ) {
-            const int n = static_cast<int>( src.size() );
-            dest = Kokkos::View<int*, memory_space>( name, n );
-            if ( n > 0 )
-            {
-                auto h = Kokkos::create_mirror_view( dest );
-                for ( int i = 0; i < n; i++ )
-                    h( i ) = src[i];
-                Kokkos::deep_copy( dest, h );
-            }
-        };
+        auto vec_to_view =
+            [&]( const std::vector<int>& src, Kokkos::View<int*, memory_space>& dest,
+                 const char* label ) {
+                const size_t n = src.size();
+                dest = Kokkos::View<int*, memory_space>( std::string( label ), n );
+                if ( n > 0 )
+                {
+                    auto h = Kokkos::create_mirror_view( dest );
+                    for ( size_t i = 0; i < n; i++ )
+                        h( i ) = src[i];
+                    Kokkos::deep_copy( dest, h );
+                }
+            };
 
-        upload( _leaves_at_depth_local[d], _d_leaves_at_depth[d],
-                "leaves_at_depth" );
-        upload( _internals_at_depth_local[d], _d_internals_at_depth[d],
-                "internals_at_depth" );
-        upload( _all_at_depth_local[d], _d_all_at_depth[d],
-                "all_at_depth" );
+        vec_to_view( _leaves_at_depth_local[d], _d_leaves_at_depth[d],
+                     "leaves_at_depth" );
+        vec_to_view( _internals_at_depth_local[d], _d_internals_at_depth[d],
+                     "internals_at_depth" );
+        vec_to_view( _all_at_depth_local[d], _d_all_at_depth[d],
+                     "all_at_depth" );
     }
 
     // We still need particle_cell_idx for L2P. Borrow via a friend-like
@@ -909,30 +922,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
 
             scalar_type phi[NComps];
 
-            // Use a lambda wrapping gradient_out to accept (comp, dim)
-            // indexing. When compute_gradient is false, we pass a
-            // dummy that won't be used.
-            if ( compute_gradient )
-            {
-                auto grad_slot = KOKKOS_LAMBDA( int c, int d )->scalar_type&
-                {
-                    return gradient_out( p, c, d );
-                };
-                KernelType::l2p_evaluate( locals, cidx, dx, dy, dz, phi,
-                                          grad_slot, true );
-            }
-            else
-            {
-                // Pass a dummy gradient accessor; it will not be invoked
-                // because compute_gradient is false inside the kernel.
-                auto dummy = KOKKOS_LAMBDA( int, int )->scalar_type&
-                {
-                    static thread_local scalar_type s = 0.0;
-                    return s;
-                };
-                KernelType::l2p_evaluate( locals, cidx, dx, dy, dz, phi,
-                                          dummy, false );
-            }
+            // GradWriter is a class-level struct (not a nested lambda) so
+            // CUDA can use it inside a device lambda without the
+            // "nested extended lambda" restriction firing.
+            GradWriter writer{ gradient_out, p };
+            KernelType::l2p_evaluate( locals, cidx, dx, dy, dz, phi,
+                                      writer, compute_gradient );
 
             // Accumulate potential (caller has zeroed or initialized)
             for ( int c = 0; c < NComps; c++ )

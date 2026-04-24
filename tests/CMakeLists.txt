@@ -23,6 +23,7 @@ set(MPI_TESTS
   CommunicationPlan
   DownwardSweep
   P2P
+  SingleSolve
   TreeBuilder
   TreePartitioner
   UpwardSweep
