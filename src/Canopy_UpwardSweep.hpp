@@ -212,7 +212,9 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _multipoles = coeff_view_type( "multipoles", num_cells,
                                    coeffs_per_cell, NComps );
 
-    _A_table = build_A_coefficients<scalar_type, memory_space>( P );
+    // M2L accesses A at degree n+j where both n and j go up to P, so the
+    // table must cover up to 2*P.
+    _A_table = build_A_coefficients<scalar_type, memory_space>( 2 * P );
 
     _key_to_cell_idx.clear();
     _key_to_cell_idx.reserve( num_cells );
@@ -381,6 +383,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2m_at_depth( int
     auto device_cells = _device_cells;
     auto A_table = _A_table;
     auto& d_internals = _d_internals_at_depth[depth];
+    const int this_rank = _rank;
 
     using team_policy = Kokkos::TeamPolicy<execution_space>;
     using team_member_type = typename team_policy::member_type;
@@ -407,6 +410,15 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2m_at_depth( int
                 if ( ( ccell.key >> 3 ) != pk )
                     continue;
                 if ( ccell.depth != parent_ci.depth + 1 )
+                    continue;
+
+                // When both parent and child are shared (replicated), every
+                // rank holds the same post-Allreduce child multipole. Only
+                // rank 0 accumulates the contribution so the subsequent
+                // Allreduce on the parent doesn't count it N times.
+                if ( parent_ci.owner_rank == OWNER_SHARED &&
+                     ccell.owner_rank == OWNER_SHARED &&
+                     this_rank != 0 )
                     continue;
 
                 const scalar_type dx =
@@ -588,8 +600,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
     for ( int d = _max_depth - 1; d >= 0; d-- )
     {
         run_m2m_at_depth( d );
-        if ( d > 0 )
-            exchange_multipoles_at_depth( d, comm_plan );
+        exchange_multipoles_at_depth( d, comm_plan );
     }
 }
 

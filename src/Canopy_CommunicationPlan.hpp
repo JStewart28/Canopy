@@ -631,11 +631,14 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
         if ( ci.depth > _m2m_plan.max_depth )
             _m2m_plan.max_depth = ci.depth;
 
-        // Collect shared cells for allreduce during M2M
-        if ( ci.depth <= _replication_depth && !ci.is_leaf )
+        // Collect shared cells for allreduce during M2M.
+        // Leaf cells at depth <= replication_depth hold P2M contributions
+        // from every rank and must also be allreduced.
+        if ( ci.depth <= _replication_depth )
         {
             _m2m_plan.shared_cells.push_back( ci.key );
-            _l2l_plan.shared_cells.push_back( ci.key );
+            if ( !ci.is_leaf )
+                _l2l_plan.shared_cells.push_back( ci.key );
         }
 
         // Skip leaves (no children) and the root (no parent)
