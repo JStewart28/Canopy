@@ -465,10 +465,21 @@ CommunicationPlan<MemorySpace, ExecutionSpace>::build_interaction_list(
 // spatial extents are adjacent (share a face, edge, or vertex). In an
 // adaptive tree, these may be at different depths.
 //
-// Additionally, we need to find finer leaves that are adjacent to this
-// cell. If a neighbor of this cell is internal (not a leaf), we need
-// to descend into its children to find the actual leaves that border
-// this cell.
+// Uses a tree traversal rather than fixed probe points. The probe-point
+// approach is only correct when all leaves have the same half-width: a
+// coarser leaf's probe at ±2*hw overshoots finer adjacent leaves whose
+// centers are closer than 2*hw, making the neighbor relation asymmetric
+// and breaking the symmetry of the ghost/send communication plan.
+//
+// Two cells A and B are adjacent iff
+//   |c_A[d] - c_B[d]| <= hw_A + hw_B   for all d in {0,1,2}.
+// This condition is symmetric by construction, so if A finds B, B finds A.
+//
+// Pruning: an internal cell X cannot contain any adjacent descendant leaf
+// if, for any d, |c[d] - c_X[d]| > hw + 2*hw_X (because the closest a
+// descendant leaf's center can be in dimension d is c_X[d] ± hw_X, and
+// the maximum descendant hw is hw_X, so the tightest the adjacency
+// condition can be satisfied is hw + hw_X vs. dist - hw_X).
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
 std::vector<MortonKey>
@@ -476,124 +487,68 @@ CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_neighbor_list(
     MortonKey key, const CellInfo& cell ) const
 {
     std::set<MortonKey> neighbor_leaves;
+    neighbor_leaves.insert( key ); // self-interaction
 
-    // Include self-interaction
-    neighbor_leaves.insert( key );
+    const double hw  = cell.half_width;
+    const double eps = 1.0e-10;
 
-    double hw = cell.half_width;
-    double step = 2.0 * hw;
+    std::vector<MortonKey> stack;
+    stack.push_back( ROOT_KEY );
 
-    // Sample 26 neighbor directions
-    for ( int dx = -1; dx <= 1; dx++ )
+    while ( !stack.empty() )
     {
-        for ( int dy = -1; dy <= 1; dy++ )
+        MortonKey s = stack.back();
+        stack.pop_back();
+
+        auto s_it = _cell_map.find( s );
+        if ( s_it == _cell_map.end() )
+            continue;
+
+        const CellInfo* s_ci = s_it->second;
+        const double hw_s = s_ci->half_width;
+
+        // Prune: no descendant of s can be adjacent to cell if, for any d,
+        //   |c[d] - c_s[d]| > hw + 2*hw_s + eps
+        bool can_contain_neighbor = true;
+        for ( int d = 0; d < 3; d++ )
         {
-            for ( int dz = -1; dz <= 1; dz++ )
+            double dist = std::abs( cell.center[d] - s_ci->center[d] );
+            if ( dist > hw + 2.0 * hw_s + eps )
             {
-                if ( dx == 0 && dy == 0 && dz == 0 )
-                    continue;
+                can_contain_neighbor = false;
+                break;
+            }
+        }
+        if ( !can_contain_neighbor )
+            continue;
 
-                double nx = cell.center[0] + dx * step;
-                double ny = cell.center[1] + dy * step;
-                double nz = cell.center[2] + dz * step;
+        if ( s_ci->is_leaf )
+        {
+            if ( s == key )
+                continue; // already inserted self
 
-                MortonKey neighbor = find_leaf_containing_point( nx, ny, nz );
-
-                if ( neighbor < ROOT_KEY )
-                    continue;
-
-                auto n_it = _cell_map.find( neighbor );
-                if ( n_it == _cell_map.end() )
-                    continue;
-
-                const CellInfo* n_ci = n_it->second;
-
-                if ( n_ci->is_leaf )
+            // True adjacency: |c[d] - c'[d]| <= hw + hw' for all d
+            bool adjacent = true;
+            for ( int d = 0; d < 3; d++ )
+            {
+                double dist = std::abs( cell.center[d] - s_ci->center[d] );
+                if ( dist > hw + hw_s + eps )
                 {
-                    // Neighbor is a leaf — could be same depth (normal
-                    // case) or coarser (adaptive case). Either way,
-                    // add it.
-                    neighbor_leaves.insert( neighbor );
+                    adjacent = false;
+                    break;
                 }
-                else
-                {
-                    // Neighbor is an internal cell at a coarser level
-                    // that we reached because the probe point landed
-                    // there. This means the actual neighbor region is
-                    // refined more deeply — we need to collect all
-                    // descendant leaves of this cell that are
-                    // geometrically adjacent to our cell.
-                    //
-                    // Use BFS to collect leaf descendants that touch
-                    // our cell's boundary.
-                    std::vector<MortonKey> stack;
-                    stack.push_back( neighbor );
-
-                    while ( !stack.empty() )
-                    {
-                        MortonKey s = stack.back();
-                        stack.pop_back();
-
-                        auto s_it = _cell_map.find( s );
-                        if ( s_it == _cell_map.end() )
-                            continue;
-
-                        const CellInfo* s_ci = s_it->second;
-
-                        if ( s_ci->is_leaf )
-                        {
-                            // Check if this leaf actually touches
-                            // our cell (it might be deep inside the
-                            // coarser neighbor, far from the boundary)
-                            bool adjacent = true;
-                            for ( int d = 0; d < 3; d++ )
-                            {
-                                double dist = std::abs( s_ci->center[d] -
-                                                        cell.center[d] );
-                                double threshold =
-                                    hw + s_ci->half_width + 1.0e-10;
-                                if ( dist > threshold )
-                                {
-                                    adjacent = false;
-                                    break;
-                                }
-                            }
-                            if ( adjacent )
-                                neighbor_leaves.insert( s );
-                        }
-                        else
-                        {
-                            // Internal — push children that could
-                            // be adjacent
-                            for ( int oct = 0; oct < 8; oct++ )
-                            {
-                                MortonKey ck = child_key( s, oct );
-                                auto ck_it = _cell_map.find( ck );
-                                if ( ck_it == _cell_map.end() )
-                                    continue;
-
-                                // Quick check: could this child
-                                // be adjacent to our cell?
-                                const CellInfo* ck_ci = ck_it->second;
-                                bool could_touch = true;
-                                for ( int d = 0; d < 3; d++ )
-                                {
-                                    double dist = std::abs( ck_ci->center[d] -
-                                                            cell.center[d] );
-                                    double threshold =
-                                        hw + ck_ci->half_width + 1.0e-10;
-                                    if ( dist > threshold )
-                                    {
-                                        could_touch = false;
-                                        break;
-                                    }
-                                }
-                                if ( could_touch )
-                                    stack.push_back( ck );
-                            }
-                        }
-                    }
-                }
+            }
+            if ( adjacent )
+                neighbor_leaves.insert( s );
+        }
+        else
+        {
+            // Descend into children that passed the pruning check
+            for ( int oct = 0; oct < 8; oct++ )
+            {
+                MortonKey ck = child_key( s, oct );
+                if ( _cell_map.count( ck ) )
+                    stack.push_back( ck );
             }
         }
     }
