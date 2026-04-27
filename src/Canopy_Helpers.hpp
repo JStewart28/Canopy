@@ -33,7 +33,8 @@ create_mirror_view_and_copy( MemorySpace,
 
     if constexpr ( rank == 1 )
     {
-        auto ext0 = slice.extent(0);
+        // slice.extent(0) = num_soa, not particle count; use size() instead
+        auto ext0 = static_cast<int>( slice.size() );
 
         Kokkos::View<value_type*, src_memory_space>
             src_view( label + "_src", ext0 );
@@ -55,8 +56,11 @@ create_mirror_view_and_copy( MemorySpace,
     }
     else if constexpr ( rank == 2 )
     {
-        auto ext0 = static_cast<int>(slice.extent(0));
-        auto ext1 = static_cast<int>(slice.extent(1));
+        // Internal AoSoA layout is [num_soa, vector_length, num_components].
+        // extent(0)=num_soa, extent(1)=vector_length, extent(2)=num_components.
+        // Use size() for particle count and extent(2) for component count.
+        auto ext0 = static_cast<int>( slice.size() );
+        auto ext1 = static_cast<int>( slice.extent( 2 ) );
 
         Kokkos::View<value_type**, src_memory_space>
             src_view( label + "_src", ext0, ext1 );
