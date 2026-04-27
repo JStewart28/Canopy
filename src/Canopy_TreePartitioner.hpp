@@ -623,7 +623,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     // Build a sort-key view: sort_keys(i) = cell index of particle i.
     // Cabana::sortByKey groups particles with the same integer key into bins,
     // one bin per cell, which is exactly the sorted-by-leaf layout we need.
-    Kokkos::View<int*, memory_space> sort_keys( std::string( "sort_keys" ),
+    Kokkos::View<int*, memory_space> sort_keys( "sort_keys",
                                                 static_cast<size_t>( N ) );
     {
         auto h = Kokkos::create_mirror_view( sort_keys );
@@ -638,7 +638,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     // Sort and permute the AoSoA in one step.
     // bin_data.binOffset(c) is the sorted start of cell c's particles;
     // bin_data.binSize(c) is the count.
-    auto bin_data = Cabana::sortByKey<execution_space>(
+    auto bin_data = Cabana::sortByKey(
         sort_keys, std::size_t( 0 ), std::size_t( N ) );
     Cabana::permute( bin_data, particles );
 
