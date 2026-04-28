@@ -47,10 +47,6 @@ enum FieldIdx
 // Expansion order used for all single-solve tests.
 static constexpr int P_ORDER = 6;
 
-// P2P only uses scalar_type from its KernelType, and processes one
-// component per execute() call.
-using P2PKernel = LaplaceKernel<double, P_ORDER, 1>;
-
 } // namespace SingleSolveTest
 
 //---------------------------------------------------------------------------//
@@ -134,7 +130,7 @@ void testFullSolve(
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
     UpSweep  upward( MPI_COMM_WORLD );
     DwnSweep downward( MPI_COMM_WORLD );
-    P2P<TEST_MEMSPACE, TEST_EXECSPACE, P2PKernel> p2p( MPI_COMM_WORLD );
+    P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
     // Step 1: build tree on initial particle distribution
     auto positions = Cabana::slice<Position>( particles );
@@ -189,50 +185,9 @@ void testFullSolve(
     downward.execute( upward.multipoles(), positions, potential, gradient,
                       compute_gradient, comm_plan );
 
-    // P2P: near-field (direct) contribution, one component per call.
-    // Each call gathers ghost particles for that component's charges.
-    {
-        Kokkos::View<double*, TEST_MEMSPACE>    charges_c( "charges_c", num_local );
-        Kokkos::View<double*, TEST_MEMSPACE>    p2p_pot( "p2p_pot", num_local );
-        Kokkos::View<double* [3], TEST_MEMSPACE> p2p_grad(
-            "p2p_grad", compute_gradient ? num_local : 0 );
-
-        for ( int c = 0; c < NComps; c++ )
-        {
-            const int cv = c; // capture by value for kernel
-
-            // Extract component cv into a scalar view
-            Kokkos::parallel_for(
-                "ExtractCharge",
-                Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
-                KOKKOS_LAMBDA( int i ) {
-                    charges_c( i ) = charges( i, cv );
-                } );
-            Kokkos::fence();
-
-            Kokkos::deep_copy( p2p_pot, 0.0 );
-            if ( compute_gradient )
-                Kokkos::deep_copy( p2p_grad, 0.0 );
-
-            p2p.execute( positions, charges_c, p2p_pot, p2p_grad,
-                         compute_gradient );
-
-            // Accumulate near-field into the multi-component output
-            Kokkos::parallel_for(
-                "AccumP2P",
-                Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
-                KOKKOS_LAMBDA( int i ) {
-                    potential( i, cv ) += p2p_pot( i );
-                    if ( compute_gradient )
-                    {
-                        gradient( i, cv, 0 ) += p2p_grad( i, 0 );
-                        gradient( i, cv, 1 ) += p2p_grad( i, 1 );
-                        gradient( i, cv, 2 ) += p2p_grad( i, 2 );
-                    }
-                } );
-            Kokkos::fence();
-        }
-    }
+    // P2P: near-field (direct) contribution. All NComps are evaluated in
+    // a single execute() call sharing one ghost-particle halo exchange.
+    p2p.execute( positions, charges, potential, gradient, compute_gradient );
 
     // -----------------------------------------------------------------------
     // Gather all particle data and results to rank 0 for comparison.
