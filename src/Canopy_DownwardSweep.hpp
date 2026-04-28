@@ -221,6 +221,12 @@ class DownwardSweep
     typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::coeff_view_type
         _m2l_multipoles_view;
 
+    // Per-depth snapshot of shared-cell locals taken before M2L at that
+    // depth. Used by allreduce_shared_locals_at_depth to isolate the
+    // M2L delta from L2L contributions inherited from prior depths.
+    std::vector<int> _shared_snapshot_indices; // shared cell indices at current depth
+    std::vector<complex_type> _shared_snapshot_buf;
+
   public:
     void build_interaction_list_device(
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
@@ -241,7 +247,17 @@ class DownwardSweep
             multipoles,
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
 
-    // Allreduce partial locals at shared cells at a given depth
+    // Snapshot shared-cell locals at a given depth into _shared_snapshot_buf.
+    // Must be called immediately before run_m2l_at_depth(depth) so that
+    // allreduce_shared_locals_at_depth can compute the per-rank M2L *delta*
+    // (current - snapshot) instead of summing the cumulative locals — which
+    // would over-count the L2L contribution from prior depths by nprocs.
+    void snapshot_shared_locals_at_depth(
+        int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
+
+    // Allreduce partial M2L contributions at shared cells at a given depth.
+    // Uses the snapshot from snapshot_shared_locals_at_depth(depth) to
+    // isolate the M2L delta before the MPI_Allreduce.
     void allreduce_shared_locals_at_depth(
         int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
 
@@ -370,13 +386,30 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     std::vector<int> offsets;
     std::vector<int> sources_flat;
 
+    // Shared cells are processed by every rank. For shared targets, all
+    // sources in the interaction list are themselves at shared depths
+    // (their multipoles are correctly allreduced and identical on every
+    // rank), so every rank would compute the SAME M2L delta and the
+    // subsequent allreduce would multiply that delta by nprocs. Avoid
+    // this double-count by running M2L for shared targets on rank 0
+    // only — the allreduce then sums (rank-0 contribution + zeros) to
+    // the correct value on every rank. (Non-shared targets are owned by
+    // exactly one rank, so this filtering is a no-op for them.)
+    auto h_dc_for_filter = Kokkos::create_mirror_view_and_copy(
+        Kokkos::HostSpace{}, _device_cells );
+
     offsets.push_back( 0 );
     for ( const auto& [target_key, sources] : ilists )
     {
         auto it = _key_to_cell_idx->find( target_key );
         if ( it == _key_to_cell_idx->end() )
             continue;
-        target_cells.push_back( it->second );
+        const int target_idx = it->second;
+        const bool target_is_shared =
+            ( h_dc_for_filter( target_idx ).owner_rank == OWNER_SHARED );
+        if ( target_is_shared && _rank != 0 )
+            continue;
+        target_cells.push_back( target_idx );
 
         int count = 0;
         for ( MortonKey src_key : sources )
@@ -662,15 +695,17 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth( i
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
-    allreduce_shared_locals_at_depth(
+    snapshot_shared_locals_at_depth(
         int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
-    // Shared cells at this depth had M2L run by every rank with each
-    // rank using the multipoles it has locally. We need to sum the
-    // partial contributions across ranks.
-    const auto& m2m = comm_plan.m2m_plan(); // uses same shared_cells list
+    // Capture the value of _locals at all shared cells at this depth
+    // BEFORE M2L runs. After M2L, allreduce_shared_locals_at_depth will
+    // use the snapshot to isolate the M2L contribution (which differs
+    // between ranks and must be summed) from the L2L-inherited part
+    // (which is identical on all ranks and must NOT be summed).
+    const auto& m2m = comm_plan.m2m_plan();
+    _shared_snapshot_indices.clear();
 
-    std::vector<int> shared_cell_indices;
     auto h_dc = Kokkos::create_mirror_view_and_copy(
         Kokkos::HostSpace{}, _device_cells );
     for ( MortonKey k : m2m.shared_cells )
@@ -679,13 +714,45 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         if ( it == _key_to_cell_idx->end() )
             continue;
         if ( h_dc( it->second ).depth == depth )
-            shared_cell_indices.push_back( it->second );
+            _shared_snapshot_indices.push_back( it->second );
     }
 
-    if ( shared_cell_indices.empty() )
+    const int nshared = static_cast<int>( _shared_snapshot_indices.size() );
+    const int per_cell_complex = coeffs_per_cell * NComps;
+    _shared_snapshot_buf.assign( nshared * per_cell_complex,
+                                 complex_type( 0, 0 ) );
+    if ( nshared == 0 )
         return;
 
-    const int nshared = static_cast<int>( shared_cell_indices.size() );
+    auto h_locals = Kokkos::create_mirror_view_and_copy(
+        Kokkos::HostSpace{}, _locals );
+    for ( int i = 0; i < nshared; i++ )
+    {
+        const int cidx = _shared_snapshot_indices[i];
+        int idx = 0;
+        for ( int ci = 0; ci < coeffs_per_cell; ci++ )
+            for ( int c = 0; c < NComps; c++ )
+                _shared_snapshot_buf[i * per_cell_complex + ( idx++ )] =
+                    h_locals( cidx, ci, c );
+    }
+}
+
+template <class MemorySpace, class ExecutionSpace, class KernelType>
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
+    allreduce_shared_locals_at_depth(
+        int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
+{
+    // Shared cells at this depth had M2L run by every rank with each
+    // rank using the multipoles it has locally. We need to sum the
+    // partial M2L contributions across ranks. The snapshot captured
+    // before M2L lets us subtract out the L2L-inherited value (which
+    // is the same on every rank) so the allreduce only sums the
+    // genuinely-disjoint M2L deltas.
+    (void)comm_plan; // shared_cell_indices already cached in snapshot
+    const int nshared = static_cast<int>( _shared_snapshot_indices.size() );
+    if ( nshared == 0 )
+        return;
+
     const int per_cell_complex = coeffs_per_cell * NComps;
     const int total_complex = nshared * per_cell_complex;
 
@@ -695,14 +762,18 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     auto h_locals = Kokkos::create_mirror_view_and_copy(
         Kokkos::HostSpace{}, _locals );
 
+    // sendbuf = current - snapshot (M2L delta on this rank)
     for ( int i = 0; i < nshared; i++ )
     {
-        const int cidx = shared_cell_indices[i];
+        const int cidx = _shared_snapshot_indices[i];
         int idx = 0;
         for ( int ci = 0; ci < coeffs_per_cell; ci++ )
             for ( int c = 0; c < NComps; c++ )
-                sendbuf[i * per_cell_complex + ( idx++ )] =
-                    h_locals( cidx, ci, c );
+            {
+                const int k = i * per_cell_complex + ( idx++ );
+                sendbuf[k] = h_locals( cidx, ci, c ) -
+                             _shared_snapshot_buf[k];
+            }
     }
 
     MPI_Datatype mpi_scalar =
@@ -711,14 +782,18 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                    reinterpret_cast<scalar_type*>( recvbuf.data() ),
                    2 * total_complex, mpi_scalar, MPI_SUM, _comm );
 
+    // _locals[shared] = snapshot + summed delta
     for ( int i = 0; i < nshared; i++ )
     {
-        const int cidx = shared_cell_indices[i];
+        const int cidx = _shared_snapshot_indices[i];
         int idx = 0;
         for ( int ci = 0; ci < coeffs_per_cell; ci++ )
             for ( int c = 0; c < NComps; c++ )
+            {
+                const int k = i * per_cell_complex + ( idx++ );
                 h_locals( cidx, ci, c ) =
-                    recvbuf[i * per_cell_complex + ( idx++ )];
+                    _shared_snapshot_buf[k] + recvbuf[k];
+            }
     }
 
     Kokkos::deep_copy( _locals, h_locals );
@@ -764,9 +839,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     auto h_dc = Kokkos::create_mirror_view_and_copy(
         Kokkos::HostSpace{}, _device_cells );
 
-    // Build sends: for each (parent_key, child_owner) in l2l.sends,
-    // find each child of parent_key at depth+1 owned by child_owner
-    // and prepare to send that child's local.
+    // The cell_key in each L2L plan entry is the CHILD's key. Filter
+    // entries to those whose child is at depth+1 (i.e. whose parent is
+    // at the depth we just finished L2L'ing on).
     struct PendingSend
     {
         int child_cell_idx;
@@ -781,28 +856,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     };
     std::vector<PendingRecv> recvs;
 
-    const int num_all = static_cast<int>( h_dc.extent( 0 ) );
-
     for ( const auto& ct : l2l.sends )
     {
         auto it = _key_to_cell_idx->find( ct.cell_key );
         if ( it == _key_to_cell_idx->end() )
             continue;
-        const auto& parent_ci = h_dc( it->second );
-        if ( parent_ci.depth != depth )
+        const int cidx = it->second;
+        if ( h_dc( cidx ).depth != depth + 1 )
             continue;
-
-        // Find children of this parent at depth+1
-        for ( int ci = 0; ci < num_all; ci++ )
-        {
-            const auto& ccell = h_dc( ci );
-            if ( ( ccell.key >> 3 ) != parent_ci.key )
-                continue;
-            if ( ccell.depth != depth + 1 )
-                continue;
-            if ( ccell.owner_rank == ct.remote_rank )
-                sends.push_back( { ci, ct.remote_rank } );
-        }
+        sends.push_back( { cidx, ct.remote_rank } );
     }
 
     for ( const auto& ct : l2l.receives )
@@ -810,20 +872,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         auto it = _key_to_cell_idx->find( ct.cell_key );
         if ( it == _key_to_cell_idx->end() )
             continue;
-        const auto& parent_ci = h_dc( it->second );
-        if ( parent_ci.depth != depth )
+        const int cidx = it->second;
+        if ( h_dc( cidx ).depth != depth + 1 )
             continue;
-
-        for ( int ci = 0; ci < num_all; ci++ )
-        {
-            const auto& ccell = h_dc( ci );
-            if ( ( ccell.key >> 3 ) != parent_ci.key )
-                continue;
-            if ( ccell.depth != depth + 1 )
-                continue;
-            if ( ccell.owner_rank == _rank )
-                recvs.push_back( { ci, ct.remote_rank } );
-        }
+        recvs.push_back( { cidx, ct.remote_rank } );
     }
 
     if ( sends.empty() && recvs.empty() )
@@ -974,9 +1026,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
     // Pre-sweep: exchange remote multipoles needed for M2L
     exchange_multipoles_for_m2l( multipoles, comm_plan );
 
-    // Layer-by-layer: M2L, allreduce shared, L2L, exchange children
+    // Layer-by-layer: snapshot shared, M2L, allreduce shared M2L delta,
+    // L2L, exchange children
     for ( int d = 0; d <= _max_depth; d++ )
     {
+        snapshot_shared_locals_at_depth( d, comm_plan );
         run_m2l_at_depth( d );
         allreduce_shared_locals_at_depth( d, comm_plan );
         run_l2l_at_depth( d );

@@ -705,6 +705,14 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
             // When parent_owner == OWNER_SHARED, all ranks already hold
             // the parent local expansion (from the M2M allreduce), so
             // the child's owner can apply it locally — no p2p needed.
+            //
+            // The cell_key in L2L plan entries is the CHILD's key
+            // (one entry per individual child transfer). Using child
+            // keys keeps entries unique even when a parent has multiple
+            // children with the same remote owner — using parent keys
+            // here would generate duplicate plan entries that cause
+            // exchange_locals_after_l2l_at_depth to send/receive the
+            // same child's local multiple times, multiplying its value.
             if ( child_owner != OWNER_SHARED )
             {
                 if ( parent_owner == _rank )
@@ -712,7 +720,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
                     // This rank owns the parent — send to child owner
                     if ( child_owner != _rank )
                     {
-                        _l2l_plan.sends.push_back( { ci.key, child_owner } );
+                        _l2l_plan.sends.push_back( { ck, child_owner } );
                     }
                 }
 
@@ -723,7 +731,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
                     if ( parent_owner != _rank && parent_owner != OWNER_SHARED )
                     {
                         _l2l_plan.receives.push_back(
-                            { ci.key, parent_owner } );
+                            { ck, parent_owner } );
                     }
                 }
             }
