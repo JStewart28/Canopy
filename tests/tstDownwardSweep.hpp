@@ -739,6 +739,312 @@ void testL2PApproximatesDirectSumMultiRank(
 }
 
 //---------------------------------------------------------------------------//
+/**
+ * Verify two structural invariants of the M2L interaction lists.
+ *
+ * In Greengard's adaptive FMM, for every cell C the interaction list (List 2)
+ * consists of children of C's parent's neighbors that are not neighbors of C
+ * itself. Two consequences must hold for any pair of cells (A, B) that this
+ * rank can observe in `m2l_plan().interaction_lists`:
+ *
+ *   (a) **Same-depth symmetry.** If A and B are at the same depth, then
+ *       B is in A's interaction list iff A is in B's interaction list.
+ *       The relation "same-depth, parents adjacent, cells not adjacent" is
+ *       symmetric, so any asymmetry indicates a neighbor-finding bug.
+ *
+ *   (b) **M2L / P2P disjointness.** If A is a leaf and B is in A's M2L
+ *       interaction list, then B (or any descendant of B) cannot appear
+ *       in A's P2P neighbor list. The two lists partition the far/near
+ *       interactions; overlap means the same source-target pair is being
+ *       evaluated twice.
+ *
+ * These invariants catch the failure mode of the previous probe-point
+ * neighbor finder: probes at ±2*hw misidentify adjacency on adaptive
+ * trees, producing asymmetric "B in A's list but not A in B's list"
+ * pairs and overlapping near/far classification.
+ *
+ * This test runs single-rank only so all cells are visible to the checks.
+ */
+void testM2LListInvariants(
+    int num_particles, int ncrit, int max_depth,
+    double tolerance, int replication_depth )
+{
+    using namespace DownwardSweepTest;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    if ( nprocs != 1 )
+        return;
+
+    AoSoA_t particles( "particles", num_particles );
+    generate_test_particles( particles, num_particles, rank );
+
+    auto positions = Cabana::slice<Position>( particles );
+
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+    builder.build( positions, num_particles );
+
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+    partitioner.partition( builder, particles, num_particles );
+    int num_local = partitioner.num_local_particles();
+
+    positions = Cabana::slice<Position>( particles );
+    builder.build( positions, num_local );
+
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    comm_plan.build( builder.cells(), partitioner.ownership(),
+                     partitioner.cell_owner_map(), replication_depth );
+
+    const auto& ilists = comm_plan.m2l_plan().interaction_lists;
+    const auto& p2p_lists = comm_plan.p2p_plan().neighbor_lists;
+
+    // Build a depth lookup from the cell list.
+    std::unordered_map<MortonKey, int> depth_of;
+    std::unordered_map<MortonKey, bool> is_leaf_of;
+    for ( const auto& ci : builder.cells() )
+    {
+        depth_of[ci.key]   = ci.depth;
+        is_leaf_of[ci.key] = ci.is_leaf;
+    }
+
+    // (a) Same-depth symmetry of m2l interaction lists.
+    int n_same_depth_pairs = 0;
+    int n_asymmetric       = 0;
+    for ( const auto& kv : ilists )
+    {
+        MortonKey A = kv.first;
+        for ( MortonKey B : kv.second )
+        {
+            auto da = depth_of.find( A );
+            auto db = depth_of.find( B );
+            if ( da == depth_of.end() || db == depth_of.end() )
+                continue;
+            if ( da->second != db->second )
+                continue;
+
+            n_same_depth_pairs++;
+            auto it = ilists.find( B );
+            bool reciprocal = false;
+            if ( it != ilists.end() )
+            {
+                for ( MortonKey k : it->second )
+                {
+                    if ( k == A )
+                    {
+                        reciprocal = true;
+                        break;
+                    }
+                }
+            }
+            if ( !reciprocal )
+            {
+                n_asymmetric++;
+                EXPECT_TRUE( false )
+                    << "M2L list asymmetry: cell " << A
+                    << " has " << B << " in its list at same depth "
+                    << da->second << ", but reciprocal is missing";
+                if ( n_asymmetric >= 5 )
+                    break;
+            }
+        }
+        if ( n_asymmetric >= 5 )
+            break;
+    }
+    EXPECT_GT( n_same_depth_pairs, 0 )
+        << "No same-depth M2L pairs observed; tree may be too shallow";
+
+    // (b) M2L / P2P disjointness for leaves.
+    int n_overlaps = 0;
+    for ( const auto& kv : ilists )
+    {
+        MortonKey A = kv.first;
+        auto la_it = is_leaf_of.find( A );
+        if ( la_it == is_leaf_of.end() || !la_it->second )
+            continue;
+
+        auto pp_it = p2p_lists.find( A );
+        if ( pp_it == p2p_lists.end() )
+            continue;
+        std::unordered_set<MortonKey> p2p_set( pp_it->second.begin(),
+                                               pp_it->second.end() );
+        for ( MortonKey B : kv.second )
+        {
+            if ( p2p_set.count( B ) )
+            {
+                n_overlaps++;
+                EXPECT_TRUE( false )
+                    << "Cell " << A << " has " << B
+                    << " in BOTH M2L and P2P lists "
+                       "(near/far classification overlap)";
+                if ( n_overlaps >= 5 )
+                    break;
+            }
+        }
+        if ( n_overlaps >= 5 )
+            break;
+    }
+}
+
+//---------------------------------------------------------------------------//
+/**
+ * Verify L2P matches a direct Coulomb sum on a deliberately non-uniform
+ * particle distribution.
+ *
+ * The geometry forces an adaptive tree: a dense source cluster in
+ * [0.0, 0.15]^3 (refines deeply because of high local particle count) and a
+ * sparse target region in [0.6, 1.0]^3 (refines shallowly). Cells of
+ * different sizes neighbor each other across the cluster boundary, so the
+ * M2L interaction list at fine target/source cells must include coarser
+ * cells from the opposite side. This is the regime where the previous
+ * probe-point neighbor finder produced incorrect lists.
+ *
+ * Same direct-sum reference and tolerance check as the uniform two-cluster
+ * variants. Single-rank only.
+ */
+void testL2PApproximatesDirectSumAdaptive(
+    int num_dense_sources, int num_sparse_targets,
+    int ncrit, int max_depth,
+    double tolerance, int replication_depth, double error_tol )
+{
+    using namespace DownwardSweepTest;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    if ( nprocs != 1 )
+        return;
+
+    const int N = num_dense_sources + num_sparse_targets;
+
+    AoSoA_ht particles_h( "particles_h", N );
+    {
+        auto h_pos = Cabana::slice<Position>( particles_h );
+        auto h_q   = Cabana::slice<Charge>( particles_h );
+
+        std::mt19937 gen( 31337 );
+        std::uniform_real_distribution<double> dense_dist( 0.0, 0.15 );
+        std::uniform_real_distribution<double> sparse_dist( 0.6, 1.0 );
+        std::uniform_real_distribution<double> q_dist( 0.5, 1.5 );
+
+        for ( int i = 0; i < num_dense_sources; i++ )
+        {
+            h_pos( i, 0 ) = dense_dist( gen );
+            h_pos( i, 1 ) = dense_dist( gen );
+            h_pos( i, 2 ) = dense_dist( gen );
+            h_q( i, 0 )   = q_dist( gen );
+        }
+        for ( int i = num_dense_sources; i < N; i++ )
+        {
+            h_pos( i, 0 ) = sparse_dist( gen );
+            h_pos( i, 1 ) = sparse_dist( gen );
+            h_pos( i, 2 ) = sparse_dist( gen );
+            h_q( i, 0 )   = 0.0;
+        }
+    }
+
+    AoSoA_t particles( "particles", N );
+    Cabana::deep_copy( particles, particles_h );
+
+    auto positions = Cabana::slice<Position>( particles );
+    auto charges   = Cabana::slice<Charge>( particles );
+
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+    builder.build( positions, N );
+
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+    partitioner.partition( builder, particles, N );
+    int num_local = partitioner.num_local_particles();
+
+    positions = Cabana::slice<Position>( particles );
+    charges   = Cabana::slice<Charge>( particles );
+    builder.build( positions, num_local );
+
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    comm_plan.build( builder.cells(), partitioner.ownership(),
+                     partitioner.cell_owner_map(), replication_depth );
+
+    UpwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> upward( MPI_COMM_WORLD );
+    upward.setup( builder.cells(), partitioner.cell_owner_map(),
+                  builder.particle_keys(), num_local );
+    upward.execute( charges, positions, comm_plan );
+
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward( MPI_COMM_WORLD );
+    downward.setup( upward, num_local );
+
+    auto potential = downward.allocate_potential( num_local );
+    auto gradient  = downward.allocate_gradient( num_local );
+    Kokkos::deep_copy( potential, 0.0 );
+
+    downward.execute( upward.multipoles(), positions, potential, gradient,
+                      false, comm_plan );
+
+    Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
+    Kokkos::View<double*, TEST_MEMSPACE> d_crg( "d_crg", num_local );
+    Kokkos::parallel_for(
+        "CopyForRefAdaptive",
+        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
+        KOKKOS_LAMBDA( int i ) {
+            d_pos( i, 0 ) = positions( i, 0 );
+            d_pos( i, 1 ) = positions( i, 1 );
+            d_pos( i, 2 ) = positions( i, 2 );
+            d_crg( i )    = charges( i, 0 );
+        } );
+    Kokkos::fence();
+
+    auto h_pos = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+    auto h_crg = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_crg );
+    auto h_phi = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+
+    double max_rel_err = 0.0;
+    int n_checked = 0;
+    for ( int p = 0; p < num_local; p++ )
+    {
+        if ( h_crg( p ) != 0.0 )
+            continue;
+
+        const double tx = h_pos( p, 0 );
+        const double ty = h_pos( p, 1 );
+        const double tz = h_pos( p, 2 );
+
+        double ref = 0.0;
+        for ( int s = 0; s < num_local; s++ )
+        {
+            if ( h_crg( s ) == 0.0 )
+                continue;
+            const double dx   = tx - h_pos( s, 0 );
+            const double dy   = ty - h_pos( s, 1 );
+            const double dz   = tz - h_pos( s, 2 );
+            const double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
+            if ( dist > 0.0 )
+                ref += h_crg( s ) / dist;
+        }
+
+        const double fmm = h_phi( p, 0 );
+        const double rel_err =
+            ( std::abs( ref ) > 1e-14 )
+                ? std::abs( fmm - ref ) / std::abs( ref )
+                : std::abs( fmm - ref );
+
+        if ( rel_err > max_rel_err )
+            max_rel_err = rel_err;
+        n_checked++;
+    }
+
+    EXPECT_GT( n_checked, 0 )
+        << "No target particles found in adaptive geometry";
+    EXPECT_LT( max_rel_err, error_tol )
+        << "FMM L2P deviates from direct Coulomb sum on adaptive tree; "
+           "max relative error = " << max_rel_err;
+}
+
+//---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
@@ -790,6 +1096,26 @@ TEST( DownwardSweep, testL2PApproximatesDirectSumMultiRankBasic )
 TEST( DownwardSweep, testL2PApproximatesDirectSumMultiRankSmall )
 {
     testL2PApproximatesDirectSumMultiRank( 40, 40, 4, 4, 0.1, 1, 1e-3 );
+}
+
+TEST( DownwardSweep, testM2LListInvariantsBasic )
+{
+    testM2LListInvariants( 1000, 32, 6, 0.1, 2 );
+}
+
+TEST( DownwardSweep, testM2LListInvariantsSmall )
+{
+    testM2LListInvariants( 200, 16, 4, 0.1, 1 );
+}
+
+TEST( DownwardSweep, testL2PApproximatesDirectSumAdaptiveBasic )
+{
+    testL2PApproximatesDirectSumAdaptive( 200, 100, 8, 5, 0.1, 2, 1e-3 );
+}
+
+TEST( DownwardSweep, testL2PApproximatesDirectSumAdaptiveSmall )
+{
+    testL2PApproximatesDirectSumAdaptive( 80, 40, 4, 4, 0.1, 1, 1e-3 );
 }
 
 //---------------------------------------------------------------------------//

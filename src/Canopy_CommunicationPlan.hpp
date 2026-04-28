@@ -322,19 +322,35 @@ CommunicationPlan<MemorySpace, ExecutionSpace>::find_leaf_containing_point(
 // --------------------------------------------------------------------------
 // find_neighbors
 //
-// For a cell at a given depth with known center and half_width, find
-// all cells in the tree that are spatially adjacent (face, edge, or
-// vertex neighbors).
+// Find all existing cells whose spatial extents are adjacent (share a
+// face, edge, or vertex) to the query cell, returning the cell at the
+// "natural" depth: same depth as the query if it exists, or a coarser
+// ancestor leaf if the neighbor region was not refined that deeply.
 //
-// Strategy: sample 26 neighbor positions (centers of would-be neighbors
-// at the same depth), then find which leaf or internal cell in the tree
-// actually contains each position. This handles the adaptive case
-// naturally — if a neighbor region is at a coarser level, we'll find
-// the coarser cell; if it's at a finer level, we'll find a leaf
-// within that region.
+// Two cells A and B are adjacent iff
+//   |c_A[d] - c_B[d]| <= hw_A + hw_B   for all d in {0,1,2}.
+// This is symmetric by construction.
 //
-// We only return cells that exist in the tree and are distinct from
-// the query cell.
+// Strategy: tree traversal from the root. For each visited cell s:
+//   - Prune the subtree if no descendant could be adjacent:
+//       |c[d] - c_s[d]| > hw + 2*hw_s   for any d
+//     (the closest a descendant center can lie is c_s[d] ± hw_s, and
+//     the maximum descendant half-width is hw_s).
+//   - If s is a leaf or s is at the query's depth, run the adjacency
+//     test and emit s on success.
+//   - Otherwise descend into s's children.
+//
+// We never descend below the query depth: a finer-than-query cell at
+// the neighbor location would be represented in the result by its
+// ancestor at query depth (if that ancestor is internal, we already
+// emit it because it sits at query depth; if no ancestor at query
+// depth exists, the parent leaf at coarser depth is returned).
+//
+// Why not the previous probe-point method? Sampling at ±2*hw and
+// looking up the containing leaf only works when all leaves share the
+// query's half-width. For adaptive trees the probe overshoots fine
+// adjacent cells (returning a non-adjacent leaf) and undershoots
+// coarse adjacent leaves whose centers lie outside the probe radius.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
 std::vector<MortonKey>
@@ -342,32 +358,74 @@ CommunicationPlan<MemorySpace, ExecutionSpace>::find_neighbors(
     MortonKey key, const CellInfo& cell ) const
 {
     std::set<MortonKey> neighbor_set;
-    double hw = cell.half_width;
-    double step = 2.0 * hw; // distance between same-level cell centers
 
-    // Sample 26 directions (all combinations of -1, 0, +1 except 0,0,0)
-    for ( int dx = -1; dx <= 1; dx++ )
+    const double hw  = cell.half_width;
+    const double eps = 1.0e-10;
+    const int qdepth = key_depth( key );
+
+    std::vector<MortonKey> stack;
+    stack.push_back( ROOT_KEY );
+
+    while ( !stack.empty() )
     {
-        for ( int dy = -1; dy <= 1; dy++ )
+        MortonKey s = stack.back();
+        stack.pop_back();
+
+        auto s_it = _cell_map.find( s );
+        if ( s_it == _cell_map.end() )
+            continue;
+
+        const CellInfo* s_ci = s_it->second;
+        const double hw_s = s_ci->half_width;
+
+        // Prune: no descendant of s can be adjacent to cell if for any d,
+        //   |c[d] - c_s[d]| > hw + 2*hw_s + eps
+        bool can_contain_neighbor = true;
+        for ( int d = 0; d < 3; d++ )
         {
-            for ( int dz = -1; dz <= 1; dz++ )
+            double dist = std::abs( cell.center[d] - s_ci->center[d] );
+            if ( dist > hw + 2.0 * hw_s + eps )
             {
-                if ( dx == 0 && dy == 0 && dz == 0 )
-                    continue;
+                can_contain_neighbor = false;
+                break;
+            }
+        }
+        if ( !can_contain_neighbor )
+            continue;
 
-                double nx = cell.center[0] + dx * step;
-                double ny = cell.center[1] + dy * step;
-                double nz = cell.center[2] + dz * step;
+        const bool at_query_depth = ( s_ci->depth == qdepth );
 
-                MortonKey neighbor = find_leaf_containing_point( nx, ny, nz );
+        if ( s_ci->is_leaf || at_query_depth )
+        {
+            if ( s == key )
+                continue;
 
-                if ( neighbor != key && neighbor >= ROOT_KEY )
-                    neighbor_set.insert( neighbor );
+            bool adjacent = true;
+            for ( int d = 0; d < 3; d++ )
+            {
+                double dist = std::abs( cell.center[d] - s_ci->center[d] );
+                if ( dist > hw + hw_s + eps )
+                {
+                    adjacent = false;
+                    break;
+                }
+            }
+            if ( adjacent )
+                neighbor_set.insert( s );
+        }
+        else
+        {
+            for ( int oct = 0; oct < 8; oct++ )
+            {
+                MortonKey ck = child_key( s, oct );
+                if ( _cell_map.count( ck ) )
+                    stack.push_back( ck );
             }
         }
     }
 
-    return std::vector<MortonKey>( neighbor_set.begin(), neighbor_set.end() );
+    return std::vector<MortonKey>( neighbor_set.begin(),
+                                   neighbor_set.end() );
 }
 
 // --------------------------------------------------------------------------
