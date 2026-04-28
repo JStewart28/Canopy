@@ -41,11 +41,12 @@ enum FieldIdx
     Charge   = 1
 };
 
-// P2P takes scalar charges: charges(p), not charges(p, comp).
+// Default single-component fixture. P2P now requires multi-component charge
+// slices; with NComps=1 the slice has shape (n, 1).
 static constexpr int P_ORDER = 4;
 using Kernel = LaplaceKernel<double, P_ORDER>;
 
-using DataTypes = Cabana::MemberTypes<double[3], double>;
+using DataTypes = Cabana::MemberTypes<double[3], double[1]>;
 using AoSoA_t   = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
 using AoSoA_ht  = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
 
@@ -88,16 +89,6 @@ int run_setup(
 /**
  * Verify that all-zero particle charges produce all-zero potential and
  * gradient across every local particle.
- *
- * If the kernel is reading uninitialised memory or failing to zero-out
- * contributions, some entries will be non-zero even though no source
- * charges exist. The test covers both the intra-leaf (Phase 1) and
- * inter-leaf (Phase 2) code paths because they both short-circuit on
- * zero charges.
- *
- * Checks:
- *   1. potential(i) == 0 for all local i.
- *   2. gradient(i, {x,y,z}) == 0 for all local i.
  */
 void testP2PZeroChargesGiveZeroPotential(
     int num_particles_per_rank, int ncrit, int max_depth,
@@ -120,7 +111,7 @@ void testP2PZeroChargesGiveZeroPotential(
             hp( i, 0 ) = pos_dist( gen );
             hp( i, 1 ) = pos_dist( gen );
             hp( i, 2 ) = pos_dist( gen );
-            hq( i )    = 0.0;
+            hq( i, 0 ) = 0.0;
         }
     }
 
@@ -141,8 +132,8 @@ void testP2PZeroChargesGiveZeroPotential(
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
 
-    Kokkos::View<double*, TEST_MEMSPACE> potential( "pot", num_local );
-    Kokkos::View<double* [3], TEST_MEMSPACE> gradient( "grad", num_local );
+    Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
+    Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
     Kokkos::deep_copy( potential, 0.0 );
     Kokkos::deep_copy( gradient, 0.0 );
 
@@ -155,14 +146,14 @@ void testP2PZeroChargesGiveZeroPotential(
 
     for ( int i = 0; i < num_local; i++ )
     {
-        EXPECT_EQ( h_pot( i ), 0.0 )
+        EXPECT_EQ( h_pot( i, 0 ), 0.0 )
             << "Non-zero potential at particle " << i
             << " with all-zero charges";
-        EXPECT_EQ( h_grad( i, 0 ), 0.0 )
+        EXPECT_EQ( h_grad( i, 0, 0 ), 0.0 )
             << "Non-zero gradient x at particle " << i;
-        EXPECT_EQ( h_grad( i, 1 ), 0.0 )
+        EXPECT_EQ( h_grad( i, 0, 1 ), 0.0 )
             << "Non-zero gradient y at particle " << i;
-        EXPECT_EQ( h_grad( i, 2 ), 0.0 )
+        EXPECT_EQ( h_grad( i, 0, 2 ), 0.0 )
             << "Non-zero gradient z at particle " << i;
     }
 }
@@ -171,15 +162,6 @@ void testP2PZeroChargesGiveZeroPotential(
 /**
  * Verify that strictly positive charges produce at least one non-zero
  * potential value after execute().
- *
- * If the P2P kernel fails to accumulate any contributions — e.g., the
- * neighbor list is empty, or the intra-leaf range is never entered — every
- * potential will be zero even for a non-trivial source distribution.  Positive
- * charges guarantee the monopole term is non-zero so cancellation cannot
- * mask a silent failure.
- *
- * Checks:
- *   1. max |potential(i)| > 0 across all local particles.
  */
 void testP2PPotentialNonzeroAfterExecution(
     int num_particles_per_rank, int ncrit, int max_depth,
@@ -203,7 +185,7 @@ void testP2PPotentialNonzeroAfterExecution(
             hp( i, 0 ) = pos_dist( gen );
             hp( i, 1 ) = pos_dist( gen );
             hp( i, 2 ) = pos_dist( gen );
-            hq( i )    = q_dist( gen );
+            hq( i, 0 ) = q_dist( gen );
         }
     }
 
@@ -224,9 +206,9 @@ void testP2PPotentialNonzeroAfterExecution(
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
 
-    Kokkos::View<double*, TEST_MEMSPACE> potential( "pot", num_local );
+    Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
     Kokkos::deep_copy( potential, 0.0 );
-    Kokkos::View<double* [3], TEST_MEMSPACE> gradient( "grad", num_local );
+    Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
     Kokkos::deep_copy( gradient, 0.0 );
 
     p2p.execute( positions, charges, potential, gradient, false );
@@ -236,11 +218,9 @@ void testP2PPotentialNonzeroAfterExecution(
 
     double max_abs = 0.0;
     for ( int i = 0; i < num_local; i++ )
-        if ( std::abs( h_pot( i ) ) > max_abs )
-            max_abs = std::abs( h_pot( i ) );
+        if ( std::abs( h_pot( i, 0 ) ) > max_abs )
+            max_abs = std::abs( h_pot( i, 0 ) );
 
-    // Reduce across ranks so the test passes even if a single rank
-    // happens to receive no particles after partitioning.
     double global_max = 0.0;
     MPI_Allreduce( &max_abs, &global_max, 1, MPI_DOUBLE, MPI_MAX,
                    MPI_COMM_WORLD );
@@ -253,14 +233,6 @@ void testP2PPotentialNonzeroAfterExecution(
 /**
  * Verify that calling execute() twice with outputs zeroed before each call
  * produces bit-identical results.
- *
- * P2P adds its contributions into the caller-supplied output views.
- * If internal state leaks between calls, or the kernel has data races that
- * produce non-deterministic results, the two runs will differ.
- *
- * Checks:
- *   1. potential(i) is identical between the first and second call for all i.
- *   2. gradient(i, {x,y,z}) is identical between the two calls for all i.
  */
 void testP2PIdempotentExecution(
     int num_particles_per_rank, int ncrit, int max_depth,
@@ -284,7 +256,7 @@ void testP2PIdempotentExecution(
             hp( i, 0 ) = pos_dist( gen );
             hp( i, 1 ) = pos_dist( gen );
             hp( i, 2 ) = pos_dist( gen );
-            hq( i )    = q_dist( gen );
+            hq( i, 0 ) = q_dist( gen );
         }
     }
 
@@ -305,10 +277,9 @@ void testP2PIdempotentExecution(
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
 
-    Kokkos::View<double*, TEST_MEMSPACE> potential( "pot", num_local );
-    Kokkos::View<double* [3], TEST_MEMSPACE> gradient( "grad", num_local );
+    Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
+    Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
 
-    // First execute
     Kokkos::deep_copy( potential, 0.0 );
     Kokkos::deep_copy( gradient, 0.0 );
     p2p.execute( positions, charges, potential, gradient, true );
@@ -317,7 +288,6 @@ void testP2PIdempotentExecution(
     auto h_grad_first = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                               gradient );
 
-    // Second execute — fresh outputs
     Kokkos::deep_copy( potential, 0.0 );
     Kokkos::deep_copy( gradient, 0.0 );
     p2p.execute( positions, charges, potential, gradient, true );
@@ -328,11 +298,11 @@ void testP2PIdempotentExecution(
 
     for ( int i = 0; i < num_local; i++ )
     {
-        EXPECT_EQ( h_pot_first( i ), h_pot_second( i ) )
+        EXPECT_EQ( h_pot_first( i, 0 ), h_pot_second( i, 0 ) )
             << "Potential mismatch at particle " << i
             << " between first and second execute()";
         for ( int d = 0; d < 3; d++ )
-            EXPECT_EQ( h_grad_first( i, d ), h_grad_second( i, d ) )
+            EXPECT_EQ( h_grad_first( i, 0, d ), h_grad_second( i, 0, d ) )
                 << "Gradient[" << d << "] mismatch at particle " << i
                 << " between first and second execute()";
     }
@@ -342,18 +312,6 @@ void testP2PIdempotentExecution(
 /**
  * Verify that P2P potentials match a brute-force O(N²) direct sum when all
  * particles reside in a single leaf cell.
- *
- * With ncrit larger than the particle count, every particle lands in the root
- * leaf. The intra-leaf kernel therefore handles every i<j pair via Newton's
- * third law, and the inter-leaf neighbor list is empty. The expected potential
- * at particle i is exactly sum_{j!=i} q_j / r_ij.
- *
- * The test is restricted to one MPI rank because the partition may split
- * particles across ranks on a multi-rank run, potentially creating multiple
- * leaves.
- *
- * Checks:
- *   1. |P2P potential(i) - direct sum potential(i)| < 1e-12 for all i.
  */
 void testP2PDirectSumSingleLeaf(
     int num_particles, int ncrit, int max_depth,
@@ -368,7 +326,6 @@ void testP2PDirectSumSingleLeaf(
     if ( nprocs != 1 )
         return;
 
-    // Place all particles in a tiny cluster so they share one leaf.
     AoSoA_ht particles_h( "particles_h", num_particles );
     {
         auto hp = Cabana::slice<Position>( particles_h );
@@ -382,7 +339,7 @@ void testP2PDirectSumSingleLeaf(
             hp( i, 0 ) = pos_dist( gen );
             hp( i, 1 ) = pos_dist( gen );
             hp( i, 2 ) = pos_dist( gen );
-            hq( i )    = q_dist( gen );
+            hq( i, 0 ) = q_dist( gen );
         }
     }
 
@@ -403,8 +360,8 @@ void testP2PDirectSumSingleLeaf(
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
 
-    Kokkos::View<double*, TEST_MEMSPACE> potential( "pot", num_local );
-    Kokkos::View<double* [3], TEST_MEMSPACE> gradient( "grad", num_local );
+    Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
+    Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
     Kokkos::deep_copy( potential, 0.0 );
     Kokkos::deep_copy( gradient, 0.0 );
 
@@ -413,7 +370,6 @@ void testP2PDirectSumSingleLeaf(
     auto h_pot = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                       potential );
 
-    // Copy sorted positions and charges to host for reference computation.
     Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
     Kokkos::View<double*, TEST_MEMSPACE> d_chg( "d_chg", num_local );
     Kokkos::parallel_for(
@@ -422,14 +378,13 @@ void testP2PDirectSumSingleLeaf(
             d_pos( i, 0 ) = positions( i, 0 );
             d_pos( i, 1 ) = positions( i, 1 );
             d_pos( i, 2 ) = positions( i, 2 );
-            d_chg( i )    = charges( i );
+            d_chg( i )    = charges( i, 0 );
         } );
     Kokkos::fence();
 
     auto h_pos = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
     auto h_chg = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_chg );
 
-    // Brute-force reference: phi_i = sum_{j != i} q_j / r_ij
     double max_err = 0.0;
     for ( int i = 0; i < num_local; i++ )
     {
@@ -444,7 +399,7 @@ void testP2PDirectSumSingleLeaf(
             const double r  = std::sqrt( dx * dx + dy * dy + dz * dz );
             phi_ref += h_chg( j ) / r;
         }
-        const double err = std::abs( h_pot( i ) - phi_ref );
+        const double err = std::abs( h_pot( i, 0 ) - phi_ref );
         if ( err > max_err )
             max_err = err;
     }
@@ -457,22 +412,6 @@ void testP2PDirectSumSingleLeaf(
 //---------------------------------------------------------------------------//
 /**
  * Verify exact potential and gradient values for a two-particle system.
- *
- * With two particles separated by a known distance d, the exact Coulomb
- * potential and gradient are:
- *   phi_0 = q1 / d,    phi_1 = q0 / d
- *   grad_0 = ( q1/d^2,  0, 0 )
- *   grad_1 = (-q0/d^2,  0, 0 )
- *
- * Both particles land in the intra-leaf kernel (Newton's third law path).
- * This test checks the sign and magnitude of gradient accumulation, which
- * is easy to get wrong compared to the potential accumulation.
- *
- * The test is restricted to one MPI rank.
- *
- * Checks:
- *   1. |potential(i) - phi_exact| < 1e-14 for i in {0, 1}.
- *   2. |gradient(i, d) - grad_exact(i, d)| < 1e-14 for all components.
  */
 void testP2PTwoParticleExact()
 {
@@ -489,21 +428,19 @@ void testP2PTwoParticleExact()
     const double q0 = 2.0;
     const double q1 = -0.5;
 
-    // particle 0 at origin, particle 1 at (d, 0, 0)
     AoSoA_ht particles_h( "particles_h", 2 );
     {
         auto hp = Cabana::slice<Position>( particles_h );
         auto hq = Cabana::slice<Charge>( particles_h );
         hp( 0, 0 ) = 0.0; hp( 0, 1 ) = 0.0; hp( 0, 2 ) = 0.0;
         hp( 1, 0 ) = d;   hp( 1, 1 ) = 0.0; hp( 1, 2 ) = 0.0;
-        hq( 0 ) = q0;
-        hq( 1 ) = q1;
+        hq( 0, 0 ) = q0;
+        hq( 1, 0 ) = q1;
     }
 
     AoSoA_t particles( "particles", 2 );
     Cabana::deep_copy( particles, particles_h );
 
-    // ncrit=100: both particles end up in one leaf.
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, 100, 6, 0.1, 0.1 );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -519,8 +456,8 @@ void testP2PTwoParticleExact()
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
 
-    Kokkos::View<double*, TEST_MEMSPACE> potential( "pot", 2 );
-    Kokkos::View<double* [3], TEST_MEMSPACE> gradient( "grad", 2 );
+    Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", 2 );
+    Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", 2 );
     Kokkos::deep_copy( potential, 0.0 );
     Kokkos::deep_copy( gradient, 0.0 );
 
@@ -531,9 +468,6 @@ void testP2PTwoParticleExact()
     auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                         gradient );
 
-    // The intra-leaf kernel sorts pairs as (i,j) with i < j.
-    // After sort_particles_by_leaf the AoSoA may be permuted, so we
-    // identify the two particles by their positions rather than indices.
     int idx0 = -1, idx1 = -1;
     {
         Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", 2 );
@@ -563,23 +497,23 @@ void testP2PTwoParticleExact()
     const double gx0_exact  =  q1 / ( d * d );
     const double gx1_exact  = -q0 / ( d * d );
 
-    EXPECT_NEAR( h_pot( idx0 ), phi0_exact, 1.0e-14 )
+    EXPECT_NEAR( h_pot( idx0, 0 ), phi0_exact, 1.0e-14 )
         << "Potential at particle 0 incorrect";
-    EXPECT_NEAR( h_pot( idx1 ), phi1_exact, 1.0e-14 )
+    EXPECT_NEAR( h_pot( idx1, 0 ), phi1_exact, 1.0e-14 )
         << "Potential at particle 1 incorrect";
 
-    EXPECT_NEAR( h_grad( idx0, 0 ), gx0_exact, 1.0e-14 )
+    EXPECT_NEAR( h_grad( idx0, 0, 0 ), gx0_exact, 1.0e-14 )
         << "Gradient x at particle 0 incorrect";
-    EXPECT_NEAR( h_grad( idx0, 1 ), 0.0, 1.0e-14 )
+    EXPECT_NEAR( h_grad( idx0, 0, 1 ), 0.0, 1.0e-14 )
         << "Gradient y at particle 0 should be zero";
-    EXPECT_NEAR( h_grad( idx0, 2 ), 0.0, 1.0e-14 )
+    EXPECT_NEAR( h_grad( idx0, 0, 2 ), 0.0, 1.0e-14 )
         << "Gradient z at particle 0 should be zero";
 
-    EXPECT_NEAR( h_grad( idx1, 0 ), gx1_exact, 1.0e-14 )
+    EXPECT_NEAR( h_grad( idx1, 0, 0 ), gx1_exact, 1.0e-14 )
         << "Gradient x at particle 1 incorrect";
-    EXPECT_NEAR( h_grad( idx1, 1 ), 0.0, 1.0e-14 )
+    EXPECT_NEAR( h_grad( idx1, 0, 1 ), 0.0, 1.0e-14 )
         << "Gradient y at particle 1 should be zero";
-    EXPECT_NEAR( h_grad( idx1, 2 ), 0.0, 1.0e-14 )
+    EXPECT_NEAR( h_grad( idx1, 0, 2 ), 0.0, 1.0e-14 )
         << "Gradient z at particle 1 should be zero";
 }
 
@@ -587,27 +521,6 @@ void testP2PTwoParticleExact()
 /**
  * Verify that the gradient is consistent with the potential via a finite-
  * difference check for a random particle distribution on a single rank.
- *
- * For each particle i, the x-component of the gradient approximated by a
- * central finite difference in x is compared to the P2P-computed gradient.
- * Because P2P computes a truncated near-field sum (not the full N-body
- * sum), the finite-difference reference is also computed from the same
- * near-field neighbor list by running two perturbed configurations.
- *
- * Instead of reproducing the neighbor list, we use a simpler end-to-end
- * check: confirm that the gradient is in the correct qualitative direction
- * by verifying that phi(x + eps) - phi(x - eps) ≈ 2*eps*grad_x for the
- * particle with the largest absolute potential.
- *
- * This is achieved by checking that the gradient vector is not identically
- * zero when charges are non-zero, and that its sign is consistent with
- * the finite-difference direction derived from the intra-leaf potential.
- *
- * Restricted to one MPI rank to keep particle ownership unambiguous.
- *
- * Checks:
- *   1. The gradient L2 norm is non-zero for non-zero charges.
- *   2. For at least one particle, gradient_x * (phi(x+eps) - phi(x-eps)) > 0.
  */
 void testP2PGradientSignConsistency(
     int num_particles, int ncrit, int max_depth,
@@ -622,7 +535,6 @@ void testP2PGradientSignConsistency(
     if ( nprocs != 1 )
         return;
 
-    // All particles in one cluster so all pairs are in-leaf.
     AoSoA_ht particles_h( "particles_h", num_particles );
     {
         auto hp = Cabana::slice<Position>( particles_h );
@@ -636,11 +548,10 @@ void testP2PGradientSignConsistency(
             hp( i, 0 ) = pos_dist( gen );
             hp( i, 1 ) = pos_dist( gen );
             hp( i, 2 ) = pos_dist( gen );
-            hq( i )    = q_dist( gen );
+            hq( i, 0 ) = q_dist( gen );
         }
     }
 
-    // Run base configuration
     AoSoA_t particles( "particles", num_particles );
     Cabana::deep_copy( particles, particles_h );
 
@@ -658,8 +569,8 @@ void testP2PGradientSignConsistency(
     auto positions = Cabana::slice<Position>( particles );
     auto charges   = Cabana::slice<Charge>( particles );
 
-    Kokkos::View<double*, TEST_MEMSPACE> potential( "pot", num_local );
-    Kokkos::View<double* [3], TEST_MEMSPACE> gradient( "grad", num_local );
+    Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
+    Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
     Kokkos::deep_copy( potential, 0.0 );
     Kokkos::deep_copy( gradient, 0.0 );
 
@@ -670,27 +581,23 @@ void testP2PGradientSignConsistency(
     auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                         gradient );
 
-    // Gradient L2 norm must be non-zero
     double grad_norm_sq = 0.0;
     for ( int i = 0; i < num_local; i++ )
         for ( int d = 0; d < 3; d++ )
-            grad_norm_sq += h_grad( i, d ) * h_grad( i, d );
+            grad_norm_sq += h_grad( i, 0, d ) * h_grad( i, 0, d );
 
     EXPECT_GT( grad_norm_sq, 0.0 )
         << "Gradient is identically zero with non-zero charges";
 
-    // Pick particle with largest |potential| and verify sign consistency
-    // using the brute-force intra-leaf Coulomb sum (single-leaf setup).
     int best = 0;
-    double best_abs = std::abs( h_pot( 0 ) );
+    double best_abs = std::abs( h_pot( 0, 0 ) );
     for ( int i = 1; i < num_local; i++ )
-        if ( std::abs( h_pot( i ) ) > best_abs )
+        if ( std::abs( h_pot( i, 0 ) ) > best_abs )
         {
-            best_abs = std::abs( h_pot( i ) );
+            best_abs = std::abs( h_pot( i, 0 ) );
             best     = i;
         }
 
-    // Copy sorted particle data to host for finite-difference reference.
     Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
     Kokkos::View<double*, TEST_MEMSPACE> d_chg( "d_chg", num_local );
     Kokkos::parallel_for(
@@ -699,14 +606,13 @@ void testP2PGradientSignConsistency(
             d_pos( i, 0 ) = positions( i, 0 );
             d_pos( i, 1 ) = positions( i, 1 );
             d_pos( i, 2 ) = positions( i, 2 );
-            d_chg( i )    = charges( i );
+            d_chg( i )    = charges( i, 0 );
         } );
     Kokkos::fence();
     auto hp = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
     auto hq = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_chg );
 
     const double eps = 1.0e-6;
-    // phi(x+eps) and phi(x-eps) for particle `best`
     double phi_plus  = 0.0;
     double phi_minus = 0.0;
     for ( int j = 0; j < num_local; j++ )
@@ -726,10 +632,163 @@ void testP2PGradientSignConsistency(
     }
     const double fd_gx = ( phi_plus - phi_minus ) / ( 2.0 * eps );
 
-    // Both must be on the same side of zero (sign agreement).
-    EXPECT_GT( fd_gx * h_grad( best, 0 ), 0.0 )
+    EXPECT_GT( fd_gx * h_grad( best, 0, 0 ), 0.0 )
         << "Gradient x sign at particle " << best
         << " inconsistent with finite-difference reference";
+}
+
+//---------------------------------------------------------------------------//
+/**
+ * Verify that a single execute() call with NComps=3 produces, for each
+ * component independently, the same brute-force direct sum a single-component
+ * P2P would. Three independent random charge fields are placed in the same
+ * cluster (single leaf), so the intra-leaf kernel handles all pairs and
+ * each component must match its own reference sum.
+ *
+ * This is the load-bearing test that the new multi-component path:
+ *   - reads charges(p, c) with the correct c for each component,
+ *   - writes to potential(p, c) and gradient(p, c, d) without crosstalk,
+ *   - shares one halo / one kernel launch across NComps.
+ *
+ * Restricted to one MPI rank to avoid partitioning complexity in the
+ * brute-force reference.
+ */
+void testP2PMultiComponentDirectSum( int num_particles )
+{
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    if ( nprocs != 1 )
+        return;
+
+    constexpr int N = 3;
+    using Kernel3 = LaplaceKernel<double, P2PTest::P_ORDER, N>;
+    using DataTypes3 = Cabana::MemberTypes<double[3], double[N]>;
+    using AoSoA3_t   = Cabana::AoSoA<DataTypes3, TEST_MEMSPACE>;
+    using AoSoA3_ht  = Cabana::AoSoA<DataTypes3, Kokkos::HostSpace>;
+
+    AoSoA3_ht particles_h( "particles_h", num_particles );
+    {
+        auto hp = Cabana::slice<P2PTest::Position>( particles_h );
+        auto hq = Cabana::slice<P2PTest::Charge>( particles_h );
+
+        std::mt19937 gen( 91 );
+        std::uniform_real_distribution<double> pos_dist( 0.45, 0.55 );
+        std::uniform_real_distribution<double> q_dist( -1.0, 1.0 );
+        for ( int i = 0; i < num_particles; i++ )
+        {
+            hp( i, 0 ) = pos_dist( gen );
+            hp( i, 1 ) = pos_dist( gen );
+            hp( i, 2 ) = pos_dist( gen );
+            for ( int c = 0; c < N; c++ )
+                hq( i, c ) = q_dist( gen );
+        }
+    }
+
+    AoSoA3_t particles( "particles", num_particles );
+    Cabana::deep_copy( particles, particles_h );
+
+    // Single-leaf parameters: large ncrit, shallow tree.
+    const int ncrit = 200;
+    const int max_depth = 1;
+    const double tolerance = 0.1;
+    const int replication_depth = 1;
+
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel3> p2p( MPI_COMM_WORLD );
+
+    // Run setup pipeline (same shape as run_setup but for the 3-component AoSoA).
+    auto positions = Cabana::slice<P2PTest::Position>( particles );
+    builder.build( positions, num_particles );
+    partitioner.partition( builder, particles, num_particles );
+    int num_local = partitioner.num_local_particles();
+    positions = Cabana::slice<P2PTest::Position>( particles );
+    builder.build( positions, num_local );
+    partitioner.sort_particles_by_leaf( builder, particles );
+    comm_plan.build( builder.cells(), partitioner.ownership(),
+                     partitioner.cell_owner_map(), replication_depth );
+    p2p.setup( builder, partitioner, comm_plan );
+
+    positions      = Cabana::slice<P2PTest::Position>( particles );
+    auto charges   = Cabana::slice<P2PTest::Charge>( particles );
+
+    Kokkos::View<double* [N], TEST_MEMSPACE> potential( "pot", num_local );
+    Kokkos::View<double* [N][3], TEST_MEMSPACE> gradient( "grad", num_local );
+    Kokkos::deep_copy( potential, 0.0 );
+    Kokkos::deep_copy( gradient, 0.0 );
+
+    // Single execute() call covers all NComps.
+    p2p.execute( positions, charges, potential, gradient, true );
+
+    auto h_pot  = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                        potential );
+    auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                        gradient );
+
+    // Copy sorted positions and per-component charges to host for reference.
+    Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
+    Kokkos::View<double* [N], TEST_MEMSPACE> d_chg( "d_chg", num_local );
+    Kokkos::parallel_for(
+        "CopySlices", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
+        KOKKOS_LAMBDA( int i ) {
+            d_pos( i, 0 ) = positions( i, 0 );
+            d_pos( i, 1 ) = positions( i, 1 );
+            d_pos( i, 2 ) = positions( i, 2 );
+            for ( int c = 0; c < N; c++ )
+                d_chg( i, c ) = charges( i, c );
+        } );
+    Kokkos::fence();
+    auto h_pos = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+    auto h_chg = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_chg );
+
+    double max_pot_err = 0.0;
+    double max_grad_err = 0.0;
+    for ( int i = 0; i < num_local; i++ )
+    {
+        for ( int c = 0; c < N; c++ )
+        {
+            double phi_ref = 0.0;
+            double gx_ref = 0.0, gy_ref = 0.0, gz_ref = 0.0;
+            for ( int j = 0; j < num_local; j++ )
+            {
+                if ( j == i )
+                    continue;
+                const double dx = h_pos( i, 0 ) - h_pos( j, 0 );
+                const double dy = h_pos( i, 1 ) - h_pos( j, 1 );
+                const double dz = h_pos( i, 2 ) - h_pos( j, 2 );
+                const double r2 = dx * dx + dy * dy + dz * dz;
+                const double inv_r = 1.0 / std::sqrt( r2 );
+                const double inv_r3 = inv_r * inv_r * inv_r;
+                const double qjc = h_chg( j, c );
+                phi_ref += qjc * inv_r;
+                gx_ref -= qjc * dx * inv_r3;
+                gy_ref -= qjc * dy * inv_r3;
+                gz_ref -= qjc * dz * inv_r3;
+            }
+            const double pot_err = std::abs( h_pot( i, c ) - phi_ref );
+            if ( pot_err > max_pot_err )
+                max_pot_err = pot_err;
+
+            const double gex = std::abs( h_grad( i, c, 0 ) - gx_ref );
+            const double gey = std::abs( h_grad( i, c, 1 ) - gy_ref );
+            const double gez = std::abs( h_grad( i, c, 2 ) - gz_ref );
+            const double gerr = std::max( { gex, gey, gez } );
+            if ( gerr > max_grad_err )
+                max_grad_err = gerr;
+        }
+    }
+
+    EXPECT_LT( max_pot_err, 1.0e-12 )
+        << "Multi-component P2P potential deviates from per-component "
+           "brute-force direct sum; max absolute error = " << max_pot_err;
+    EXPECT_LT( max_grad_err, 1.0e-12 )
+        << "Multi-component P2P gradient deviates from per-component "
+           "brute-force direct sum; max absolute error = " << max_grad_err;
 }
 
 //---------------------------------------------------------------------------//
@@ -768,8 +827,6 @@ TEST( P2P, testIdempotentExecutionSmall )
 
 TEST( P2P, testDirectSumSingleLeaf )
 {
-    // ncrit=200 ensures all 8 particles land in one leaf; max_depth=1 avoids
-    // further subdivision.
     testP2PDirectSumSingleLeaf( 8, 200, 1, 0.1, 1 );
 }
 
@@ -781,6 +838,11 @@ TEST( P2P, testTwoParticleExact )
 TEST( P2P, testGradientSignConsistencyBasic )
 {
     testP2PGradientSignConsistency( 12, 200, 1, 0.1, 1 );
+}
+
+TEST( P2P, testMultiComponentDirectSum )
+{
+    testP2PMultiComponentDirectSum( 12 );
 }
 
 //---------------------------------------------------------------------------//

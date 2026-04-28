@@ -66,17 +66,20 @@ class P2P
 
     using scalar_type = typename KernelType::scalar_type;
 
+    static constexpr int NComps = KernelType::num_components;
+
     // Ghost particle storage (grouped by ghost leaf)
     using position_view_type =
         Kokkos::View<scalar_type* [3], memory_space>;
-    using charge_view_type = Kokkos::View<scalar_type*, memory_space>;
+    using charge_view_type =
+        Kokkos::View<scalar_type* [NComps], memory_space>;
     using offset_view_type = Kokkos::View<int*, memory_space>;
 
     // Output views (caller-owned, passed to execute())
     using potential_view_type =
-        Kokkos::View<scalar_type*, memory_space>;
+        Kokkos::View<scalar_type* [NComps], memory_space>;
     using gradient_view_type =
-        Kokkos::View<scalar_type* [3], memory_space>;
+        Kokkos::View<scalar_type* [NComps][3], memory_space>;
 
     // -----------------------------------------------------------------------
     // Constructor
@@ -120,9 +123,11 @@ class P2P
     //
     // Parameters:
     //   positions         - Cabana slice of local particle positions
-    //   charges           - Cabana slice of local particle charges
-    //                       (scalar per particle; NComps-aware kernels
-    //                       can be layered on later)
+    //   charges           - Cabana slice of local particle charges, shape
+    //                       (num_local, NComps) where NComps comes from
+    //                       KernelType::num_components. All NComps solves
+    //                       are evaluated in a single execute() call,
+    //                       sharing one ghost-particle halo exchange.
     //   potential_out     - caller-owned output; P2P adds its contribution.
     //   gradient_out      - caller-owned output (x, y, z); ignored if
     //                       compute_gradient is false.
@@ -460,6 +465,8 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         _ghost_charges = charge_view_type( "ghost_charges", 0 );
     }
 
+    constexpr int per_particle = 3 + NComps;
+
     // --- Particle data exchange ---
     auto h_pos = Canopy::create_mirror_view_and_copy(
         Kokkos::HostSpace(), positions );
@@ -481,12 +488,12 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         const int count = recv_counts[i];
         if ( count == 0 )
             continue;
-        recv_bufs[i].resize( 4 * count );
+        recv_bufs[i].resize( per_particle * count );
 
         int tag =
             static_cast<int>( ( _ghost_leaf_keys[i] & 0x7fffffff ) ^
                               0xABCD );
-        MPI_Irecv( recv_bufs[i].data(), 4 * count, mpi_scalar,
+        MPI_Irecv( recv_bufs[i].data(), per_particle * count, mpi_scalar,
                    _ghost_leaf_owners[i], tag, _comm,
                    &recv_data_reqs[i] );
     }
@@ -503,22 +510,23 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         if ( count == 0 )
             continue;
 
-        send_bufs[i].resize( 4 * count );
+        send_bufs[i].resize( per_particle * count );
         for ( int p = 0; p < count; p++ )
         {
-            send_bufs[i][4 * p + 0] =
+            send_bufs[i][per_particle * p + 0] =
                 static_cast<scalar_type>( h_pos( start + p, 0 ) );
-            send_bufs[i][4 * p + 1] =
+            send_bufs[i][per_particle * p + 1] =
                 static_cast<scalar_type>( h_pos( start + p, 1 ) );
-            send_bufs[i][4 * p + 2] =
+            send_bufs[i][per_particle * p + 2] =
                 static_cast<scalar_type>( h_pos( start + p, 2 ) );
-            send_bufs[i][4 * p + 3] =
-                static_cast<scalar_type>( h_chg( start + p ) );
+            for ( int c = 0; c < NComps; c++ )
+                send_bufs[i][per_particle * p + 3 + c] =
+                    static_cast<scalar_type>( h_chg( start + p, c ) );
         }
 
         int tag = static_cast<int>(
             ( _send_entries[i].leaf_key & 0x7fffffff ) ^ 0xABCD );
-        MPI_Isend( send_bufs[i].data(), 4 * count, mpi_scalar,
+        MPI_Isend( send_bufs[i].data(), per_particle * count, mpi_scalar,
                    _send_entries[i].dest_rank, tag, _comm,
                    &send_data_reqs[i] );
     }
@@ -537,10 +545,12 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         const int base = h_goff( i );
         for ( int p = 0; p < count; p++ )
         {
-            h_gpos( base + p, 0 ) = recv_bufs[i][4 * p + 0];
-            h_gpos( base + p, 1 ) = recv_bufs[i][4 * p + 1];
-            h_gpos( base + p, 2 ) = recv_bufs[i][4 * p + 2];
-            h_gchg( base + p ) = recv_bufs[i][4 * p + 3];
+            h_gpos( base + p, 0 ) = recv_bufs[i][per_particle * p + 0];
+            h_gpos( base + p, 1 ) = recv_bufs[i][per_particle * p + 1];
+            h_gpos( base + p, 2 ) = recv_bufs[i][per_particle * p + 2];
+            for ( int c = 0; c < NComps; c++ )
+                h_gchg( base + p, c ) =
+                    recv_bufs[i][per_particle * p + 3 + c];
         }
     }
 
@@ -650,8 +660,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             static_cast<scalar_type>( positions( pi, 1 ) );
                         const scalar_type zi =
                             static_cast<scalar_type>( positions( pi, 2 ) );
-                        const scalar_type qi =
-                            static_cast<scalar_type>( charges( pi ) );
 
                         const scalar_type xj =
                             static_cast<scalar_type>( positions( pj, 0 ) );
@@ -659,8 +667,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             static_cast<scalar_type>( positions( pj, 1 ) );
                         const scalar_type zj =
                             static_cast<scalar_type>( positions( pj, 2 ) );
-                        const scalar_type qj =
-                            static_cast<scalar_type>( charges( pj ) );
 
                         const scalar_type dx = xi - xj;
                         const scalar_type dy = yi - yj;
@@ -673,36 +679,52 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             Kokkos::sqrt( r2 );
                         const scalar_type inv_r3 = inv_r * inv_r * inv_r;
 
+                        scalar_type qi[NComps];
+                        scalar_type qj[NComps];
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            qi[c] = static_cast<scalar_type>(
+                                charges( pi, c ) );
+                            qj[c] = static_cast<scalar_type>(
+                                charges( pj, c ) );
+                        }
+
                         // Potential (Newton): +q_j/r on i, +q_i/r on j
-                        Kokkos::atomic_add( &potential_out( pi ),
-                                            qj * inv_r );
-                        Kokkos::atomic_add( &potential_out( pj ),
-                                            qi * inv_r );
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            Kokkos::atomic_add( &potential_out( pi, c ),
+                                                qj[c] * inv_r );
+                            Kokkos::atomic_add( &potential_out( pj, c ),
+                                                qi[c] * inv_r );
+                        }
 
                         if ( compute_gradient )
                         {
                             // grad_i(phi) from j: -q_j * (r_i - r_j) / r^3
                             // grad_j(phi) from i: -q_i * (r_j - r_i) / r^3
                             //                  = +q_i * (r_i - r_j) / r^3
-                            const scalar_type fx_i = -qj * dx * inv_r3;
-                            const scalar_type fy_i = -qj * dy * inv_r3;
-                            const scalar_type fz_i = -qj * dz * inv_r3;
-                            Kokkos::atomic_add( &gradient_out( pi, 0 ),
-                                                fx_i );
-                            Kokkos::atomic_add( &gradient_out( pi, 1 ),
-                                                fy_i );
-                            Kokkos::atomic_add( &gradient_out( pi, 2 ),
-                                                fz_i );
+                            for ( int c = 0; c < NComps; c++ )
+                            {
+                                Kokkos::atomic_add(
+                                    &gradient_out( pi, c, 0 ),
+                                    -qj[c] * dx * inv_r3 );
+                                Kokkos::atomic_add(
+                                    &gradient_out( pi, c, 1 ),
+                                    -qj[c] * dy * inv_r3 );
+                                Kokkos::atomic_add(
+                                    &gradient_out( pi, c, 2 ),
+                                    -qj[c] * dz * inv_r3 );
 
-                            const scalar_type fx_j = qi * dx * inv_r3;
-                            const scalar_type fy_j = qi * dy * inv_r3;
-                            const scalar_type fz_j = qi * dz * inv_r3;
-                            Kokkos::atomic_add( &gradient_out( pj, 0 ),
-                                                fx_j );
-                            Kokkos::atomic_add( &gradient_out( pj, 1 ),
-                                                fy_j );
-                            Kokkos::atomic_add( &gradient_out( pj, 2 ),
-                                                fz_j );
+                                Kokkos::atomic_add(
+                                    &gradient_out( pj, c, 0 ),
+                                    qi[c] * dx * inv_r3 );
+                                Kokkos::atomic_add(
+                                    &gradient_out( pj, c, 1 ),
+                                    qi[c] * dy * inv_r3 );
+                                Kokkos::atomic_add(
+                                    &gradient_out( pj, c, 2 ),
+                                    qi[c] * dz * inv_r3 );
+                            }
                         }
                     } );
             } );
@@ -757,8 +779,15 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                         const scalar_type zi =
                             static_cast<scalar_type>( positions( pi, 2 ) );
 
-                        scalar_type phi = 0.0;
-                        scalar_type gx = 0.0, gy = 0.0, gz = 0.0;
+                        scalar_type phi[NComps];
+                        scalar_type gx[NComps], gy[NComps], gz[NComps];
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            phi[c] = 0.0;
+                            gx[c] = 0.0;
+                            gy[c] = 0.0;
+                            gz[c] = 0.0;
+                        }
 
                         // --- Local neighbors ---
                         const int l_start = local_nbr_off( league );
@@ -790,17 +819,20 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                                 const scalar_type inv_r =
                                     static_cast<scalar_type>( 1.0 ) /
                                     Kokkos::sqrt( r2 );
-                                const scalar_type qj =
-                                    static_cast<scalar_type>(
-                                        charges( pj ) );
-                                phi += qj * inv_r;
-                                if ( compute_gradient )
+                                const scalar_type inv_r3 =
+                                    inv_r * inv_r * inv_r;
+                                for ( int c = 0; c < NComps; c++ )
                                 {
-                                    const scalar_type inv_r3 =
-                                        inv_r * inv_r * inv_r;
-                                    gx -= qj * dx * inv_r3;
-                                    gy -= qj * dy * inv_r3;
-                                    gz -= qj * dz * inv_r3;
+                                    const scalar_type qj =
+                                        static_cast<scalar_type>(
+                                            charges( pj, c ) );
+                                    phi[c] += qj * inv_r;
+                                    if ( compute_gradient )
+                                    {
+                                        gx[c] -= qj * dx * inv_r3;
+                                        gy[c] -= qj * dy * inv_r3;
+                                        gz[c] -= qj * dz * inv_r3;
+                                    }
                                 }
                             }
                         }
@@ -832,27 +864,33 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                                 const scalar_type inv_r =
                                     static_cast<scalar_type>( 1.0 ) /
                                     Kokkos::sqrt( r2 );
-                                const scalar_type qj =
-                                    ghost_charges( pj );
-                                phi += qj * inv_r;
-                                if ( compute_gradient )
+                                const scalar_type inv_r3 =
+                                    inv_r * inv_r * inv_r;
+                                for ( int c = 0; c < NComps; c++ )
                                 {
-                                    const scalar_type inv_r3 =
-                                        inv_r * inv_r * inv_r;
-                                    gx -= qj * dx * inv_r3;
-                                    gy -= qj * dy * inv_r3;
-                                    gz -= qj * dz * inv_r3;
+                                    const scalar_type qj =
+                                        ghost_charges( pj, c );
+                                    phi[c] += qj * inv_r;
+                                    if ( compute_gradient )
+                                    {
+                                        gx[c] -= qj * dx * inv_r3;
+                                        gy[c] -= qj * dy * inv_r3;
+                                        gz[c] -= qj * dz * inv_r3;
+                                    }
                                 }
                             }
                         }
 
                         // Single-writer: no atomic needed
-                        potential_out( pi ) += phi;
-                        if ( compute_gradient )
+                        for ( int c = 0; c < NComps; c++ )
                         {
-                            gradient_out( pi, 0 ) += gx;
-                            gradient_out( pi, 1 ) += gy;
-                            gradient_out( pi, 2 ) += gz;
+                            potential_out( pi, c ) += phi[c];
+                            if ( compute_gradient )
+                            {
+                                gradient_out( pi, c, 0 ) += gx[c];
+                                gradient_out( pi, c, 1 ) += gy[c];
+                                gradient_out( pi, c, 2 ) += gz[c];
+                            }
                         }
                     } );
             } );
