@@ -638,9 +638,33 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     // Sort and permute the AoSoA in one step.
     // bin_data.binOffset(c) is the sorted start of cell c's particles;
     // bin_data.binSize(c) is the count.
+    //
+    // IMPORTANT: The number of bins returned by sortByKey equals the number
+    // of UNIQUE sort key values, NOT num_cells. If some cells have zero
+    // particles, their keys won't appear in sort_keys, resulting in fewer
+    // bins than num_cells. Accessing bin_data.binOffset(c) for c >=
+    // num_unique_bins causes out-of-bounds access.
     auto bin_data = Cabana::sortByKey(
         sort_keys, std::size_t( 0 ), std::size_t( N ) );
     Cabana::permute( bin_data, particles );
+
+    // Get the actual number of unique bins returned by sortByKey.
+    // bin_data.binSize(0) returns the number of unique key values (bins).
+    const int num_unique_bins = static_cast<int>( bin_data.binSize( 0 ) );
+
+    // Build a mapping from cell index to bin index.
+    // After Cabana::sortByKey, the sort_keys array is sorted, so the unique
+    // cell indices appear at the start of each bin.
+    std::vector<int> cell_to_bin( num_cells, -1 );
+    for ( int b = 0; b < num_unique_bins; b++ )
+    {
+        const int first_particle_in_bin =
+            static_cast<int>( bin_data.binOffset( b ) );
+        // After sortByKey, sort_keys is sorted, so sort_keys[first_particle_in_bin]
+        // gives the cell index for this bin.
+        const int cell_idx = static_cast<int>( sort_keys( first_particle_in_bin ) );
+        cell_to_bin[ cell_idx ] = b;
+    }
 
     // Build leaf_particle_offsets from the bin boundaries.
     _leaf_particle_offsets = Kokkos::View<int*, memory_space>(
@@ -650,8 +674,19 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
         auto h = Kokkos::create_mirror_view( _leaf_particle_offsets );
         h( 0 ) = 0;
         for ( int c = 0; c < num_cells; c++ )
-            h( c + 1 ) = static_cast<int>( bin_data.binOffset( c ) +
-                                            bin_data.binSize( c ) );
+        {
+            const int bin = cell_to_bin[ c ];
+            if ( bin >= 0 && bin < num_unique_bins )
+            {
+                h( c + 1 ) = h( c ) +
+                    static_cast<int>( bin_data.binSize( bin ) );
+            }
+            else
+            {
+                // Cell c has no particles
+                h( c + 1 ) = h( c );
+            }
+        }
         Kokkos::deep_copy( _leaf_particle_offsets, h );
     }
 
@@ -661,12 +696,17 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
         static_cast<size_t>( N ) );
     {
         auto h = Kokkos::create_mirror_view( _particle_leaf_cell_idx );
-        for ( int c = 0; c < num_cells; c++ )
+
+        // After Cabana::sortByKey, the sort_keys array is sorted, so
+        // sort_keys[p] gives the cell index of particle p in the sorted order.
+        if ( N > 0 )
         {
-            const int start = static_cast<int>( bin_data.binOffset( c ) );
-            const int count = static_cast<int>( bin_data.binSize( c ) );
-            for ( int k = 0; k < count; k++ )
-                h( start + k ) = c;
+            auto h_sorted_sort_keys = Kokkos::create_mirror_view( sort_keys );
+            Kokkos::deep_copy( h_sorted_sort_keys, sort_keys );
+            for ( int p = 0; p < N; p++ )
+            {
+                h( p ) = h_sorted_sort_keys( p );
+            }
         }
         Kokkos::deep_copy( _particle_leaf_cell_idx, h );
     }
