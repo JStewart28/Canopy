@@ -45,7 +45,7 @@ enum FieldIdx
 };
 
 // Expansion order used for all single-solve tests.
-static constexpr int P_ORDER = 6;
+static constexpr int P_ORDER = 10;
 
 } // namespace SingleSolveTest
 
