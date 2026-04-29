@@ -378,13 +378,19 @@ CommunicationPlan<MemorySpace, ExecutionSpace>::find_neighbors(
         const CellInfo* s_ci = s_it->second;
         const double hw_s = s_ci->half_width;
 
-        // Prune: no descendant of s can be adjacent to cell if for any d,
-        //   |c[d] - c_s[d]| > hw + 2*hw_s + eps
+        // FMM well-separation pruning. A descendant d of s has
+        // hw_d <= hw_s and center within hw_s of s.center. For d to count
+        // as "near" (excluded from M2L) we require
+        //     dist(cell, d) <= 2 * max(hw_cell, hw_d) <= 2 * max(hw, hw_s),
+        // so no descendant can qualify when
+        //     dist(cell, s) > 2 * max(hw, hw_s) + hw_s + eps.
+        const double max_hw_csci = ( hw > hw_s ) ? hw : hw_s;
+        const double prune_dist = 2.0 * max_hw_csci + hw_s;
         bool can_contain_neighbor = true;
         for ( int d = 0; d < 3; d++ )
         {
             double dist = std::abs( cell.center[d] - s_ci->center[d] );
-            if ( dist > hw + 2.0 * hw_s + eps )
+            if ( dist > prune_dist + eps )
             {
                 can_contain_neighbor = false;
                 break;
@@ -400,11 +406,17 @@ CommunicationPlan<MemorySpace, ExecutionSpace>::find_neighbors(
             if ( s == key )
                 continue;
 
+            // FMM near-list test: dist <= 2 * max(hw, hw_s). The traditional
+            // adjacency rule dist <= hw + hw_s is correct only for same-size
+            // cells; for a coarser-depth leaf neighbor (hw_s > hw) the M2L
+            // series only converges when dist > 2*hw_s, so the wider rule is
+            // required to exclude such cells from M2L and keep them in P2P.
+            const double near_dist = 4.0 * max_hw_csci;
             bool adjacent = true;
             for ( int d = 0; d < 3; d++ )
             {
                 double dist = std::abs( cell.center[d] - s_ci->center[d] );
-                if ( dist > hw + hw_s + eps )
+                if ( dist > near_dist + eps )
                 {
                     adjacent = false;
                     break;
@@ -565,13 +577,15 @@ CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_neighbor_list(
         const CellInfo* s_ci = s_it->second;
         const double hw_s = s_ci->half_width;
 
-        // Prune: no descendant of s can be adjacent to cell if, for any d,
-        //   |c[d] - c_s[d]| > hw + 2*hw_s + eps
+        // FMM well-separation pruning. See find_neighbors above for the
+        // derivation; we use 2*max(hw, hw_s) as the near-list threshold.
+        const double max_hw_csci = ( hw > hw_s ) ? hw : hw_s;
+        const double prune_dist = 2.0 * max_hw_csci + hw_s;
         bool can_contain_neighbor = true;
         for ( int d = 0; d < 3; d++ )
         {
             double dist = std::abs( cell.center[d] - s_ci->center[d] );
-            if ( dist > hw + 2.0 * hw_s + eps )
+            if ( dist > prune_dist + eps )
             {
                 can_contain_neighbor = false;
                 break;
@@ -585,12 +599,15 @@ CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_neighbor_list(
             if ( s == key )
                 continue; // already inserted self
 
-            // True adjacency: |c[d] - c'[d]| <= hw + hw' for all d
+            // FMM near-list: dist <= 2*max(hw, hw_s) in every axis. This is
+            // the same threshold used by find_neighbors so M2L and P2P
+            // partition all cells consistently.
+            const double near_dist = 4.0 * max_hw_csci;
             bool adjacent = true;
             for ( int d = 0; d < 3; d++ )
             {
                 double dist = std::abs( cell.center[d] - s_ci->center[d] );
-                if ( dist > hw + hw_s + eps )
+                if ( dist > near_dist + eps )
                 {
                     adjacent = false;
                     break;
