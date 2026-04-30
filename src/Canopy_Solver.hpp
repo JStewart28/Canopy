@@ -162,18 +162,47 @@ class Solver
     //   redistribute → build → sort_by_leaf → build
     //   → upward.setup → downward.setup → p2p.setup
     //
-    // comm_plan is reused (topology stable).
+    // comm_plan is reused when topology is confirmed stable. If build()
+    // detects a topology change (bounding-box drift can shift cell
+    // boundaries past nearby particles), falls back to
+    // _finish_topology_change so the comm_plan is rebuilt before the
+    // next solve.
     // -----------------------------------------------------------------------
     template <int PositionIdx, class AoSoA>
     RedistributeResult migrate( AoSoA& particles )
     {
-        // redistribute uses the current particle_keys (stale w.r.t. new
-        // positions but valid for finding new leaf owners after the user
-        // has moved particles). The standard pattern is to first rebuild
-        // particle_keys, then redistribute.
+        // Snapshot the current cell-key set before rebuilding the tree.
+        std::unordered_set<MortonKey> old_keys;
+        old_keys.reserve( _builder.cells().size() );
+        for ( const auto& c : _builder.cells() )
+            old_keys.insert( c.key );
+
+        // Rebuild tree from current positions (also recomputes bounding box).
         {
             auto positions = Cabana::slice<PositionIdx>( particles );
             _builder.build( positions, _num_local );
+        }
+
+        // If the topology changed the existing comm_plan is invalid.
+        // Fall back to the full topology-change path so it is rebuilt.
+        bool topology_changed =
+            ( _builder.cells().size() != old_keys.size() );
+        if ( !topology_changed )
+        {
+            for ( const auto& c : _builder.cells() )
+            {
+                if ( old_keys.find( c.key ) == old_keys.end() )
+                {
+                    topology_changed = true;
+                    break;
+                }
+            }
+        }
+
+        if ( topology_changed )
+        {
+            _finish_topology_change<PositionIdx>( particles );
+            return RedistributeResult{ 0, 0, _num_local };
         }
 
         RedistributeResult result =
