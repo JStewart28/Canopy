@@ -206,6 +206,18 @@ class CommunicationPlan
     const std::unordered_map<MortonKey, int>* _owner_map;
     int _replication_depth;
 
+    // Subtree relevance: true iff the subtree rooted at this cell contains
+    // at least one cell that this rank processes (owns or shares). Used to
+    // prune the dual-tree traversal in build_all_interaction_lists().
+    std::unordered_map<MortonKey, bool> _subtree_relevant;
+
+    // Scratch sets populated by build_all_interaction_lists, consumed by
+    // finalize_m2l_plan / finalize_p2p_plan.
+    std::set<std::pair<MortonKey, int>> _m2l_receives_set;
+    std::set<std::pair<MortonKey, int>> _m2l_sends_set;
+    std::set<MortonKey> _p2p_ghost_set;
+    std::set<std::pair<MortonKey, int>> _p2p_send_set;
+
     // -----------------------------------------------------------------------
     // Internal: look up owner of a cell, defaulting to OWNER_SHARED
     // -----------------------------------------------------------------------
@@ -227,47 +239,53 @@ class CommunicationPlan
     }
 
     // -----------------------------------------------------------------------
+    // is_well_separated — geometric MAC shared by M2L and P2P partition.
+    //
+    // Two cells A, B are well-separated iff their Chebyshev (L_inf) center
+    // distance exceeds 2 * max(box_width(A), box_width(B)) =
+    // 4 * max(half_width(A), half_width(B)). For same-size cells this is
+    // the standard FMM "one-cell buffer" rule; for asymmetric pairs it is
+    // the conservative form needed for the M2L series to converge against
+    // a coarser source. The complementary (near) test is
+    // is_well_separated == false → both cells touch within the buffer →
+    // P2P territory. Sharing this single predicate between DTT and any
+    // debug assertion guarantees the two interaction lists partition the
+    // global pair set with no overlap and no gap.
+    // -----------------------------------------------------------------------
+    bool is_well_separated( const CellInfo& a, const CellInfo& b ) const
+    {
+        const double eps = 1.0e-10;
+        const double max_hw =
+            ( a.half_width > b.half_width ) ? a.half_width : b.half_width;
+        const double near_dist = 4.0 * max_hw;
+        for ( int d = 0; d < 3; d++ )
+        {
+            if ( std::abs( a.center[d] - b.center[d] ) > near_dist + eps )
+                return true;
+        }
+        return false;
+    }
+
+    // -----------------------------------------------------------------------
     // Internal plan builders
     // -----------------------------------------------------------------------
     void build_vertical_plans( const std::vector<CellInfo>& cells );
-    void build_m2l_plan( const std::vector<CellInfo>& cells );
-    void build_p2p_plan( const std::vector<CellInfo>& cells );
 
-    // -----------------------------------------------------------------------
-    // Neighbor-finding in the adaptive octree
-    //
-    // Two cells are "neighbors" if they are at the same depth and their
-    // bounding boxes are adjacent (share a face, edge, or vertex).
-    // In the Morton key scheme, neighbors at a given depth can be found
-    // by examining all 3^3 - 1 = 26 spatial neighbors.
-    //
-    // For the adaptive case, a cell's neighbors may be at a coarser
-    // depth (if a neighbor region wasn't refined). We handle this by
-    // finding the leaf cell that contains each neighbor position.
-    // -----------------------------------------------------------------------
+    // Compute _subtree_relevant bottom-up.
+    void compute_subtree_relevance( const std::vector<CellInfo>& cells );
 
-    // Find all existing cells that are neighbors of the given cell.
-    // Returns cells at the same depth if they exist, or their ancestor
-    // leaf if they were not refined to that depth.
-    std::vector<MortonKey> find_neighbors( MortonKey key,
-                                           const CellInfo& cell ) const;
+    // Single dual-tree traversal that fills _m2l_plan.interaction_lists,
+    // _p2p_plan.neighbor_lists, and the scratch send/receive/ghost sets.
+    void build_all_interaction_lists( const std::vector<CellInfo>& cells );
 
-    // Find the leaf cell containing a given point by walking down
-    // from the root.
-    MortonKey find_leaf_containing_point( double px, double py,
-                                          double pz ) const;
+    // Materialize sends/receives/ghosts from the scratch sets into the
+    // exposed plan vectors.
+    void finalize_m2l_plan();
+    void finalize_p2p_plan();
 
-    // Build the M2L interaction list for a single cell.
-    // The interaction list consists of children of the parent's
-    // neighbors that are NOT neighbors of the cell itself.
-    std::vector<MortonKey> build_interaction_list( MortonKey key,
-                                                   const CellInfo& cell ) const;
-
-    // Build the P2P neighbor list for a single leaf cell.
-    // In an adaptive tree, this includes leaf cells at the same or
-    // different depths whose spatial extents are adjacent.
-    std::vector<MortonKey>
-    build_p2p_neighbor_list( MortonKey key, const CellInfo& cell ) const;
+    // Symmetric emit helpers used by the DTT pass.
+    void emit_m2l_pair( MortonKey a, MortonKey b );
+    void emit_p2p_pair( MortonKey a, MortonKey b );
 };
 
 // ============================================================================
@@ -275,361 +293,264 @@ class CommunicationPlan
 // ============================================================================
 
 // --------------------------------------------------------------------------
-// find_leaf_containing_point
+// compute_subtree_relevance
 //
-// Walk from root to leaf following the octant that contains the point.
-// If we reach a cell that doesn't exist, return the last valid ancestor.
+// Sets _subtree_relevant[k] = true iff the subtree rooted at k contains any
+// cell processed by this rank (owned or shared). Used to prune the dual-tree
+// traversal: a (T, S) pair where neither subtree is relevant produces only
+// pairs that this rank neither computes nor communicates, so the entire
+// branch can be skipped.
+//
+// Implementation: process cells in order of decreasing depth (leaves first),
+// initializing each cell's flag to rank_processes(key) and OR'ing it into
+// the parent's entry. The result is exact because every descendant has been
+// processed by the time we reach an ancestor.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-MortonKey
-CommunicationPlan<MemorySpace, ExecutionSpace>::find_leaf_containing_point(
-    double px, double py, double pz ) const
+void CommunicationPlan<MemorySpace, ExecutionSpace>::compute_subtree_relevance(
+    const std::vector<CellInfo>& cells )
 {
-    MortonKey current = ROOT_KEY;
+    _subtree_relevant.clear();
+    _subtree_relevant.reserve( cells.size() );
+    for ( const auto& c : cells )
+        _subtree_relevant[c.key] = rank_processes( c.key );
 
-    while ( true )
+    std::vector<MortonKey> by_depth_desc;
+    by_depth_desc.reserve( cells.size() );
+    for ( const auto& c : cells )
+        by_depth_desc.push_back( c.key );
+    std::sort( by_depth_desc.begin(), by_depth_desc.end(),
+               []( MortonKey a, MortonKey b ) {
+                   return key_depth( a ) > key_depth( b );
+               } );
+
+    for ( MortonKey k : by_depth_desc )
     {
-        auto it = _cell_map.find( current );
-        if ( it == _cell_map.end() )
-            return parent_key( current ); // safety fallback
-
-        const CellInfo* ci = it->second;
-        if ( ci->is_leaf )
-            return current;
-
-        // Determine octant
-        int octant = 0;
-        if ( px >= ci->center[0] )
-            octant |= 1;
-        if ( py >= ci->center[1] )
-            octant |= 2;
-        if ( pz >= ci->center[2] )
-            octant |= 4;
-
-        MortonKey child = child_key( current, octant );
-
-        // If the child doesn't exist in the tree, the current cell's
-        // subtree was pruned — but current is internal, so this
-        // shouldn't happen in a well-formed tree. Return current as
-        // a fallback.
-        if ( _cell_map.find( child ) == _cell_map.end() )
-            return current;
-
-        current = child;
+        if ( k == ROOT_KEY )
+            continue;
+        if ( !_subtree_relevant[k] )
+            continue;
+        MortonKey pk = parent_key( k );
+        auto it = _subtree_relevant.find( pk );
+        if ( it != _subtree_relevant.end() )
+            it->second = true;
     }
 }
 
 // --------------------------------------------------------------------------
-// find_neighbors
+// emit_m2l_pair / emit_p2p_pair
 //
-// Find all existing cells whose spatial extents are adjacent (share a
-// face, edge, or vertex) to the query cell, returning the cell at the
-// "natural" depth: same depth as the query if it exists, or a coarser
-// ancestor leaf if the neighbor region was not refined that deeply.
+// DTT visits each unordered cell pair {a, b} once. For M2L, both directed
+// pairs (a target ← b source) AND (b target ← a source) contribute; we
+// emit symmetrically so that build_interaction_list_device on the
+// downstream consumer sees an entry for both endpoints whenever both are
+// processed by this rank, and so that send/receive inference is local
+// (each rank reaches the same conclusion about its own send/receive set).
 //
-// Two cells A and B are adjacent iff
-//   |c_A[d] - c_B[d]| <= hw_A + hw_B   for all d in {0,1,2}.
-// This is symmetric by construction.
-//
-// Strategy: tree traversal from the root. For each visited cell s:
-//   - Prune the subtree if no descendant could be adjacent:
-//       |c[d] - c_s[d]| > hw + 2*hw_s   for any d
-//     (the closest a descendant center can lie is c_s[d] ± hw_s, and
-//     the maximum descendant half-width is hw_s).
-//   - If s is a leaf or s is at the query's depth, run the adjacency
-//     test and emit s on success.
-//   - Otherwise descend into s's children.
-//
-// We never descend below the query depth: a finer-than-query cell at
-// the neighbor location would be represented in the result by its
-// ancestor at query depth (if that ancestor is internal, we already
-// emit it because it sits at query depth; if no ancestor at query
-// depth exists, the parent leaf at coarser depth is returned).
-//
-// Why not the previous probe-point method? Sampling at ±2*hw and
-// looking up the containing leaf only works when all leaves share the
-// query's half-width. For adaptive trees the probe overshoots fine
-// adjacent cells (returning a non-adjacent leaf) and undershoots
-// coarse adjacent leaves whose centers lie outside the probe radius.
+// Receives are skipped for shared targets: shared cells live at depth
+// <= replication_depth, and the FMM ensures their M2L sources are at
+// equal-or-shallower depth (also shared on every rank), so no
+// point-to-point exchange is required — the existing snapshot/allreduce
+// path in DownwardSweep handles them. Sends are skipped symmetrically.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-std::vector<MortonKey>
-CommunicationPlan<MemorySpace, ExecutionSpace>::find_neighbors(
-    MortonKey key, const CellInfo& cell ) const
+void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_m2l_pair(
+    MortonKey a, MortonKey b )
 {
-    std::set<MortonKey> neighbor_set;
+    const int oa = owner_of( a );
+    const int ob = owner_of( b );
 
-    const double hw  = cell.half_width;
-    const double eps = 1.0e-10;
-    const int qdepth = key_depth( key );
+    // Each unordered pair {a, b} contributes two directed M2Ls. For each,
+    // pick the rank that actually computes it: the target's owner for
+    // non-shared targets, or rank 0 for shared targets (matching the
+    // shared-target filter in DownwardSweep::build_interaction_list_device).
+    // Populate interaction_lists[t] only on that rank, and route the
+    // receive/send for s's multipole to/from the same rank.
+    //
+    // Shared sources are replicated on every rank after the M2M allreduce,
+    // so they never require point-to-point communication.
+    auto handle = [&]( MortonKey t, int ot, MortonKey s, int os ) {
+        const int compute_rank = ( ot == OWNER_SHARED ) ? 0 : ot;
+        if ( compute_rank == _rank )
+        {
+            _m2l_plan.interaction_lists[t].push_back( s );
+            if ( os != OWNER_SHARED && os != _rank )
+                _m2l_receives_set.insert( { s, os } );
+        }
+        else if ( os == _rank )
+        {
+            _m2l_sends_set.insert( { s, compute_rank } );
+        }
+    };
+    handle( a, oa, b, ob );
+    handle( b, ob, a, oa );
+}
 
-    std::vector<MortonKey> stack;
-    stack.push_back( ROOT_KEY );
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_p2p_pair(
+    MortonKey a, MortonKey b )
+{
+    // Both endpoints are leaves and not well-separated. P2P targets are
+    // owned (not shared — leaves do not live above the replication depth).
+    const int oa = owner_of( a );
+    const int ob = owner_of( b );
+    const bool a_owned = ( oa == _rank );
+    const bool b_owned = ( ob == _rank );
+
+    auto handle = [&]( MortonKey t, MortonKey s, int os, bool t_owned ) {
+        if ( !t_owned )
+            return;
+        _p2p_plan.neighbor_lists[t].push_back( s );
+        if ( t == s )
+            return; // self-interaction, no ghost
+        if ( os != _rank && os != OWNER_SHARED )
+        {
+            _p2p_ghost_set.insert( s );
+            _p2p_send_set.insert( { t, os } );
+        }
+    };
+    handle( a, b, ob, a_owned );
+    if ( a != b )
+        handle( b, a, oa, b_owned );
+}
+
+// --------------------------------------------------------------------------
+// build_all_interaction_lists
+//
+// Single dual-tree traversal that produces both the M2L interaction lists
+// and the P2P neighbor lists in one pass. This replaces the previous
+// "parent's neighbors → children, minus my neighbors" recipe, which was
+// correct only for 2:1-balanced trees: in an unbalanced adaptive tree it
+// silently dropped the X-list (deep target, shallow non-adjacent leaf
+// source) and the W-list (target's colleague's deep descendants that are
+// well-separated from the target), producing an asymmetric, incomplete
+// pair set.
+//
+// DTT enumerates every unordered (T, S) cell pair exactly once, classifies
+// it via is_well_separated, and either:
+//   - records an M2L pair (well-separated, both directions),
+//   - records a P2P pair (both leaves, near), or
+//   - splits the larger cell and recurses.
+//
+// Self-pairs on internal cells are split into asymmetric (Tc_i, Tc_j) for
+// i <= j only — without this, the (ROOT, ROOT) starting pair would emit
+// every descendant pair twice via reflected recursion paths.
+//
+// Subtree-relevance pruning skips any (T, S) where neither side touches
+// this rank's processed cells, so the global pair set is enumerated only
+// where it intersects this rank's compute or comm responsibilities.
+// --------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::build_all_interaction_lists(
+    const std::vector<CellInfo>& cells )
+{
+    (void)cells;
+    _m2l_plan.interaction_lists.clear();
+    _p2p_plan.neighbor_lists.clear();
+    _m2l_receives_set.clear();
+    _m2l_sends_set.clear();
+    _p2p_ghost_set.clear();
+    _p2p_send_set.clear();
+
+    auto root_it = _cell_map.find( ROOT_KEY );
+    if ( root_it == _cell_map.end() )
+        return;
+
+    std::vector<std::pair<MortonKey, MortonKey>> stack;
+    stack.reserve( 1024 );
+    stack.push_back( { ROOT_KEY, ROOT_KEY } );
 
     while ( !stack.empty() )
     {
-        MortonKey s = stack.back();
+        auto [tk, sk] = stack.back();
         stack.pop_back();
 
-        auto s_it = _cell_map.find( s );
-        if ( s_it == _cell_map.end() )
+        auto t_it = _cell_map.find( tk );
+        auto s_it = _cell_map.find( sk );
+        if ( t_it == _cell_map.end() || s_it == _cell_map.end() )
             continue;
 
-        const CellInfo* s_ci = s_it->second;
-        const double hw_s = s_ci->half_width;
+        const CellInfo* T = t_it->second;
+        const CellInfo* S = s_it->second;
 
-        // FMM well-separation pruning. A descendant d of s has
-        // hw_d <= hw_s and center within hw_s of s.center. For d to count
-        // as "near" (excluded from M2L) we require
-        //     dist(cell, d) <= 2 * max(hw_cell, hw_d) <= 2 * max(hw, hw_s),
-        // so no descendant can qualify when
-        //     dist(cell, s) > 2 * max(hw, hw_s) + hw_s + eps.
-        const double max_hw_csci = ( hw > hw_s ) ? hw : hw_s;
-        const double prune_dist = 2.0 * max_hw_csci + hw_s;
-        bool can_contain_neighbor = true;
-        for ( int d = 0; d < 3; d++ )
+        // Subtree-ownership pruning — skip pairs that touch nothing this
+        // rank cares about.
+        auto tr_it = _subtree_relevant.find( tk );
+        auto sr_it = _subtree_relevant.find( sk );
+        const bool tr = ( tr_it != _subtree_relevant.end() ) && tr_it->second;
+        const bool sr = ( sr_it != _subtree_relevant.end() ) && sr_it->second;
+        if ( !tr && !sr )
+            continue;
+
+        // Self-pair: at a leaf this is the P2P self-interaction; at an
+        // internal cell we split asymmetrically into child pairs (i, j)
+        // for i <= j to avoid double-visiting reflected pairs.
+        if ( tk == sk )
         {
-            double dist = std::abs( cell.center[d] - s_ci->center[d] );
-            if ( dist > prune_dist + eps )
+            if ( T->is_leaf )
             {
-                can_contain_neighbor = false;
-                break;
-            }
-        }
-        if ( !can_contain_neighbor )
-            continue;
-
-        const bool at_query_depth = ( s_ci->depth == qdepth );
-
-        if ( s_ci->is_leaf || at_query_depth )
-        {
-            if ( s == key )
+                emit_p2p_pair( tk, tk );
                 continue;
-
-            // FMM near-list test: dist <= 2 * max(hw, hw_s). The traditional
-            // adjacency rule dist <= hw + hw_s is correct only for same-size
-            // cells; for a coarser-depth leaf neighbor (hw_s > hw) the M2L
-            // series only converges when dist > 2*hw_s, so the wider rule is
-            // required to exclude such cells from M2L and keep them in P2P.
-            const double near_dist = 4.0 * max_hw_csci;
-            bool adjacent = true;
-            for ( int d = 0; d < 3; d++ )
-            {
-                double dist = std::abs( cell.center[d] - s_ci->center[d] );
-                if ( dist > near_dist + eps )
-                {
-                    adjacent = false;
-                    break;
-                }
             }
-            if ( adjacent )
-                neighbor_set.insert( s );
-        }
-        else
-        {
-            for ( int oct = 0; oct < 8; oct++ )
+            for ( int i = 0; i < 8; i++ )
             {
-                MortonKey ck = child_key( s, oct );
-                if ( _cell_map.count( ck ) )
-                    stack.push_back( ck );
-            }
-        }
-    }
-
-    return std::vector<MortonKey>( neighbor_set.begin(),
-                                   neighbor_set.end() );
-}
-
-// --------------------------------------------------------------------------
-// build_interaction_list
-//
-// The M2L interaction list for cell C consists of cells that are:
-//   - Children of C's parent's neighbors (i.e., "cousins")
-//   - NOT neighbors of C itself (i.e., well-separated from C)
-//   - At the same depth as C or are leaves at a coarser depth
-//
-// In the standard FMM, the interaction list has at most 189 entries
-// in 3D (6^3 - 3^3 = 189). In an adaptive tree, interactions with
-// coarser cells can occur when the tree isn't uniformly refined.
-//
-// For the adaptive case, we use the following approach:
-//   1. Find the parent's neighbors (cells adjacent to the parent).
-//   2. For each parent neighbor, collect its children (if internal)
-//      or the cell itself (if leaf).
-//   3. Exclude any cell that is a neighbor of C.
-//   4. The remaining cells form the interaction list.
-// --------------------------------------------------------------------------
-template <class MemorySpace, class ExecutionSpace>
-std::vector<MortonKey>
-CommunicationPlan<MemorySpace, ExecutionSpace>::build_interaction_list(
-    MortonKey key, const CellInfo& cell ) const
-{
-    if ( key == ROOT_KEY )
-        return {}; // root has no interaction list
-
-    MortonKey pk = parent_key( key );
-    auto parent_it = _cell_map.find( pk );
-    if ( parent_it == _cell_map.end() )
-        return {};
-
-    const CellInfo* parent_ci = parent_it->second;
-
-    // Step 1: Find parent's neighbors
-    auto parent_neighbors = find_neighbors( pk, *parent_ci );
-
-    // Step 2: Find the cell's own neighbors (to exclude from
-    //         interaction list)
-    auto my_neighbors = find_neighbors( key, cell );
-    std::unordered_set<MortonKey> my_neighbor_set( my_neighbors.begin(),
-                                                   my_neighbors.end() );
-    my_neighbor_set.insert( key ); // exclude self too
-
-    // Step 3: For each parent neighbor, collect its children or itself
-    std::vector<MortonKey> interaction_list;
-
-    for ( MortonKey pn_key : parent_neighbors )
-    {
-        auto pn_it = _cell_map.find( pn_key );
-        if ( pn_it == _cell_map.end() )
-            continue;
-
-        const CellInfo* pn_ci = pn_it->second;
-
-        if ( pn_ci->is_leaf )
-        {
-            // Parent's neighbor is a leaf. It interacts with C at
-            // C's level only if it's well-separated from C.
-            // (This handles the adaptive case where a neighbor of the
-            // parent wasn't refined as deeply as C.)
-            if ( my_neighbor_set.find( pn_key ) == my_neighbor_set.end() )
-            {
-                interaction_list.push_back( pn_key );
-            }
-        }
-        else
-        {
-            // Parent's neighbor is internal — check its children
-            for ( int oct = 0; oct < 8; oct++ )
-            {
-                MortonKey ck = child_key( pn_key, oct );
-                auto ck_it = _cell_map.find( ck );
-                if ( ck_it == _cell_map.end() )
-                    continue; // child was pruned (empty)
-
-                // Exclude if this child is a neighbor of C
-                if ( my_neighbor_set.find( ck ) != my_neighbor_set.end() )
+                MortonKey ci = child_key( tk, i );
+                if ( !_cell_map.count( ci ) )
                     continue;
-
-                interaction_list.push_back( ck );
-            }
-        }
-    }
-
-    return interaction_list;
-}
-
-// --------------------------------------------------------------------------
-// build_p2p_neighbor_list
-//
-// For a leaf cell, the P2P neighbor list includes all leaf cells whose
-// spatial extents are adjacent (share a face, edge, or vertex). In an
-// adaptive tree, these may be at different depths.
-//
-// Uses a tree traversal rather than fixed probe points. The probe-point
-// approach is only correct when all leaves have the same half-width: a
-// coarser leaf's probe at ±2*hw overshoots finer adjacent leaves whose
-// centers are closer than 2*hw, making the neighbor relation asymmetric
-// and breaking the symmetry of the ghost/send communication plan.
-//
-// Two cells A and B are adjacent iff
-//   |c_A[d] - c_B[d]| <= hw_A + hw_B   for all d in {0,1,2}.
-// This condition is symmetric by construction, so if A finds B, B finds A.
-//
-// Pruning: an internal cell X cannot contain any adjacent descendant leaf
-// if, for any d, |c[d] - c_X[d]| > hw + 2*hw_X (because the closest a
-// descendant leaf's center can be in dimension d is c_X[d] ± hw_X, and
-// the maximum descendant hw is hw_X, so the tightest the adjacency
-// condition can be satisfied is hw + hw_X vs. dist - hw_X).
-// --------------------------------------------------------------------------
-template <class MemorySpace, class ExecutionSpace>
-std::vector<MortonKey>
-CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_neighbor_list(
-    MortonKey key, const CellInfo& cell ) const
-{
-    std::set<MortonKey> neighbor_leaves;
-    neighbor_leaves.insert( key ); // self-interaction
-
-    const double hw  = cell.half_width;
-    const double eps = 1.0e-10;
-
-    std::vector<MortonKey> stack;
-    stack.push_back( ROOT_KEY );
-
-    while ( !stack.empty() )
-    {
-        MortonKey s = stack.back();
-        stack.pop_back();
-
-        auto s_it = _cell_map.find( s );
-        if ( s_it == _cell_map.end() )
-            continue;
-
-        const CellInfo* s_ci = s_it->second;
-        const double hw_s = s_ci->half_width;
-
-        // FMM well-separation pruning. See find_neighbors above for the
-        // derivation; we use 2*max(hw, hw_s) as the near-list threshold.
-        const double max_hw_csci = ( hw > hw_s ) ? hw : hw_s;
-        const double prune_dist = 2.0 * max_hw_csci + hw_s;
-        bool can_contain_neighbor = true;
-        for ( int d = 0; d < 3; d++ )
-        {
-            double dist = std::abs( cell.center[d] - s_ci->center[d] );
-            if ( dist > prune_dist + eps )
-            {
-                can_contain_neighbor = false;
-                break;
-            }
-        }
-        if ( !can_contain_neighbor )
-            continue;
-
-        if ( s_ci->is_leaf )
-        {
-            if ( s == key )
-                continue; // already inserted self
-
-            // FMM near-list: dist <= 2*max(hw, hw_s) in every axis. This is
-            // the same threshold used by find_neighbors so M2L and P2P
-            // partition all cells consistently.
-            const double near_dist = 4.0 * max_hw_csci;
-            bool adjacent = true;
-            for ( int d = 0; d < 3; d++ )
-            {
-                double dist = std::abs( cell.center[d] - s_ci->center[d] );
-                if ( dist > near_dist + eps )
+                for ( int j = i; j < 8; j++ )
                 {
-                    adjacent = false;
-                    break;
+                    MortonKey cj = child_key( tk, j );
+                    if ( !_cell_map.count( cj ) )
+                        continue;
+                    stack.push_back( { ci, cj } );
                 }
             }
-            if ( adjacent )
-                neighbor_leaves.insert( s );
+            continue;
+        }
+
+        // Well-separated → M2L (one unordered pair, both directed M2Ls).
+        if ( is_well_separated( *T, *S ) )
+        {
+            emit_m2l_pair( tk, sk );
+            continue;
+        }
+
+        // Both leaves, not well-separated → P2P.
+        if ( T->is_leaf && S->is_leaf )
+        {
+            emit_p2p_pair( tk, sk );
+            continue;
+        }
+
+        // Otherwise, split the larger cell. Splitting on >= (rather than
+        // strict >) gives a deterministic tie-break for equal half-widths.
+        const bool split_t =
+            S->is_leaf ||
+            ( !T->is_leaf && T->half_width >= S->half_width );
+        if ( split_t )
+        {
+            for ( int oct = 0; oct < 8; oct++ )
+            {
+                MortonKey ck = child_key( tk, oct );
+                if ( _cell_map.count( ck ) )
+                    stack.push_back( { ck, sk } );
+            }
         }
         else
         {
-            // Descend into children that passed the pruning check
             for ( int oct = 0; oct < 8; oct++ )
             {
-                MortonKey ck = child_key( s, oct );
+                MortonKey ck = child_key( sk, oct );
                 if ( _cell_map.count( ck ) )
-                    stack.push_back( ck );
+                    stack.push_back( { tk, ck } );
             }
         }
     }
 
-    return std::vector<MortonKey>( neighbor_leaves.begin(),
-                                   neighbor_leaves.end() );
+    // The DTT may emit duplicates of the same (target, source) directed
+    // pair only via a self-pair self-emit on a leaf — which is intended
+    // to appear exactly once. All other pairs are visited exactly once,
+    // so no list-side dedup is required.
 }
 
 // --------------------------------------------------------------------------
@@ -759,205 +680,54 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
 }
 
 // --------------------------------------------------------------------------
-// build_m2l_plan — interaction list communication
+// finalize_m2l_plan / finalize_p2p_plan
 //
-// For each cell this rank processes, compute the interaction list.
-// Identify which source cells are on remote ranks, and build the
-// send/receive manifests.
+// The DTT pass populates interaction_lists / neighbor_lists and the scratch
+// receive/send/ghost sets directly. These finalizers transcribe the scratch
+// sets into the public CellTransfer vectors and drop scratch storage.
+//
+// Each interaction list is sorted before being exposed so that downstream
+// CSR construction is deterministic across runs. The DTT visit order
+// otherwise depends on stack pop order and would shuffle entries.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-void CommunicationPlan<MemorySpace, ExecutionSpace>::build_m2l_plan(
-    const std::vector<CellInfo>& cells )
+void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_m2l_plan()
 {
-    _m2l_plan.interaction_lists.clear();
     _m2l_plan.sends.clear();
     _m2l_plan.receives.clear();
 
-    // Track which source cells we need from each rank
-    // and which cells other ranks need from us
-    std::set<std::pair<MortonKey, int>> receives_set; // (key, from_rank)
-    std::set<std::pair<MortonKey, int>> sends_set;    // (key, to_rank)
+    for ( auto& kv : _m2l_plan.interaction_lists )
+        std::sort( kv.second.begin(), kv.second.end() );
 
-    for ( const auto& ci : cells )
-    {
-        // Only build interaction lists for cells this rank processes
-        if ( !rank_processes( ci.key ) )
-            continue;
-
-        // Skip leaves at the root level (no interaction list)
-        if ( ci.key == ROOT_KEY )
-            continue;
-
-        auto ilist = build_interaction_list( ci.key, ci );
-
-        if ( !ilist.empty() )
-            _m2l_plan.interaction_lists[ci.key] = ilist;
-
-        // Shared cells use collective M2L communication across all ranks;
-        // their interaction-list data is not exchanged point-to-point here.
-        if ( owner_of( ci.key ) == OWNER_SHARED )
-            continue;
-
-        // Check which sources are on remote ranks
-        for ( MortonKey source : ilist )
-        {
-            int source_owner = owner_of( source );
-
-            if ( source_owner != _rank && source_owner != OWNER_SHARED )
-            {
-                // We need this cell's multipole from another rank
-                receives_set.insert( { source, source_owner } );
-            }
-        }
-    }
-
-    // Convert receives to vector
-    for ( const auto& [key, from_rank] : receives_set )
-    {
+    for ( const auto& [key, from_rank] : _m2l_receives_set )
         _m2l_plan.receives.push_back( { key, from_rank } );
-    }
-
-    // Now determine what this rank needs to send.
-    // We need to know what other ranks need from us. Since the tree
-    // and ownership are global, we can compute this symmetrically:
-    // for each cell this rank owns, check if any other rank's cells
-    // have it in their interaction list.
-    //
-    // Alternatively, we can use an MPI exchange of the receive lists
-    // to determine sends. This is more robust for large rank counts.
-    //
-    // For now, since the tree is replicated on all ranks, we compute
-    // sends by iterating over all cells and checking if their
-    // interaction lists include cells we own.
-
-    for ( const auto& ci : cells )
-    {
-        int target_owner = owner_of( ci.key );
-
-        // Skip cells that this rank processes (we don't send to ourselves)
-        if ( target_owner == _rank || target_owner == OWNER_SHARED )
-            continue;
-
-        // Skip root
-        if ( ci.key == ROOT_KEY )
-            continue;
-
-        auto ilist = build_interaction_list( ci.key, ci );
-
-        for ( MortonKey source : ilist )
-        {
-            int source_owner = owner_of( source );
-
-            if ( source_owner == _rank )
-            {
-                // The target rank needs our cell's multipole
-                sends_set.insert( { source, target_owner } );
-            }
-        }
-    }
-
-    for ( const auto& [key, to_rank] : sends_set )
-    {
+    for ( const auto& [key, to_rank] : _m2l_sends_set )
         _m2l_plan.sends.push_back( { key, to_rank } );
-    }
+
+    _m2l_receives_set.clear();
+    _m2l_sends_set.clear();
 }
 
-// --------------------------------------------------------------------------
-// build_p2p_plan — near-field neighbor lists and ghost identification
-//
-// For each locally-owned leaf, compute its P2P neighbor list (adjacent
-// leaf cells). Identify which neighbors are on remote ranks — those
-// will need particle halo exchange.
-// --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-void CommunicationPlan<MemorySpace, ExecutionSpace>::build_p2p_plan(
-    const std::vector<CellInfo>& cells )
+void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_p2p_plan()
 {
-    _p2p_plan.neighbor_lists.clear();
     _p2p_plan.ghost_leaf_keys.clear();
     _p2p_plan.ghost_leaf_owners.clear();
     _p2p_plan.send_leaves.clear();
 
-    std::set<MortonKey> ghost_set;
+    for ( auto& kv : _p2p_plan.neighbor_lists )
+        std::sort( kv.second.begin(), kv.second.end() );
 
-    // Build the incoming side: for each leaf we own, compute its
-    // neighbor list. Any neighbor whose owner is a remote rank is a
-    // ghost we need to receive.
-    for ( const auto& ci : cells )
-    {
-        if ( !ci.is_leaf )
-            continue;
-
-        int leaf_owner = owner_of( ci.key );
-        if ( leaf_owner != _rank )
-            continue;
-
-        auto neighbors = build_p2p_neighbor_list( ci.key, ci );
-        _p2p_plan.neighbor_lists[ci.key] = neighbors;
-
-        for ( MortonKey nk : neighbors )
-        {
-            if ( nk == ci.key )
-                continue;
-
-            int nk_owner = owner_of( nk );
-            if ( nk_owner != _rank && nk_owner != OWNER_SHARED )
-            {
-                ghost_set.insert( nk );
-            }
-        }
-    }
-
-    for ( MortonKey gk : ghost_set )
+    for ( MortonKey gk : _p2p_ghost_set )
     {
         _p2p_plan.ghost_leaf_keys.push_back( gk );
         _p2p_plan.ghost_leaf_owners.push_back( owner_of( gk ) );
     }
-
-    // --------------------------------------------------------------------
-    // Build the outgoing side: for each leaf I own, for each of its
-    // neighbors, if that neighbor's owner is a different rank, then that
-    // rank has ME in its ghost list and needs to receive this leaf.
-    //
-    // Adjacency is symmetric: if N is a P2P neighbor of L, then L is a
-    // P2P neighbor of N. Since the tree is replicated, we can compute
-    // sends locally with no MPI.
-    //
-    // Duplicates: if the same remote rank owns multiple of a leaf's
-    // neighbors, we'd add the send multiple times. Deduplicate via a
-    // set of (leaf_key, remote_rank) pairs.
-    // --------------------------------------------------------------------
-    std::set<std::pair<MortonKey, int>> send_set;
-
-    for ( const auto& ci : cells )
-    {
-        if ( !ci.is_leaf )
-            continue;
-
-        int leaf_owner = owner_of( ci.key );
-        if ( leaf_owner != _rank )
-            continue;
-
-        // We already built the neighbor list for this leaf above;
-        // look it up.
-        auto nit = _p2p_plan.neighbor_lists.find( ci.key );
-        if ( nit == _p2p_plan.neighbor_lists.end() )
-            continue;
-
-        for ( MortonKey nk : nit->second )
-        {
-            if ( nk == ci.key )
-                continue;
-            int nk_owner = owner_of( nk );
-            if ( nk_owner == _rank || nk_owner == OWNER_SHARED )
-                continue;
-            // nk_owner is a remote rank that needs my leaf ci.key
-            send_set.insert( { ci.key, nk_owner } );
-        }
-    }
-
-    for ( const auto& [k, r] : send_set )
+    for ( const auto& [k, r] : _p2p_send_set )
         _p2p_plan.send_leaves.push_back( { k, r } );
+
+    _p2p_ghost_set.clear();
+    _p2p_send_set.clear();
 }
 
 // --------------------------------------------------------------------------
@@ -979,10 +749,22 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     for ( const auto& c : cells )
         _cell_map[c.key] = &c;
 
-    // Build all four plans
+    // Vertical plans (M2M / L2L) follow the parent-child topology and are
+    // independent of the M2L/P2P pair set.
     build_vertical_plans( cells );
-    build_m2l_plan( cells );
-    build_p2p_plan( cells );
+
+    // Compute subtree-relevance flags before the DTT so the traversal can
+    // skip branches that don't intersect this rank's responsibilities.
+    compute_subtree_relevance( cells );
+
+    // Single dual-tree traversal builds both the M2L interaction lists
+    // and the P2P neighbor lists with symmetric (target, source) emissions.
+    build_all_interaction_lists( cells );
+
+    // Materialize the scratch send/receive/ghost sets into the public plan
+    // vectors.
+    finalize_m2l_plan();
+    finalize_p2p_plan();
 
     _valid = true;
 }

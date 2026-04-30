@@ -210,10 +210,16 @@ class DownwardSweep
     // cell indices. To make this efficient on device, we concatenate
     // all interaction lists into a single flat array with per-target
     // offsets and counts.
+    //
+    // Targets are sorted by depth so that run_m2l_at_depth(d) launches
+    // only over the contiguous range [depth_offsets[d], depth_offsets[d+1]),
+    // avoiding the per-team `if (depth != d) return` filter that ran a
+    // team for every target at every depth.
     Kokkos::View<int*, memory_space> _m2l_target_cells;
     Kokkos::View<int*, memory_space> _m2l_source_cells_flat;
     Kokkos::View<int*, memory_space> _m2l_offsets;  // size N+1
     Kokkos::View<int*, memory_space> _m2l_counts;   // size N
+    std::vector<int> _m2l_depth_offsets;            // size max_depth + 2 (host)
 
     // Scratch: reference to the multipoles view during execute().
     // The M2L kernels capture this. Set at the start of execute()
@@ -380,12 +386,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     const auto& m2l = comm_plan.m2l_plan();
     const auto& ilists = m2l.interaction_lists;
 
-    // Flatten interaction lists. Target cells are keys in ilists.
-    std::vector<int> target_cells;
-    std::vector<int> counts;
-    std::vector<int> offsets;
-    std::vector<int> sources_flat;
-
     // Shared cells are processed by every rank. For shared targets, all
     // sources in the interaction list are themselves at shared depths
     // (their multipoles are correctly allreduced and identical on every
@@ -398,7 +398,19 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     auto h_dc_for_filter = Kokkos::create_mirror_view_and_copy(
         Kokkos::HostSpace{}, _device_cells );
 
-    offsets.push_back( 0 );
+    // First pass: collect (target_idx, sources_idx_vec, depth) so we can
+    // sort by depth before flattening into the CSR. Depth-sorted target
+    // order lets run_m2l_at_depth(d) launch only over the contiguous
+    // [depth_offsets[d], depth_offsets[d+1]) slice — no per-team filter.
+    struct TargetEntry
+    {
+        int target_idx;
+        int depth;
+        std::vector<int> sources;
+    };
+    std::vector<TargetEntry> entries;
+    entries.reserve( ilists.size() );
+
     for ( const auto& [target_key, sources] : ilists )
     {
         auto it = _key_to_cell_idx->find( target_key );
@@ -409,19 +421,58 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             ( h_dc_for_filter( target_idx ).owner_rank == OWNER_SHARED );
         if ( target_is_shared && _rank != 0 )
             continue;
-        target_cells.push_back( target_idx );
 
-        int count = 0;
+        TargetEntry e;
+        e.target_idx = target_idx;
+        e.depth = h_dc_for_filter( target_idx ).depth;
+        e.sources.reserve( sources.size() );
         for ( MortonKey src_key : sources )
         {
             auto sit = _key_to_cell_idx->find( src_key );
             if ( sit == _key_to_cell_idx->end() )
                 continue;
-            sources_flat.push_back( sit->second );
-            count++;
+            e.sources.push_back( sit->second );
         }
-        counts.push_back( count );
-        offsets.push_back( offsets.back() + count );
+        entries.push_back( std::move( e ) );
+    }
+
+    std::sort( entries.begin(), entries.end(),
+               []( const TargetEntry& a, const TargetEntry& b ) {
+                   if ( a.depth != b.depth )
+                       return a.depth < b.depth;
+                   return a.target_idx < b.target_idx;
+               } );
+
+    std::vector<int> target_cells;
+    std::vector<int> counts;
+    std::vector<int> offsets;
+    std::vector<int> sources_flat;
+    target_cells.reserve( entries.size() );
+    counts.reserve( entries.size() );
+    offsets.reserve( entries.size() + 1 );
+    offsets.push_back( 0 );
+    for ( const auto& e : entries )
+    {
+        target_cells.push_back( e.target_idx );
+        counts.push_back( static_cast<int>( e.sources.size() ) );
+        for ( int s : e.sources )
+            sources_flat.push_back( s );
+        offsets.push_back( offsets.back() +
+                           static_cast<int>( e.sources.size() ) );
+    }
+
+    // Build host-side per-depth offsets into the sorted target list:
+    // _m2l_depth_offsets[d] = first index in target_cells with depth >= d.
+    _m2l_depth_offsets.assign( _max_depth + 2, 0 );
+    {
+        int cursor = 0;
+        for ( int d = 0; d <= _max_depth + 1; d++ )
+        {
+            while ( cursor < static_cast<int>( entries.size() ) &&
+                    entries[cursor].depth < d )
+                ++cursor;
+            _m2l_depth_offsets[d] = cursor;
+        }
     }
 
     // Upload to device
@@ -561,11 +612,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::exchange_multipoles
 template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth( int depth )
 {
-    // Run M2L for all target cells at this depth.
-    // _m2l_target_cells holds all target cells (across all depths); filter.
-    //
-    // For simplicity, build per-depth target lists on the host-side
-    // interaction list during setup. For now we filter at launch.
+    // Targets are stored sorted by depth, so we launch only over the
+    // contiguous slice [depth_offsets[depth], depth_offsets[depth+1]).
+    if ( depth < 0 || depth + 1 >= static_cast<int>( _m2l_depth_offsets.size() ) )
+        return;
+    const int begin = _m2l_depth_offsets[depth];
+    const int end   = _m2l_depth_offsets[depth + 1];
+    const int N     = end - begin;
+    if ( N == 0 )
+        return;
 
     auto device_cells = _device_cells;
     auto m2l_targets = _m2l_target_cells;
@@ -574,35 +629,20 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth( i
     auto m2l_sources = _m2l_source_cells_flat;
     auto locals = _locals;
     auto A_table = _A_table;
-
-    // We need the multipoles too. They live in the UpwardSweep's view,
-    // which was passed into execute(). We capture it via a member
-    // variable set at the start of execute() to avoid plumbing through
-    // every internal method.
-    // Approach: store multipoles pointer in a temporary scratch during
-    // execute. Done via _m2l_multipoles_view below.
     auto multipoles = _m2l_multipoles_view;
-
-    const int N = m2l_targets.extent( 0 );
-    if ( N == 0 )
-        return;
 
     using team_policy = Kokkos::TeamPolicy<execution_space>;
     using team_member_type = typename team_policy::member_type;
 
-    // Launch one team per target cell. Teams whose target is not at
-    // `depth` return early.
     team_policy policy( N, Kokkos::AUTO );
 
     Kokkos::parallel_for(
         "M2L",
         policy,
         KOKKOS_LAMBDA( const team_member_type& team ) {
-            const int league = team.league_rank();
+            const int league = team.league_rank() + begin;
             const int target_cell = m2l_targets( league );
             const auto& target_ci = device_cells( target_cell );
-            if ( target_ci.depth != depth )
-                return;
 
             auto L_target = Kokkos::subview( locals, target_cell,
                                              Kokkos::ALL, Kokkos::ALL );
