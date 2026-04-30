@@ -69,13 +69,11 @@ class DownwardSweep
     using complex_type = typename KernelType::complex_type;
 
     static constexpr int P = KernelType::max_order;
-    static constexpr int coeffs_per_cell =
-        KernelType::num_coeffs_per_cell;
+    static constexpr int coeffs_per_cell = KernelType::num_coeffs_per_cell;
     static constexpr int NComps = KernelType::num_components;
 
     // Local coefficient storage
-    using coeff_view_type =
-        Kokkos::View<complex_type***, memory_space>;
+    using coeff_view_type = Kokkos::View<complex_type***, memory_space>;
 
     // Potential output: (num_particles, NComps)
     using potential_view_type =
@@ -101,10 +99,11 @@ class DownwardSweep
     };
 
     // Match UpwardSweep's cell metadata layout
-    using cell_view_type =
-        typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::cell_view_type;
+    using cell_view_type = typename UpwardSweep<MemorySpace, ExecutionSpace,
+                                                KernelType>::cell_view_type;
     using particle_cell_idx_view_type =
-        typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::particle_cell_idx_view_type;
+        typename UpwardSweep<MemorySpace, ExecutionSpace,
+                             KernelType>::particle_cell_idx_view_type;
 
     // -----------------------------------------------------------------------
     // Constructor
@@ -127,9 +126,9 @@ class DownwardSweep
     // view, key lookup, particle-cell index, and A-table. This avoids
     // duplicating host metadata.
     // -----------------------------------------------------------------------
-    void setup(
-        const UpwardSweep<MemorySpace, ExecutionSpace, KernelType>& upward_sweep,
-        int num_local_particles );
+    void setup( const UpwardSweep<MemorySpace, ExecutionSpace, KernelType>&
+                    upward_sweep,
+                int num_local_particles );
 
     // -----------------------------------------------------------------------
     // allocate_potential / allocate_gradient — helper to size outputs.
@@ -137,14 +136,12 @@ class DownwardSweep
     // -----------------------------------------------------------------------
     potential_view_type allocate_potential( int num_local_particles ) const
     {
-        return potential_view_type( "fmm_potential",
-                                    num_local_particles );
+        return potential_view_type( "fmm_potential", num_local_particles );
     }
 
     gradient_view_type allocate_gradient( int num_local_particles ) const
     {
-        return gradient_view_type( "fmm_gradient",
-                                   num_local_particles );
+        return gradient_view_type( "fmm_gradient", num_local_particles );
     }
 
     // -----------------------------------------------------------------------
@@ -167,8 +164,8 @@ class DownwardSweep
     // -----------------------------------------------------------------------
     template <class PositionType>
     void execute(
-        const typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::coeff_view_type&
-            multipoles,
+        const typename UpwardSweep<MemorySpace, ExecutionSpace,
+                                   KernelType>::coeff_view_type& multipoles,
         const PositionType& particle_positions,
         const potential_view_type& potential_out,
         const gradient_view_type& gradient_out, bool compute_gradient,
@@ -217,20 +214,21 @@ class DownwardSweep
     // team for every target at every depth.
     Kokkos::View<int*, memory_space> _m2l_target_cells;
     Kokkos::View<int*, memory_space> _m2l_source_cells_flat;
-    Kokkos::View<int*, memory_space> _m2l_offsets;  // size N+1
-    Kokkos::View<int*, memory_space> _m2l_counts;   // size N
-    std::vector<int> _m2l_depth_offsets;            // size max_depth + 2 (host)
+    Kokkos::View<int*, memory_space> _m2l_offsets; // size N+1
+    Kokkos::View<int*, memory_space> _m2l_counts;  // size N
+    std::vector<int> _m2l_depth_offsets;           // size max_depth + 2 (host)
 
     // Scratch: reference to the multipoles view during execute().
     // The M2L kernels capture this. Set at the start of execute()
     // and used by run_m2l_at_depth().
-    typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::coeff_view_type
-        _m2l_multipoles_view;
+    typename UpwardSweep<MemorySpace, ExecutionSpace,
+                         KernelType>::coeff_view_type _m2l_multipoles_view;
 
     // Per-depth snapshot of shared-cell locals taken before M2L at that
     // depth. Used by allreduce_shared_locals_at_depth to isolate the
     // M2L delta from L2L contributions inherited from prior depths.
-    std::vector<int> _shared_snapshot_indices; // shared cell indices at current depth
+    std::vector<int>
+        _shared_snapshot_indices; // shared cell indices at current depth
     std::vector<complex_type> _shared_snapshot_buf;
 
   public:
@@ -249,8 +247,8 @@ class DownwardSweep
     // Multipole exchange for M2L: receive source multipoles from
     // remote ranks so we can run M2L locally.
     void exchange_multipoles_for_m2l(
-        const typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::coeff_view_type&
-            multipoles,
+        const typename UpwardSweep<MemorySpace, ExecutionSpace,
+                                   KernelType>::coeff_view_type& multipoles,
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
 
     // Snapshot shared-cell locals at a given depth into _shared_snapshot_buf.
@@ -259,19 +257,22 @@ class DownwardSweep
     // (current - snapshot) instead of summing the cumulative locals — which
     // would over-count the L2L contribution from prior depths by nprocs.
     void snapshot_shared_locals_at_depth(
-        int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
+        int depth,
+        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
 
     // Allreduce partial M2L contributions at shared cells at a given depth.
     // Uses the snapshot from snapshot_shared_locals_at_depth(depth) to
     // isolate the M2L delta before the MPI_Allreduce.
     void allreduce_shared_locals_at_depth(
-        int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
+        int depth,
+        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
 
     // Point-to-point exchange of local coefficients after L2L at a depth:
     // children owners receive from parent owners. Direction is the
     // reverse of M2M exchange.
     void exchange_locals_after_l2l_at_depth(
-        int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
+        int depth,
+        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
 };
 
 // ============================================================================
@@ -293,8 +294,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
 
     const int num_cells = _device_cells.extent( 0 );
 
-    _locals = coeff_view_type( "locals", num_cells, coeffs_per_cell,
-                               NComps );
+    _locals = coeff_view_type( "locals", num_cells, coeffs_per_cell, NComps );
 
     // We need particle_cell_idx too. It's private in UpwardSweep, but
     // we can rebuild it from the key-to-idx map and particle keys. A
@@ -318,13 +318,13 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _internals_at_depth_local.assign( _max_depth + 1, {} );
     _all_at_depth_local.assign( _max_depth + 1, {} );
 
-    auto h_dc = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace{}, _device_cells );
+    auto h_dc = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
+                                                     _device_cells );
     for ( int i = 0; i < num_cells; i++ )
     {
         const auto& dci = h_dc( i );
-        bool processes = ( dci.owner_rank == _rank ||
-                           dci.owner_rank == OWNER_SHARED );
+        bool processes =
+            ( dci.owner_rank == _rank || dci.owner_rank == OWNER_SHARED );
         if ( !processes )
             continue;
 
@@ -344,19 +344,20 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
 
     for ( int d = 0; d <= _max_depth; d++ )
     {
-        auto vec_to_view =
-            [&]( const std::vector<int>& src, Kokkos::View<int*, memory_space>& dest,
-                 const char* label ) {
-                const size_t n = src.size();
-                dest = Kokkos::View<int*, memory_space>( std::string( label ), n );
-                if ( n > 0 )
-                {
-                    auto h = Kokkos::create_mirror_view( dest );
-                    for ( size_t i = 0; i < n; i++ )
-                        h( i ) = src[i];
-                    Kokkos::deep_copy( dest, h );
-                }
-            };
+        auto vec_to_view = [&]( const std::vector<int>& src,
+                                Kokkos::View<int*, memory_space>& dest,
+                                const char* label )
+        {
+            const size_t n = src.size();
+            dest = Kokkos::View<int*, memory_space>( std::string( label ), n );
+            if ( n > 0 )
+            {
+                auto h = Kokkos::create_mirror_view( dest );
+                for ( size_t i = 0; i < n; i++ )
+                    h( i ) = src[i];
+                Kokkos::deep_copy( dest, h );
+            }
+        };
 
         vec_to_view( _leaves_at_depth_local[d], _d_leaves_at_depth[d],
                      "leaves_at_depth" );
@@ -447,7 +448,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     std::sort( entries.begin(), entries.end(),
-               []( const TargetEntry& a, const TargetEntry& b ) {
+               []( const TargetEntry& a, const TargetEntry& b )
+               {
                    if ( a.depth != b.depth )
                        return a.depth < b.depth;
                    return a.target_idx < b.target_idx;
@@ -487,15 +489,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     // Upload to device
     const int N = static_cast<int>( target_cells.size() );
-    _m2l_target_cells =
-        Kokkos::View<int*, memory_space>( "m2l_targets", N );
-    _m2l_counts =
-        Kokkos::View<int*, memory_space>( "m2l_counts", N );
-    _m2l_offsets =
-        Kokkos::View<int*, memory_space>( "m2l_offsets", N + 1 );
+    _m2l_target_cells = Kokkos::View<int*, memory_space>( "m2l_targets", N );
+    _m2l_counts = Kokkos::View<int*, memory_space>( "m2l_counts", N );
+    _m2l_offsets = Kokkos::View<int*, memory_space>( "m2l_offsets", N + 1 );
     _m2l_source_cells_flat = Kokkos::View<int*, memory_space>(
-        "m2l_sources_flat",
-        static_cast<int>( sources_flat.size() ) );
+        "m2l_sources_flat", static_cast<int>( sources_flat.size() ) );
 
     if ( N > 0 )
     {
@@ -525,10 +523,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
-void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::exchange_multipoles_for_m2l(
-    const typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::coeff_view_type&
-        multipoles,
-    const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
+    exchange_multipoles_for_m2l(
+        const typename UpwardSweep<MemorySpace, ExecutionSpace,
+                                   KernelType>::coeff_view_type& multipoles,
+        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
     // Pre-sweep bulk exchange: we send each of our cells whose multipole
     // is in another rank's interaction list, and receive remote source
@@ -541,8 +540,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::exchange_multipoles
     MPI_Datatype mpi_scalar =
         ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
 
-    auto h_mults = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace{}, multipoles );
+    auto h_mults =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, multipoles );
 
     // Post receives
     std::vector<MPI_Request> recv_reqs( m2l.receives.size() );
@@ -563,10 +562,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::exchange_multipoles
         recv_bufs[i].resize( per_cell_complex );
 
         int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Irecv(
-            reinterpret_cast<scalar_type*>( recv_bufs[i].data() ),
-            per_cell_real, mpi_scalar, m2l.receives[i].remote_rank, tag,
-            _comm, &recv_reqs[i] );
+        MPI_Irecv( reinterpret_cast<scalar_type*>( recv_bufs[i].data() ),
+                   per_cell_real, mpi_scalar, m2l.receives[i].remote_rank, tag,
+                   _comm, &recv_reqs[i] );
     }
 
     // Post sends
@@ -591,18 +589,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::exchange_multipoles
                 send_bufs[i][idx++] = h_mults( cidx, ci, c );
 
         int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Isend(
-            reinterpret_cast<scalar_type*>( send_bufs[i].data() ),
-            per_cell_real, mpi_scalar, m2l.sends[i].remote_rank, tag,
-            _comm, &send_reqs[i] );
+        MPI_Isend( reinterpret_cast<scalar_type*>( send_bufs[i].data() ),
+                   per_cell_real, mpi_scalar, m2l.sends[i].remote_rank, tag,
+                   _comm, &send_reqs[i] );
     }
 
     if ( !recv_reqs.empty() )
-        MPI_Waitall( recv_reqs.size(), recv_reqs.data(),
-                     MPI_STATUSES_IGNORE );
+        MPI_Waitall( recv_reqs.size(), recv_reqs.data(), MPI_STATUSES_IGNORE );
     if ( !send_reqs.empty() )
-        MPI_Waitall( send_reqs.size(), send_reqs.data(),
-                     MPI_STATUSES_IGNORE );
+        MPI_Waitall( send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE );
 
     // Unpack received multipoles into the multipole view
     for ( size_t i = 0; i < m2l.receives.size(); i++ )
@@ -620,15 +615,17 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::exchange_multipoles
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
-void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth( int depth )
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
+    int depth )
 {
     // Targets are stored sorted by depth, so we launch only over the
     // contiguous slice [depth_offsets[depth], depth_offsets[depth+1]).
-    if ( depth < 0 || depth + 1 >= static_cast<int>( _m2l_depth_offsets.size() ) )
+    if ( depth < 0 ||
+         depth + 1 >= static_cast<int>( _m2l_depth_offsets.size() ) )
         return;
     const int begin = _m2l_depth_offsets[depth];
-    const int end   = _m2l_depth_offsets[depth + 1];
-    const int N     = end - begin;
+    const int end = _m2l_depth_offsets[depth + 1];
+    const int N = end - begin;
     if ( N == 0 )
         return;
 
@@ -647,15 +644,13 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth( i
     team_policy policy( N, Kokkos::AUTO );
 
     Kokkos::parallel_for(
-        "M2L",
-        policy,
-        KOKKOS_LAMBDA( const team_member_type& team ) {
+        "M2L", policy, KOKKOS_LAMBDA( const team_member_type& team ) {
             const int league = team.league_rank() + begin;
             const int target_cell = m2l_targets( league );
             const auto& target_ci = device_cells( target_cell );
 
-            auto L_target = Kokkos::subview( locals, target_cell,
-                                             Kokkos::ALL, Kokkos::ALL );
+            auto L_target = Kokkos::subview( locals, target_cell, Kokkos::ALL,
+                                             Kokkos::ALL );
 
             const int start = m2l_offsets( league );
             const int count = m2l_counts( league );
@@ -665,16 +660,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth( i
                 const int source_cell = m2l_sources( start + s );
                 const auto& src_ci = device_cells( source_cell );
 
-                const scalar_type dx =
-                    src_ci.center[0] - target_ci.center[0];
-                const scalar_type dy =
-                    src_ci.center[1] - target_ci.center[1];
-                const scalar_type dz =
-                    src_ci.center[2] - target_ci.center[2];
+                const scalar_type dx = src_ci.center[0] - target_ci.center[0];
+                const scalar_type dy = src_ci.center[1] - target_ci.center[1];
+                const scalar_type dz = src_ci.center[2] - target_ci.center[2];
 
-                KernelType::m2l_translate( team, multipoles, source_cell,
-                                           dx, dy, dz, A_table,
-                                           L_target );
+                KernelType::m2l_translate( team, multipoles, source_cell, dx,
+                                           dy, dz, A_table, L_target );
             }
         } );
 
@@ -682,7 +673,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth( i
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
-void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth( int depth )
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth(
+    int depth )
 {
     // Parents at `depth` translate to their children at `depth+1`.
     // For each parent this rank processes, iterate over its children
@@ -705,9 +697,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth( i
     team_policy policy( nparents, Kokkos::AUTO );
 
     Kokkos::parallel_for(
-        "L2L",
-        policy,
-        KOKKOS_LAMBDA( const team_member_type& team ) {
+        "L2L", policy, KOKKOS_LAMBDA( const team_member_type& team ) {
             const int league = team.league_rank();
             const int parent_cell = d_parents( league );
             const auto& parent_ci = device_cells( parent_cell );
@@ -725,18 +715,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth( i
                 if ( ccell.depth != parent_ci.depth + 1 )
                     continue;
 
-                const scalar_type dx =
-                    ccell.center[0] - parent_ci.center[0];
-                const scalar_type dy =
-                    ccell.center[1] - parent_ci.center[1];
-                const scalar_type dz =
-                    ccell.center[2] - parent_ci.center[2];
+                const scalar_type dx = ccell.center[0] - parent_ci.center[0];
+                const scalar_type dy = ccell.center[1] - parent_ci.center[1];
+                const scalar_type dz = ccell.center[2] - parent_ci.center[2];
 
-                auto L_child = Kokkos::subview(
-                    locals, ci, Kokkos::ALL, Kokkos::ALL );
-                KernelType::l2l_translate( team, locals, parent_cell,
-                                           dx, dy, dz, A_table,
-                                           L_child );
+                auto L_child =
+                    Kokkos::subview( locals, ci, Kokkos::ALL, Kokkos::ALL );
+                KernelType::l2l_translate( team, locals, parent_cell, dx, dy,
+                                           dz, A_table, L_child );
             }
         } );
 
@@ -746,7 +732,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth( i
 template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     snapshot_shared_locals_at_depth(
-        int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
+        int depth,
+        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
     // Capture the value of _locals at all shared cells at this depth
     // BEFORE M2L runs. After M2L, allreduce_shared_locals_at_depth will
@@ -756,8 +743,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     const auto& m2m = comm_plan.m2m_plan();
     _shared_snapshot_indices.clear();
 
-    auto h_dc = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace{}, _device_cells );
+    auto h_dc = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
+                                                     _device_cells );
     for ( MortonKey k : m2m.shared_cells )
     {
         auto it = _key_to_cell_idx->find( k );
@@ -774,8 +761,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     if ( nshared == 0 )
         return;
 
-    auto h_locals = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace{}, _locals );
+    auto h_locals =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, _locals );
     for ( int i = 0; i < nshared; i++ )
     {
         const int cidx = _shared_snapshot_indices[i];
@@ -790,7 +777,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     allreduce_shared_locals_at_depth(
-        int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
+        int depth,
+        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
     // Shared cells at this depth had M2L run by every rank with each
     // rank using the multipoles it has locally. We need to sum the
@@ -809,8 +797,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     std::vector<complex_type> sendbuf( total_complex );
     std::vector<complex_type> recvbuf( total_complex );
 
-    auto h_locals = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace{}, _locals );
+    auto h_locals =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, _locals );
 
     // sendbuf = current - snapshot (M2L delta on this rank)
     for ( int i = 0; i < nshared; i++ )
@@ -821,8 +809,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             for ( int c = 0; c < NComps; c++ )
             {
                 const int k = i * per_cell_complex + ( idx++ );
-                sendbuf[k] = h_locals( cidx, ci, c ) -
-                             _shared_snapshot_buf[k];
+                sendbuf[k] = h_locals( cidx, ci, c ) - _shared_snapshot_buf[k];
             }
     }
 
@@ -841,8 +828,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             for ( int c = 0; c < NComps; c++ )
             {
                 const int k = i * per_cell_complex + ( idx++ );
-                h_locals( cidx, ci, c ) =
-                    _shared_snapshot_buf[k] + recvbuf[k];
+                h_locals( cidx, ci, c ) = _shared_snapshot_buf[k] + recvbuf[k];
             }
     }
 
@@ -852,7 +838,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     exchange_locals_after_l2l_at_depth(
-        int depth, const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
+        int depth,
+        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
     // L2L plan: parent-owner sends L to child-owner. The cell_key in
     // the L2L plan is the PARENT's key. We filter entries where the
@@ -886,8 +873,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     MPI_Datatype mpi_scalar =
         ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
 
-    auto h_dc = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace{}, _device_cells );
+    auto h_dc = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
+                                                     _device_cells );
 
     // The cell_key in each L2L plan entry is the CHILD's key. Filter
     // entries to those whose child is at depth+1 (i.e. whose parent is
@@ -931,8 +918,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     if ( sends.empty() && recvs.empty() )
         return;
 
-    auto h_locals = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace{}, _locals );
+    auto h_locals =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, _locals );
 
     std::vector<MPI_Request> recv_reqs( recvs.size() );
     std::vector<std::vector<complex_type>> recv_bufs( recvs.size() );
@@ -941,10 +928,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         recv_bufs[i].resize( per_cell_complex );
         const MortonKey key = h_dc( recvs[i].child_cell_idx ).key;
         int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Irecv(
-            reinterpret_cast<scalar_type*>( recv_bufs[i].data() ),
-            per_cell_real, mpi_scalar, recvs[i].remote_rank, tag, _comm,
-            &recv_reqs[i] );
+        MPI_Irecv( reinterpret_cast<scalar_type*>( recv_bufs[i].data() ),
+                   per_cell_real, mpi_scalar, recvs[i].remote_rank, tag, _comm,
+                   &recv_reqs[i] );
     }
 
     std::vector<MPI_Request> send_reqs( sends.size() );
@@ -960,18 +946,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
         const MortonKey key = h_dc( cidx ).key;
         int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Isend(
-            reinterpret_cast<scalar_type*>( send_bufs[i].data() ),
-            per_cell_real, mpi_scalar, sends[i].remote_rank, tag,
-            _comm, &send_reqs[i] );
+        MPI_Isend( reinterpret_cast<scalar_type*>( send_bufs[i].data() ),
+                   per_cell_real, mpi_scalar, sends[i].remote_rank, tag, _comm,
+                   &send_reqs[i] );
     }
 
     if ( !recv_reqs.empty() )
-        MPI_Waitall( recv_reqs.size(), recv_reqs.data(),
-                     MPI_STATUSES_IGNORE );
+        MPI_Waitall( recv_reqs.size(), recv_reqs.data(), MPI_STATUSES_IGNORE );
     if ( !send_reqs.empty() )
-        MPI_Waitall( send_reqs.size(), send_reqs.data(),
-                     MPI_STATUSES_IGNORE );
+        MPI_Waitall( send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE );
 
     // Accumulate received locals into the child's local (the child
     // owner may already have M2L contributions there)
@@ -1000,8 +983,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
     const int N = _num_local_particles;
 
     Kokkos::parallel_for(
-        "L2P",
-        Kokkos::RangePolicy<execution_space>( 0, N ),
+        "L2P", Kokkos::RangePolicy<execution_space>( 0, N ),
         KOKKOS_LAMBDA( int p ) {
             const int cidx = particle_cell_idx( p );
             if ( cidx < 0 )
@@ -1028,8 +1010,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
             // CUDA can use it inside a device lambda without the
             // "nested extended lambda" restriction firing.
             GradWriter writer{ gradient_out, p };
-            KernelType::l2p_evaluate( locals, cidx, dx, dy, dz, phi,
-                                      writer, compute_gradient );
+            KernelType::l2p_evaluate( locals, cidx, dx, dy, dz, phi, writer,
+                                      compute_gradient );
 
             // Accumulate potential (caller has zeroed or initialized)
             for ( int c = 0; c < NComps; c++ )
@@ -1056,8 +1038,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
 template <class MemorySpace, class ExecutionSpace, class KernelType>
 template <class PositionType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
-    const typename UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::coeff_view_type&
-        multipoles,
+    const typename UpwardSweep<MemorySpace, ExecutionSpace,
+                               KernelType>::coeff_view_type& multipoles,
     const PositionType& particle_positions,
     const potential_view_type& potential_out,
     const gradient_view_type& gradient_out, bool compute_gradient,

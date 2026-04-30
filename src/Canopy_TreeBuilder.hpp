@@ -157,7 +157,7 @@ class TreeBuilder
 
   public:
     // Constructor
-    TreeBuilder( MPI_Comm comm, const int ncrit, const int max_depth, 
+    TreeBuilder( MPI_Comm comm, const int ncrit, const int max_depth,
                  const double bb_tolerance_factor = 0.1,
                  const double ncrit_tolerance_factor = 0.1 )
         : _ncrit( ncrit )

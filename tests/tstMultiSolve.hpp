@@ -35,7 +35,7 @@ namespace MultiSolveTest
 enum FieldIdx
 {
     Position = 0,
-    Charge   = 1,
+    Charge = 1,
     Velocity = 2,
     GlobalId = 3
 };
@@ -62,10 +62,10 @@ enum class Mode
 //
 // This is the gradient of phi[i,c] = sum_{j!=i} q[j,c] / |r_i - r_j|.
 //---------------------------------------------------------------------------//
-inline void brute_force_gradient(
-    const std::vector<double>& pos,    // 3 * N
-    const std::vector<double>& chg,    // N (NComps=1 here)
-    std::vector<double>& grad )        // 3 * N (output)
+inline void
+brute_force_gradient( const std::vector<double>& pos, // 3 * N
+                      const std::vector<double>& chg, // N (NComps=1 here)
+                      std::vector<double>& grad )     // 3 * N (output)
 {
     const int N = static_cast<int>( chg.size() );
     grad.assign( 3 * N, 0.0 );
@@ -109,7 +109,8 @@ inline void brute_force_gradient(
  *             v += dt * g;  r += dt * drift_multiplier * v
  *             dispatch the requested maintenance call
  *   2. Brute (rank 0 only, on a separate copy of all particles):
- *             compute g via O(N^2);  v += dt * g;  r += dt * drift_multiplier * v
+ *             compute g via O(N^2);  v += dt * g;  r += dt * drift_multiplier *
+ * v
  *
  * After num_steps, gather the FMM trajectory's final state to rank 0,
  * align by GlobalId, and compare against the brute-force final state.
@@ -119,8 +120,7 @@ struct MaintenanceDispatch;
 
 template <class Solver, class AoSoA>
 inline typename Solver::MaintenanceAction
-dispatch_maintain( Solver& solver, AoSoA& particles,
-                   MultiSolveTest::Mode mode )
+dispatch_maintain( Solver& solver, AoSoA& particles, MultiSolveTest::Mode mode )
 {
     using namespace MultiSolveTest;
     using Action = typename Solver::MaintenanceAction;
@@ -141,25 +141,24 @@ dispatch_maintain( Solver& solver, AoSoA& particles,
     }
 }
 
-inline void
-testMultiStepGravity( MultiSolveTest::Mode mode,
-                      int num_particles_per_rank, int num_steps,
-                      double dt, double drift_multiplier,
-                      int ncrit, int max_depth, double tree_tolerance,
-                      int replication_depth, double fmm_tolerance,
-                      int* out_action_counts = nullptr )
+inline void testMultiStepGravity( MultiSolveTest::Mode mode,
+                                  int num_particles_per_rank, int num_steps,
+                                  double dt, double drift_multiplier, int ncrit,
+                                  int max_depth, double tree_tolerance,
+                                  int replication_depth, double fmm_tolerance,
+                                  int* out_action_counts = nullptr )
 {
     using namespace MultiSolveTest;
 
     using DataTypes =
-        Cabana::MemberTypes<double[3],   // Position
-                            double[1],   // Charge (NComps=1 for gravity)
-                            double[3],   // Velocity
-                            int>;        // GlobalId
-    using AoSoA_t  = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
+        Cabana::MemberTypes<double[3], // Position
+                            double[1], // Charge (NComps=1 for gravity)
+                            double[3], // Velocity
+                            int>;      // GlobalId
+    using AoSoA_t = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
     using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
-    using Solver_t = Solver<TEST_MEMSPACE, TEST_EXECSPACE,
-                            double, P_ORDER, /*NComps=*/1>;
+    using Solver_t =
+        Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, P_ORDER, /*NComps=*/1>;
 
     int rank, nprocs;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
@@ -171,9 +170,9 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
     // -----------------------------------------------------------------------
     AoSoA_ht particles_h( "particles_h", num_particles_per_rank );
     {
-        auto hp  = Cabana::slice<Position>( particles_h );
-        auto hq  = Cabana::slice<Charge>( particles_h );
-        auto hv  = Cabana::slice<Velocity>( particles_h );
+        auto hp = Cabana::slice<Position>( particles_h );
+        auto hq = Cabana::slice<Charge>( particles_h );
+        auto hv = Cabana::slice<Velocity>( particles_h );
         auto hid = Cabana::slice<GlobalId>( particles_h );
 
         std::mt19937 gen( 42 + rank * 7919 );
@@ -191,7 +190,7 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
             hv( i, 0 ) = v_dist( gen );
             hv( i, 1 ) = v_dist( gen );
             hv( i, 2 ) = v_dist( gen );
-            hid( i )   = gid_base + i;
+            hid( i ) = gid_base + i;
         }
     }
     AoSoA_t particles( "particles", num_particles_per_rank );
@@ -210,20 +209,20 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
     MPI_Gather( &local_n, 1, MPI_INT, all_n.data(), 1, MPI_INT, 0,
                 MPI_COMM_WORLD );
 
-    std::vector<int>    bf_displs( nprocs, 0 );
-    std::vector<int>    bf_counts3( nprocs, 0 );
-    std::vector<int>    bf_displs3( nprocs, 0 );
-    std::vector<int>    bf_counts( nprocs, 0 );
+    std::vector<int> bf_displs( nprocs, 0 );
+    std::vector<int> bf_counts3( nprocs, 0 );
+    std::vector<int> bf_displs3( nprocs, 0 );
+    std::vector<int> bf_counts( nprocs, 0 );
     if ( rank == 0 )
     {
         for ( int r = 0; r < nprocs; r++ )
         {
-            bf_counts[r]  = all_n[r];
+            bf_counts[r] = all_n[r];
             bf_counts3[r] = 3 * all_n[r];
         }
         for ( int r = 1; r < nprocs; r++ )
         {
-            bf_displs[r]  = bf_displs[r - 1]  + bf_counts[r - 1];
+            bf_displs[r] = bf_displs[r - 1] + bf_counts[r - 1];
             bf_displs3[r] = bf_displs3[r - 1] + bf_counts3[r - 1];
         }
     }
@@ -232,27 +231,27 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
     std::vector<double> local_pos0( 3 * num_particles_per_rank );
     std::vector<double> local_chg0( num_particles_per_rank );
     std::vector<double> local_vel0( 3 * num_particles_per_rank );
-    std::vector<int>    local_gid0( num_particles_per_rank );
+    std::vector<int> local_gid0( num_particles_per_rank );
     {
-        auto hp  = Cabana::slice<Position>( particles_h );
-        auto hq  = Cabana::slice<Charge>( particles_h );
-        auto hv  = Cabana::slice<Velocity>( particles_h );
+        auto hp = Cabana::slice<Position>( particles_h );
+        auto hq = Cabana::slice<Charge>( particles_h );
+        auto hv = Cabana::slice<Velocity>( particles_h );
         auto hid = Cabana::slice<GlobalId>( particles_h );
         for ( int i = 0; i < num_particles_per_rank; i++ )
         {
             local_pos0[3 * i + 0] = hp( i, 0 );
             local_pos0[3 * i + 1] = hp( i, 1 );
             local_pos0[3 * i + 2] = hp( i, 2 );
-            local_chg0[i]         = hq( i, 0 );
+            local_chg0[i] = hq( i, 0 );
             local_vel0[3 * i + 0] = hv( i, 0 );
             local_vel0[3 * i + 1] = hv( i, 1 );
             local_vel0[3 * i + 2] = hv( i, 2 );
-            local_gid0[i]         = hid( i );
+            local_gid0[i] = hid( i );
         }
     }
 
     std::vector<double> bf_pos, bf_chg, bf_vel;
-    std::vector<int>    bf_gid;
+    std::vector<int> bf_gid;
     if ( rank == 0 )
     {
         bf_pos.resize( 3 * total_particles );
@@ -264,21 +263,22 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
                  bf_pos.data(), bf_counts3.data(), bf_displs3.data(),
                  MPI_DOUBLE, 0, MPI_COMM_WORLD );
     MPI_Gatherv( local_chg0.data(), num_particles_per_rank, MPI_DOUBLE,
-                 bf_chg.data(), bf_counts.data(), bf_displs.data(),
-                 MPI_DOUBLE, 0, MPI_COMM_WORLD );
+                 bf_chg.data(), bf_counts.data(), bf_displs.data(), MPI_DOUBLE,
+                 0, MPI_COMM_WORLD );
     MPI_Gatherv( local_vel0.data(), 3 * num_particles_per_rank, MPI_DOUBLE,
                  bf_vel.data(), bf_counts3.data(), bf_displs3.data(),
                  MPI_DOUBLE, 0, MPI_COMM_WORLD );
     MPI_Gatherv( local_gid0.data(), num_particles_per_rank, MPI_INT,
-                 bf_gid.data(), bf_counts.data(), bf_displs.data(),
-                 MPI_INT, 0, MPI_COMM_WORLD );
+                 bf_gid.data(), bf_counts.data(), bf_displs.data(), MPI_INT, 0,
+                 MPI_COMM_WORLD );
 
     // -----------------------------------------------------------------------
     // Set up FMM solver.
     // -----------------------------------------------------------------------
     Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth, tree_tolerance,
                      replication_depth );
-    solver.template setup<Position, Charge>( particles, num_particles_per_rank );
+    solver.template setup<Position, Charge>( particles,
+                                             num_particles_per_rank );
 
     int action_counts[3] = { 0, 0, 0 }; // [Migrate, Rebalance, Rebuild]
 
@@ -295,7 +295,7 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
         // Symplectic Euler: v += dt*g;  r += dt * drift * v.
         // Run on device so we write directly into the AoSoA slices.
         const int n_local = solver.num_local_particles();
-        auto positions  = Cabana::slice<Position>( particles );
+        auto positions = Cabana::slice<Position>( particles );
         auto velocities = Cabana::slice<Velocity>( particles );
         auto grad = solver.gradient();
         const double dt_local = dt;
@@ -329,12 +329,9 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
                 bf_vel[3 * i + 0] += dt * bf_grad[3 * i + 0];
                 bf_vel[3 * i + 1] += dt * bf_grad[3 * i + 1];
                 bf_vel[3 * i + 2] += dt * bf_grad[3 * i + 2];
-                bf_pos[3 * i + 0] +=
-                    dt * drift_multiplier * bf_vel[3 * i + 0];
-                bf_pos[3 * i + 1] +=
-                    dt * drift_multiplier * bf_vel[3 * i + 1];
-                bf_pos[3 * i + 2] +=
-                    dt * drift_multiplier * bf_vel[3 * i + 2];
+                bf_pos[3 * i + 0] += dt * drift_multiplier * bf_vel[3 * i + 0];
+                bf_pos[3 * i + 1] += dt * drift_multiplier * bf_vel[3 * i + 1];
+                bf_pos[3 * i + 2] += dt * drift_multiplier * bf_vel[3 * i + 2];
             }
         }
 
@@ -342,9 +339,15 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
         auto action = dispatch_maintain( solver, particles, mode );
         switch ( action )
         {
-        case Solver_t::MaintenanceAction::Migrate:   action_counts[0]++; break;
-        case Solver_t::MaintenanceAction::Rebalance: action_counts[1]++; break;
-        case Solver_t::MaintenanceAction::Rebuild:   action_counts[2]++; break;
+        case Solver_t::MaintenanceAction::Migrate:
+            action_counts[0]++;
+            break;
+        case Solver_t::MaintenanceAction::Rebalance:
+            action_counts[1]++;
+            break;
+        case Solver_t::MaintenanceAction::Rebuild:
+            action_counts[2]++;
+            break;
         }
     }
 
@@ -364,17 +367,17 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
 
     auto positions_f = Cabana::slice<Position>( particles );
     auto velocities_f = Cabana::slice<Velocity>( particles );
-    auto gids_f      = Cabana::slice<GlobalId>( particles );
+    auto gids_f = Cabana::slice<GlobalId>( particles );
     auto h_pos_f = Canopy::create_mirror_view_and_copy(
         Kokkos::HostSpace(), positions_f, "h_pos_f" );
     auto h_vel_f = Canopy::create_mirror_view_and_copy(
         Kokkos::HostSpace(), velocities_f, "h_vel_f" );
-    auto h_gid_f = Canopy::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), gids_f, "h_gid_f" );
+    auto h_gid_f = Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                        gids_f, "h_gid_f" );
 
     std::vector<double> local_pos_f( 3 * n_local_final );
     std::vector<double> local_vel_f( 3 * n_local_final );
-    std::vector<int>    local_gid_f( n_local_final );
+    std::vector<int> local_gid_f( n_local_final );
     for ( int i = 0; i < n_local_final; i++ )
     {
         local_pos_f[3 * i + 0] = h_pos_f( i, 0 );
@@ -383,27 +386,27 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
         local_vel_f[3 * i + 0] = h_vel_f( i, 0 );
         local_vel_f[3 * i + 1] = h_vel_f( i, 1 );
         local_vel_f[3 * i + 2] = h_vel_f( i, 2 );
-        local_gid_f[i]         = h_gid_f( i );
+        local_gid_f[i] = h_gid_f( i );
     }
 
-    std::vector<int> counts_f( nprocs, 0 ),  displs_f( nprocs, 0 );
+    std::vector<int> counts_f( nprocs, 0 ), displs_f( nprocs, 0 );
     std::vector<int> counts3_f( nprocs, 0 ), displs3_f( nprocs, 0 );
     if ( rank == 0 )
     {
         for ( int r = 0; r < nprocs; r++ )
         {
-            counts_f[r]  = all_n_final[r];
+            counts_f[r] = all_n_final[r];
             counts3_f[r] = 3 * all_n_final[r];
         }
         for ( int r = 1; r < nprocs; r++ )
         {
-            displs_f[r]  = displs_f[r - 1]  + counts_f[r - 1];
+            displs_f[r] = displs_f[r - 1] + counts_f[r - 1];
             displs3_f[r] = displs3_f[r - 1] + counts3_f[r - 1];
         }
     }
 
     std::vector<double> fmm_pos_f, fmm_vel_f;
-    std::vector<int>    fmm_gid_f;
+    std::vector<int> fmm_gid_f;
     if ( rank == 0 )
     {
         fmm_pos_f.resize( 3 * total_particles );
@@ -416,9 +419,8 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
     MPI_Gatherv( local_vel_f.data(), 3 * n_local_final, MPI_DOUBLE,
                  fmm_vel_f.data(), counts3_f.data(), displs3_f.data(),
                  MPI_DOUBLE, 0, MPI_COMM_WORLD );
-    MPI_Gatherv( local_gid_f.data(), n_local_final, MPI_INT,
-                 fmm_gid_f.data(), counts_f.data(), displs_f.data(),
-                 MPI_INT, 0, MPI_COMM_WORLD );
+    MPI_Gatherv( local_gid_f.data(), n_local_final, MPI_INT, fmm_gid_f.data(),
+                 counts_f.data(), displs_f.data(), MPI_INT, 0, MPI_COMM_WORLD );
 
     if ( rank == 0 )
     {
@@ -435,40 +437,43 @@ testMultiStepGravity( MultiSolveTest::Mode mode,
             ASSERT_GE( gid, 0 );
             ASSERT_LT( gid, total_particles );
             const int j = bf_idx_of_gid[gid];
-            ASSERT_GE( j, 0 ) << "GlobalId " << gid << " missing from brute-force set";
+            ASSERT_GE( j, 0 )
+                << "GlobalId " << gid << " missing from brute-force set";
 
             // Compare position and velocity vectors.
             const double pdx = fmm_pos_f[3 * i + 0] - bf_pos[3 * j + 0];
             const double pdy = fmm_pos_f[3 * i + 1] - bf_pos[3 * j + 1];
             const double pdz = fmm_pos_f[3 * i + 2] - bf_pos[3 * j + 2];
-            const double pmag = std::sqrt(
-                bf_pos[3 * j + 0] * bf_pos[3 * j + 0] +
-                bf_pos[3 * j + 1] * bf_pos[3 * j + 1] +
-                bf_pos[3 * j + 2] * bf_pos[3 * j + 2] );
+            const double pmag =
+                std::sqrt( bf_pos[3 * j + 0] * bf_pos[3 * j + 0] +
+                           bf_pos[3 * j + 1] * bf_pos[3 * j + 1] +
+                           bf_pos[3 * j + 2] * bf_pos[3 * j + 2] );
             const double perr = std::sqrt( pdx * pdx + pdy * pdy + pdz * pdz );
-            const double prel =
-                ( pmag > 1.0e-10 ) ? perr / pmag : perr;
-            if ( prel > max_pos_rel ) max_pos_rel = prel;
+            const double prel = ( pmag > 1.0e-10 ) ? perr / pmag : perr;
+            if ( prel > max_pos_rel )
+                max_pos_rel = prel;
 
             const double vdx = fmm_vel_f[3 * i + 0] - bf_vel[3 * j + 0];
             const double vdy = fmm_vel_f[3 * i + 1] - bf_vel[3 * j + 1];
             const double vdz = fmm_vel_f[3 * i + 2] - bf_vel[3 * j + 2];
-            const double vmag = std::sqrt(
-                bf_vel[3 * j + 0] * bf_vel[3 * j + 0] +
-                bf_vel[3 * j + 1] * bf_vel[3 * j + 1] +
-                bf_vel[3 * j + 2] * bf_vel[3 * j + 2] );
+            const double vmag =
+                std::sqrt( bf_vel[3 * j + 0] * bf_vel[3 * j + 0] +
+                           bf_vel[3 * j + 1] * bf_vel[3 * j + 1] +
+                           bf_vel[3 * j + 2] * bf_vel[3 * j + 2] );
             const double verr = std::sqrt( vdx * vdx + vdy * vdy + vdz * vdz );
-            const double vrel =
-                ( vmag > 1.0e-10 ) ? verr / vmag : verr;
-            if ( vrel > max_vel_rel ) max_vel_rel = vrel;
+            const double vrel = ( vmag > 1.0e-10 ) ? verr / vmag : verr;
+            if ( vrel > max_vel_rel )
+                max_vel_rel = vrel;
         }
 
         EXPECT_LT( max_pos_rel, fmm_tolerance )
             << "FMM multi-step position deviates from brute-force; "
-               "max relative error = " << max_pos_rel;
+               "max relative error = "
+            << max_pos_rel;
         EXPECT_LT( max_vel_rel, fmm_tolerance )
             << "FMM multi-step velocity deviates from brute-force; "
-               "max relative error = " << max_vel_rel;
+               "max relative error = "
+            << max_vel_rel;
     }
 }
 
