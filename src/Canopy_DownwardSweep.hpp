@@ -376,6 +376,16 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     // (Caller sees: upward_sweep.particle_cell_idx() → we copy reference.)
     // See UpwardSweep modification below.
     _particle_cell_idx = upward_sweep.particle_cell_idx();
+
+    // Invalidate the cached M2L interaction list so the next execute()
+    // rebuilds it against the current tree. Without this, a re-setup
+    // after a tree-topology change would silently reuse stale cell
+    // indices from the previous tree.
+    _m2l_target_cells = Kokkos::View<int*, memory_space>();
+    _m2l_source_cells_flat = Kokkos::View<int*, memory_space>();
+    _m2l_offsets = Kokkos::View<int*, memory_space>();
+    _m2l_counts = Kokkos::View<int*, memory_space>();
+    _m2l_depth_offsets.clear();
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>

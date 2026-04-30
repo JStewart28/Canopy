@@ -45,7 +45,7 @@ enum FieldIdx
 };
 
 // Expansion order used for all single-solve tests.
-static constexpr int P_ORDER = 10;
+static constexpr int P_ORDER = 8;
 
 } // namespace SingleSolveTest
 
@@ -399,7 +399,7 @@ void testFullSolve(
  */
 TEST( SingleSolve, PotentialNComps1 )
 {
-    testFullSolve<1>( false, 200, 16, 6, 0.1, 2, 1.0e-3 );
+    testFullSolve<1>( false, 500, 16, 6, 0.1, 2, 1.0e-3 );
 }
 
 /**
@@ -409,7 +409,7 @@ TEST( SingleSolve, PotentialNComps1 )
  */
 TEST( SingleSolve, PotentialAndGradientNComps1 )
 {
-    testFullSolve<1>( true, 200, 16, 6, 0.1, 2, 1.0e-3 );
+    testFullSolve<1>( true, 500, 16, 6, 0.1, 2, 1.0e-3 );
 }
 
 /**
@@ -420,7 +420,7 @@ TEST( SingleSolve, PotentialAndGradientNComps1 )
  */
 TEST( SingleSolve, PotentialNComps3 )
 {
-    testFullSolve<3>( false, 200, 16, 6, 0.1, 2, 1.0e-3 );
+    testFullSolve<3>( false, 500, 16, 6, 0.1, 2, 1.0e-3 );
 }
 
 /**
@@ -430,7 +430,7 @@ TEST( SingleSolve, PotentialNComps3 )
  */
 TEST( SingleSolve, PotentialAndGradientNComps3 )
 {
-    testFullSolve<3>( true, 200, 16, 6, 0.1, 2, 1.0e-3 );
+    testFullSolve<3>( true, 500, 16, 6, 0.1, 2, 1.0e-3 );
 }
 
 //---------------------------------------------------------------------------//

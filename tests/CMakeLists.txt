@@ -22,6 +22,7 @@ set(SERIAL_TESTS
 set(MPI_TESTS
   CommunicationPlan
   DownwardSweep
+  MultiSolve
   P2P
   SingleSolve
   TreeBuilder
