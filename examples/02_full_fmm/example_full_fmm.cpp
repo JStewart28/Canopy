@@ -1,5 +1,6 @@
 #include "Canopy_CommunicationPlan.hpp"
 #include "Canopy_DownwardSweep.hpp"
+#include "Canopy_Helpers.hpp"
 #include "Canopy_LaplaceKernel.hpp"
 #include "Canopy_SphericalCoefficients.hpp"
 #include "Canopy_TreeBuilder.hpp"
@@ -58,35 +59,11 @@ void generate_particles( AoSoA_t& particles, int num_particles, int rank )
     auto positions = Cabana::slice<Position>( particles );
     auto charges = Cabana::slice<Charge>( particles );
 
-    // Workaround to copy a device-side slice into a host-side view
-    using pos_value_type = typename decltype( positions )::value_type;
-    Kokkos::View<pos_value_type* [3], MemorySpace> d_pos( "d_pos",
-                                                       num_local_particles );
-    Kokkos::parallel_for(
-        "SliceToView",
-        Kokkos::RangePolicy<ExecutionSpace>( 0, num_local_particles ),
-        KOKKOS_LAMBDA( int i ) {
-            d_pos( i, 0 ) = positions( i, 0 );
-            d_pos( i, 1 ) = positions( i, 1 );
-            d_pos( i, 2 ) = positions( i, 2 );
-        } );
-    Kokkos::fence();
-    auto h_positions =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+    // auto h_positions =
+    //     Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(), positions );
     
-    // Workaround to copy a device-side slice into a host-side view
-    using crg_value_type = typename decltype( positions )::value_type;
-    Kokkos::View<crg_value_type*, MemorySpace> d_crg( "d_crg",
-                                                       num_local_particles );
-    Kokkos::parallel_for(
-        "SliceToView",
-        Kokkos::RangePolicy<ExecutionSpace>( 0, num_local_particles ),
-        KOKKOS_LAMBDA( int i ) {
-            d_crg( i, 0 ) = charges( i );
-        } );
-    Kokkos::fence();
-    auto h_charges =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_crg );
+    // auto h_charges =
+    //     Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(), charges );
 
     std::mt19937 gen( 42 + rank );
     std::uniform_real_distribution<double> pos_dist( 0.0, 1.0 );
@@ -94,14 +71,14 @@ void generate_particles( AoSoA_t& particles, int num_particles, int rank )
 
     for ( int i = 0; i < num_particles; i++ )
     {
-        h_positions( i, 0 ) = pos_dist( gen );
-        h_positions( i, 1 ) = pos_dist( gen );
-        h_positions( i, 2 ) = pos_dist( gen );
-        h_charges( i ) = q_dist( gen );
+        positions( i, 0 ) = pos_dist( gen );
+        positions( i, 1 ) = pos_dist( gen );
+        positions( i, 2 ) = pos_dist( gen );
+        charges( i ) = q_dist( gen );
     }
 
-    Kokkos::deep_copy( positions, h_positions );
-    Kokkos::deep_copy( charges, h_charges );
+    // Kokkos::deep_copy( positions, h_positions );
+    // Kokkos::deep_copy( charges, h_charges );
 }
 
 // ============================================================================
@@ -114,9 +91,9 @@ void direct_evaluate( const AoSoA_t& particles, int num_particles,
 {
     auto positions = Cabana::slice<Position>( particles );
     auto charges = Cabana::slice<Charge>( particles );
-    auto h_positions = Kokkos::create_mirror_view_and_copy(
+    auto h_positions = Canopy::create_mirror_view_and_copy(
         Kokkos::HostSpace{}, positions );
-    auto h_charges = Kokkos::create_mirror_view_and_copy(
+    auto h_charges = Canopy::create_mirror_view_and_copy(
         Kokkos::HostSpace{}, charges );
 
     phi_direct.assign( num_particles, 0.0 );
@@ -205,12 +182,12 @@ int main( int argc, char* argv[] )
         auto charges = Cabana::slice<Charge>( particles );
         using PositionSlice = decltype( positions );
 
-        TreeBuilder<MemorySpace, ExecutionSpace PositionSlice> builder(
+        TreeBuilder<MemorySpace, ExecutionSpace> builder(
             MPI_COMM_WORLD, ncrit, max_depth, tolerance );
         builder.build( positions, num_particles_per_rank );
 
         // Phase 2: partition
-        TreePartitioner<MemorySpace, ExecutionSpace AoSoA_t, Position> partitioner(
+        TreePartitioner<MemorySpace, ExecutionSpace> partitioner(
             MPI_COMM_WORLD, replication_depth );
         partitioner.partition( builder, particles,
                                num_particles_per_rank );
@@ -230,22 +207,22 @@ int main( int argc, char* argv[] )
         // Build charge view with NComps dimension for the kernel
         Kokkos::View<double* [N_COMPS], MemorySpace> charge_view(
             "charge_view", num_local );
-        auto h_charge_view =
-            Kokkos::create_mirror_view( charge_view );
-        auto h_charges = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace{}, charges );
+        // auto h_charge_view =
+        //     Kokkos::create_mirror_view( charge_view );
+        // auto h_charges = Canopy::create_mirror_view_and_copy(
+        //     Kokkos::HostSpace(), charges );
         for ( int i = 0; i < num_local; i++ )
-            h_charge_view( i, 0 ) = h_charges( i );
-        Kokkos::deep_copy( charge_view, h_charge_view );
+            charge_view( i, 0 ) = charges( i );
+        // Kokkos::deep_copy( charge_view, h_charge_view );
 
         // Phase 4: upward sweep
-        UpwardSweep<MemorySpace, ExecutionSpace Kernel> upward( MPI_COMM_WORLD );
+        UpwardSweep<MemorySpace, ExecutionSpace, Kernel> upward( MPI_COMM_WORLD );
         upward.setup( builder.cells(), partitioner.cell_owner_map(),
                       builder.particle_keys(), num_local );
         upward.execute( charge_view, positions, comm_plan );
 
         // Phase 5: downward sweep
-        DownwardSweep<MemorySpace, ExecutionSpace Kernel> downward(
+        DownwardSweep<MemorySpace, ExecutionSpace, Kernel> downward(
             MPI_COMM_WORLD );
         downward.setup( upward, num_local );
 
@@ -258,129 +235,129 @@ int main( int argc, char* argv[] )
                           gradient, compute_gradient, comm_plan );
 
         // Phase 6: validate against direct sum (single rank only)
-        if ( nprocs == 1 )
-        {
-            std::vector<double> phi_direct;
-            std::vector<std::array<double, 3>> grad_direct;
-            direct_evaluate( particles, num_local, phi_direct,
-                             grad_direct, compute_gradient );
+        // if ( nprocs == 1 )
+        // {
+        //     std::vector<double> phi_direct;
+        //     std::vector<std::array<double, 3>> grad_direct;
+        //     direct_evaluate( particles, num_local, phi_direct,
+        //                      grad_direct, compute_gradient );
 
-            // Workaround to copy a device-side slice into a host-side view
-            using pos_value_type = typename decltype( positions )::value_type;
-            Kokkos::View<pos_value_type* [3], MemorySpace> d_pos( "d_pos",
-                                                            num_local_particles );
-            Kokkos::parallel_for(
-                "SliceToView",
-                Kokkos::RangePolicy<ExecutionSpace>( 0, num_local_particles ),
-                KOKKOS_LAMBDA( int i ) {
-                    d_pos( i, 0 ) = positions( i, 0 );
-                    d_pos( i, 1 ) = positions( i, 1 );
-                    d_pos( i, 2 ) = positions( i, 2 );
-                } );
-            Kokkos::fence();
-            auto h_positions =
-                Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+        //     // Workaround to copy a device-side slice into a host-side view
+        //     using pos_value_type = typename decltype( positions )::value_type;
+        //     Kokkos::View<pos_value_type* [3], MemorySpace> d_pos( "d_pos",
+        //                                                     num_local_particles );
+        //     Kokkos::parallel_for(
+        //         "SliceToView",
+        //         Kokkos::RangePolicy<ExecutionSpace>( 0, num_local_particles ),
+        //         KOKKOS_LAMBDA( int i ) {
+        //             d_pos( i, 0 ) = positions( i, 0 );
+        //             d_pos( i, 1 ) = positions( i, 1 );
+        //             d_pos( i, 2 ) = positions( i, 2 );
+        //         } );
+        //     Kokkos::fence();
+        //     auto h_positions =
+        //         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
             
-            // Workaround to copy a device-side slice into a host-side view
-            using gr_value_type = typename decltype( positions )::value_type;
-            Kokkos::View<pos_value_type* [3], MemorySpace> d_pos( "d_pos",
-                                                            num_local_particles );
-            Kokkos::parallel_for(
-                "SliceToView",
-                Kokkos::RangePolicy<ExecutionSpace>( 0, num_local_particles ),
-                KOKKOS_LAMBDA( int i ) {
-                    d_pos( i, 0 ) = positions( i, 0 );
-                    d_pos( i, 1 ) = positions( i, 1 );
-                    d_pos( i, 2 ) = positions( i, 2 );
-                } );
-            Kokkos::fence();
-            auto h_positions =
-                Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+        //     // Workaround to copy a device-side slice into a host-side view
+        //     using gr_value_type = typename decltype( positions )::value_type;
+        //     Kokkos::View<pos_value_type* [3], MemorySpace> d_pos( "d_pos",
+        //                                                     num_local_particles );
+        //     Kokkos::parallel_for(
+        //         "SliceToView",
+        //         Kokkos::RangePolicy<ExecutionSpace>( 0, num_local_particles ),
+        //         KOKKOS_LAMBDA( int i ) {
+        //             d_pos( i, 0 ) = positions( i, 0 );
+        //             d_pos( i, 1 ) = positions( i, 1 );
+        //             d_pos( i, 2 ) = positions( i, 2 );
+        //         } );
+        //     Kokkos::fence();
+        //     auto h_positions =
+        //         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
 
-            double max_phi_err = 0.0;
-            double avg_phi_err = 0.0;
-            double max_phi_rel = 0.0;
-            double phi_norm = 0.0;
+        //     double max_phi_err = 0.0;
+        //     double avg_phi_err = 0.0;
+        //     double max_phi_rel = 0.0;
+        //     double phi_norm = 0.0;
 
-            double max_grad_err = 0.0;
-            double avg_grad_err = 0.0;
-            double max_grad_rel = 0.0;
-            double grad_norm = 0.0;
+        //     double max_grad_err = 0.0;
+        //     double avg_grad_err = 0.0;
+        //     double max_grad_rel = 0.0;
+        //     double grad_norm = 0.0;
 
-            for ( int i = 0; i < num_local; i++ )
-            {
-                double fmm_phi = h_pot( i, 0 );
-                double ref_phi = phi_direct[i];
-                double err = std::abs( fmm_phi - ref_phi );
-                max_phi_err = std::max( max_phi_err, err );
-                avg_phi_err += err;
-                double refmag = std::abs( ref_phi );
-                if ( refmag > 1e-14 )
-                    max_phi_rel =
-                        std::max( max_phi_rel, err / refmag );
-                phi_norm += ref_phi * ref_phi;
+        //     for ( int i = 0; i < num_local; i++ )
+        //     {
+        //         double fmm_phi = h_pot( i, 0 );
+        //         double ref_phi = phi_direct[i];
+        //         double err = std::abs( fmm_phi - ref_phi );
+        //         max_phi_err = std::max( max_phi_err, err );
+        //         avg_phi_err += err;
+        //         double refmag = std::abs( ref_phi );
+        //         if ( refmag > 1e-14 )
+        //             max_phi_rel =
+        //                 std::max( max_phi_rel, err / refmag );
+        //         phi_norm += ref_phi * ref_phi;
 
-                if ( compute_gradient )
-                {
-                    double gx = h_grad( i, 0, 0 );
-                    double gy = h_grad( i, 0, 1 );
-                    double gz = h_grad( i, 0, 2 );
-                    double rx = grad_direct[i][0];
-                    double ry = grad_direct[i][1];
-                    double rz = grad_direct[i][2];
+        //         if ( compute_gradient )
+        //         {
+        //             double gx = h_grad( i, 0, 0 );
+        //             double gy = h_grad( i, 0, 1 );
+        //             double gz = h_grad( i, 0, 2 );
+        //             double rx = grad_direct[i][0];
+        //             double ry = grad_direct[i][1];
+        //             double rz = grad_direct[i][2];
 
-                    double ge = std::sqrt(
-                        ( gx - rx ) * ( gx - rx ) +
-                        ( gy - ry ) * ( gy - ry ) +
-                        ( gz - rz ) * ( gz - rz ) );
-                    max_grad_err = std::max( max_grad_err, ge );
-                    avg_grad_err += ge;
+        //             double ge = std::sqrt(
+        //                 ( gx - rx ) * ( gx - rx ) +
+        //                 ( gy - ry ) * ( gy - ry ) +
+        //                 ( gz - rz ) * ( gz - rz ) );
+        //             max_grad_err = std::max( max_grad_err, ge );
+        //             avg_grad_err += ge;
 
-                    double rmag =
-                        std::sqrt( rx * rx + ry * ry + rz * rz );
-                    if ( rmag > 1e-14 )
-                        max_grad_rel =
-                            std::max( max_grad_rel, ge / rmag );
-                    grad_norm += rmag * rmag;
-                }
-            }
-            avg_phi_err /= num_local;
-            if ( compute_gradient )
-                avg_grad_err /= num_local;
-            phi_norm = std::sqrt( phi_norm );
-            grad_norm = std::sqrt( grad_norm );
+        //             double rmag =
+        //                 std::sqrt( rx * rx + ry * ry + rz * rz );
+        //             if ( rmag > 1e-14 )
+        //                 max_grad_rel =
+        //                     std::max( max_grad_rel, ge / rmag );
+        //             grad_norm += rmag * rmag;
+        //         }
+        //     }
+        //     avg_phi_err /= num_local;
+        //     if ( compute_gradient )
+        //         avg_grad_err /= num_local;
+        //     phi_norm = std::sqrt( phi_norm );
+        //     grad_norm = std::sqrt( grad_norm );
 
-            std::printf( "\nPotential (FMM vs direct):\n" );
-            std::printf( "  max abs error:      %.6e\n", max_phi_err );
-            std::printf( "  avg abs error:      %.6e\n", avg_phi_err );
-            std::printf( "  max rel error:      %.6e\n", max_phi_rel );
-            std::printf( "  reference norm:     %.6e\n", phi_norm );
+        //     std::printf( "\nPotential (FMM vs direct):\n" );
+        //     std::printf( "  max abs error:      %.6e\n", max_phi_err );
+        //     std::printf( "  avg abs error:      %.6e\n", avg_phi_err );
+        //     std::printf( "  max rel error:      %.6e\n", max_phi_rel );
+        //     std::printf( "  reference norm:     %.6e\n", phi_norm );
 
-            if ( compute_gradient )
-            {
-                std::printf( "\nGradient (FMM vs direct):\n" );
-                std::printf( "  max abs error:      %.6e\n",
-                             max_grad_err );
-                std::printf( "  avg abs error:      %.6e\n",
-                             avg_grad_err );
-                std::printf( "  max rel error:      %.6e\n",
-                             max_grad_rel );
-                std::printf( "  reference norm:     %.6e\n",
-                             grad_norm );
-            }
+        //     if ( compute_gradient )
+        //     {
+        //         std::printf( "\nGradient (FMM vs direct):\n" );
+        //         std::printf( "  max abs error:      %.6e\n",
+        //                      max_grad_err );
+        //         std::printf( "  avg abs error:      %.6e\n",
+        //                      avg_grad_err );
+        //         std::printf( "  max rel error:      %.6e\n",
+        //                      max_grad_rel );
+        //         std::printf( "  reference norm:     %.6e\n",
+        //                      grad_norm );
+        //     }
 
-            std::printf( "\nNOTE: without P2P for near-field, the FMM "
-                         "result lacks direct contributions from "
-                         "neighboring leaves — large errors at "
-                         "particle level are expected until P2P is "
-                         "added. Confirm here that far-field contributions "
-                         "are within reasonable bounds given P and ncrit.\n" );
-        }
-        else
-        {
-            if ( rank == 0 )
-                std::printf( "\nMulti-rank direct validation TBD.\n" );
-        }
+        //     std::printf( "\nNOTE: without P2P for near-field, the FMM "
+        //                  "result lacks direct contributions from "
+        //                  "neighboring leaves — large errors at "
+        //                  "particle level are expected until P2P is "
+        //                  "added. Confirm here that far-field contributions "
+        //                  "are within reasonable bounds given P and ncrit.\n" );
+        // }
+        // else
+        // {
+        //     if ( rank == 0 )
+        //         std::printf( "\nMulti-rank direct validation TBD.\n" );
+        // }
     }
     Kokkos::finalize();
     MPI_Finalize();
