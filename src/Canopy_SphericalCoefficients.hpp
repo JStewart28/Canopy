@@ -12,8 +12,8 @@
 #ifndef CANOPY_SPHERICAL_COEFFICIENTS_HPP
 #define CANOPY_SPHERICAL_COEFFICIENTS_HPP
 
-#include <Kokkos_Core.hpp>
 #include <Kokkos_Complex.hpp>
+#include <Kokkos_Core.hpp>
 
 #include <cstdint>
 
@@ -56,10 +56,7 @@ constexpr int num_coeffs_symmetric( int p )
 // Valid range: 0 <= m <= n <= p
 // --------------------------------------------------------------------------
 KOKKOS_INLINE_FUNCTION
-constexpr int coeff_index( int n, int m )
-{
-    return n * ( n + 1 ) / 2 + m;
-}
+constexpr int coeff_index( int n, int m ) { return n * ( n + 1 ) / 2 + m; }
 
 // --------------------------------------------------------------------------
 // Retrieve M_{n,m} from a coefficient array, handling negative m via
@@ -71,9 +68,8 @@ constexpr int coeff_index( int n, int m )
 // Out-of-range queries (|m| > n or n > p) return zero.
 // --------------------------------------------------------------------------
 template <class Scalar, class View>
-KOKKOS_INLINE_FUNCTION
-Kokkos::complex<Scalar> get_coeff( const View& coeffs, int cell_idx,
-                                   int n, int m, int max_order )
+KOKKOS_INLINE_FUNCTION Kokkos::complex<Scalar>
+get_coeff( const View& coeffs, int cell_idx, int n, int m, int max_order )
 {
     using complex = Kokkos::complex<Scalar>;
 
@@ -106,8 +102,7 @@ Kokkos::complex<Scalar> get_coeff( const View& coeffs, int cell_idx,
 // build_A_coefficients() below.
 // --------------------------------------------------------------------------
 template <class Scalar>
-KOKKOS_INLINE_FUNCTION
-Scalar A_coeff( int n, int m )
+KOKKOS_INLINE_FUNCTION Scalar A_coeff( int n, int m )
 {
     const int abs_m = ( m < 0 ) ? -m : m;
     if ( abs_m > n )
@@ -115,8 +110,10 @@ Scalar A_coeff( int n, int m )
 
     // (n-m)! and (n+m)!
     // Use tgamma for device-callable factorials
-    const Scalar num_fact = Kokkos::tgamma( static_cast<Scalar>( n - abs_m + 1 ) );
-    const Scalar den_fact = Kokkos::tgamma( static_cast<Scalar>( n + abs_m + 1 ) );
+    const Scalar num_fact =
+        Kokkos::tgamma( static_cast<Scalar>( n - abs_m + 1 ) );
+    const Scalar den_fact =
+        Kokkos::tgamma( static_cast<Scalar>( n + abs_m + 1 ) );
 
     const Scalar sign = ( n % 2 == 0 ) ? 1.0 : -1.0;
     return sign / Kokkos::sqrt( num_fact * den_fact );
@@ -152,10 +149,7 @@ Kokkos::View<Scalar*, MemorySpace> build_A_coefficients( int max_order )
 
 // Index into the A-coefficient table.
 KOKKOS_INLINE_FUNCTION
-constexpr int a_index( int n, int m )
-{
-    return n * n + n + m;
-}
+constexpr int a_index( int n, int m ) { return n * n + n + m; }
 
 } // namespace Canopy
 

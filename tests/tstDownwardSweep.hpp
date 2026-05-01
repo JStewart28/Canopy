@@ -40,14 +40,15 @@ namespace DownwardSweepTest
 enum FieldIdx
 {
     Position = 0,
-    Charge   = 1
+    Charge = 1
 };
 
 static constexpr int P_ORDER = 6;
 using Kernel = LaplaceKernel<double, P_ORDER>;
 
-using DataTypes = Cabana::MemberTypes<double[3], double[Kernel::num_components]>;
-using AoSoA_t  = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
+using DataTypes =
+    Cabana::MemberTypes<double[3], double[Kernel::num_components]>;
+using AoSoA_t = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
 using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
 
 // Generate particles with random positions in [0, 1)^3 and strictly positive
@@ -56,7 +57,7 @@ void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
 {
     AoSoA_ht particles_h( "particles_h", num_particles );
     auto h_pos = Cabana::slice<Position>( particles_h );
-    auto h_q   = Cabana::slice<Charge>( particles_h );
+    auto h_q = Cabana::slice<Charge>( particles_h );
 
     std::mt19937 gen( 42 + rank );
     std::uniform_real_distribution<double> pos_dist( 0.0, 1.0 );
@@ -67,7 +68,7 @@ void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
         h_pos( i, 0 ) = pos_dist( gen );
         h_pos( i, 1 ) = pos_dist( gen );
         h_pos( i, 2 ) = pos_dist( gen );
-        h_q( i, 0 )   = q_dist( gen );
+        h_q( i, 0 ) = q_dist( gen );
     }
 
     particles.resize( num_particles );
@@ -91,9 +92,10 @@ void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
  *   1. Every local coefficient in every cell is exactly zero.
  *   2. Every particle potential is exactly zero.
  */
-void testZeroChargesGiveZeroLocalsAndPotential(
-    int num_particles_per_rank, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testZeroChargesGiveZeroLocalsAndPotential( int num_particles_per_rank,
+                                                int ncrit, int max_depth,
+                                                double tolerance,
+                                                int replication_depth )
 {
     using namespace DownwardSweepTest;
 
@@ -103,7 +105,7 @@ void testZeroChargesGiveZeroLocalsAndPotential(
     AoSoA_ht particles_h( "particles_h", num_particles_per_rank );
     {
         auto h_pos = Cabana::slice<Position>( particles_h );
-        auto h_q   = Cabana::slice<Charge>( particles_h );
+        auto h_q = Cabana::slice<Charge>( particles_h );
 
         std::mt19937 gen( 42 + rank );
         std::uniform_real_distribution<double> pos_dist( 0.0, 1.0 );
@@ -113,7 +115,7 @@ void testZeroChargesGiveZeroLocalsAndPotential(
             h_pos( i, 0 ) = pos_dist( gen );
             h_pos( i, 1 ) = pos_dist( gen );
             h_pos( i, 2 ) = pos_dist( gen );
-            h_q( i, 0 )   = 0.0;
+            h_q( i, 0 ) = 0.0;
         }
     }
 
@@ -121,7 +123,7 @@ void testZeroChargesGiveZeroLocalsAndPotential(
     Cabana::deep_copy( particles, particles_h );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -133,10 +135,11 @@ void testZeroChargesGiveZeroLocalsAndPotential(
     int num_local = partitioner.num_local_particles();
 
     positions = Cabana::slice<Position>( particles );
-    charges   = Cabana::slice<Charge>( particles );
+    charges = Cabana::slice<Charge>( particles );
     builder.build( positions, num_local );
 
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -145,19 +148,20 @@ void testZeroChargesGiveZeroLocalsAndPotential(
                   builder.particle_keys(), num_local );
     upward.execute( charges, positions, comm_plan );
 
-    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward( MPI_COMM_WORLD );
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward(
+        MPI_COMM_WORLD );
     downward.setup( upward, num_local );
 
     auto potential = downward.allocate_potential( num_local );
-    auto gradient  = downward.allocate_gradient( num_local );
+    auto gradient = downward.allocate_gradient( num_local );
     Kokkos::deep_copy( potential, 0.0 );
 
     downward.execute( upward.multipoles(), positions, potential, gradient,
                       false, comm_plan );
 
     // All local coefficients must be zero
-    auto h_L = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), downward.locals() );
+    auto h_L = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                    downward.locals() );
     const int num_cells = static_cast<int>( h_L.extent( 0 ) );
     for ( int c = 0; c < num_cells; c++ )
         for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
@@ -169,8 +173,8 @@ void testZeroChargesGiveZeroLocalsAndPotential(
         }
 
     // All particle potentials must be zero
-    auto h_phi = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), potential );
+    auto h_phi =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
     for ( int p = 0; p < num_local; p++ )
         EXPECT_EQ( h_phi( p, 0 ), 0.0 )
             << "Non-zero potential at particle " << p << " with zero charges";
@@ -196,9 +200,10 @@ void testZeroChargesGiveZeroLocalsAndPotential(
  *   1. The global maximum absolute local coefficient is > 0.
  *   2. The global maximum absolute particle potential is > 0.
  */
-void testLocalsAndPotentialNonzeroAfterExecute(
-    int num_particles_per_rank, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testLocalsAndPotentialNonzeroAfterExecute( int num_particles_per_rank,
+                                                int ncrit, int max_depth,
+                                                double tolerance,
+                                                int replication_depth )
 {
     using namespace DownwardSweepTest;
 
@@ -209,7 +214,7 @@ void testLocalsAndPotentialNonzeroAfterExecute(
     generate_test_particles( particles, num_particles_per_rank, rank );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -221,10 +226,11 @@ void testLocalsAndPotentialNonzeroAfterExecute(
     int num_local = partitioner.num_local_particles();
 
     positions = Cabana::slice<Position>( particles );
-    charges   = Cabana::slice<Charge>( particles );
+    charges = Cabana::slice<Charge>( particles );
     builder.build( positions, num_local );
 
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -233,19 +239,20 @@ void testLocalsAndPotentialNonzeroAfterExecute(
                   builder.particle_keys(), num_local );
     upward.execute( charges, positions, comm_plan );
 
-    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward( MPI_COMM_WORLD );
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward(
+        MPI_COMM_WORLD );
     downward.setup( upward, num_local );
 
     auto potential = downward.allocate_potential( num_local );
-    auto gradient  = downward.allocate_gradient( num_local );
+    auto gradient = downward.allocate_gradient( num_local );
     Kokkos::deep_copy( potential, 0.0 );
 
     downward.execute( upward.multipoles(), positions, potential, gradient,
                       false, comm_plan );
 
     // Reduce max |local| across all ranks
-    auto h_L = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), downward.locals() );
+    auto h_L = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                    downward.locals() );
     const int num_cells = static_cast<int>( h_L.extent( 0 ) );
     double local_max_abs = 0.0;
     for ( int c = 0; c < num_cells; c++ )
@@ -265,8 +272,8 @@ void testLocalsAndPotentialNonzeroAfterExecute(
         << "All local coefficients are zero after sweep with non-zero charges";
 
     // Reduce max |potential| across all ranks
-    auto h_phi = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), potential );
+    auto h_phi =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
     double local_phi_max = 0.0;
     for ( int p = 0; p < num_local; p++ )
         if ( std::abs( h_phi( p, 0 ) ) > local_phi_max )
@@ -294,9 +301,9 @@ void testLocalsAndPotentialNonzeroAfterExecute(
  *      between the first and second execute() calls.
  *   2. Every particle potential value matches exactly between the two calls.
  */
-void testIdempotentExecution(
-    int num_particles_per_rank, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testIdempotentExecution( int num_particles_per_rank, int ncrit,
+                              int max_depth, double tolerance,
+                              int replication_depth )
 {
     using namespace DownwardSweepTest;
 
@@ -307,7 +314,7 @@ void testIdempotentExecution(
     generate_test_particles( particles, num_particles_per_rank, rank );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -319,10 +326,11 @@ void testIdempotentExecution(
     int num_local = partitioner.num_local_particles();
 
     positions = Cabana::slice<Position>( particles );
-    charges   = Cabana::slice<Charge>( particles );
+    charges = Cabana::slice<Charge>( particles );
     builder.build( positions, num_local );
 
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -331,32 +339,33 @@ void testIdempotentExecution(
                   builder.particle_keys(), num_local );
     upward.execute( charges, positions, comm_plan );
 
-    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward( MPI_COMM_WORLD );
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward(
+        MPI_COMM_WORLD );
     downward.setup( upward, num_local );
 
     // First execute — snapshot locals and potential
     auto potential1 = downward.allocate_potential( num_local );
-    auto gradient1  = downward.allocate_gradient( num_local );
+    auto gradient1 = downward.allocate_gradient( num_local );
     Kokkos::deep_copy( potential1, 0.0 );
     downward.execute( upward.multipoles(), positions, potential1, gradient1,
                       false, comm_plan );
 
-    auto h_L1   = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), downward.locals() );
-    auto h_phi1 = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), potential1 );
+    auto h_L1 = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                     downward.locals() );
+    auto h_phi1 =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential1 );
 
     // Second execute — must give bit-identical results
     auto potential2 = downward.allocate_potential( num_local );
-    auto gradient2  = downward.allocate_gradient( num_local );
+    auto gradient2 = downward.allocate_gradient( num_local );
     Kokkos::deep_copy( potential2, 0.0 );
     downward.execute( upward.multipoles(), positions, potential2, gradient2,
                       false, comm_plan );
 
-    auto h_L2   = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), downward.locals() );
-    auto h_phi2 = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), potential2 );
+    auto h_L2 = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                     downward.locals() );
+    auto h_phi2 =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential2 );
 
     const int num_cells = static_cast<int>( h_L1.extent( 0 ) );
     for ( int c = 0; c < num_cells; c++ )
@@ -398,9 +407,11 @@ void testIdempotentExecution(
  *   1. At least one target particle exists in the post-partition data.
  *   2. Max relative error over all target particles is below error_tol.
  */
-void testL2PApproximatesDirectSumSingleRank(
-    int num_sources, int num_targets, int ncrit, int max_depth,
-    double tolerance, int replication_depth, double error_tol )
+void testL2PApproximatesDirectSumSingleRank( int num_sources, int num_targets,
+                                             int ncrit, int max_depth,
+                                             double tolerance,
+                                             int replication_depth,
+                                             double error_tol )
 {
     using namespace DownwardSweepTest;
 
@@ -416,7 +427,7 @@ void testL2PApproximatesDirectSumSingleRank(
     AoSoA_ht particles_h( "particles_h", N );
     {
         auto h_pos = Cabana::slice<Position>( particles_h );
-        auto h_q   = Cabana::slice<Charge>( particles_h );
+        auto h_q = Cabana::slice<Charge>( particles_h );
 
         std::mt19937 gen( 777 );
         std::uniform_real_distribution<double> src_dist( 0.0, 0.2 );
@@ -428,14 +439,14 @@ void testL2PApproximatesDirectSumSingleRank(
             h_pos( i, 0 ) = src_dist( gen );
             h_pos( i, 1 ) = src_dist( gen );
             h_pos( i, 2 ) = src_dist( gen );
-            h_q( i, 0 )   = q_dist( gen );
+            h_q( i, 0 ) = q_dist( gen );
         }
         for ( int i = num_sources; i < N; i++ )
         {
             h_pos( i, 0 ) = tgt_dist( gen );
             h_pos( i, 1 ) = tgt_dist( gen );
             h_pos( i, 2 ) = tgt_dist( gen );
-            h_q( i, 0 )   = 0.0;
+            h_q( i, 0 ) = 0.0;
         }
     }
 
@@ -443,7 +454,7 @@ void testL2PApproximatesDirectSumSingleRank(
     Cabana::deep_copy( particles, particles_h );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -455,10 +466,11 @@ void testL2PApproximatesDirectSumSingleRank(
     int num_local = partitioner.num_local_particles();
 
     positions = Cabana::slice<Position>( particles );
-    charges   = Cabana::slice<Charge>( particles );
+    charges = Cabana::slice<Charge>( particles );
     builder.build( positions, num_local );
 
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -467,11 +479,12 @@ void testL2PApproximatesDirectSumSingleRank(
                   builder.particle_keys(), num_local );
     upward.execute( charges, positions, comm_plan );
 
-    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward( MPI_COMM_WORLD );
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward(
+        MPI_COMM_WORLD );
     downward.setup( upward, num_local );
 
     auto potential = downward.allocate_potential( num_local );
-    auto gradient  = downward.allocate_gradient( num_local );
+    auto gradient = downward.allocate_gradient( num_local );
     Kokkos::deep_copy( potential, 0.0 );
 
     downward.execute( upward.multipoles(), positions, potential, gradient,
@@ -481,19 +494,21 @@ void testL2PApproximatesDirectSumSingleRank(
     Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
     Kokkos::View<double*, TEST_MEMSPACE> d_crg( "d_crg", num_local );
     Kokkos::parallel_for(
-        "CopyForRef",
-        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
+        "CopyForRef", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
         KOKKOS_LAMBDA( int i ) {
             d_pos( i, 0 ) = positions( i, 0 );
             d_pos( i, 1 ) = positions( i, 1 );
             d_pos( i, 2 ) = positions( i, 2 );
-            d_crg( i )    = charges( i, 0 );
+            d_crg( i ) = charges( i, 0 );
         } );
     Kokkos::fence();
 
-    auto h_pos = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
-    auto h_crg = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_crg );
-    auto h_phi = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_pos =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+    auto h_crg =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_crg );
+    auto h_phi =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
 
     // For each target particle (charge == 0), compare FMM potential to
     // direct sum over all source particles (charge != 0).
@@ -513,19 +528,18 @@ void testL2PApproximatesDirectSumSingleRank(
         {
             if ( h_crg( s ) == 0.0 )
                 continue;
-            const double dx   = tx - h_pos( s, 0 );
-            const double dy   = ty - h_pos( s, 1 );
-            const double dz   = tz - h_pos( s, 2 );
+            const double dx = tx - h_pos( s, 0 );
+            const double dy = ty - h_pos( s, 1 );
+            const double dz = tz - h_pos( s, 2 );
             const double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
             if ( dist > 0.0 )
                 ref += h_crg( s ) / dist;
         }
 
         const double fmm = h_phi( p, 0 );
-        const double rel_err =
-            ( std::abs( ref ) > 1e-14 )
-                ? std::abs( fmm - ref ) / std::abs( ref )
-                : std::abs( fmm - ref );
+        const double rel_err = ( std::abs( ref ) > 1e-14 )
+                                   ? std::abs( fmm - ref ) / std::abs( ref )
+                                   : std::abs( fmm - ref );
 
         if ( rel_err > max_rel_err )
             max_rel_err = rel_err;
@@ -536,7 +550,8 @@ void testL2PApproximatesDirectSumSingleRank(
         << "No target particles found; check two-cluster placement";
     EXPECT_LT( max_rel_err, error_tol )
         << "FMM L2P deviates from direct Coulomb sum; "
-           "max relative error = " << max_rel_err;
+           "max relative error = "
+        << max_rel_err;
 }
 
 //---------------------------------------------------------------------------//
@@ -544,9 +559,10 @@ void testL2PApproximatesDirectSumSingleRank(
  * Verify that the FMM far-field potential approximates the direct Coulomb sum
  * for the two-cluster setup on multiple MPI ranks.
  *
- * The geometry and physics are the same as testL2PApproximatesDirectSumSingleRank.
- * This test is silently skipped on a single rank; the single-rank case is
- * covered by testL2PApproximatesDirectSumSingleRank.
+ * The geometry and physics are the same as
+ * testL2PApproximatesDirectSumSingleRank. This test is silently skipped on a
+ * single rank; the single-rank case is covered by
+ * testL2PApproximatesDirectSumSingleRank.
  *
  * After partitioning, exchange_multipoles_for_m2l communicates source cell
  * multipoles to the ranks that own target cells. Each rank evaluates L2P at
@@ -557,9 +573,11 @@ void testL2PApproximatesDirectSumSingleRank(
  *   1. At least one target particle exists in the gathered data.
  *   2. Max relative error over all target particles is below error_tol.
  */
-void testL2PApproximatesDirectSumMultiRank(
-    int num_sources, int num_targets, int ncrit, int max_depth,
-    double tolerance, int replication_depth, double error_tol )
+void testL2PApproximatesDirectSumMultiRank( int num_sources, int num_targets,
+                                            int ncrit, int max_depth,
+                                            double tolerance,
+                                            int replication_depth,
+                                            double error_tol )
 {
     using namespace DownwardSweepTest;
 
@@ -577,7 +595,7 @@ void testL2PApproximatesDirectSumMultiRank(
     AoSoA_ht particles_h( "particles_h", N );
     {
         auto h_pos = Cabana::slice<Position>( particles_h );
-        auto h_q   = Cabana::slice<Charge>( particles_h );
+        auto h_q = Cabana::slice<Charge>( particles_h );
 
         std::mt19937 gen( 777 + rank );
         std::uniform_real_distribution<double> src_dist( 0.0, 0.2 );
@@ -589,14 +607,14 @@ void testL2PApproximatesDirectSumMultiRank(
             h_pos( i, 0 ) = src_dist( gen );
             h_pos( i, 1 ) = src_dist( gen );
             h_pos( i, 2 ) = src_dist( gen );
-            h_q( i, 0 )   = q_dist( gen );
+            h_q( i, 0 ) = q_dist( gen );
         }
         for ( int i = num_sources; i < N; i++ )
         {
             h_pos( i, 0 ) = tgt_dist( gen );
             h_pos( i, 1 ) = tgt_dist( gen );
             h_pos( i, 2 ) = tgt_dist( gen );
-            h_q( i, 0 )   = 0.0;
+            h_q( i, 0 ) = 0.0;
         }
     }
 
@@ -604,7 +622,7 @@ void testL2PApproximatesDirectSumMultiRank(
     Cabana::deep_copy( particles, particles_h );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -616,10 +634,11 @@ void testL2PApproximatesDirectSumMultiRank(
     int num_local = partitioner.num_local_particles();
 
     positions = Cabana::slice<Position>( particles );
-    charges   = Cabana::slice<Charge>( particles );
+    charges = Cabana::slice<Charge>( particles );
     builder.build( positions, num_local );
 
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -628,11 +647,12 @@ void testL2PApproximatesDirectSumMultiRank(
                   builder.particle_keys(), num_local );
     upward.execute( charges, positions, comm_plan );
 
-    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward( MPI_COMM_WORLD );
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward(
+        MPI_COMM_WORLD );
     downward.setup( upward, num_local );
 
     auto potential = downward.allocate_potential( num_local );
-    auto gradient  = downward.allocate_gradient( num_local );
+    auto gradient = downward.allocate_gradient( num_local );
     Kokkos::deep_copy( potential, 0.0 );
 
     downward.execute( upward.multipoles(), positions, potential, gradient,
@@ -642,19 +662,21 @@ void testL2PApproximatesDirectSumMultiRank(
     Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
     Kokkos::View<double*, TEST_MEMSPACE> d_crg( "d_crg", num_local );
     Kokkos::parallel_for(
-        "CopyForRef",
-        Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
+        "CopyForRef", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, num_local ),
         KOKKOS_LAMBDA( int i ) {
             d_pos( i, 0 ) = positions( i, 0 );
             d_pos( i, 1 ) = positions( i, 1 );
             d_pos( i, 2 ) = positions( i, 2 );
-            d_crg( i )    = charges( i, 0 );
+            d_crg( i ) = charges( i, 0 );
         } );
     Kokkos::fence();
 
-    auto h_pos_l = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
-    auto h_crg_l = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_crg );
-    auto h_phi_l = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_pos_l =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+    auto h_crg_l =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_crg );
+    auto h_phi_l =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
 
     // Pack each particle as (x, y, z, charge, potential) for gathering
     std::vector<double> local_buf( 5 * num_local );
@@ -668,8 +690,8 @@ void testL2PApproximatesDirectSumMultiRank(
     }
 
     std::vector<int> all_num_local( nprocs, 0 );
-    MPI_Gather( &num_local, 1, MPI_INT,
-                all_num_local.data(), 1, MPI_INT, 0, MPI_COMM_WORLD );
+    MPI_Gather( &num_local, 1, MPI_INT, all_num_local.data(), 1, MPI_INT, 0,
+                MPI_COMM_WORLD );
 
     int total_particles = 0;
     std::vector<int> counts( nprocs, 0 ), displs( nprocs, 0 );
@@ -687,9 +709,8 @@ void testL2PApproximatesDirectSumMultiRank(
         gathered.resize( 5 * total_particles );
     }
 
-    MPI_Gatherv( local_buf.data(), 5 * num_local, MPI_DOUBLE,
-                 gathered.data(), counts.data(), displs.data(),
-                 MPI_DOUBLE, 0, MPI_COMM_WORLD );
+    MPI_Gatherv( local_buf.data(), 5 * num_local, MPI_DOUBLE, gathered.data(),
+                 counts.data(), displs.data(), MPI_DOUBLE, 0, MPI_COMM_WORLD );
 
     if ( rank == 0 )
     {
@@ -710,31 +731,29 @@ void testL2PApproximatesDirectSumMultiRank(
             {
                 if ( gathered[5 * s + 3] == 0.0 )
                     continue;
-                const double dx   = tx - gathered[5 * s + 0];
-                const double dy   = ty - gathered[5 * s + 1];
-                const double dz   = tz - gathered[5 * s + 2];
-                const double dist =
-                    std::sqrt( dx * dx + dy * dy + dz * dz );
+                const double dx = tx - gathered[5 * s + 0];
+                const double dy = ty - gathered[5 * s + 1];
+                const double dz = tz - gathered[5 * s + 2];
+                const double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
                 if ( dist > 0.0 )
                     ref += gathered[5 * s + 3] / dist;
             }
 
             const double fmm = gathered[5 * p + 4];
-            const double rel_err =
-                ( std::abs( ref ) > 1e-14 )
-                    ? std::abs( fmm - ref ) / std::abs( ref )
-                    : std::abs( fmm - ref );
+            const double rel_err = ( std::abs( ref ) > 1e-14 )
+                                       ? std::abs( fmm - ref ) / std::abs( ref )
+                                       : std::abs( fmm - ref );
 
             if ( rel_err > max_rel_err )
                 max_rel_err = rel_err;
             n_checked++;
         }
 
-        EXPECT_GT( n_checked, 0 )
-            << "No target particles gathered on rank 0";
+        EXPECT_GT( n_checked, 0 ) << "No target particles gathered on rank 0";
         EXPECT_LT( max_rel_err, error_tol )
             << "FMM L2P multi-rank deviates from direct Coulomb sum; "
-               "max relative error = " << max_rel_err;
+               "max relative error = "
+            << max_rel_err;
     }
 }
 
@@ -765,9 +784,8 @@ void testL2PApproximatesDirectSumMultiRank(
  *
  * This test runs single-rank only so all cells are visible to the checks.
  */
-void testM2LListInvariants(
-    int num_particles, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testM2LListInvariants( int num_particles, int ncrit, int max_depth,
+                            double tolerance, int replication_depth )
 {
     using namespace DownwardSweepTest;
 
@@ -795,7 +813,8 @@ void testM2LListInvariants(
     positions = Cabana::slice<Position>( particles );
     builder.build( positions, num_local );
 
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -807,13 +826,13 @@ void testM2LListInvariants(
     std::unordered_map<MortonKey, bool> is_leaf_of;
     for ( const auto& ci : builder.cells() )
     {
-        depth_of[ci.key]   = ci.depth;
+        depth_of[ci.key] = ci.depth;
         is_leaf_of[ci.key] = ci.is_leaf;
     }
 
     // (a) Same-depth symmetry of m2l interaction lists.
     int n_same_depth_pairs = 0;
-    int n_asymmetric       = 0;
+    int n_asymmetric = 0;
     for ( const auto& kv : ilists )
     {
         MortonKey A = kv.first;
@@ -844,9 +863,9 @@ void testM2LListInvariants(
             {
                 n_asymmetric++;
                 EXPECT_TRUE( false )
-                    << "M2L list asymmetry: cell " << A
-                    << " has " << B << " in its list at same depth "
-                    << da->second << ", but reciprocal is missing";
+                    << "M2L list asymmetry: cell " << A << " has " << B
+                    << " in its list at same depth " << da->second
+                    << ", but reciprocal is missing";
                 if ( n_asymmetric >= 5 )
                     break;
             }
@@ -876,10 +895,9 @@ void testM2LListInvariants(
             if ( p2p_set.count( B ) )
             {
                 n_overlaps++;
-                EXPECT_TRUE( false )
-                    << "Cell " << A << " has " << B
-                    << " in BOTH M2L and P2P lists "
-                       "(near/far classification overlap)";
+                EXPECT_TRUE( false ) << "Cell " << A << " has " << B
+                                     << " in BOTH M2L and P2P lists "
+                                        "(near/far classification overlap)";
                 if ( n_overlaps >= 5 )
                     break;
             }
@@ -905,10 +923,11 @@ void testM2LListInvariants(
  * Same direct-sum reference and tolerance check as the uniform two-cluster
  * variants. Single-rank only.
  */
-void testL2PApproximatesDirectSumAdaptive(
-    int num_dense_sources, int num_sparse_targets,
-    int ncrit, int max_depth,
-    double tolerance, int replication_depth, double error_tol )
+void testL2PApproximatesDirectSumAdaptive( int num_dense_sources,
+                                           int num_sparse_targets, int ncrit,
+                                           int max_depth, double tolerance,
+                                           int replication_depth,
+                                           double error_tol )
 {
     using namespace DownwardSweepTest;
 
@@ -924,7 +943,7 @@ void testL2PApproximatesDirectSumAdaptive(
     AoSoA_ht particles_h( "particles_h", N );
     {
         auto h_pos = Cabana::slice<Position>( particles_h );
-        auto h_q   = Cabana::slice<Charge>( particles_h );
+        auto h_q = Cabana::slice<Charge>( particles_h );
 
         std::mt19937 gen( 31337 );
         std::uniform_real_distribution<double> dense_dist( 0.0, 0.15 );
@@ -936,14 +955,14 @@ void testL2PApproximatesDirectSumAdaptive(
             h_pos( i, 0 ) = dense_dist( gen );
             h_pos( i, 1 ) = dense_dist( gen );
             h_pos( i, 2 ) = dense_dist( gen );
-            h_q( i, 0 )   = q_dist( gen );
+            h_q( i, 0 ) = q_dist( gen );
         }
         for ( int i = num_dense_sources; i < N; i++ )
         {
             h_pos( i, 0 ) = sparse_dist( gen );
             h_pos( i, 1 ) = sparse_dist( gen );
             h_pos( i, 2 ) = sparse_dist( gen );
-            h_q( i, 0 )   = 0.0;
+            h_q( i, 0 ) = 0.0;
         }
     }
 
@@ -951,7 +970,7 @@ void testL2PApproximatesDirectSumAdaptive(
     Cabana::deep_copy( particles, particles_h );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
@@ -963,10 +982,11 @@ void testL2PApproximatesDirectSumAdaptive(
     int num_local = partitioner.num_local_particles();
 
     positions = Cabana::slice<Position>( particles );
-    charges   = Cabana::slice<Charge>( particles );
+    charges = Cabana::slice<Charge>( particles );
     builder.build( positions, num_local );
 
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -975,11 +995,12 @@ void testL2PApproximatesDirectSumAdaptive(
                   builder.particle_keys(), num_local );
     upward.execute( charges, positions, comm_plan );
 
-    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward( MPI_COMM_WORLD );
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> downward(
+        MPI_COMM_WORLD );
     downward.setup( upward, num_local );
 
     auto potential = downward.allocate_potential( num_local );
-    auto gradient  = downward.allocate_gradient( num_local );
+    auto gradient = downward.allocate_gradient( num_local );
     Kokkos::deep_copy( potential, 0.0 );
 
     downward.execute( upward.multipoles(), positions, potential, gradient,
@@ -994,13 +1015,16 @@ void testL2PApproximatesDirectSumAdaptive(
             d_pos( i, 0 ) = positions( i, 0 );
             d_pos( i, 1 ) = positions( i, 1 );
             d_pos( i, 2 ) = positions( i, 2 );
-            d_crg( i )    = charges( i, 0 );
+            d_crg( i ) = charges( i, 0 );
         } );
     Kokkos::fence();
 
-    auto h_pos = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
-    auto h_crg = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_crg );
-    auto h_phi = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_pos =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+    auto h_crg =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_crg );
+    auto h_phi =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
 
     double max_rel_err = 0.0;
     int n_checked = 0;
@@ -1018,19 +1042,18 @@ void testL2PApproximatesDirectSumAdaptive(
         {
             if ( h_crg( s ) == 0.0 )
                 continue;
-            const double dx   = tx - h_pos( s, 0 );
-            const double dy   = ty - h_pos( s, 1 );
-            const double dz   = tz - h_pos( s, 2 );
+            const double dx = tx - h_pos( s, 0 );
+            const double dy = ty - h_pos( s, 1 );
+            const double dz = tz - h_pos( s, 2 );
             const double dist = std::sqrt( dx * dx + dy * dy + dz * dz );
             if ( dist > 0.0 )
                 ref += h_crg( s ) / dist;
         }
 
         const double fmm = h_phi( p, 0 );
-        const double rel_err =
-            ( std::abs( ref ) > 1e-14 )
-                ? std::abs( fmm - ref ) / std::abs( ref )
-                : std::abs( fmm - ref );
+        const double rel_err = ( std::abs( ref ) > 1e-14 )
+                                   ? std::abs( fmm - ref ) / std::abs( ref )
+                                   : std::abs( fmm - ref );
 
         if ( rel_err > max_rel_err )
             max_rel_err = rel_err;
@@ -1041,7 +1064,8 @@ void testL2PApproximatesDirectSumAdaptive(
         << "No target particles found in adaptive geometry";
     EXPECT_LT( max_rel_err, error_tol )
         << "FMM L2P deviates from direct Coulomb sum on adaptive tree; "
-           "max relative error = " << max_rel_err;
+           "max relative error = "
+        << max_rel_err;
 }
 
 //---------------------------------------------------------------------------//

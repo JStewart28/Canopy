@@ -11,12 +11,12 @@
 
 #include "Canopy_CommunicationPlan.hpp"
 #include "Canopy_DownwardSweep.hpp"
+#include "Canopy_Helpers.hpp"
 #include "Canopy_LaplaceKernel.hpp"
 #include "Canopy_P2P.hpp"
 #include "Canopy_TreeBuilder.hpp"
 #include "Canopy_TreePartitioner.hpp"
 #include "Canopy_UpwardSweep.hpp"
-#include "Canopy_Helpers.hpp"
 
 #include <Cabana_Core.hpp>
 #include <Kokkos_Core.hpp>
@@ -41,7 +41,7 @@ namespace SingleSolveTest
 enum FieldIdx
 {
     Position = 0,
-    Charge   = 1
+    Charge = 1
 };
 
 // Expansion order used for all single-solve tests.
@@ -77,21 +77,18 @@ static constexpr int P_ORDER = 8;
  *   grad_ref[i,c,d] = sum_{j≠i} -q[j,c] * (r_i[d] - r_j[d]) / |r_i - r_j|^3
  */
 template <int NComps>
-void testFullSolve(
-    bool compute_gradient,
-    int num_particles_per_rank,
-    int ncrit, int max_depth,
-    double tree_tolerance, int replication_depth,
-    double fmm_tolerance )
+void testFullSolve( bool compute_gradient, int num_particles_per_rank,
+                    int ncrit, int max_depth, double tree_tolerance,
+                    int replication_depth, double fmm_tolerance )
 {
     using namespace SingleSolveTest;
 
-    using Kernel   = LaplaceKernel<double, P_ORDER, NComps>;
+    using Kernel = LaplaceKernel<double, P_ORDER, NComps>;
     using DataTypes = Cabana::MemberTypes<double[3], double[NComps]>;
-    using AoSoA_t   = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
-    using AoSoA_ht  = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
-    using UpSweep   = UpwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel>;
-    using DwnSweep  = DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel>;
+    using AoSoA_t = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
+    using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
+    using UpSweep = UpwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel>;
+    using DwnSweep = DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel>;
 
     int rank, nprocs;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
@@ -127,8 +124,9 @@ void testFullSolve(
         MPI_COMM_WORLD, ncrit, max_depth, tree_tolerance, tree_tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
-    UpSweep  upward( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
+    UpSweep upward( MPI_COMM_WORLD );
     DwnSweep downward( MPI_COMM_WORLD );
     P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
@@ -173,9 +171,9 @@ void testFullSolve(
     // Allocate output views.  Both DownwardSweep and P2P ADD to these, so
     // they must be zero before execute().  A zero-extent gradient view is
     // passed when gradient evaluation is skipped.
-    using pot_view  = typename DwnSweep::potential_view_type;
+    using pot_view = typename DwnSweep::potential_view_type;
     using grad_view = typename DwnSweep::gradient_view_type;
-    pot_view  potential( "potential", num_local );
+    pot_view potential( "potential", num_local );
     grad_view gradient( "gradient", compute_gradient ? num_local : 0 );
     Kokkos::deep_copy( potential, 0.0 );
     if ( compute_gradient )
@@ -198,20 +196,20 @@ void testFullSolve(
 
     // Copy slices to host (must use Canopy helper; Kokkos::create_mirror_view
     // does not support Cabana slice sources).
-    auto h_pos = Canopy::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), positions, "h_pos" );
-    auto h_chg = Canopy::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), charges, "h_chg" );
+    auto h_pos = Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                      positions, "h_pos" );
+    auto h_chg = Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                      charges, "h_chg" );
 
     // Copy output Kokkos views to host
-    auto h_pot = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), potential );
-    auto h_grad = Kokkos::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), gradient );
+    auto h_pot =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_grad =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), gradient );
 
     // Pack into flat buffers (row-major: particle outermost)
-    const int chg_stride  = NComps;
-    const int pot_stride  = NComps;
+    const int chg_stride = NComps;
+    const int pot_stride = NComps;
     const int grad_stride = NComps * 3;
 
     std::vector<double> local_pos_buf( 3 * num_local );
@@ -242,14 +240,14 @@ void testFullSolve(
 
     // Gather particle counts
     std::vector<int> all_num_local( nprocs, 0 );
-    MPI_Gather( &num_local, 1, MPI_INT,
-                all_num_local.data(), 1, MPI_INT, 0, MPI_COMM_WORLD );
+    MPI_Gather( &num_local, 1, MPI_INT, all_num_local.data(), 1, MPI_INT, 0,
+                MPI_COMM_WORLD );
 
     // Build displacements and receive buffers on rank 0
     int total_particles = 0;
-    std::vector<int> pos_counts( nprocs, 0 ),  pos_displs( nprocs, 0 );
-    std::vector<int> chg_counts( nprocs, 0 ),  chg_displs( nprocs, 0 );
-    std::vector<int> pot_counts( nprocs, 0 ),  pot_displs( nprocs, 0 );
+    std::vector<int> pos_counts( nprocs, 0 ), pos_displs( nprocs, 0 );
+    std::vector<int> chg_counts( nprocs, 0 ), chg_displs( nprocs, 0 );
+    std::vector<int> pot_counts( nprocs, 0 ), pot_displs( nprocs, 0 );
     std::vector<int> grad_counts( nprocs, 0 ), grad_displs( nprocs, 0 );
     std::vector<double> gathered_pos, gathered_chg, gathered_pot, gathered_grad;
 
@@ -257,17 +255,17 @@ void testFullSolve(
     {
         for ( int r = 0; r < nprocs; r++ )
         {
-            pos_counts[r]  = 3          * all_num_local[r];
-            chg_counts[r]  = chg_stride * all_num_local[r];
-            pot_counts[r]  = pot_stride * all_num_local[r];
+            pos_counts[r] = 3 * all_num_local[r];
+            chg_counts[r] = chg_stride * all_num_local[r];
+            pot_counts[r] = pot_stride * all_num_local[r];
             grad_counts[r] = grad_stride * all_num_local[r];
             total_particles += all_num_local[r];
         }
         for ( int r = 1; r < nprocs; r++ )
         {
-            pos_displs[r]  = pos_displs[r - 1]  + pos_counts[r - 1];
-            chg_displs[r]  = chg_displs[r - 1]  + chg_counts[r - 1];
-            pot_displs[r]  = pot_displs[r - 1]  + pot_counts[r - 1];
+            pos_displs[r] = pos_displs[r - 1] + pos_counts[r - 1];
+            chg_displs[r] = chg_displs[r - 1] + chg_counts[r - 1];
+            pot_displs[r] = pot_displs[r - 1] + pot_counts[r - 1];
             grad_displs[r] = grad_displs[r - 1] + grad_counts[r - 1];
         }
         gathered_pos.resize( 3 * total_particles );
@@ -288,15 +286,15 @@ void testFullSolve(
                  MPI_DOUBLE, 0, MPI_COMM_WORLD );
     if ( compute_gradient )
         MPI_Gatherv( local_grad_buf.data(), grad_stride * num_local, MPI_DOUBLE,
-                     gathered_grad.data(), grad_counts.data(), grad_displs.data(),
-                     MPI_DOUBLE, 0, MPI_COMM_WORLD );
+                     gathered_grad.data(), grad_counts.data(),
+                     grad_displs.data(), MPI_DOUBLE, 0, MPI_COMM_WORLD );
 
     // -----------------------------------------------------------------------
     // On rank 0: compute brute-force N-body sum and compare.
     // -----------------------------------------------------------------------
     if ( rank == 0 )
     {
-        double max_pot_rel_err  = 0.0;
+        double max_pot_rel_err = 0.0;
         double max_grad_rel_err = 0.0;
 
         for ( int i = 0; i < total_particles; i++ )
@@ -317,10 +315,10 @@ void testFullSolve(
                     const double dx = xi - gathered_pos[3 * j + 0];
                     const double dy = yi - gathered_pos[3 * j + 1];
                     const double dz = zi - gathered_pos[3 * j + 2];
-                    const double r2     = dx * dx + dy * dy + dz * dz;
-                    const double inv_r  = 1.0 / std::sqrt( r2 );
+                    const double r2 = dx * dx + dy * dy + dz * dz;
+                    const double inv_r = 1.0 / std::sqrt( r2 );
                     const double inv_r3 = inv_r * inv_r * inv_r;
-                    const double qjc    = gathered_chg[j * NComps + c];
+                    const double qjc = gathered_chg[j * NComps + c];
 
                     phi_ref += qjc * inv_r;
                     if ( compute_gradient )
@@ -350,16 +348,14 @@ void testFullSolve(
                     const double gz_fmm =
                         gathered_grad[i * grad_stride + c * 3 + 2];
 
-                    const double grad_mag = std::sqrt( gx_ref * gx_ref +
-                                                       gy_ref * gy_ref +
-                                                       gz_ref * gz_ref );
+                    const double grad_mag = std::sqrt(
+                        gx_ref * gx_ref + gy_ref * gy_ref + gz_ref * gz_ref );
                     const double grad_err =
                         std::max( { std::abs( gx_fmm - gx_ref ),
                                     std::abs( gy_fmm - gy_ref ),
                                     std::abs( gz_fmm - gz_ref ) } );
                     const double grad_rel =
-                        ( grad_mag > 1.0e-10 ) ? grad_err / grad_mag
-                                               : grad_err;
+                        ( grad_mag > 1.0e-10 ) ? grad_err / grad_mag : grad_err;
                     if ( grad_rel > max_grad_rel_err )
                         max_grad_rel_err = grad_rel;
                 }
@@ -369,13 +365,15 @@ void testFullSolve(
         EXPECT_LT( max_pot_rel_err, fmm_tolerance )
             << "FMM+P2P potential (NComps=" << NComps
             << ") deviates from brute-force N-body sum; "
-               "max relative error = " << max_pot_rel_err;
+               "max relative error = "
+            << max_pot_rel_err;
 
         if ( compute_gradient )
             EXPECT_LT( max_grad_rel_err, fmm_tolerance )
                 << "FMM+P2P gradient (NComps=" << NComps
                 << ") deviates from brute-force N-body gradient; "
-                   "max relative error = " << max_grad_rel_err;
+                   "max relative error = "
+                << max_grad_rel_err;
     }
 }
 

@@ -54,28 +54,25 @@ namespace Canopy
 //   NComps  - number of simultaneous solves (charge components)
 // ============================================================================
 
-template <class MemorySpace, class ExecutionSpace,
-          class Scalar = double, int P_ORDER = 8, int NComps = 1>
+template <class MemorySpace, class ExecutionSpace, class Scalar = double,
+          int P_ORDER = 8, int NComps = 1>
 class Solver
 {
   public:
-    using memory_space    = MemorySpace;
+    using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
 
-    using kernel_type   = LaplaceKernel<Scalar, P_ORDER, NComps>;
-    using builder_type  = TreeBuilder<MemorySpace, ExecutionSpace>;
-    using partitioner_type =
-        TreePartitioner<MemorySpace, ExecutionSpace>;
-    using comm_plan_type =
-        CommunicationPlan<MemorySpace, ExecutionSpace>;
-    using upward_type =
-        UpwardSweep<MemorySpace, ExecutionSpace, kernel_type>;
+    using kernel_type = LaplaceKernel<Scalar, P_ORDER, NComps>;
+    using builder_type = TreeBuilder<MemorySpace, ExecutionSpace>;
+    using partitioner_type = TreePartitioner<MemorySpace, ExecutionSpace>;
+    using comm_plan_type = CommunicationPlan<MemorySpace, ExecutionSpace>;
+    using upward_type = UpwardSweep<MemorySpace, ExecutionSpace, kernel_type>;
     using downward_type =
         DownwardSweep<MemorySpace, ExecutionSpace, kernel_type>;
     using p2p_type = P2P<MemorySpace, ExecutionSpace, kernel_type>;
 
     using potential_view_type = typename downward_type::potential_view_type;
-    using gradient_view_type  = typename downward_type::gradient_view_type;
+    using gradient_view_type = typename downward_type::gradient_view_type;
 
     enum class MaintenanceAction
     {
@@ -87,12 +84,8 @@ class Solver
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
-    Solver( MPI_Comm comm,
-            int ncrit,
-            int max_depth,
-            double tree_tolerance,
-            int replication_depth,
-            double imbalance_tolerance = 0.05 )
+    Solver( MPI_Comm comm, int ncrit, int max_depth, double tree_tolerance,
+            int replication_depth, double imbalance_tolerance = 0.05 )
         : _comm( comm )
         , _replication_depth( replication_depth )
         , _builder( comm, ncrit, max_depth, tree_tolerance, tree_tolerance )
@@ -130,7 +123,7 @@ class Solver
     void solve( AoSoA& particles, bool compute_gradient )
     {
         auto positions = Cabana::slice<PositionIdx>( particles );
-        auto charges   = Cabana::slice<ChargeIdx>( particles );
+        auto charges = Cabana::slice<ChargeIdx>( particles );
 
         // Resize/zero output views to current local count
         if ( static_cast<int>( _potential.extent( 0 ) ) != _num_local )
@@ -162,18 +155,46 @@ class Solver
     //   redistribute → build → sort_by_leaf → build
     //   → upward.setup → downward.setup → p2p.setup
     //
-    // comm_plan is reused (topology stable).
+    // comm_plan is reused when topology is confirmed stable. If build()
+    // detects a topology change (bounding-box drift can shift cell
+    // boundaries past nearby particles), falls back to
+    // _finish_topology_change so the comm_plan is rebuilt before the
+    // next solve.
     // -----------------------------------------------------------------------
     template <int PositionIdx, class AoSoA>
     RedistributeResult migrate( AoSoA& particles )
     {
-        // redistribute uses the current particle_keys (stale w.r.t. new
-        // positions but valid for finding new leaf owners after the user
-        // has moved particles). The standard pattern is to first rebuild
-        // particle_keys, then redistribute.
+        // Snapshot the current cell-key set before rebuilding the tree.
+        std::unordered_set<MortonKey> old_keys;
+        old_keys.reserve( _builder.cells().size() );
+        for ( const auto& c : _builder.cells() )
+            old_keys.insert( c.key );
+
+        // Rebuild tree from current positions (also recomputes bounding box).
         {
             auto positions = Cabana::slice<PositionIdx>( particles );
             _builder.build( positions, _num_local );
+        }
+
+        // If the topology changed the existing comm_plan is invalid.
+        // Fall back to the full topology-change path so it is rebuilt.
+        bool topology_changed = ( _builder.cells().size() != old_keys.size() );
+        if ( !topology_changed )
+        {
+            for ( const auto& c : _builder.cells() )
+            {
+                if ( old_keys.find( c.key ) == old_keys.end() )
+                {
+                    topology_changed = true;
+                    break;
+                }
+            }
+        }
+
+        if ( topology_changed )
+        {
+            _finish_topology_change<PositionIdx>( particles );
+            return RedistributeResult{ 0, 0, _num_local };
         }
 
         RedistributeResult result =
@@ -297,11 +318,11 @@ class Solver
     int num_local_particles() const { return _num_local; }
 
     const potential_view_type& potential() const { return _potential; }
-    const gradient_view_type&  gradient()  const { return _gradient; }
+    const gradient_view_type& gradient() const { return _gradient; }
 
-    const builder_type&     builder()     const { return _builder; }
+    const builder_type& builder() const { return _builder; }
     const partitioner_type& partitioner() const { return _partitioner; }
-    const comm_plan_type&   comm_plan()   const { return _comm_plan; }
+    const comm_plan_type& comm_plan() const { return _comm_plan; }
 
   private:
     // -----------------------------------------------------------------------
@@ -337,8 +358,7 @@ class Solver
 
         // Step 6: communication plan
         _comm_plan.build( _builder.cells(), _partitioner.ownership(),
-                          _partitioner.cell_owner_map(),
-                          _replication_depth );
+                          _partitioner.cell_owner_map(), _replication_depth );
 
         // Step 7: setup sweeps and P2P
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
@@ -372,8 +392,7 @@ class Solver
         }
 
         _comm_plan.build( _builder.cells(), _partitioner.ownership(),
-                          _partitioner.cell_owner_map(),
-                          _replication_depth );
+                          _partitioner.cell_owner_map(), _replication_depth );
 
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
                        _builder.particle_keys(), _num_local );
@@ -413,19 +432,19 @@ class Solver
     // Members
     // -----------------------------------------------------------------------
     MPI_Comm _comm;
-    int      _replication_depth;
+    int _replication_depth;
 
-    builder_type     _builder;
+    builder_type _builder;
     partitioner_type _partitioner;
-    comm_plan_type   _comm_plan;
-    upward_type      _upward;
-    downward_type    _downward;
-    p2p_type         _p2p;
+    comm_plan_type _comm_plan;
+    upward_type _upward;
+    downward_type _downward;
+    p2p_type _p2p;
 
     int _num_local;
 
     potential_view_type _potential;
-    gradient_view_type  _gradient;
+    gradient_view_type _gradient;
 };
 
 } // namespace Canopy

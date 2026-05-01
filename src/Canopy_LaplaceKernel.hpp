@@ -14,8 +14,8 @@
 
 #include "Canopy_SphericalCoefficients.hpp"
 
-#include <Kokkos_Core.hpp>
 #include <Kokkos_Complex.hpp>
+#include <Kokkos_Core.hpp>
 
 #include <cstdint>
 
@@ -63,8 +63,7 @@ KOKKOS_INLINE_FUNCTION Scalar Pnm_impl( int n, int m, Scalar x )
     Scalar pn = 0.0;
     for ( int l = m + 2; l <= n; l++ )
     {
-        pn = ( ( 2 * l - 1 ) * x * pnm1 - ( l + m - 1 ) * pnm2 ) /
-             ( l - m );
+        pn = ( ( 2 * l - 1 ) * x * pnm1 - ( l + m - 1 ) * pnm2 ) / ( l - m );
         pnm2 = pnm1;
         pnm1 = pn;
     }
@@ -75,8 +74,8 @@ KOKKOS_INLINE_FUNCTION Scalar Pnm_impl( int n, int m, Scalar x )
 // Device-callable complex spherical harmonic Y_{n,m}(theta, phi).
 // ============================================================================
 template <class Scalar>
-KOKKOS_INLINE_FUNCTION Kokkos::complex<Scalar>
-Ynm( int n, int m, Scalar theta, Scalar phi )
+KOKKOS_INLINE_FUNCTION Kokkos::complex<Scalar> Ynm( int n, int m, Scalar theta,
+                                                    Scalar phi )
 {
     using complex = Kokkos::complex<Scalar>;
 
@@ -85,9 +84,9 @@ Ynm( int n, int m, Scalar theta, Scalar phi )
 
     const Scalar Pnm = Pnm_impl<Scalar>( n, mp, x );
 
-    const Scalar norm = Kokkos::sqrt(
-        Kokkos::tgamma( static_cast<Scalar>( n - mp + 1 ) ) /
-        Kokkos::tgamma( static_cast<Scalar>( n + mp + 1 ) ) );
+    const Scalar norm =
+        Kokkos::sqrt( Kokkos::tgamma( static_cast<Scalar>( n - mp + 1 ) ) /
+                      Kokkos::tgamma( static_cast<Scalar>( n + mp + 1 ) ) );
 
     const Scalar cos_mphi = Kokkos::cos( static_cast<Scalar>( m ) * phi );
     const Scalar sin_mphi = Kokkos::sin( static_cast<Scalar>( m ) * phi );
@@ -101,8 +100,7 @@ Ynm( int n, int m, Scalar theta, Scalar phi )
 template <class Scalar>
 KOKKOS_INLINE_FUNCTION void cartesian_to_spherical( Scalar x, Scalar y,
                                                     Scalar z, Scalar& rho,
-                                                    Scalar& theta,
-                                                    Scalar& phi )
+                                                    Scalar& theta, Scalar& phi )
 {
     rho = Kokkos::sqrt( x * x + y * y + z * z );
     theta = ( rho > 0.0 ) ? Kokkos::acos( z / rho ) : 0.0;
@@ -156,8 +154,7 @@ struct LaplaceKernel
     using complex_type = Kokkos::complex<Scalar>;
 
     static constexpr int max_order = P;
-    static constexpr int num_coeffs_per_cell =
-        ( P + 1 ) * ( P + 2 ) / 2;
+    static constexpr int num_coeffs_per_cell = ( P + 1 ) * ( P + 2 ) / 2;
     static constexpr int num_components = NComps;
     static constexpr bool has_mplus_symmetry = true;
 
@@ -165,7 +162,8 @@ struct LaplaceKernel
     // Retrieve a coefficient from 3D storage with symmetry for m < 0.
     //
     // This kernel's Ynm uses the Greengard convention
-    //     Y_{n,m} = sqrt((n-|m|)!/(n+|m|)!) * P_n^{|m|}(cos theta) * exp(i m phi)
+    //     Y_{n,m} = sqrt((n-|m|)!/(n+|m|)!) * P_n^{|m|}(cos theta) * exp(i m
+    //     phi)
     // so Y_{n,-m} = conj(Y_{n,m}) with no extra (-1)^m phase between +m and
     // -m. For real-sourced kernels the corresponding multipole/local symmetry
     // is therefore
@@ -203,15 +201,15 @@ struct LaplaceKernel
         int p = ( ( pow % 4 ) + 4 ) % 4;
         switch ( p )
         {
-            case 0:
-                return complex_type( 1.0, 0.0 );
-            case 1:
-                return complex_type( 0.0, 1.0 );
-            case 2:
-                return complex_type( -1.0, 0.0 );
-            case 3:
-            default:
-                return complex_type( 0.0, -1.0 );
+        case 0:
+            return complex_type( 1.0, 0.0 );
+        case 1:
+            return complex_type( 0.0, 1.0 );
+        case 2:
+            return complex_type( -1.0, 0.0 );
+        case 3:
+        default:
+            return complex_type( 0.0, -1.0 );
         }
     }
 
@@ -227,8 +225,8 @@ struct LaplaceKernel
     // =======================================================================
     template <class MSliceType>
     KOKKOS_INLINE_FUNCTION static void
-    p2m_contribution( const Scalar ( &charges )[NComps], Scalar dx,
-                      Scalar dy, Scalar dz, const MSliceType& M_out )
+    p2m_contribution( const Scalar ( &charges )[NComps], Scalar dx, Scalar dy,
+                      Scalar dz, const MSliceType& M_out )
     {
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
@@ -238,8 +236,7 @@ struct LaplaceKernel
         {
             for ( int m = 0; m <= n; m++ )
             {
-                const complex_type Ynm_neg_m =
-                    Ynm<Scalar>( n, -m, theta, phi );
+                const complex_type Ynm_neg_m = Ynm<Scalar>( n, -m, theta, phi );
 
                 const int idx = coeff_index( n, m );
                 for ( int c = 0; c < NComps; c++ )
@@ -271,7 +268,8 @@ struct LaplaceKernel
 
         Kokkos::parallel_for(
             Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
-            [&]( const int out_idx ) {
+            [&]( const int out_idx )
+            {
                 int j, k;
                 unflatten_triangular( out_idx, j, k );
 
@@ -296,27 +294,23 @@ struct LaplaceKernel
                             continue;
 
                         const Scalar A_nm = A_table( a_index( n, m ) );
-                        const Scalar A_jmn_kmm =
-                            A_table( a_index( jmn, kmm ) );
+                        const Scalar A_jmn_kmm = A_table( a_index( jmn, kmm ) );
 
                         const int abs_k = k;
                         const int abs_m = ( m < 0 ) ? -m : m;
                         const complex_type ip =
                             i_power( abs_k - abs_m - abs_km );
 
-                        const complex_type Y =
-                            Ynm<Scalar>( n, -m, theta, phi );
+                        const complex_type Y = Ynm<Scalar>( n, -m, theta, phi );
 
                         const Scalar coef_scalar =
                             A_nm * A_jmn_kmm / A_jk * rho_pow_n;
-                        const complex_type pre_factor =
-                            ip * coef_scalar * Y;
+                        const complex_type pre_factor = ip * coef_scalar * Y;
 
                         for ( int c = 0; c < NComps; c++ )
                         {
                             const complex_type M_child_val =
-                                get_coeff_3d( M_full, child_cell, jmn,
-                                              kmm, c );
+                                get_coeff_3d( M_full, child_cell, jmn, kmm, c );
                             accum[c] += M_child_val * pre_factor;
                         }
                     }
@@ -357,7 +351,8 @@ struct LaplaceKernel
 
         Kokkos::parallel_for(
             Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
-            [&]( const int out_idx ) {
+            [&]( const int out_idx )
+            {
                 int j, k;
                 unflatten_triangular( out_idx, j, k );
 
@@ -383,8 +378,7 @@ struct LaplaceKernel
                             continue;
 
                         const Scalar A_nm = A_table( a_index( n, m ) );
-                        const Scalar A_npj_mmk =
-                            A_table( a_index( npj, mmk ) );
+                        const Scalar A_npj_mmk = A_table( a_index( npj, mmk ) );
                         if ( A_npj_mmk == 0.0 )
                             continue;
 
@@ -401,14 +395,12 @@ struct LaplaceKernel
                         const Scalar sign_n = ( n % 2 == 0 ) ? 1.0 : -1.0;
                         const Scalar coef_scalar =
                             sign_n * A_nm * A_jk / A_npj_mmk * inv_rho_pow;
-                        const complex_type pre_factor =
-                            ip * coef_scalar * Y;
+                        const complex_type pre_factor = ip * coef_scalar * Y;
 
                         for ( int c = 0; c < NComps; c++ )
                         {
                             const complex_type M_src_val =
-                                get_coeff_3d( M_full, source_cell, n, m,
-                                              c );
+                                get_coeff_3d( M_full, source_cell, n, m, c );
                             accum[c] += M_src_val * pre_factor;
                         }
                     }
@@ -441,7 +433,8 @@ struct LaplaceKernel
 
         Kokkos::parallel_for(
             Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
-            [&]( const int out_idx ) {
+            [&]( const int out_idx )
+            {
                 int j, k;
                 unflatten_triangular( out_idx, j, k );
 
@@ -472,8 +465,7 @@ struct LaplaceKernel
                         if ( A_nm == 0.0 )
                             continue;
 
-                        const Scalar A_nmj_mmk =
-                            A_table( a_index( nmj, mmk ) );
+                        const Scalar A_nmj_mmk = A_table( a_index( nmj, mmk ) );
 
                         const int abs_k = k;
                         const int abs_m = ( m < 0 ) ? -m : m;
@@ -487,14 +479,12 @@ struct LaplaceKernel
 
                         const Scalar coef_scalar =
                             A_nmj_mmk * A_jk / A_nm * rho_pow_nmj;
-                        const complex_type pre_factor =
-                            ip * coef_scalar * Y;
+                        const complex_type pre_factor = ip * coef_scalar * Y;
 
                         for ( int c = 0; c < NComps; c++ )
                         {
                             const complex_type L_par_val =
-                                get_coeff_3d( L_full, parent_cell, n, m,
-                                              c );
+                                get_coeff_3d( L_full, parent_cell, n, m, c );
                             accum[c] += L_par_val * pre_factor;
                         }
                     }
@@ -531,8 +521,9 @@ struct LaplaceKernel
                   const GradAccess& grad_out, bool compute_gradient )
     {
         // Inline evaluator for potential at an arbitrary offset
-        auto eval_phi = [&]( Scalar ex, Scalar ey, Scalar ez,
-                             Scalar ( &phi )[NComps] ) {
+        auto eval_phi =
+            [&]( Scalar ex, Scalar ey, Scalar ez, Scalar( &phi )[NComps] )
+        {
             for ( int c = 0; c < NComps; c++ )
                 phi[c] = 0.0;
 
@@ -544,12 +535,11 @@ struct LaplaceKernel
             {
                 // m = 0: count once
                 {
-                    const complex_type Y0 =
-                        Ynm<Scalar>( n, 0, theta, phi_ang );
+                    const complex_type Y0 = Ynm<Scalar>( n, 0, theta, phi_ang );
                     for ( int c = 0; c < NComps; c++ )
                     {
-                        const complex_type L_n0 = get_coeff_3d(
-                            L_full, leaf_cell, n, 0, c );
+                        const complex_type L_n0 =
+                            get_coeff_3d( L_full, leaf_cell, n, 0, c );
                         const complex_type term = L_n0 * rho_pow_n * Y0;
                         phi[c] += term.real();
                     }
@@ -557,12 +547,11 @@ struct LaplaceKernel
                 // m = 1..n: count twice via symmetry
                 for ( int m = 1; m <= n; m++ )
                 {
-                    const complex_type Y =
-                        Ynm<Scalar>( n, m, theta, phi_ang );
+                    const complex_type Y = Ynm<Scalar>( n, m, theta, phi_ang );
                     for ( int c = 0; c < NComps; c++ )
                     {
-                        const complex_type L_nm = get_coeff_3d(
-                            L_full, leaf_cell, n, m, c );
+                        const complex_type L_nm =
+                            get_coeff_3d( L_full, leaf_cell, n, m, c );
                         const complex_type term = L_nm * rho_pow_n * Y;
                         phi[c] += 2.0 * term.real();
                     }

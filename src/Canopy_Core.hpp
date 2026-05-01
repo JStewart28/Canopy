@@ -19,8 +19,7 @@
 #include <Canopy_Config.hpp>
 
 #include <Canopy_Operators.hpp>
-#include <Canopy_SolverLayer.hpp>
 #include <Canopy_Solver.hpp>
-
+#include <Canopy_SolverLayer.hpp>
 
 #endif // CANOPY_CORE_HPP

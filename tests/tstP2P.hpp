@@ -38,7 +38,7 @@ namespace P2PTest
 enum FieldIdx
 {
     Position = 0,
-    Charge   = 1
+    Charge = 1
 };
 
 // Default single-component fixture. P2P now requires multi-component charge
@@ -47,23 +47,18 @@ static constexpr int P_ORDER = 4;
 using Kernel = LaplaceKernel<double, P_ORDER>;
 
 using DataTypes = Cabana::MemberTypes<double[3], double[1]>;
-using AoSoA_t   = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
-using AoSoA_ht  = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
+using AoSoA_t = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
+using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
 
 // Run the standard P2P setup pipeline. After this call the AoSoA has been
 // partitioned and sorted by leaf; callers must reslice positions/charges.
 // Returns num_local (post-migration particle count on this rank).
-int run_setup(
-    AoSoA_t& particles,
-    int n_initial,
-    int ncrit,
-    int max_depth,
-    double tolerance,
-    int replication_depth,
-    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>& builder,
-    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE>& partitioner,
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE>& comm_plan,
-    P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel>& p2p )
+int run_setup( AoSoA_t& particles, int n_initial, int ncrit, int max_depth,
+               double tolerance, int replication_depth,
+               TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>& builder,
+               TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE>& partitioner,
+               CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE>& comm_plan,
+               P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel>& p2p )
 {
     auto positions = Cabana::slice<Position>( particles );
     builder.build( positions, n_initial );
@@ -90,9 +85,9 @@ int run_setup(
  * Verify that all-zero particle charges produce all-zero potential and
  * gradient across every local particle.
  */
-void testP2PZeroChargesGiveZeroPotential(
-    int num_particles_per_rank, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testP2PZeroChargesGiveZeroPotential( int num_particles_per_rank, int ncrit,
+                                          int max_depth, double tolerance,
+                                          int replication_depth )
 {
     using namespace P2PTest;
 
@@ -122,15 +117,16 @@ void testP2PZeroChargesGiveZeroPotential(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
     int num_local = run_setup( particles, num_particles_per_rank, ncrit,
-                               max_depth, tolerance, replication_depth,
-                               builder, partitioner, comm_plan, p2p );
+                               max_depth, tolerance, replication_depth, builder,
+                               partitioner, comm_plan, p2p );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
     Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
@@ -139,16 +135,15 @@ void testP2PZeroChargesGiveZeroPotential(
 
     p2p.execute( positions, charges, potential, gradient, true );
 
-    auto h_pot  = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                        potential );
-    auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                        gradient );
+    auto h_pot =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_grad =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), gradient );
 
     for ( int i = 0; i < num_local; i++ )
     {
-        EXPECT_EQ( h_pot( i, 0 ), 0.0 )
-            << "Non-zero potential at particle " << i
-            << " with all-zero charges";
+        EXPECT_EQ( h_pot( i, 0 ), 0.0 ) << "Non-zero potential at particle "
+                                        << i << " with all-zero charges";
         EXPECT_EQ( h_grad( i, 0, 0 ), 0.0 )
             << "Non-zero gradient x at particle " << i;
         EXPECT_EQ( h_grad( i, 0, 1 ), 0.0 )
@@ -163,9 +158,10 @@ void testP2PZeroChargesGiveZeroPotential(
  * Verify that strictly positive charges produce at least one non-zero
  * potential value after execute().
  */
-void testP2PPotentialNonzeroAfterExecution(
-    int num_particles_per_rank, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testP2PPotentialNonzeroAfterExecution( int num_particles_per_rank,
+                                            int ncrit, int max_depth,
+                                            double tolerance,
+                                            int replication_depth )
 {
     using namespace P2PTest;
 
@@ -196,15 +192,16 @@ void testP2PPotentialNonzeroAfterExecution(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
     int num_local = run_setup( particles, num_particles_per_rank, ncrit,
-                               max_depth, tolerance, replication_depth,
-                               builder, partitioner, comm_plan, p2p );
+                               max_depth, tolerance, replication_depth, builder,
+                               partitioner, comm_plan, p2p );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
     Kokkos::deep_copy( potential, 0.0 );
@@ -213,8 +210,8 @@ void testP2PPotentialNonzeroAfterExecution(
 
     p2p.execute( positions, charges, potential, gradient, false );
 
-    auto h_pot = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                      potential );
+    auto h_pot =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
 
     double max_abs = 0.0;
     for ( int i = 0; i < num_local; i++ )
@@ -234,9 +231,9 @@ void testP2PPotentialNonzeroAfterExecution(
  * Verify that calling execute() twice with outputs zeroed before each call
  * produces bit-identical results.
  */
-void testP2PIdempotentExecution(
-    int num_particles_per_rank, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testP2PIdempotentExecution( int num_particles_per_rank, int ncrit,
+                                 int max_depth, double tolerance,
+                                 int replication_depth )
 {
     using namespace P2PTest;
 
@@ -267,15 +264,16 @@ void testP2PIdempotentExecution(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
     int num_local = run_setup( particles, num_particles_per_rank, ncrit,
-                               max_depth, tolerance, replication_depth,
-                               builder, partitioner, comm_plan, p2p );
+                               max_depth, tolerance, replication_depth, builder,
+                               partitioner, comm_plan, p2p );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
     Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
@@ -283,18 +281,18 @@ void testP2PIdempotentExecution(
     Kokkos::deep_copy( potential, 0.0 );
     Kokkos::deep_copy( gradient, 0.0 );
     p2p.execute( positions, charges, potential, gradient, true );
-    auto h_pot_first  = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                              potential );
-    auto h_grad_first = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                              gradient );
+    auto h_pot_first =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_grad_first =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), gradient );
 
     Kokkos::deep_copy( potential, 0.0 );
     Kokkos::deep_copy( gradient, 0.0 );
     p2p.execute( positions, charges, potential, gradient, true );
-    auto h_pot_second  = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                               potential );
-    auto h_grad_second = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                               gradient );
+    auto h_pot_second =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_grad_second =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), gradient );
 
     for ( int i = 0; i < num_local; i++ )
     {
@@ -313,9 +311,8 @@ void testP2PIdempotentExecution(
  * Verify that P2P potentials match a brute-force O(N²) direct sum when all
  * particles reside in a single leaf cell.
  */
-void testP2PDirectSumSingleLeaf(
-    int num_particles, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testP2PDirectSumSingleLeaf( int num_particles, int ncrit, int max_depth,
+                                 double tolerance, int replication_depth )
 {
     using namespace P2PTest;
 
@@ -350,15 +347,16 @@ void testP2PDirectSumSingleLeaf(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
-    int num_local = run_setup( particles, num_particles, ncrit, max_depth,
-                               tolerance, replication_depth,
-                               builder, partitioner, comm_plan, p2p );
+    int num_local =
+        run_setup( particles, num_particles, ncrit, max_depth, tolerance,
+                   replication_depth, builder, partitioner, comm_plan, p2p );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
     Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
@@ -367,8 +365,8 @@ void testP2PDirectSumSingleLeaf(
 
     p2p.execute( positions, charges, potential, gradient, false );
 
-    auto h_pot = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                      potential );
+    auto h_pot =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
 
     Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
     Kokkos::View<double*, TEST_MEMSPACE> d_chg( "d_chg", num_local );
@@ -378,12 +376,14 @@ void testP2PDirectSumSingleLeaf(
             d_pos( i, 0 ) = positions( i, 0 );
             d_pos( i, 1 ) = positions( i, 1 );
             d_pos( i, 2 ) = positions( i, 2 );
-            d_chg( i )    = charges( i, 0 );
+            d_chg( i ) = charges( i, 0 );
         } );
     Kokkos::fence();
 
-    auto h_pos = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
-    auto h_chg = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_chg );
+    auto h_pos =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+    auto h_chg =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_chg );
 
     double max_err = 0.0;
     for ( int i = 0; i < num_local; i++ )
@@ -396,7 +396,7 @@ void testP2PDirectSumSingleLeaf(
             const double dx = h_pos( i, 0 ) - h_pos( j, 0 );
             const double dy = h_pos( i, 1 ) - h_pos( j, 1 );
             const double dz = h_pos( i, 2 ) - h_pos( j, 2 );
-            const double r  = std::sqrt( dx * dx + dy * dy + dz * dz );
+            const double r = std::sqrt( dx * dx + dy * dy + dz * dz );
             phi_ref += h_chg( j ) / r;
         }
         const double err = std::abs( h_pot( i, 0 ) - phi_ref );
@@ -406,7 +406,8 @@ void testP2PDirectSumSingleLeaf(
 
     EXPECT_LT( max_err, 1.0e-12 )
         << "P2P potential deviates from brute-force direct sum; "
-           "max absolute error = " << max_err;
+           "max absolute error = "
+        << max_err;
 }
 
 //---------------------------------------------------------------------------//
@@ -424,7 +425,7 @@ void testP2PTwoParticleExact()
     if ( nprocs != 1 )
         return;
 
-    const double d  = 1.5;
+    const double d = 1.5;
     const double q0 = 2.0;
     const double q1 = -0.5;
 
@@ -432,8 +433,12 @@ void testP2PTwoParticleExact()
     {
         auto hp = Cabana::slice<Position>( particles_h );
         auto hq = Cabana::slice<Charge>( particles_h );
-        hp( 0, 0 ) = 0.0; hp( 0, 1 ) = 0.0; hp( 0, 2 ) = 0.0;
-        hp( 1, 0 ) = d;   hp( 1, 1 ) = 0.0; hp( 1, 2 ) = 0.0;
+        hp( 0, 0 ) = 0.0;
+        hp( 0, 1 ) = 0.0;
+        hp( 0, 2 ) = 0.0;
+        hp( 1, 0 ) = d;
+        hp( 1, 1 ) = 0.0;
+        hp( 1, 2 ) = 0.0;
         hq( 0, 0 ) = q0;
         hq( 1, 0 ) = q1;
     }
@@ -441,20 +446,21 @@ void testP2PTwoParticleExact()
     AoSoA_t particles( "particles", 2 );
     Cabana::deep_copy( particles, particles_h );
 
-    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, 100, 6, 0.1, 0.1 );
-    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
-        MPI_COMM_WORLD, 2 );
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder( MPI_COMM_WORLD, 100, 6,
+                                                        0.1, 0.1 );
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner( MPI_COMM_WORLD,
+                                                                2 );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
-    int num_local = run_setup( particles, 2, 100, 6, 0.1, 2,
-                               builder, partitioner, comm_plan, p2p );
+    int num_local = run_setup( particles, 2, 100, 6, 0.1, 2, builder,
+                               partitioner, comm_plan, p2p );
 
     ASSERT_EQ( num_local, 2 ) << "Expected 2 local particles on single rank";
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", 2 );
     Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", 2 );
@@ -463,10 +469,10 @@ void testP2PTwoParticleExact()
 
     p2p.execute( positions, charges, potential, gradient, true );
 
-    auto h_pot  = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                        potential );
-    auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                        gradient );
+    auto h_pot =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_grad =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), gradient );
 
     int idx0 = -1, idx1 = -1;
     {
@@ -479,7 +485,8 @@ void testP2PTwoParticleExact()
                 d_pos( i, 2 ) = positions( i, 2 );
             } );
         Kokkos::fence();
-        auto hp = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+        auto hp =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
         for ( int i = 0; i < 2; i++ )
         {
             if ( hp( i, 0 ) < d * 0.5 )
@@ -494,8 +501,8 @@ void testP2PTwoParticleExact()
 
     const double phi0_exact = q1 / d;
     const double phi1_exact = q0 / d;
-    const double gx0_exact  =  q1 / ( d * d );
-    const double gx1_exact  = -q0 / ( d * d );
+    const double gx0_exact = q1 / ( d * d );
+    const double gx1_exact = -q0 / ( d * d );
 
     EXPECT_NEAR( h_pot( idx0, 0 ), phi0_exact, 1.0e-14 )
         << "Potential at particle 0 incorrect";
@@ -522,9 +529,9 @@ void testP2PTwoParticleExact()
  * Verify that the gradient is consistent with the potential via a finite-
  * difference check for a random particle distribution on a single rank.
  */
-void testP2PGradientSignConsistency(
-    int num_particles, int ncrit, int max_depth,
-    double tolerance, int replication_depth )
+void testP2PGradientSignConsistency( int num_particles, int ncrit,
+                                     int max_depth, double tolerance,
+                                     int replication_depth )
 {
     using namespace P2PTest;
 
@@ -559,15 +566,16 @@ void testP2PGradientSignConsistency(
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
-    int num_local = run_setup( particles, num_particles, ncrit, max_depth,
-                               tolerance, replication_depth,
-                               builder, partitioner, comm_plan, p2p );
+    int num_local =
+        run_setup( particles, num_particles, ncrit, max_depth, tolerance,
+                   replication_depth, builder, partitioner, comm_plan, p2p );
 
     auto positions = Cabana::slice<Position>( particles );
-    auto charges   = Cabana::slice<Charge>( particles );
+    auto charges = Cabana::slice<Charge>( particles );
 
     Kokkos::View<double* [1], TEST_MEMSPACE> potential( "pot", num_local );
     Kokkos::View<double* [1][3], TEST_MEMSPACE> gradient( "grad", num_local );
@@ -576,10 +584,10 @@ void testP2PGradientSignConsistency(
 
     p2p.execute( positions, charges, potential, gradient, true );
 
-    auto h_pot  = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                        potential );
-    auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                        gradient );
+    auto h_pot =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_grad =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), gradient );
 
     double grad_norm_sq = 0.0;
     for ( int i = 0; i < num_local; i++ )
@@ -595,7 +603,7 @@ void testP2PGradientSignConsistency(
         if ( std::abs( h_pot( i, 0 ) ) > best_abs )
         {
             best_abs = std::abs( h_pot( i, 0 ) );
-            best     = i;
+            best = i;
         }
 
     Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
@@ -606,14 +614,14 @@ void testP2PGradientSignConsistency(
             d_pos( i, 0 ) = positions( i, 0 );
             d_pos( i, 1 ) = positions( i, 1 );
             d_pos( i, 2 ) = positions( i, 2 );
-            d_chg( i )    = charges( i, 0 );
+            d_chg( i ) = charges( i, 0 );
         } );
     Kokkos::fence();
     auto hp = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
     auto hq = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_chg );
 
     const double eps = 1.0e-6;
-    double phi_plus  = 0.0;
+    double phi_plus = 0.0;
     double phi_minus = 0.0;
     for ( int j = 0; j < num_local; j++ )
     {
@@ -665,8 +673,8 @@ void testP2PMultiComponentDirectSum( int num_particles )
     constexpr int N = 3;
     using Kernel3 = LaplaceKernel<double, P2PTest::P_ORDER, N>;
     using DataTypes3 = Cabana::MemberTypes<double[3], double[N]>;
-    using AoSoA3_t   = Cabana::AoSoA<DataTypes3, TEST_MEMSPACE>;
-    using AoSoA3_ht  = Cabana::AoSoA<DataTypes3, Kokkos::HostSpace>;
+    using AoSoA3_t = Cabana::AoSoA<DataTypes3, TEST_MEMSPACE>;
+    using AoSoA3_ht = Cabana::AoSoA<DataTypes3, Kokkos::HostSpace>;
 
     AoSoA3_ht particles_h( "particles_h", num_particles );
     {
@@ -699,10 +707,12 @@ void testP2PMultiComponentDirectSum( int num_particles )
         MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
-    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan( MPI_COMM_WORLD );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
     P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel3> p2p( MPI_COMM_WORLD );
 
-    // Run setup pipeline (same shape as run_setup but for the 3-component AoSoA).
+    // Run setup pipeline (same shape as run_setup but for the 3-component
+    // AoSoA).
     auto positions = Cabana::slice<P2PTest::Position>( particles );
     builder.build( positions, num_particles );
     partitioner.partition( builder, particles, num_particles );
@@ -714,8 +724,8 @@ void testP2PMultiComponentDirectSum( int num_particles )
                      partitioner.cell_owner_map(), replication_depth );
     p2p.setup( builder, partitioner, comm_plan );
 
-    positions      = Cabana::slice<P2PTest::Position>( particles );
-    auto charges   = Cabana::slice<P2PTest::Charge>( particles );
+    positions = Cabana::slice<P2PTest::Position>( particles );
+    auto charges = Cabana::slice<P2PTest::Charge>( particles );
 
     Kokkos::View<double* [N], TEST_MEMSPACE> potential( "pot", num_local );
     Kokkos::View<double* [N][3], TEST_MEMSPACE> gradient( "grad", num_local );
@@ -725,10 +735,10 @@ void testP2PMultiComponentDirectSum( int num_particles )
     // Single execute() call covers all NComps.
     p2p.execute( positions, charges, potential, gradient, true );
 
-    auto h_pot  = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                        potential );
-    auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                        gradient );
+    auto h_pot =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_grad =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), gradient );
 
     // Copy sorted positions and per-component charges to host for reference.
     Kokkos::View<double* [3], TEST_MEMSPACE> d_pos( "d_pos", num_local );
@@ -743,8 +753,10 @@ void testP2PMultiComponentDirectSum( int num_particles )
                 d_chg( i, c ) = charges( i, c );
         } );
     Kokkos::fence();
-    auto h_pos = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
-    auto h_chg = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_chg );
+    auto h_pos =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_pos );
+    auto h_chg =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_chg );
 
     double max_pot_err = 0.0;
     double max_grad_err = 0.0;
@@ -785,10 +797,12 @@ void testP2PMultiComponentDirectSum( int num_particles )
 
     EXPECT_LT( max_pot_err, 1.0e-12 )
         << "Multi-component P2P potential deviates from per-component "
-           "brute-force direct sum; max absolute error = " << max_pot_err;
+           "brute-force direct sum; max absolute error = "
+        << max_pot_err;
     EXPECT_LT( max_grad_err, 1.0e-12 )
         << "Multi-component P2P gradient deviates from per-component "
-           "brute-force direct sum; max absolute error = " << max_grad_err;
+           "brute-force direct sum; max absolute error = "
+        << max_grad_err;
 }
 
 //---------------------------------------------------------------------------//
@@ -830,10 +844,7 @@ TEST( P2P, testDirectSumSingleLeaf )
     testP2PDirectSumSingleLeaf( 8, 200, 1, 0.1, 1 );
 }
 
-TEST( P2P, testTwoParticleExact )
-{
-    testP2PTwoParticleExact();
-}
+TEST( P2P, testTwoParticleExact ) { testP2PTwoParticleExact(); }
 
 TEST( P2P, testGradientSignConsistencyBasic )
 {

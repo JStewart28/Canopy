@@ -281,8 +281,7 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
             leaf_x.push_back( c.center[0] );
             leaf_y.push_back( c.center[1] );
             leaf_z.push_back( c.center[2] );
-            leaf_weights.push_back(
-                static_cast<double>( c.global_count ) );
+            leaf_weights.push_back( static_cast<double>( c.global_count ) );
         }
     }
 
@@ -354,13 +353,13 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     params.set( "algorithm", "rcb" );
     params.set( "num_global_parts", _comm_size );
     params.set( "imbalance_tolerance", _imbalance_tolerance );
-    params.set("debug_level", "no_status");
+    params.set( "debug_level", "no_status" );
 
     // Need these lines to disable Zoltan-level
     // status printouts
     Teuchos::ParameterList zoltanParams;
-    zoltanParams.set("DEBUG_LEVEL", "0");
-    params.set("zoltan_parameters", zoltanParams);
+    zoltanParams.set( "DEBUG_LEVEL", "0" );
+    params.set( "zoltan_parameters", zoltanParams );
 
     // Solve
     Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
@@ -390,9 +389,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::derive_internal_ownership(
     for ( const auto& c : cells )
         cell_map[c.key] = &c;
 
-    std::unordered_map<MortonKey,
-                       std::unordered_map<int, int64_t>>
-        vote_map;
+    std::unordered_map<MortonKey, std::unordered_map<int, int64_t>> vote_map;
 
     for ( const auto& c : cells )
     {
@@ -485,8 +482,8 @@ int TreePartitioner<MemorySpace, ExecutionSpace>::migrate_particles(
     auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        particle_keys );
 
-    Kokkos::View<int*, memory_space> dest_ranks(
-        "dest_ranks", num_local_particles_before );
+    Kokkos::View<int*, memory_space> dest_ranks( "dest_ranks",
+                                                 num_local_particles_before );
     auto h_dest = Kokkos::create_mirror_view( dest_ranks );
 
     int num_sent = 0;
@@ -549,16 +546,15 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::partition(
 
 template <class MemorySpace, class ExecutionSpace>
 template <class AoSoAType>
-RedistributeResult
-TreePartitioner<MemorySpace, ExecutionSpace>::redistribute(
+RedistributeResult TreePartitioner<MemorySpace, ExecutionSpace>::redistribute(
     const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
     AoSoAType& particles, int num_local_particles_before )
 {
     RedistributeResult result;
 
     int num_before = num_local_particles_before;
-    result.particles_sent = migrate_particles(
-        tree_builder, particles, num_local_particles_before );
+    result.particles_sent = migrate_particles( tree_builder, particles,
+                                               num_local_particles_before );
 
     result.num_local_after = _num_local_after;
 
@@ -637,8 +633,8 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
 
     // Sort particles by cell index. sortByKey sorts sort_keys in place and
     // returns a BinningData permutation for use with Cabana::permute.
-    auto bin_data = Cabana::sortByKey(
-        sort_keys, std::size_t( 0 ), std::size_t( N ) );
+    auto bin_data =
+        Cabana::sortByKey( sort_keys, std::size_t( 0 ), std::size_t( N ) );
 
     // After sortByKey, sort_keys is sorted in ascending order. Read it now
     // (before permute) to count how many particles belong to each cell.
@@ -647,7 +643,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     std::vector<int> cell_counts( num_cells, 0 );
     {
         auto h_sk = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                          sort_keys );
+                                                         sort_keys );
         for ( int i = 0; i < N; i++ )
             cell_counts[h_sk( i )]++;
     }
@@ -670,10 +666,9 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     // Build per-particle cell index using the offsets.
     // After permute, particles in [offsets(c), offsets(c+1)) belong to cell c.
     _particle_leaf_cell_idx = Kokkos::View<int*, memory_space>(
-        std::string( "particle_leaf_cell_idx" ),
-        static_cast<size_t>( N ) );
+        std::string( "particle_leaf_cell_idx" ), static_cast<size_t>( N ) );
     {
-        auto h     = Kokkos::create_mirror_view( _particle_leaf_cell_idx );
+        auto h = Kokkos::create_mirror_view( _particle_leaf_cell_idx );
         auto h_off = Kokkos::create_mirror_view_and_copy(
             Kokkos::HostSpace(), _leaf_particle_offsets );
         for ( int c = 0; c < num_cells; c++ )

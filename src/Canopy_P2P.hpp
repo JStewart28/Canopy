@@ -12,8 +12,8 @@
 #ifndef CANOPY_P2P_HPP
 #define CANOPY_P2P_HPP
 
-#include "Canopy_Helpers.hpp"
 #include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_Helpers.hpp"
 #include "Canopy_TreeBuilder.hpp"
 #include "Canopy_TreePartitioner.hpp"
 
@@ -69,10 +69,8 @@ class P2P
     static constexpr int NComps = KernelType::num_components;
 
     // Ghost particle storage (grouped by ghost leaf)
-    using position_view_type =
-        Kokkos::View<scalar_type* [3], memory_space>;
-    using charge_view_type =
-        Kokkos::View<scalar_type* [NComps], memory_space>;
+    using position_view_type = Kokkos::View<scalar_type* [3], memory_space>;
+    using charge_view_type = Kokkos::View<scalar_type* [NComps], memory_space>;
     using offset_view_type = Kokkos::View<int*, memory_space>;
 
     // Output views (caller-owned, passed to execute())
@@ -104,10 +102,10 @@ class P2P
     //   partitioner   - provides ownership map and leaf_particle_offsets
     //   comm_plan     - provides P2PPlan with neighbor_lists + exchange
     // -----------------------------------------------------------------------
-    void setup(
-        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
-        const TreePartitioner<MemorySpace, ExecutionSpace>& partitioner,
-        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
+    void
+    setup( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+           const TreePartitioner<MemorySpace, ExecutionSpace>& partitioner,
+           const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
 
     // -----------------------------------------------------------------------
     // execute()
@@ -134,8 +132,7 @@ class P2P
     //   compute_gradient  - true to evaluate gradient contributions.
     // -----------------------------------------------------------------------
     template <class PositionSlice, class ChargeSlice>
-    void execute( const PositionSlice& positions,
-                  const ChargeSlice& charges,
+    void execute( const PositionSlice& positions, const ChargeSlice& charges,
                   const potential_view_type& potential_out,
                   const gradient_view_type& gradient_out,
                   bool compute_gradient );
@@ -164,9 +161,9 @@ class P2P
     // Ghost particle storage (grouped by ghost leaf)
     // -----------------------------------------------------------------------
     int _num_ghost_particles;
-    position_view_type _ghost_positions;    // (num_ghost_particles, 3)
-    charge_view_type _ghost_charges;        // (num_ghost_particles)
-    offset_view_type _ghost_leaf_offsets;   // (num_ghost_leaves + 1)
+    position_view_type _ghost_positions;  // (num_ghost_particles, 3)
+    charge_view_type _ghost_charges;      // (num_ghost_particles)
+    offset_view_type _ghost_leaf_offsets; // (num_ghost_leaves + 1)
 
     // -----------------------------------------------------------------------
     // Exchange plan metadata (host-side)
@@ -199,10 +196,14 @@ class P2P
     // is not included in the inter-leaf neighbor list.
     // -----------------------------------------------------------------------
     Kokkos::View<int*, memory_space> _local_leaf_cells; // target leaves
-    Kokkos::View<int*, memory_space> _local_nbr_offsets; // prefix into local nbrs
-    Kokkos::View<int*, memory_space> _local_nbr_cell_idx; // flat local neighbor cell idxs
-    Kokkos::View<int*, memory_space> _ghost_nbr_offsets;  // prefix into ghost nbrs
-    Kokkos::View<int*, memory_space> _ghost_nbr_leaf_idx; // flat ghost neighbor indexes
+    Kokkos::View<int*, memory_space>
+        _local_nbr_offsets; // prefix into local nbrs
+    Kokkos::View<int*, memory_space>
+        _local_nbr_cell_idx; // flat local neighbor cell idxs
+    Kokkos::View<int*, memory_space>
+        _ghost_nbr_offsets; // prefix into ghost nbrs
+    Kokkos::View<int*, memory_space>
+        _ghost_nbr_leaf_idx; // flat ghost neighbor indexes
 
   public:
     // -----------------------------------------------------------------------
@@ -303,14 +304,12 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::build_exchange_plan(
 // handled by Phase 1 of the kernel via _local_leaf_cells.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace, class KernelType>
-void P2P<MemorySpace, ExecutionSpace, KernelType>::
-    build_neighbor_lists_device(
-        const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan,
-        const std::unordered_map<MortonKey, int>& cell_key_to_idx )
+void P2P<MemorySpace, ExecutionSpace, KernelType>::build_neighbor_lists_device(
+    const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan,
+    const std::unordered_map<MortonKey, int>& cell_key_to_idx )
 {
     const auto& p2p = comm_plan.p2p_plan();
-    const int nleaves =
-        static_cast<int>( p2p.neighbor_lists.size() );
+    const int nleaves = static_cast<int>( p2p.neighbor_lists.size() );
 
     // Collect target leaves (those we own) and flatten neighbor lists
     std::vector<int> target_cells;
@@ -358,19 +357,20 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::
 
     const int ntargets = static_cast<int>( target_cells.size() );
 
-    auto upload_int =
-        [&]( const std::vector<int>& src,
-             Kokkos::View<int*, memory_space>& dest, const char* name ) {
-            const size_t n = src.size();
-            dest = Kokkos::View<int*, memory_space>( std::string( name ), n );
-            if ( n > 0 )
-            {
-                auto h = Kokkos::create_mirror_view( dest );
-                for ( size_t i = 0; i < n; i++ )
-                    h( i ) = src[i];
-                Kokkos::deep_copy( dest, h );
-            }
-        };
+    auto upload_int = [&]( const std::vector<int>& src,
+                           Kokkos::View<int*, memory_space>& dest,
+                           const char* name )
+    {
+        const size_t n = src.size();
+        dest = Kokkos::View<int*, memory_space>( std::string( name ), n );
+        if ( n > 0 )
+        {
+            auto h = Kokkos::create_mirror_view( dest );
+            for ( size_t i = 0; i < n; i++ )
+                h( i ) = src[i];
+            Kokkos::deep_copy( dest, h );
+        }
+    };
 
     upload_int( target_cells, _local_leaf_cells, "p2p_targets" );
     upload_int( local_offsets, _local_nbr_offsets, "p2p_local_nbr_off" );
@@ -399,10 +399,8 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     auto h_offsets = Kokkos::create_mirror_view_and_copy(
         Kokkos::HostSpace(), _leaf_particle_offsets );
 
-    const int num_ghost_leaves =
-        static_cast<int>( _ghost_leaf_keys.size() );
-    const int num_send_entries =
-        static_cast<int>( _send_entries.size() );
+    const int num_ghost_leaves = static_cast<int>( _ghost_leaf_keys.size() );
+    const int num_send_entries = static_cast<int>( _send_entries.size() );
 
     std::vector<int> recv_counts( num_ghost_leaves, 0 );
     std::vector<int> send_counts( num_send_entries, 0 );
@@ -411,8 +409,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     for ( int i = 0; i < num_send_entries; i++ )
     {
         const int cidx = _send_entries[i].cell_idx;
-        send_counts[i] =
-            h_offsets( cidx + 1 ) - h_offsets( cidx );
+        send_counts[i] = h_offsets( cidx + 1 ) - h_offsets( cidx );
     }
 
     // --- Count exchange phase ---
@@ -420,18 +417,16 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     for ( int i = 0; i < num_ghost_leaves; i++ )
     {
         int tag = static_cast<int>( _ghost_leaf_keys[i] & 0x7fffffff );
-        MPI_Irecv( &recv_counts[i], 1, MPI_INT,
-                   _ghost_leaf_owners[i], tag, _comm,
-                   &recv_count_reqs[i] );
+        MPI_Irecv( &recv_counts[i], 1, MPI_INT, _ghost_leaf_owners[i], tag,
+                   _comm, &recv_count_reqs[i] );
     }
 
     std::vector<MPI_Request> send_count_reqs( num_send_entries );
     for ( int i = 0; i < num_send_entries; i++ )
     {
         int tag = static_cast<int>( _send_entries[i].leaf_key & 0x7fffffff );
-        MPI_Isend( &send_counts[i], 1, MPI_INT,
-                   _send_entries[i].dest_rank, tag, _comm,
-                   &send_count_reqs[i] );
+        MPI_Isend( &send_counts[i], 1, MPI_INT, _send_entries[i].dest_rank, tag,
+                   _comm, &send_count_reqs[i] );
     }
 
     if ( !recv_count_reqs.empty() )
@@ -453,8 +448,8 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
 
     if ( _num_ghost_particles > 0 )
     {
-        _ghost_positions = position_view_type(
-            "ghost_positions", _num_ghost_particles );
+        _ghost_positions =
+            position_view_type( "ghost_positions", _num_ghost_particles );
         _ghost_charges =
             charge_view_type( "ghost_charges", _num_ghost_particles );
     }
@@ -468,10 +463,10 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     constexpr int per_particle = 3 + NComps;
 
     // --- Particle data exchange ---
-    auto h_pos = Canopy::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), positions );
-    auto h_chg = Canopy::create_mirror_view_and_copy(
-        Kokkos::HostSpace(), charges );
+    auto h_pos =
+        Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(), positions );
+    auto h_chg =
+        Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(), charges );
 
     auto h_gpos = Kokkos::create_mirror_view( _ghost_positions );
     auto h_gchg = Kokkos::create_mirror_view( _ghost_charges );
@@ -491,11 +486,9 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         recv_bufs[i].resize( per_particle * count );
 
         int tag =
-            static_cast<int>( ( _ghost_leaf_keys[i] & 0x7fffffff ) ^
-                              0xABCD );
+            static_cast<int>( ( _ghost_leaf_keys[i] & 0x7fffffff ) ^ 0xABCD );
         MPI_Irecv( recv_bufs[i].data(), per_particle * count, mpi_scalar,
-                   _ghost_leaf_owners[i], tag, _comm,
-                   &recv_data_reqs[i] );
+                   _ghost_leaf_owners[i], tag, _comm, &recv_data_reqs[i] );
     }
 
     // Post sends for particle data
@@ -524,11 +517,10 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
                     static_cast<scalar_type>( h_chg( start + p, c ) );
         }
 
-        int tag = static_cast<int>(
-            ( _send_entries[i].leaf_key & 0x7fffffff ) ^ 0xABCD );
+        int tag = static_cast<int>( ( _send_entries[i].leaf_key & 0x7fffffff ) ^
+                                    0xABCD );
         MPI_Isend( send_bufs[i].data(), per_particle * count, mpi_scalar,
-                   _send_entries[i].dest_rank, tag, _comm,
-                   &send_data_reqs[i] );
+                   _send_entries[i].dest_rank, tag, _comm, &send_data_reqs[i] );
     }
 
     if ( !recv_data_reqs.empty() )
@@ -549,8 +541,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
             h_gpos( base + p, 1 ) = recv_bufs[i][per_particle * p + 1];
             h_gpos( base + p, 2 ) = recv_bufs[i][per_particle * p + 2];
             for ( int c = 0; c < NComps; c++ )
-                h_gchg( base + p, c ) =
-                    recv_bufs[i][per_particle * p + 3 + c];
+                h_gchg( base + p, c ) = recv_bufs[i][per_particle * p + 3 + c];
         }
     }
 
@@ -612,18 +603,19 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
 
                 Kokkos::parallel_for(
                     Kokkos::TeamThreadRange( team, npairs ),
-                    [&]( const int pair_idx ) {
+                    [&]( const int pair_idx )
+                    {
                         // Convert pair_idx to (i, j) with i < j
                         // Upper-triangular indexing:
                         //   row i has (ncell-1-i) entries
                         //   we invert to find (i, j) for a given flat index.
                         // Use the formula:
-                        //   i = ncell - 2 - floor(sqrt(-8*pair_idx + 4*ncell*(ncell-1) - 7)/2 - 0.5)
-                        //   j = pair_idx + i + 1 - ncell*(ncell-1)/2 + (ncell-i)*((ncell-i)-1)/2
+                        //   i = ncell - 2 - floor(sqrt(-8*pair_idx +
+                        //   4*ncell*(ncell-1) - 7)/2 - 0.5) j = pair_idx + i +
+                        //   1 - ncell*(ncell-1)/2 + (ncell-i)*((ncell-i)-1)/2
                         const double x =
                             Kokkos::sqrt( -8.0 * pair_idx +
-                                          4.0 * ncell * ( ncell - 1 ) -
-                                          7.0 );
+                                          4.0 * ncell * ( ncell - 1 ) - 7.0 );
                         int i = static_cast<int>(
                             static_cast<double>( ncell ) - 2.0 -
                             Kokkos::floor( x * 0.5 - 0.5 ) );
@@ -683,10 +675,10 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                         scalar_type qj[NComps];
                         for ( int c = 0; c < NComps; c++ )
                         {
-                            qi[c] = static_cast<scalar_type>(
-                                charges( pi, c ) );
-                            qj[c] = static_cast<scalar_type>(
-                                charges( pj, c ) );
+                            qi[c] =
+                                static_cast<scalar_type>( charges( pi, c ) );
+                            qj[c] =
+                                static_cast<scalar_type>( charges( pj, c ) );
                         }
 
                         // Potential (Newton): +q_j/r on i, +q_i/r on j
@@ -705,25 +697,19 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             //                  = +q_i * (r_i - r_j) / r^3
                             for ( int c = 0; c < NComps; c++ )
                             {
-                                Kokkos::atomic_add(
-                                    &gradient_out( pi, c, 0 ),
-                                    -qj[c] * dx * inv_r3 );
-                                Kokkos::atomic_add(
-                                    &gradient_out( pi, c, 1 ),
-                                    -qj[c] * dy * inv_r3 );
-                                Kokkos::atomic_add(
-                                    &gradient_out( pi, c, 2 ),
-                                    -qj[c] * dz * inv_r3 );
+                                Kokkos::atomic_add( &gradient_out( pi, c, 0 ),
+                                                    -qj[c] * dx * inv_r3 );
+                                Kokkos::atomic_add( &gradient_out( pi, c, 1 ),
+                                                    -qj[c] * dy * inv_r3 );
+                                Kokkos::atomic_add( &gradient_out( pi, c, 2 ),
+                                                    -qj[c] * dz * inv_r3 );
 
-                                Kokkos::atomic_add(
-                                    &gradient_out( pj, c, 0 ),
-                                    qi[c] * dx * inv_r3 );
-                                Kokkos::atomic_add(
-                                    &gradient_out( pj, c, 1 ),
-                                    qi[c] * dy * inv_r3 );
-                                Kokkos::atomic_add(
-                                    &gradient_out( pj, c, 2 ),
-                                    qi[c] * dz * inv_r3 );
+                                Kokkos::atomic_add( &gradient_out( pj, c, 0 ),
+                                                    qi[c] * dx * inv_r3 );
+                                Kokkos::atomic_add( &gradient_out( pj, c, 1 ),
+                                                    qi[c] * dy * inv_r3 );
+                                Kokkos::atomic_add( &gradient_out( pj, c, 2 ),
+                                                    qi[c] * dz * inv_r3 );
                             }
                         }
                     } );
@@ -769,7 +755,8 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                 // Iterate target particles in parallel across team threads
                 Kokkos::parallel_for(
                     Kokkos::TeamThreadRange( team, ntarget ),
-                    [&]( const int t ) {
+                    [&]( const int t )
+                    {
                         const int pi = pstart + t;
 
                         const scalar_type xi =
@@ -800,21 +787,17 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             for ( int pj = ns; pj < ne; pj++ )
                             {
                                 const scalar_type dx =
-                                    xi -
-                                    static_cast<scalar_type>(
-                                        positions( pj, 0 ) );
+                                    xi - static_cast<scalar_type>(
+                                             positions( pj, 0 ) );
                                 const scalar_type dy =
-                                    yi -
-                                    static_cast<scalar_type>(
-                                        positions( pj, 1 ) );
+                                    yi - static_cast<scalar_type>(
+                                             positions( pj, 1 ) );
                                 const scalar_type dz =
-                                    zi -
-                                    static_cast<scalar_type>(
-                                        positions( pj, 2 ) );
+                                    zi - static_cast<scalar_type>(
+                                             positions( pj, 2 ) );
                                 const scalar_type r2 =
                                     dx * dx + dy * dy + dz * dz;
-                                if ( r2 < static_cast<scalar_type>(
-                                              1.0e-24 ) )
+                                if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
                                     continue;
                                 const scalar_type inv_r =
                                     static_cast<scalar_type>( 1.0 ) /
@@ -848,18 +831,14 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             for ( int pj = gs; pj < ge; pj++ )
                             {
                                 const scalar_type dx =
-                                    xi -
-                                    ghost_positions( pj, 0 );
+                                    xi - ghost_positions( pj, 0 );
                                 const scalar_type dy =
-                                    yi -
-                                    ghost_positions( pj, 1 );
+                                    yi - ghost_positions( pj, 1 );
                                 const scalar_type dz =
-                                    zi -
-                                    ghost_positions( pj, 2 );
+                                    zi - ghost_positions( pj, 2 );
                                 const scalar_type r2 =
                                     dx * dx + dy * dy + dz * dz;
-                                if ( r2 < static_cast<scalar_type>(
-                                              1.0e-24 ) )
+                                if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
                                     continue;
                                 const scalar_type inv_r =
                                     static_cast<scalar_type>( 1.0 ) /

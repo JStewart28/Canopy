@@ -320,9 +320,8 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::compute_subtree_relevance(
     for ( const auto& c : cells )
         by_depth_desc.push_back( c.key );
     std::sort( by_depth_desc.begin(), by_depth_desc.end(),
-               []( MortonKey a, MortonKey b ) {
-                   return key_depth( a ) > key_depth( b );
-               } );
+               []( MortonKey a, MortonKey b )
+               { return key_depth( a ) > key_depth( b ); } );
 
     for ( MortonKey k : by_depth_desc )
     {
@@ -369,7 +368,8 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_m2l_pair(
     //
     // Shared sources are replicated on every rank after the M2M allreduce,
     // so they never require point-to-point communication.
-    auto handle = [&]( MortonKey t, int ot, MortonKey s, int os ) {
+    auto handle = [&]( MortonKey t, int ot, MortonKey s, int os )
+    {
         const int compute_rank = ( ot == OWNER_SHARED ) ? 0 : ot;
         if ( compute_rank == _rank )
         {
@@ -397,7 +397,8 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_p2p_pair(
     const bool a_owned = ( oa == _rank );
     const bool b_owned = ( ob == _rank );
 
-    auto handle = [&]( MortonKey t, MortonKey s, int os, bool t_owned ) {
+    auto handle = [&]( MortonKey t, MortonKey s, int os, bool t_owned )
+    {
         if ( !t_owned )
             return;
         _p2p_plan.neighbor_lists[t].push_back( s );
@@ -441,8 +442,8 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_p2p_pair(
 // where it intersects this rank's compute or comm responsibilities.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
-void CommunicationPlan<MemorySpace, ExecutionSpace>::build_all_interaction_lists(
-    const std::vector<CellInfo>& cells )
+void CommunicationPlan<MemorySpace, ExecutionSpace>::
+    build_all_interaction_lists( const std::vector<CellInfo>& cells )
 {
     (void)cells;
     _m2l_plan.interaction_lists.clear();
@@ -525,8 +526,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_all_interaction_lists
         // Otherwise, split the larger cell. Splitting on >= (rather than
         // strict >) gives a deterministic tie-break for equal half-widths.
         const bool split_t =
-            S->is_leaf ||
-            ( !T->is_leaf && T->half_width >= S->half_width );
+            S->is_leaf || ( !T->is_leaf && T->half_width >= S->half_width );
         if ( split_t )
         {
             for ( int oct = 0; oct < 8; oct++ )
@@ -668,8 +668,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
                     // parent's owner
                     if ( parent_owner != _rank && parent_owner != OWNER_SHARED )
                     {
-                        _l2l_plan.receives.push_back(
-                            { ck, parent_owner } );
+                        _l2l_plan.receives.push_back( { ck, parent_owner } );
                     }
                 }
             }
