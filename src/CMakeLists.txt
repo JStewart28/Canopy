@@ -3,6 +3,7 @@ configure_file(Canopy_Config.hpp.cmakein Canopy_Config.hpp)
 set(HEADERS_PUBLIC
   Canopy_CommunicationPlan.hpp
   Canopy_Core.hpp
+  Canopy_Diagnostics.hpp
   Canopy_TreeBuilder.hpp
   Canopy_TreePartitioner.hpp
   )
@@ -13,6 +14,10 @@ set(HEADERS_PUBLIC
 #   )
 
 add_library(Canopy INTERFACE)
+
+if(Canopy_ENABLE_DIAGNOSTICS)
+  target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_DIAGNOSTICS)
+endif()
 
 # Require minimum of C++17
 set_target_properties(Canopy PROPERTIES INTERFACE_COMPILE_FEATURES cxx_std_17)

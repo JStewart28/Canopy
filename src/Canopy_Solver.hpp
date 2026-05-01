@@ -13,6 +13,7 @@
 #define CANOPY_SOLVER_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_Diagnostics.hpp"
 #include "Canopy_DownwardSweep.hpp"
 #include "Canopy_LaplaceKernel.hpp"
 #include "Canopy_P2P.hpp"
@@ -141,11 +142,21 @@ class Solver
             _gradient = gradient_view_type( "fmm_gradient", 0 );
         }
 
+        double _t0 = CANOPY_WTIME();
         _upward.execute( charges, positions, _comm_plan );
+        double _t_up = CANOPY_WTIME() - _t0;
+
+        _t0 = CANOPY_WTIME();
         _downward.execute( _upward.multipoles(), positions, _potential,
                            _gradient, compute_gradient, _comm_plan );
+        double _t_dn = CANOPY_WTIME() - _t0;
+
+        _t0 = CANOPY_WTIME();
         _p2p.execute( positions, charges, _potential, _gradient,
                       compute_gradient );
+        double _t_p2p = CANOPY_WTIME() - _t0;
+
+        CANOPY_PRINT_SOLVE_BREAKDOWN( _comm, _t_up, _t_dn, _t_p2p );
     }
 
     // -----------------------------------------------------------------------
@@ -164,44 +175,52 @@ class Solver
     template <int PositionIdx, class AoSoA>
     RedistributeResult migrate( AoSoA& particles )
     {
-        // Snapshot the current cell-key set before rebuilding the tree.
-        std::unordered_set<MortonKey> old_keys;
-        old_keys.reserve( _builder.cells().size() );
-        for ( const auto& c : _builder.cells() )
-            old_keys.insert( c.key );
-
-        // Rebuild tree from current positions (also recomputes bounding box).
+        CANOPY_RESET_TIMERS();
+        RedistributeResult result{};
         {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, _num_local );
-        }
+            CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_MIGRATE_TOTAL );
 
-        // If the topology changed the existing comm_plan is invalid.
-        // Fall back to the full topology-change path so it is rebuilt.
-        bool topology_changed = ( _builder.cells().size() != old_keys.size() );
-        if ( !topology_changed )
-        {
+            // Snapshot the current cell-key set before rebuilding the tree.
+            std::unordered_set<MortonKey> old_keys;
+            old_keys.reserve( _builder.cells().size() );
             for ( const auto& c : _builder.cells() )
+                old_keys.insert( c.key );
+
+            // Rebuild tree from current positions (also recomputes bounding box).
+            { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+              auto positions = Cabana::slice<PositionIdx>( particles );
+              _builder.build( positions, _num_local ); }
+
+            // If the topology changed the existing comm_plan is invalid.
+            // Fall back to the full topology-change path so it is rebuilt.
+            bool topology_changed = ( _builder.cells().size() != old_keys.size() );
+            if ( !topology_changed )
             {
-                if ( old_keys.find( c.key ) == old_keys.end() )
+                for ( const auto& c : _builder.cells() )
                 {
-                    topology_changed = true;
-                    break;
+                    if ( old_keys.find( c.key ) == old_keys.end() )
+                    {
+                        topology_changed = true;
+                        break;
+                    }
                 }
             }
-        }
 
-        if ( topology_changed )
-        {
-            _finish_topology_change<PositionIdx>( particles );
-            return RedistributeResult{ 0, 0, _num_local };
-        }
-
-        RedistributeResult result =
-            _partitioner.redistribute( _builder, particles, _num_local );
-        _num_local = _partitioner.num_local_particles();
-
-        _finish_topology_stable<PositionIdx>( particles );
+            if ( topology_changed )
+            {
+                _finish_topology_change<PositionIdx>( particles );
+                result = RedistributeResult{ 0, 0, _num_local };
+            }
+            else
+            {
+                { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_REDISTRIBUTE );
+                  result = _partitioner.redistribute( _builder, particles,
+                                                      _num_local ); }
+                _num_local = _partitioner.num_local_particles();
+                _finish_topology_stable<PositionIdx>( particles );
+            }
+        } // TIMER_MIGRATE_TOTAL destructs here
+        CANOPY_PRINT_MIGRATE_TIMERS( _comm );
         return result;
     }
 
@@ -220,11 +239,15 @@ class Solver
         // once stable — rebalance still saves work over rebuild() because
         // the partition step is a re-partition rather than the initial
         // partition. Today both are equivalent in TreePartitioner.
+        CANOPY_RESET_TIMERS();
         {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, _num_local );
-        }
-        _finish_topology_change<PositionIdx>( particles );
+            CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_REBALANCE_TOTAL );
+            { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+              auto positions = Cabana::slice<PositionIdx>( particles );
+              _builder.build( positions, _num_local ); }
+            _finish_topology_change<PositionIdx>( particles );
+        } // TIMER_REBALANCE_TOTAL destructs here
+        CANOPY_PRINT_REBALANCE_TIMERS( _comm );
     }
 
     // -----------------------------------------------------------------------
@@ -331,40 +354,61 @@ class Solver
     template <int PositionIdx, int ChargeIdx, class AoSoA>
     void _full_setup( AoSoA& particles, int num_local_before )
     {
-        // Step 1: initial tree build on caller-provided distribution
+        CANOPY_RESET_TIMERS();
         {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, num_local_before );
-        }
+            CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_SETUP_TOTAL );
 
-        // Step 2: partition (migrates particles across ranks)
-        _partitioner.partition( _builder, particles, num_local_before );
-        _num_local = _partitioner.num_local_particles();
+            // Step 1: initial tree build on caller-provided distribution
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+                auto positions = Cabana::slice<PositionIdx>( particles );
+                _builder.build( positions, num_local_before );
+            }
 
-        // Step 3: rebuild for migrated particles
-        {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, _num_local );
-        }
+            // Step 2: partition (migrates particles across ranks)
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_PARTITION );
+                _partitioner.partition( _builder, particles, num_local_before );
+            }
+            _num_local = _partitioner.num_local_particles();
 
-        // Step 4: sort AoSoA by leaf (invalidates particle_keys)
-        _partitioner.sort_particles_by_leaf( _builder, particles );
+            // Step 3: rebuild for migrated particles (accumulated into
+            // TIMER_BUILDER_BUILD via += in the registry)
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+                auto positions = Cabana::slice<PositionIdx>( particles );
+                _builder.build( positions, _num_local );
+            }
 
-        // Step 5: rebuild so particle_keys match sorted AoSoA order
-        {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, _num_local );
-        }
+            // Step 4: sort AoSoA by leaf (invalidates particle_keys)
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_SORT_BY_LEAF );
+                _partitioner.sort_particles_by_leaf( _builder, particles );
+            }
 
-        // Step 6: communication plan
-        _comm_plan.build( _builder.cells(), _partitioner.ownership(),
-                          _partitioner.cell_owner_map(), _replication_depth );
+            // Step 5: rebuild so particle_keys match sorted AoSoA order
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+                auto positions = Cabana::slice<PositionIdx>( particles );
+                _builder.build( positions, _num_local );
+            }
 
-        // Step 7: setup sweeps and P2P
-        _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
-                       _builder.particle_keys(), _num_local );
-        _downward.setup( _upward, _num_local );
-        _p2p.setup( _builder, _partitioner, _comm_plan );
+            // Step 6: communication plan
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_COMM_PLAN_BUILD );
+                _comm_plan.build( _builder.cells(), _partitioner.ownership(),
+                                  _partitioner.cell_owner_map(),
+                                  _replication_depth );
+            }
+
+            // Step 7: setup sweeps and P2P (not individually timed)
+            _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
+                           _builder.particle_keys(), _num_local );
+            _downward.setup( _upward, _num_local );
+            _p2p.setup( _builder, _partitioner, _comm_plan );
+
+        } // TIMER_SETUP_TOTAL destructs here
+        CANOPY_PRINT_SETUP_TIMERS( _comm );
     }
 
     // -----------------------------------------------------------------------
@@ -376,23 +420,24 @@ class Solver
     template <int PositionIdx, class AoSoA>
     void _finish_topology_change( AoSoA& particles )
     {
-        _partitioner.repartition( _builder, particles, _num_local );
+        { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_REPARTITION );
+          _partitioner.repartition( _builder, particles, _num_local ); }
         _num_local = _partitioner.num_local_particles();
 
-        {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, _num_local );
-        }
+        { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+          auto positions = Cabana::slice<PositionIdx>( particles );
+          _builder.build( positions, _num_local ); }
 
-        _partitioner.sort_particles_by_leaf( _builder, particles );
+        { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_SORT_BY_LEAF );
+          _partitioner.sort_particles_by_leaf( _builder, particles ); }
 
-        {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, _num_local );
-        }
+        { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+          auto positions = Cabana::slice<PositionIdx>( particles );
+          _builder.build( positions, _num_local ); }
 
-        _comm_plan.build( _builder.cells(), _partitioner.ownership(),
-                          _partitioner.cell_owner_map(), _replication_depth );
+        { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_COMM_PLAN_BUILD );
+          _comm_plan.build( _builder.cells(), _partitioner.ownership(),
+                            _partitioner.cell_owner_map(), _replication_depth ); }
 
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
                        _builder.particle_keys(), _num_local );
@@ -409,17 +454,16 @@ class Solver
     void _finish_topology_stable( AoSoA& particles )
     {
         // Rebuild particle_keys for the (now migrated) particles
-        {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, _num_local );
-        }
+        { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+          auto positions = Cabana::slice<PositionIdx>( particles );
+          _builder.build( positions, _num_local ); }
 
-        _partitioner.sort_particles_by_leaf( _builder, particles );
+        { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_SORT_BY_LEAF );
+          _partitioner.sort_particles_by_leaf( _builder, particles ); }
 
-        {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            _builder.build( positions, _num_local );
-        }
+        { CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_BUILDER_BUILD );
+          auto positions = Cabana::slice<PositionIdx>( particles );
+          _builder.build( positions, _num_local ); }
 
         // Reuse existing comm_plan (topology unchanged).
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),

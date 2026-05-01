@@ -13,6 +13,7 @@
 #define CANOPY_DOWNWARD_SWEEP_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_Diagnostics.hpp"
 #include "Canopy_LaplaceKernel.hpp"
 #include "Canopy_SphericalCoefficients.hpp"
 #include "Canopy_TreeBuilder.hpp"
@@ -529,6 +530,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                                    KernelType>::coeff_view_type& multipoles,
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
+    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_M2L_COMM );
     // Pre-sweep bulk exchange: we send each of our cells whose multipole
     // is in another rank's interaction list, and receive remote source
     // multipoles we need. This overwrites multipoles at the remote
@@ -618,6 +620,7 @@ template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
     int depth )
 {
+    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_M2L_KERNEL );
     // Targets are stored sorted by depth, so we launch only over the
     // contiguous slice [depth_offsets[depth], depth_offsets[depth+1]).
     if ( depth < 0 ||
@@ -676,6 +679,7 @@ template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth(
     int depth )
 {
+    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_L2L_KERNEL );
     // Parents at `depth` translate to their children at `depth+1`.
     // For each parent this rank processes, iterate over its children
     // and call l2l_translate. One team per parent. Each team writes
@@ -815,9 +819,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     MPI_Datatype mpi_scalar =
         ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
-    MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
-                   reinterpret_cast<scalar_type*>( recvbuf.data() ),
-                   2 * total_complex, mpi_scalar, MPI_SUM, _comm );
+    {
+        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_M2L_ALLREDUCE );
+        MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
+                       reinterpret_cast<scalar_type*>( recvbuf.data() ),
+                       2 * total_complex, mpi_scalar, MPI_SUM, _comm );
+    }
 
     // _locals[shared] = snapshot + summed delta
     for ( int i = 0; i < nshared; i++ )
@@ -841,6 +848,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         int depth,
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
+    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_L2L_COMM );
     // L2L plan: parent-owner sends L to child-owner. The cell_key in
     // the L2L plan is the PARENT's key. We filter entries where the
     // parent is at `depth` — meaning this exchange happens after L2L
@@ -977,6 +985,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
     const potential_view_type& potential_out,
     const gradient_view_type& gradient_out, bool compute_gradient )
 {
+    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_L2P );
     auto locals = _locals;
     auto device_cells = _device_cells;
     auto particle_cell_idx = _particle_cell_idx;
@@ -1045,34 +1054,39 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
     const gradient_view_type& gradient_out, bool compute_gradient,
     const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
-    // Zero local coefficients
-    Kokkos::deep_copy( _locals, complex_type( 0.0, 0.0 ) );
-
-    // Stash the multipoles for the M2L kernel
-    _m2l_multipoles_view = multipoles;
-
-    // Build device-side interaction list if needed
-    if ( _m2l_target_cells.extent( 0 ) == 0 )
-        build_interaction_list_device( comm_plan );
-
-    // Pre-sweep: exchange remote multipoles needed for M2L
-    exchange_multipoles_for_m2l( multipoles, comm_plan );
-
-    // Layer-by-layer: snapshot shared, M2L, allreduce shared M2L delta,
-    // L2L, exchange children
-    for ( int d = 0; d <= _max_depth; d++ )
+    CANOPY_RESET_TIMERS();
     {
-        snapshot_shared_locals_at_depth( d, comm_plan );
-        run_m2l_at_depth( d );
-        allreduce_shared_locals_at_depth( d, comm_plan );
-        run_l2l_at_depth( d );
-        if ( d < _max_depth )
-            exchange_locals_after_l2l_at_depth( d, comm_plan );
-    }
+        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_DOWNWARD_TOTAL );
+        // Zero local coefficients
+        Kokkos::deep_copy( _locals, complex_type( 0.0, 0.0 ) );
 
-    // L2P: evaluate local expansion at each particle
-    run_l2p( particle_positions, potential_out, gradient_out,
-             compute_gradient );
+        // Stash the multipoles for the M2L kernel
+        _m2l_multipoles_view = multipoles;
+
+        // Build device-side interaction list if needed
+        if ( _m2l_target_cells.extent( 0 ) == 0 )
+            build_interaction_list_device( comm_plan );
+
+        // Pre-sweep: exchange remote multipoles needed for M2L
+        exchange_multipoles_for_m2l( multipoles, comm_plan );
+
+        // Layer-by-layer: snapshot shared, M2L, allreduce shared M2L delta,
+        // L2L, exchange children
+        for ( int d = 0; d <= _max_depth; d++ )
+        {
+            snapshot_shared_locals_at_depth( d, comm_plan );
+            run_m2l_at_depth( d );
+            allreduce_shared_locals_at_depth( d, comm_plan );
+            run_l2l_at_depth( d );
+            if ( d < _max_depth )
+                exchange_locals_after_l2l_at_depth( d, comm_plan );
+        }
+
+        // L2P: evaluate local expansion at each particle
+        run_l2p( particle_positions, potential_out, gradient_out,
+                 compute_gradient );
+    }
+    CANOPY_PRINT_DOWNWARD_TIMERS( _comm );
 }
 
 } // namespace Canopy

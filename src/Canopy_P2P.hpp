@@ -13,6 +13,7 @@
 #define CANOPY_P2P_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_Diagnostics.hpp"
 #include "Canopy_Helpers.hpp"
 #include "Canopy_TreeBuilder.hpp"
 #include "Canopy_TreePartitioner.hpp"
@@ -396,6 +397,7 @@ template <class PositionSlice, class ChargeSlice>
 void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     const PositionSlice& positions, const ChargeSlice& charges )
 {
+    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2P_GHOST_COMM );
     auto h_offsets = Kokkos::create_mirror_view_and_copy(
         Kokkos::HostSpace(), _leaf_particle_offsets );
 
@@ -562,6 +564,10 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     const potential_view_type& potential_out,
     const gradient_view_type& gradient_out, bool compute_gradient )
 {
+    CANOPY_RESET_TIMERS();
+    {
+    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2P_TOTAL );
+
     // ------------------------------------------------------------------
     // 1. Gather ghost particles
     // ------------------------------------------------------------------
@@ -584,8 +590,10 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     using team_policy = Kokkos::TeamPolicy<execution_space>;
     using team_member_type = typename team_policy::member_type;
 
-    if ( num_target_leaves > 0 )
     {
+        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2P_INTRA_KERNEL );
+        if ( num_target_leaves > 0 )
+        {
         team_policy policy( num_target_leaves, Kokkos::AUTO );
 
         Kokkos::parallel_for(
@@ -716,7 +724,8 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
             } );
 
         Kokkos::fence();
-    }
+        } // if ( num_target_leaves > 0 )
+    } // TIMER_P2P_INTRA_KERNEL
 
     // ------------------------------------------------------------------
     // 3. Phase 2: inter-leaf pairs (one-way, no atomics needed)
@@ -737,8 +746,10 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     auto ghost_positions = _ghost_positions;
     auto ghost_charges = _ghost_charges;
 
-    if ( num_target_leaves > 0 )
     {
+        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2P_INTER_KERNEL );
+        if ( num_target_leaves > 0 )
+        {
         team_policy policy( num_target_leaves, Kokkos::AUTO );
 
         Kokkos::parallel_for(
@@ -875,7 +886,10 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
             } );
 
         Kokkos::fence();
-    }
+        } // if ( num_target_leaves > 0 )
+    } // TIMER_P2P_INTER_KERNEL
+    } // TIMER_P2P_TOTAL
+    CANOPY_PRINT_P2P_TIMERS( _comm );
 }
 
 } // end namespace Canopy
