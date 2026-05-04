@@ -182,8 +182,9 @@ int main( int argc, char* argv[] )
         auto charges = Cabana::slice<Charge>( particles );
         using PositionSlice = decltype( positions );
 
+        std::array<double, 3> bb_tol = {tolerance, tolerance, tolerance};
         TreeBuilder<MemorySpace, ExecutionSpace> builder(
-            MPI_COMM_WORLD, ncrit, max_depth, tolerance );
+            MPI_COMM_WORLD, ncrit, max_depth, bb_tol, tolerance );
         builder.build( positions, num_particles_per_rank );
 
         // Phase 2: partition

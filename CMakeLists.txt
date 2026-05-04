@@ -189,7 +189,10 @@ endif()
 ## Profiling
 ##---------------------------------------------------------------------------##
 option(Canopy_ENABLE_PROFILING "Profiling" OFF)
-add_feature_info(Documentation Canopy_ENABLE_PROFILING "Build with profiling information (increases runtime)")
+add_feature_info(Profiling Canopy_ENABLE_PROFILING "Build with profiling information (increases runtime)")
+if(Canopy_ENABLE_PROFILING)
+  add_compile_definitions(CANOPY_ENABLE_PROFILING)
+endif()
 
 ##---------------------------------------------------------------------------##
 ## Libraries and Examples
