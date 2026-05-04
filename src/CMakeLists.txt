@@ -2,11 +2,11 @@ configure_file(Canopy_Config.hpp.cmakein Canopy_Config.hpp)
 
 set(HEADERS_PUBLIC
   Canopy_CommunicationPlan.hpp
-  Canopy_Diagnostics.hpp
   Canopy_DownwardSweep.hpp
   Canopy_Helpers.hpp
   Canopy_LaplaceKernel.hpp
   Canopy_P2P.hpp
+  Canopy_Profiling.hpp
   Canopy_Solver.hpp
   Canopy_SphericalCoefficients.hpp
   Canopy_TreeBuilder.hpp
@@ -21,8 +21,8 @@ set(HEADERS_PUBLIC
 
 add_library(Canopy INTERFACE)
 
-if(Canopy_ENABLE_DIAGNOSTICS)
-  target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_DIAGNOSTICS)
+if(CANOPY_ENABLE_PROFILING)
+  target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_PROFILING)
 endif()
 
 # Require minimum of C++17

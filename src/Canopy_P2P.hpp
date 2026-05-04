@@ -13,7 +13,7 @@
 #define CANOPY_P2P_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
-#include "Canopy_Diagnostics.hpp"
+#include "Canopy_Profiling.hpp"
 #include "Canopy_Helpers.hpp"
 #include "Canopy_TreeBuilder.hpp"
 #include "Canopy_TreePartitioner.hpp"
@@ -397,7 +397,7 @@ template <class PositionSlice, class ChargeSlice>
 void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     const PositionSlice& positions, const ChargeSlice& charges )
 {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2P_GHOST_COMM );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_GHOST_COMM );
     auto h_offsets = Kokkos::create_mirror_view_and_copy(
         Kokkos::HostSpace(), _leaf_particle_offsets );
 
@@ -566,7 +566,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
 {
     CANOPY_RESET_TIMERS();
     {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2P_TOTAL );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_TOTAL );
 
     // ------------------------------------------------------------------
     // 1. Gather ghost particles
@@ -591,7 +591,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     using team_member_type = typename team_policy::member_type;
 
     {
-        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2P_INTRA_KERNEL );
+        CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_INTRA_KERNEL );
         if ( num_target_leaves > 0 )
         {
         team_policy policy( num_target_leaves, Kokkos::AUTO );
@@ -747,7 +747,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     auto ghost_charges = _ghost_charges;
 
     {
-        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2P_INTER_KERNEL );
+        CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_INTER_KERNEL );
         if ( num_target_leaves > 0 )
         {
         team_policy policy( num_target_leaves, Kokkos::AUTO );

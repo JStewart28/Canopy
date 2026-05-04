@@ -13,7 +13,7 @@
 #define CANOPY_UPWARD_SWEEP_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
-#include "Canopy_Diagnostics.hpp"
+#include "Canopy_Profiling.hpp"
 #include "Canopy_SphericalCoefficients.hpp"
 #include "Canopy_TreeBuilder.hpp"
 #include "Canopy_TreePartitioner.hpp"
@@ -320,7 +320,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_p2m_at_depth(
     int depth, const ChargeView& particle_charges,
     const PositionType& particle_positions )
 {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_P2M );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2M );
     auto multipoles = _multipoles;
     auto device_cells = _device_cells;
     auto particle_cell_idx = _particle_cell_idx;
@@ -367,7 +367,7 @@ template <class MemorySpace, class ExecutionSpace, class KernelType>
 void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2m_at_depth(
     int depth )
 {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_M2M );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2M );
     const int ninternals =
         static_cast<int>( _internals_at_depth_local[depth].size() );
     if ( ninternals == 0 )
@@ -474,7 +474,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         }
 
         {
-            CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_M2M_ALLREDUCE );
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2M_ALLREDUCE );
             MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
                            reinterpret_cast<scalar_type*>( recvbuf.data() ),
                            2 * total_complex, mpi_scalar, MPI_SUM, _comm );
@@ -579,7 +579,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
 {
     CANOPY_RESET_TIMERS();
     {
-        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_UPWARD_TOTAL );
+        CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_UPWARD_TOTAL );
         Kokkos::deep_copy( _multipoles, complex_type( 0.0, 0.0 ) );
 
         for ( int d = 0; d <= _max_depth; d++ )

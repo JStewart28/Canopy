@@ -13,7 +13,7 @@
 #define CANOPY_DOWNWARD_SWEEP_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
-#include "Canopy_Diagnostics.hpp"
+#include "Canopy_Profiling.hpp"
 #include "Canopy_LaplaceKernel.hpp"
 #include "Canopy_SphericalCoefficients.hpp"
 #include "Canopy_TreeBuilder.hpp"
@@ -530,7 +530,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                                    KernelType>::coeff_view_type& multipoles,
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_M2L_COMM );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2L_COMM );
     // Pre-sweep bulk exchange: we send each of our cells whose multipole
     // is in another rank's interaction list, and receive remote source
     // multipoles we need. This overwrites multipoles at the remote
@@ -620,7 +620,7 @@ template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
     int depth )
 {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_M2L_KERNEL );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2L_KERNEL );
     // Targets are stored sorted by depth, so we launch only over the
     // contiguous slice [depth_offsets[depth], depth_offsets[depth+1]).
     if ( depth < 0 ||
@@ -679,7 +679,7 @@ template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth(
     int depth )
 {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_L2L_KERNEL );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_L2L_KERNEL );
     // Parents at `depth` translate to their children at `depth+1`.
     // For each parent this rank processes, iterate over its children
     // and call l2l_translate. One team per parent. Each team writes
@@ -820,7 +820,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     MPI_Datatype mpi_scalar =
         ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
     {
-        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_M2L_ALLREDUCE );
+        CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2L_ALLREDUCE );
         MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
                        reinterpret_cast<scalar_type*>( recvbuf.data() ),
                        2 * total_complex, mpi_scalar, MPI_SUM, _comm );
@@ -848,7 +848,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         int depth,
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_L2L_COMM );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_L2L_COMM );
     // L2L plan: parent-owner sends L to child-owner. The cell_key in
     // the L2L plan is the PARENT's key. We filter entries where the
     // parent is at `depth` — meaning this exchange happens after L2L
@@ -985,7 +985,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
     const potential_view_type& potential_out,
     const gradient_view_type& gradient_out, bool compute_gradient )
 {
-    CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_L2P );
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_L2P );
     auto locals = _locals;
     auto device_cells = _device_cells;
     auto particle_cell_idx = _particle_cell_idx;
@@ -1056,7 +1056,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
 {
     CANOPY_RESET_TIMERS();
     {
-        CANOPY_SCOPED_TIMER( Canopy::Diag::TIMER_DOWNWARD_TOTAL );
+        CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_DOWNWARD_TOTAL );
         // Zero local coefficients
         Kokkos::deep_copy( _locals, complex_type( 0.0, 0.0 ) );
 

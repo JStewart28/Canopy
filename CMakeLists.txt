@@ -186,6 +186,12 @@ if(Canopy_ENABLE_DOXYGEN)
 endif()
 
 ##---------------------------------------------------------------------------##
+## Profiling
+##---------------------------------------------------------------------------##
+option(Canopy_ENABLE_PROFILING "Profiling" OFF)
+add_feature_info(Documentation Canopy_ENABLE_PROFILING "Build with profiling information (increases runtime)")
+
+##---------------------------------------------------------------------------##
 ## Libraries and Examples
 ##---------------------------------------------------------------------------##
 

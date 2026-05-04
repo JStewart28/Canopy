@@ -9,12 +9,12 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#ifndef CANOPY_DIAGNOSTICS_HPP
-#define CANOPY_DIAGNOSTICS_HPP
+#ifndef CANOPY_PROFILING_HPP
+#define CANOPY_PROFILING_HPP
 
 #include "Canopy_Config.hpp"
 
-#ifdef CANOPY_ENABLE_DIAGNOSTICS
+#ifdef CANOPY_ENABLE_PROFILING
 
 #include <mpi.h>
 
@@ -25,7 +25,7 @@
 
 namespace Canopy
 {
-namespace Diag
+namespace Profiling
 {
 
 // ---------------------------------------------------------------------------
@@ -335,44 +335,44 @@ inline void print_timing_table( MPI_Comm comm, const char* section_name,
     std::fflush( stdout );
 }
 
-} // namespace Diag
+} // namespace Profiling
 } // namespace Canopy
 
-#endif // CANOPY_ENABLE_DIAGNOSTICS
+#endif // CANOPY_ENABLE_PROFILING
 
 // ---------------------------------------------------------------------------
 // Convenience macros — defined whether or not diagnostics are enabled so
 // instrumentation in other headers compiles in both modes.
 // ---------------------------------------------------------------------------
-#ifdef CANOPY_ENABLE_DIAGNOSTICS
+#ifdef CANOPY_ENABLE_PROFILING
 #  define CANOPY_SCOPED_TIMER( key ) \
-       ::Canopy::Diag::ScopedTimer _canopy_timer_##__LINE__( (key) )
+       ::Canopy::Profiling::ScopedTimer _canopy_timer_##__LINE__( (key) )
 #  define CANOPY_RESET_TIMERS() \
-       ::Canopy::Diag::reset_timers()
+       ::Canopy::Profiling::reset_timers()
 #  define CANOPY_WTIME() MPI_Wtime()
 #  define CANOPY_PRINT_SETUP_TIMERS( comm ) \
-       ::Canopy::Diag::print_timing_table( \
-           (comm), "setup()", ::Canopy::Diag::setup_phase_entries() )
+       ::Canopy::Profiling::print_timing_table( \
+           (comm), "setup()", ::Canopy::Profiling::setup_phase_entries() )
 #  define CANOPY_PRINT_UPWARD_TIMERS( comm ) \
-       ::Canopy::Diag::print_timing_table( \
+       ::Canopy::Profiling::print_timing_table( \
            (comm), "UpwardSweep::execute()", \
-           ::Canopy::Diag::upward_phase_entries() )
+           ::Canopy::Profiling::upward_phase_entries() )
 #  define CANOPY_PRINT_DOWNWARD_TIMERS( comm ) \
-       ::Canopy::Diag::print_timing_table( \
+       ::Canopy::Profiling::print_timing_table( \
            (comm), "DownwardSweep::execute()", \
-           ::Canopy::Diag::downward_phase_entries() )
+           ::Canopy::Profiling::downward_phase_entries() )
 #  define CANOPY_PRINT_P2P_TIMERS( comm ) \
-       ::Canopy::Diag::print_timing_table( \
+       ::Canopy::Profiling::print_timing_table( \
            (comm), "P2P::execute()", \
-           ::Canopy::Diag::p2p_phase_entries() )
+           ::Canopy::Profiling::p2p_phase_entries() )
 #  define CANOPY_PRINT_SOLVE_BREAKDOWN( comm, t_up, t_dn, t_p2p ) \
-       ::Canopy::Diag::print_solve_breakdown( (comm), (t_up), (t_dn), (t_p2p) )
+       ::Canopy::Profiling::print_solve_breakdown( (comm), (t_up), (t_dn), (t_p2p) )
 #  define CANOPY_PRINT_MIGRATE_TIMERS( comm ) \
-       ::Canopy::Diag::print_timing_table( \
-           (comm), "migrate()", ::Canopy::Diag::migrate_phase_entries() )
+       ::Canopy::Profiling::print_timing_table( \
+           (comm), "migrate()", ::Canopy::Profiling::migrate_phase_entries() )
 #  define CANOPY_PRINT_REBALANCE_TIMERS( comm ) \
-       ::Canopy::Diag::print_timing_table( \
-           (comm), "rebalance()", ::Canopy::Diag::rebalance_phase_entries() )
+       ::Canopy::Profiling::print_timing_table( \
+           (comm), "rebalance()", ::Canopy::Profiling::rebalance_phase_entries() )
 #else
 #  define CANOPY_SCOPED_TIMER( key )            do {} while ( 0 )
 #  define CANOPY_RESET_TIMERS()                 do {} while ( 0 )
@@ -387,4 +387,4 @@ inline void print_timing_table( MPI_Comm comm, const char* section_name,
 #  define CANOPY_PRINT_REBALANCE_TIMERS( comm ) do {} while ( 0 )
 #endif
 
-#endif // CANOPY_DIAGNOSTICS_HPP
+#endif // CANOPY_PROFILING_HPP
