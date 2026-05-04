@@ -275,8 +275,9 @@ inline void testMultiStepGravity( MultiSolveTest::Mode mode,
     // -----------------------------------------------------------------------
     // Set up FMM solver.
     // -----------------------------------------------------------------------
-    Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth, tree_tolerance,
-                     replication_depth );
+    Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth,
+                     std::array<double, 3>{tree_tolerance, tree_tolerance, tree_tolerance},
+                     tree_tolerance, replication_depth );
     solver.template setup<Position, Charge>( particles,
                                              num_particles_per_rank );
 

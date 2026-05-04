@@ -117,7 +117,7 @@ void testBuildAndValid( int num_particles_per_rank, int ncrit, int max_depth,
     AoSoA_t particles( "particles", num_particles_per_rank );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
@@ -167,7 +167,7 @@ void testVerticalPlanStructure( int num_particles_per_rank, int ncrit,
 
     AoSoA_t particles( "particles", num_particles_per_rank );
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
@@ -230,7 +230,7 @@ void testVerticalPlanBalance( int num_particles_per_rank, int ncrit,
 
     AoSoA_t particles( "particles", num_particles_per_rank );
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
@@ -283,7 +283,7 @@ void testM2LInteractionLists( int num_particles_per_rank, int ncrit,
 
     AoSoA_t particles( "particles", num_particles_per_rank );
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
@@ -340,7 +340,7 @@ void testM2LBalance( int num_particles_per_rank, int ncrit, int max_depth,
 
     AoSoA_t particles( "particles", num_particles_per_rank );
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
@@ -395,7 +395,7 @@ void testP2PNeighborLists( int num_particles_per_rank, int ncrit, int max_depth,
 
     AoSoA_t particles( "particles", num_particles_per_rank );
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
@@ -473,7 +473,7 @@ void testP2PGhostConsistency( int num_particles_per_rank, int ncrit,
 
     AoSoA_t particles( "particles", num_particles_per_rank );
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 
@@ -550,7 +550,7 @@ void testSingleRankNoTransfers( int num_particles_per_rank, int ncrit,
 
     AoSoA_t particles( "particles", num_particles_per_rank );
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
 

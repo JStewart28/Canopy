@@ -156,7 +156,7 @@ void testRootMultipoleMatchesDirectP2M( int num_particles_per_rank, int ncrit,
 
     // Phase 1: Build tree
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     // Phase 2: Partition
@@ -277,7 +277,7 @@ void testMultipolesNonzeroAfterSweep( int num_particles_per_rank, int ncrit,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -348,7 +348,7 @@ void testIdempotentExecution( int num_particles_per_rank, int ncrit,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -444,7 +444,7 @@ void testZeroChargesGiveZeroMultipoles( int num_particles_per_rank, int ncrit,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -531,7 +531,7 @@ void testRootMultipoleMatchesDirectP2MMultiRank( int num_particles_per_rank,
 
     // Phase 1: Build tree
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, tolerance, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     // Phase 2: Partition
