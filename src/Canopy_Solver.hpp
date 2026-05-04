@@ -26,6 +26,7 @@
 
 #include <mpi.h>
 
+#include <memory>
 #include <unordered_set>
 
 namespace Canopy
@@ -490,6 +491,18 @@ class Solver
     potential_view_type _potential;
     gradient_view_type _gradient;
 };
+
+template <class MemorySpace, class ExecutionSpace, class Scalar = double,
+          int P_ORDER = 8, int NComps = 1>
+std::shared_ptr<Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>>
+createSolver( MPI_Comm comm, int ncrit, int max_depth,
+              std::array<double, 3> bounding_box_tol, double ncrit_tol,
+              int replication_depth, double imbalance_tolerance = 0.05 )
+{
+    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>>(
+        comm, ncrit, max_depth, bounding_box_tol, ncrit_tol,
+        replication_depth, imbalance_tolerance );
+}
 
 } // namespace Canopy
 
