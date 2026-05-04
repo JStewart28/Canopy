@@ -85,11 +85,11 @@ class Solver
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
-    Solver( MPI_Comm comm, int ncrit, int max_depth, double tree_tolerance,
+    Solver( MPI_Comm comm, int ncrit, int max_depth, std::array<double, 3> bounding_box_tol, double ncrit_tol,
             int replication_depth, double imbalance_tolerance = 0.05 )
         : _comm( comm )
         , _replication_depth( replication_depth )
-        , _builder( comm, ncrit, max_depth, tree_tolerance, tree_tolerance )
+        , _builder( comm, ncrit, max_depth, bounding_box_tol, ncrit_tol )
         , _partitioner( comm, replication_depth, imbalance_tolerance )
         , _comm_plan( comm )
         , _upward( comm )

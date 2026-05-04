@@ -136,7 +136,7 @@ class TreeBuilder
     //! Maximum tree depth
     int _max_depth;
     //! Tolerance factor on global bounding box
-    double _bb_tf;
+    std::array<double, 3> _bb_tf;
     //! Tolerance factor on gncrit
     double _ncrit_tf;
 
@@ -158,7 +158,7 @@ class TreeBuilder
   public:
     // Constructor
     TreeBuilder( MPI_Comm comm, const int ncrit, const int max_depth,
-                 const double bb_tolerance_factor = 0.1,
+                 const std::array<double, 3> bb_tolerance_factor,
                  const double ncrit_tolerance_factor = 0.1 )
         : _ncrit( ncrit )
         , _max_depth( max_depth )
@@ -577,12 +577,13 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
 
     // Expand the root box by the tolerance factor so particles have room
     // to move before leaving the domain.
-    if ( _bb_tf > 0.0 )
+    for ( int d = 0; d < 3; ++d )
     {
-        for ( int d = 0; d < 3; ++d )
+        double tol = _bb_tf[d];
+        if ( tol > 0.0 )
         {
             double width = _root_box.max[d] - _root_box.min[d];
-            double expansion = _bb_tf * width;
+            double expansion = tol * width;
             _root_box.min[d] -= expansion;
             _root_box.max[d] += expansion;
         }
