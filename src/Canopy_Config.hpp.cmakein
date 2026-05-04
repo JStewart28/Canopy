@@ -16,6 +16,4 @@
 
 #define Canopy_GIT_COMMIT_HASH "@Canopy_GIT_COMMIT_HASH@"
 
-#cmakedefine Canopy_ENABLE_MPI
-
 #endif // CANOPY_CORE_CONFIG_HPP
