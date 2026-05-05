@@ -219,6 +219,27 @@ class DownwardSweep
     Kokkos::View<int*, memory_space> _m2l_counts;  // size N
     std::vector<int> _m2l_depth_offsets;           // size max_depth + 2 (host)
 
+    // Stage 3: precomputed M2L operator tables. For each (target, source)
+    // pair, the integer offset (i,j,k) = round((src_center - tgt_center)/w_d)
+    // is reduced to a bin id; pairs sharing a bin at the same depth share
+    // a common M2L operator T(out_idx, src_idx). Pairs whose offset falls
+    // outside the well-separated stencil get bin = -1 and fall back to the
+    // direct m2l_translate path.
+    static constexpr int M2L_BIN_RANGE = 3;
+    static constexpr int M2L_BIN_DIM = 2 * M2L_BIN_RANGE + 1;
+    static constexpr int M2L_NUM_BINS =
+        M2L_BIN_DIM * M2L_BIN_DIM * M2L_BIN_DIM;
+    static constexpr int M2L_NUM_SRC = ( P + 1 ) * ( P + 1 );
+
+    // Operator tables: shape (num_active_depths, num_bins, num_coeffs,
+    // num_src). Only depths with M2L work are present.
+    Kokkos::View<complex_type****, memory_space> _m2l_op_table;
+    // Map from depth -> active-depth index in _m2l_op_table; -1 if none.
+    // Host-side; used to pick the right slice when launching M2L per depth.
+    std::vector<int> _m2l_depth_to_op_idx;
+    // Per-pair bin id, parallel to _m2l_source_cells_flat. -1 = fallback.
+    Kokkos::View<int*, memory_space> _m2l_pair_bins;
+
     // Scratch: reference to the multipoles view during execute().
     // The M2L kernels capture this. Set at the start of execute()
     // and used by run_m2l_at_depth().
@@ -388,6 +409,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _m2l_offsets = Kokkos::View<int*, memory_space>();
     _m2l_counts = Kokkos::View<int*, memory_space>();
     _m2l_depth_offsets.clear();
+    _m2l_op_table = Kokkos::View<complex_type****, memory_space>();
+    _m2l_depth_to_op_idx.clear();
+    _m2l_pair_bins = Kokkos::View<int*, memory_space>();
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -521,6 +545,118 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             h_s( i ) = sources_flat[i];
         Kokkos::deep_copy( _m2l_source_cells_flat, h_s );
     }
+
+    // -----------------------------------------------------------------------
+    // Stage 3: per-pair bin ids and per-active-depth M2L operator tables.
+    //
+    // For each (target, source) pair we compute the integer offset
+    //   (i, j, k) = round((src_center - tgt_center) / w_d)
+    // where w_d = 2 * tgt.half_width is the cell width at depth d. If
+    // |i|, |j|, |k| <= M2L_BIN_RANGE, the pair shares an M2L operator
+    // with every other pair at the same depth and same offset. Pairs with
+    // out-of-range offsets get bin = -1 and use the direct m2l_translate
+    // fallback in run_m2l_at_depth.
+    // -----------------------------------------------------------------------
+    const int total_pairs = static_cast<int>( sources_flat.size() );
+    std::vector<int> pair_bins( total_pairs, -1 );
+    std::vector<double> half_width_at_depth( _max_depth + 1, 0.0 );
+    {
+        size_t pair_cursor = 0;
+        for ( const auto& e : entries )
+        {
+            const auto& tci = h_dc_for_filter( e.target_idx );
+            const double w = 2.0 * tci.half_width;
+            half_width_at_depth[e.depth] = tci.half_width;
+            const double inv_w = ( w > 0.0 ) ? ( 1.0 / w ) : 0.0;
+            for ( int s : e.sources )
+            {
+                const auto& sci = h_dc_for_filter( s );
+                const double dx = sci.center[0] - tci.center[0];
+                const double dy = sci.center[1] - tci.center[1];
+                const double dz = sci.center[2] - tci.center[2];
+                const int ii = static_cast<int>(
+                    std::lround( dx * inv_w ) );
+                const int jj = static_cast<int>(
+                    std::lround( dy * inv_w ) );
+                const int kk = static_cast<int>(
+                    std::lround( dz * inv_w ) );
+                int bin = -1;
+                const bool same_depth = ( sci.depth == e.depth );
+                if ( same_depth && std::abs( ii ) <= M2L_BIN_RANGE &&
+                     std::abs( jj ) <= M2L_BIN_RANGE &&
+                     std::abs( kk ) <= M2L_BIN_RANGE )
+                {
+                    bin = ( ( ii + M2L_BIN_RANGE ) * M2L_BIN_DIM +
+                            ( jj + M2L_BIN_RANGE ) ) *
+                              M2L_BIN_DIM +
+                          ( kk + M2L_BIN_RANGE );
+                }
+                pair_bins[pair_cursor++] = bin;
+            }
+        }
+    }
+
+    // Determine which depths actually have any M2L work.
+    std::vector<int> depth_to_op_idx( _max_depth + 1, -1 );
+    std::vector<int> active_depths;
+    for ( const auto& e : entries )
+    {
+        if ( !e.sources.empty() && depth_to_op_idx[e.depth] == -1 )
+        {
+            depth_to_op_idx[e.depth] =
+                static_cast<int>( active_depths.size() );
+            active_depths.push_back( e.depth );
+        }
+    }
+
+    // Build operator tables on host for each active depth, every
+    // in-range bin offset.
+    const int n_active = static_cast<int>( active_depths.size() );
+    using complex_t = complex_type;
+    Kokkos::View<complex_t****, memory_space> op_table(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_op_table" ),
+        n_active, M2L_NUM_BINS, KernelType::num_coeffs_per_cell,
+        KernelType::m2l_num_src_coeffs );
+    auto h_op = Kokkos::create_mirror_view( op_table );
+
+    auto h_A = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
+                                                    _A_table );
+    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
+    {
+        const int d = active_depths[d_idx];
+        const double w = 2.0 * half_width_at_depth[d];
+        for ( int ii = -M2L_BIN_RANGE; ii <= M2L_BIN_RANGE; ii++ )
+            for ( int jj = -M2L_BIN_RANGE; jj <= M2L_BIN_RANGE; jj++ )
+                for ( int kk = -M2L_BIN_RANGE; kk <= M2L_BIN_RANGE; kk++ )
+                {
+                    const int bin =
+                        ( ( ii + M2L_BIN_RANGE ) * M2L_BIN_DIM +
+                          ( jj + M2L_BIN_RANGE ) ) *
+                            M2L_BIN_DIM +
+                        ( kk + M2L_BIN_RANGE );
+                    auto T_slice = Kokkos::subview(
+                        h_op, d_idx, bin, Kokkos::ALL, Kokkos::ALL );
+                    KernelType::m2l_build_operator(
+                        static_cast<scalar_type>( ii * w ),
+                        static_cast<scalar_type>( jj * w ),
+                        static_cast<scalar_type>( kk * w ), h_A, T_slice );
+                }
+    }
+    Kokkos::deep_copy( op_table, h_op );
+    _m2l_op_table = op_table;
+
+    _m2l_depth_to_op_idx = std::move( depth_to_op_idx );
+
+    // pair bins on device
+    _m2l_pair_bins =
+        Kokkos::View<int*, memory_space>( "m2l_pair_bins", total_pairs );
+    if ( total_pairs > 0 )
+    {
+        auto h_pb = Kokkos::create_mirror_view( _m2l_pair_bins );
+        for ( int i = 0; i < total_pairs; i++ )
+            h_pb( i ) = pair_bins[i];
+        Kokkos::deep_copy( _m2l_pair_bins, h_pb );
+    }
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -637,9 +773,21 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
     auto m2l_offsets = _m2l_offsets;
     auto m2l_counts = _m2l_counts;
     auto m2l_sources = _m2l_source_cells_flat;
+    auto m2l_pair_bins = _m2l_pair_bins;
     auto locals = _locals;
     auto A_table = _A_table;
     auto multipoles = _m2l_multipoles_view;
+    auto op_table = _m2l_op_table;
+
+    // Resolve depth -> active-depth slice (host-side lookup).
+    const int op_d_idx =
+        ( depth >= 0 &&
+          depth < static_cast<int>( _m2l_depth_to_op_idx.size() ) )
+            ? _m2l_depth_to_op_idx[depth]
+            : -1;
+    const bool have_op_table = ( op_d_idx >= 0 ) &&
+                               ( op_table.extent( 0 ) > 0 ) &&
+                               ( m2l_pair_bins.extent( 0 ) > 0 );
 
     using team_policy = Kokkos::TeamPolicy<execution_space>;
     using team_member_type = typename team_policy::member_type;
@@ -661,14 +809,29 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
             for ( int s = 0; s < count; s++ )
             {
                 const int source_cell = m2l_sources( start + s );
-                const auto& src_ci = device_cells( source_cell );
+                const int bin =
+                    have_op_table ? m2l_pair_bins( start + s ) : -1;
 
-                const scalar_type dx = src_ci.center[0] - target_ci.center[0];
-                const scalar_type dy = src_ci.center[1] - target_ci.center[1];
-                const scalar_type dz = src_ci.center[2] - target_ci.center[2];
-
-                KernelType::m2l_translate( team, multipoles, source_cell, dx,
-                                           dy, dz, A_table, L_target );
+                if ( bin >= 0 )
+                {
+                    auto T_slice = Kokkos::subview(
+                        op_table, op_d_idx, bin, Kokkos::ALL, Kokkos::ALL );
+                    KernelType::m2l_apply_operator(
+                        team, multipoles, source_cell, T_slice, L_target );
+                }
+                else
+                {
+                    const auto& src_ci = device_cells( source_cell );
+                    const scalar_type dx =
+                        src_ci.center[0] - target_ci.center[0];
+                    const scalar_type dy =
+                        src_ci.center[1] - target_ci.center[1];
+                    const scalar_type dz =
+                        src_ci.center[2] - target_ci.center[2];
+                    KernelType::m2l_translate( team, multipoles, source_cell,
+                                               dx, dy, dz, A_table,
+                                               L_target );
+                }
             }
         } );
 

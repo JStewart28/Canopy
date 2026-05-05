@@ -436,6 +436,147 @@ struct LaplaceKernel
     }
 
     // =======================================================================
+    // m2l_num_src_coeffs: flat (n,m) source-coefficient slot count for the
+    // precomputed-operator path. Indexed by src_idx = n*n + n + m for
+    // n = 0..P, m = -n..n. Some slots (|m| > n) are unused / left zero.
+    // =======================================================================
+    static constexpr int m2l_num_src_coeffs = ( P + 1 ) * ( P + 1 );
+
+    // =======================================================================
+    // m2l_build_operator
+    //
+    // Build the per-pair M2L operator entries for a single (dx, dy, dz)
+    // offset into a 2D table T_out(out_idx, src_idx). At runtime the M2L
+    // contraction is then
+    //
+    //   L_{out_idx} += sum_{n,m} T_out(out_idx, n*n+n+m) * M_{n,m}(source)
+    //
+    // i.e. all the per-pair scalar work (Ynm, A factors, i_power, sign,
+    // rho^-(n+j+1)) is absorbed into T_out and reused across every source-
+    // target pair that shares this offset.
+    // =======================================================================
+    template <class AType, class TView>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_build_operator( Scalar dx, Scalar dy, Scalar dz, const AType& A_table,
+                        const TView& T_out )
+    {
+        Scalar rho, theta, phi;
+        cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
+
+        const Scalar inv_rho = ( rho > 0.0 ) ? ( 1.0 / rho ) : 0.0;
+
+        constexpr int max_rho_pow = 2 * P + 2;
+        Scalar inv_rho_pow_tbl[max_rho_pow];
+        inv_rho_pow_tbl[0] = 1.0;
+        for ( int e = 1; e < max_rho_pow; e++ )
+            inv_rho_pow_tbl[e] = inv_rho_pow_tbl[e - 1] * inv_rho;
+
+        constexpr int max_L = 2 * P;
+        constexpr int Y_size = ( max_L + 1 ) * ( max_L + 1 );
+        complex_type Y_tbl[Y_size];
+        for ( int L = 0; L <= max_L; L++ )
+            for ( int M = -L; M <= L; M++ )
+                Y_tbl[L * L + L + M] = Ynm<Scalar>( L, M, theta, phi );
+
+        constexpr int ip_stride = 2 * P + 1;
+        constexpr int ip_size = ( P + 1 ) * ip_stride;
+        complex_type ip_tbl[ip_size];
+        for ( int kk = 0; kk <= P; kk++ )
+            for ( int mm = -P; mm <= P; mm++ )
+            {
+                const int abs_kk = kk;
+                const int abs_mm = ( mm < 0 ) ? -mm : mm;
+                const int kmm = kk - mm;
+                const int abs_kmm = ( kmm < 0 ) ? -kmm : kmm;
+                ip_tbl[kk * ip_stride + ( mm + P )] =
+                    i_power( abs_kmm - abs_kk - abs_mm );
+            }
+
+        for ( int out_idx = 0; out_idx < num_coeffs_per_cell; out_idx++ )
+        {
+            for ( int src_idx = 0; src_idx < m2l_num_src_coeffs; src_idx++ )
+                T_out( out_idx, src_idx ) = complex_type( 0.0, 0.0 );
+
+            int j, k;
+            unflatten_triangular( out_idx, j, k );
+            const Scalar A_jk = A_table( a_index( j, k ) );
+
+            for ( int n = 0; n <= P; n++ )
+            {
+                const Scalar inv_rho_pow = inv_rho_pow_tbl[n + j + 1];
+
+                for ( int m = -n; m <= n; m++ )
+                {
+                    const int npj = n + j;
+                    const int mmk = m - k;
+                    const int abs_mmk = ( mmk < 0 ) ? -mmk : mmk;
+                    if ( abs_mmk > npj )
+                        continue;
+
+                    const Scalar A_nm = A_table( a_index( n, m ) );
+                    const Scalar A_npj_mmk = A_table( a_index( npj, mmk ) );
+                    if ( A_npj_mmk == 0.0 )
+                        continue;
+
+                    const complex_type ip =
+                        ip_tbl[k * ip_stride + ( m + P )];
+                    const complex_type Y =
+                        Y_tbl[npj * npj + npj + mmk];
+
+                    const Scalar sign_n = ( n % 2 == 0 ) ? 1.0 : -1.0;
+                    const Scalar coef_scalar =
+                        sign_n * A_nm * A_jk / A_npj_mmk * inv_rho_pow;
+
+                    T_out( out_idx, n * n + n + m ) =
+                        ip * coef_scalar * Y;
+                }
+            }
+        }
+    }
+
+    // =======================================================================
+    // m2l_apply_operator
+    //
+    // Apply a precomputed M2L operator T_in (for one source-target offset)
+    // to translate `source_cell`'s multipole into `L_target_out`. T_in
+    // is indexed as T_in(out_idx, n*n+n+m).
+    // =======================================================================
+    template <class TeamMember, class MView, class TView, class LTargetType>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_apply_operator( const TeamMember& team_member, const MView& M_full,
+                        int source_cell, const TView& T_in,
+                        const LTargetType& L_target_out )
+    {
+        Kokkos::parallel_for(
+            Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
+            [&]( const int out_idx )
+            {
+                complex_type accum[NComps];
+                for ( int c = 0; c < NComps; c++ )
+                    accum[c] = complex_type( 0.0, 0.0 );
+
+                for ( int n = 0; n <= P; n++ )
+                {
+                    for ( int m = -n; m <= n; m++ )
+                    {
+                        const int src_idx = n * n + n + m;
+                        const complex_type T_val =
+                            T_in( out_idx, src_idx );
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            const complex_type M_val = get_coeff_3d(
+                                M_full, source_cell, n, m, c );
+                            accum[c] += T_val * M_val;
+                        }
+                    }
+                }
+
+                for ( int c = 0; c < NComps; c++ )
+                    L_target_out( out_idx, c ) += accum[c];
+            } );
+    }
+
+    // =======================================================================
     // L2L: translate parent's local expansion to child's local.
     // Greengard Theorem 5.26.
     //
