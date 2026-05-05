@@ -349,6 +349,37 @@ struct LaplaceKernel
 
         const Scalar inv_rho = ( rho > 0.0 ) ? ( 1.0 / rho ) : 0.0;
 
+        // Per-pair precomputed tables. With P=6 these are 14 scalars,
+        // 169 complex (Y), 91 complex (ip) — fit comfortably in registers/L1
+        // and replace the dominant Ynm/tgamma recomputation that previously
+        // ran inside the (j,k,n,m) loop nest for every (target, source) pair.
+        constexpr int max_rho_pow = 2 * P + 2;
+        Scalar inv_rho_pow_tbl[max_rho_pow];
+        inv_rho_pow_tbl[0] = 1.0;
+        for ( int e = 1; e < max_rho_pow; e++ )
+            inv_rho_pow_tbl[e] = inv_rho_pow_tbl[e - 1] * inv_rho;
+
+        constexpr int max_L = 2 * P;
+        constexpr int Y_size = ( max_L + 1 ) * ( max_L + 1 );
+        complex_type Y_tbl[Y_size];
+        for ( int L = 0; L <= max_L; L++ )
+            for ( int M = -L; M <= L; M++ )
+                Y_tbl[L * L + L + M] = Ynm<Scalar>( L, M, theta, phi );
+
+        constexpr int ip_stride = 2 * P + 1;
+        constexpr int ip_size = ( P + 1 ) * ip_stride;
+        complex_type ip_tbl[ip_size];
+        for ( int kk = 0; kk <= P; kk++ )
+            for ( int mm = -P; mm <= P; mm++ )
+            {
+                const int abs_kk = kk;
+                const int abs_mm = ( mm < 0 ) ? -mm : mm;
+                const int kmm = kk - mm;
+                const int abs_kmm = ( kmm < 0 ) ? -kmm : kmm;
+                ip_tbl[kk * ip_stride + ( mm + P )] =
+                    i_power( abs_kmm - abs_kk - abs_mm );
+            }
+
         Kokkos::parallel_for(
             Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
             [&]( const int out_idx )
@@ -364,9 +395,7 @@ struct LaplaceKernel
 
                 for ( int n = 0; n <= P; n++ )
                 {
-                    Scalar inv_rho_pow = 1.0;
-                    for ( int e = 0; e < n + j + 1; e++ )
-                        inv_rho_pow *= inv_rho;
+                    const Scalar inv_rho_pow = inv_rho_pow_tbl[n + j + 1];
 
                     for ( int m = -n; m <= n; m++ )
                     {
@@ -382,15 +411,10 @@ struct LaplaceKernel
                         if ( A_npj_mmk == 0.0 )
                             continue;
 
-                        const int abs_k = k;
-                        const int abs_m = ( m < 0 ) ? -m : m;
-                        const int km = k - m;
-                        const int abs_km = ( km < 0 ) ? -km : km;
                         const complex_type ip =
-                            i_power( abs_km - abs_k - abs_m );
-
+                            ip_tbl[k * ip_stride + ( m + P )];
                         const complex_type Y =
-                            Ynm<Scalar>( npj, mmk, theta, phi );
+                            Y_tbl[npj * npj + npj + mmk];
 
                         const Scalar sign_n = ( n % 2 == 0 ) ? 1.0 : -1.0;
                         const Scalar coef_scalar =
