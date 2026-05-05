@@ -186,10 +186,10 @@ if(Canopy_ENABLE_DOXYGEN)
 endif()
 
 ##---------------------------------------------------------------------------##
-## Profiling
+## Diagnostics / profiling timers
 ##---------------------------------------------------------------------------##
 option(Canopy_ENABLE_PROFILING "Profiling" OFF)
-add_feature_info(Profiling Canopy_ENABLE_PROFILING "Build with profiling information (increases runtime)")
+add_feature_info(Profiling Canopy_ENABLE_PROFILING "Enable FMM phase timing via MPI_Wtime")
 if(Canopy_ENABLE_PROFILING)
   add_compile_definitions(CANOPY_ENABLE_PROFILING)
 endif()
