@@ -151,14 +151,31 @@ class CommunicationPlan
 
     // -----------------------------------------------------------------------
     // Constructor
+    //
+    // mac_theta selects the multipole acceptance criterion used by the
+    // dual-tree traversal in build_all_interaction_lists. The MAC is the
+    // exafmm-style spherical test R*theta > r_T + r_S where r is the
+    // circumradius of a cube cell (sqrt(3)*half_width). Smaller theta is
+    // more conservative (more pairs, deeper expansions converge); larger
+    // theta is less conservative (fewer pairs, requires larger P for
+    // equivalent accuracy). Default 0.5 is the closest single-knob match
+    // to the legacy 4*max(half_width) Chebyshev rule. exafmm's default
+    // is 0.4. Must satisfy 0 < theta < 1.
     // -----------------------------------------------------------------------
-    CommunicationPlan( MPI_Comm comm )
+    CommunicationPlan( MPI_Comm comm, double mac_theta = 0.5 )
         : _comm( comm )
         , _valid( false )
+        , _theta( mac_theta )
     {
         MPI_Comm_rank( _comm, &_rank );
         MPI_Comm_size( _comm, &_nprocs );
     }
+
+    // Configure the MAC theta after construction. Triggers re-build on next
+    // build() call; callers must call invalidate() if they have already
+    // built a plan.
+    void set_mac_theta( double mac_theta ) { _theta = mac_theta; }
+    double mac_theta() const { return _theta; }
 
     // -----------------------------------------------------------------------
     // build()
@@ -198,6 +215,9 @@ class CommunicationPlan
     VerticalPlan _l2l_plan;
     M2LPlan _m2l_plan;
     P2PPlan _p2p_plan;
+
+    // MAC theta used by the dual-tree traversal. See constructor.
+    double _theta;
 
     // -----------------------------------------------------------------------
     // Cell lookup helpers built during build()
@@ -264,6 +284,35 @@ class CommunicationPlan
                 return true;
         }
         return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // mac_satisfied — exafmm-style spherical multipole acceptance criterion.
+    //
+    // Two cells A, B are accepted as well-separated for M2L iff
+    //     R * theta > r_A + r_B
+    // where R = ||center_A - center_B||_2 and r = sqrt(3) * half_width is
+    // the circumradius of a cube cell. The squared form below avoids the
+    // sqrt. The predicate is symmetric in A, B, which is required by the
+    // symmetric pair emission in emit_m2l_pair: both ranks (target owner,
+    // source owner) must independently reach the same accept/reject
+    // conclusion or send/receive sets diverge.
+    //
+    // Selecting theta is a knob: smaller theta is more conservative (more
+    // pairs, M2L converges at lower P); larger theta is less conservative
+    // (fewer pairs, requires larger P for the same accuracy). exafmm's
+    // default is 0.4; Canopy's default 0.5 is the closest single-knob
+    // match to the legacy 4*max(hw) Chebyshev rule for same-depth pairs.
+    // -----------------------------------------------------------------------
+    bool mac_satisfied( const CellInfo& a, const CellInfo& b ) const
+    {
+        const double dx = a.center[0] - b.center[0];
+        const double dy = a.center[1] - b.center[1];
+        const double dz = a.center[2] - b.center[2];
+        const double R2 = dx * dx + dy * dy + dz * dz;
+        constexpr double SQRT3 = 1.7320508075688772;
+        const double r_sum = SQRT3 * ( a.half_width + b.half_width );
+        return R2 * _theta * _theta > r_sum * r_sum;
     }
 
     // -----------------------------------------------------------------------
@@ -509,8 +558,8 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
             continue;
         }
 
-        // Well-separated → M2L (one unordered pair, both directed M2Ls).
-        if ( is_well_separated( *T, *S ) )
+        // MAC satisfied → M2L (one unordered pair, both directed M2Ls).
+        if ( mac_satisfied( *T, *S ) )
         {
             emit_m2l_pair( tk, sk );
             continue;

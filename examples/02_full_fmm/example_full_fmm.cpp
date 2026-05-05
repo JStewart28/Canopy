@@ -27,8 +27,8 @@ static constexpr int N_COMPS = 1;
 
 using DataTypes = Cabana::MemberTypes<double[3], double[N_COMPS]>;
 
-using MemorySpace = Kokkos::HostSpace;
-using ExecutionSpace = Kokkos::DefaultHostExecutionSpace;
+using MemorySpace = Kokkos::CudaSpace;
+using ExecutionSpace = Kokkos::Cuda;
 
 using AoSoA_t = Cabana::AoSoA<DataTypes, MemorySpace>;
 using Solver_t =
@@ -36,9 +36,10 @@ using Solver_t =
 
 void generate_particles( AoSoA_t& particles, int num_particles, int rank )
 {
-    particles.resize( num_particles );
-    auto positions = Cabana::slice<Position>( particles );
-    auto charges = Cabana::slice<Charge>( particles );
+    using AoSoA_h = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
+    AoSoA_h particles_h( "particles_h", num_particles );
+    auto positions = Cabana::slice<Position>( particles_h );
+    auto charges = Cabana::slice<Charge>( particles_h );
 
     std::mt19937 gen( 42 + rank );
     std::uniform_real_distribution<double> pos_dist( 0.0, 1.0 );
@@ -51,6 +52,9 @@ void generate_particles( AoSoA_t& particles, int num_particles, int rank )
         positions( i, 2 ) = pos_dist( gen );
         charges( i, 0 ) = q_dist( gen );
     }
+
+    particles.resize( num_particles );
+    Cabana::deep_copy( particles, particles_h );
 }
 
 void direct_evaluate_global(
@@ -161,10 +165,11 @@ int main( int argc, char* argv[] )
         double bbox_tol = 0.10;
         int replication_depth = 3;
         double imbalance_tolerance = 0.10;
+        double mac_theta = 0.5;
         bool compute_gradient = true;
 
         int opt;
-        while ( ( opt = getopt( argc, argv, "p:d:r:i:n:t:b:" ) ) != -1 )
+        while ( ( opt = getopt( argc, argv, "p:d:r:i:n:t:b:m:" ) ) != -1 )
         {
             switch ( opt )
             {
@@ -175,13 +180,14 @@ int main( int argc, char* argv[] )
             case 'n': ncrit = std::atoi( optarg ); break;
             case 't': ncrit_tol = std::atof( optarg ); break;
             case 'b': bbox_tol = std::atof( optarg ); break;
+            case 'm': mac_theta = std::atof( optarg ); break;
             default:
                 if ( rank == 0 )
                     std::fprintf(
                         stderr,
                         "Usage: %s [-p N] [-d max_depth] [-r repl_depth] "
                         "[-i imbal_tol] [-n ncrit] [-t ncrit_tol] "
-                        "[-b bbox_tol]\n",
+                        "[-b bbox_tol] [-m mac_theta]\n",
                         argv[0] );
                 MPI_Abort( MPI_COMM_WORLD, 1 );
             }
@@ -191,10 +197,10 @@ int main( int argc, char* argv[] )
             std::printf( "Full FMM validation (P=%d, NComps=%d): "
                          "%d ranks, %d particles/rank, ncrit=%d, "
                          "max_depth=%d, repl_depth=%d, imbal_tol=%.3g, "
-                         "ncrit_tol=%.3g, bbox_tol=%.3g\n",
+                         "ncrit_tol=%.3g, bbox_tol=%.3g, mac_theta=%.3g\n",
                          P_ORDER, N_COMPS, nprocs, num_particles_per_rank,
                          ncrit, max_depth, replication_depth,
-                         imbalance_tolerance, ncrit_tol, bbox_tol );
+                         imbalance_tolerance, ncrit_tol, bbox_tol, mac_theta );
 
         AoSoA_t particles( "particles", num_particles_per_rank );
         generate_particles( particles, num_particles_per_rank, rank );
@@ -202,7 +208,7 @@ int main( int argc, char* argv[] )
         std::array<double, 3> bb_tol = { bbox_tol, bbox_tol, bbox_tol };
 
         Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth, bb_tol, ncrit_tol,
-                         replication_depth, imbalance_tolerance );
+                         replication_depth, imbalance_tolerance, mac_theta );
 
         solver.setup<Position, Charge>( particles, num_particles_per_rank );
         solver.solve<Position, Charge>( particles, compute_gradient );

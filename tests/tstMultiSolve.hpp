@@ -20,6 +20,7 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
@@ -31,6 +32,13 @@ using namespace Canopy;
 
 namespace MultiSolveTest
 {
+
+inline double get_test_mac_theta()
+{
+    if ( const char* s = std::getenv( "CANOPY_MAC_THETA" ) )
+        return std::atof( s );
+    return 0.5;
+}
 
 enum FieldIdx
 {
@@ -277,7 +285,8 @@ inline void testMultiStepGravity( MultiSolveTest::Mode mode,
     // -----------------------------------------------------------------------
     Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth,
                      std::array<double, 3>{tree_tolerance, tree_tolerance, tree_tolerance},
-                     tree_tolerance, replication_depth );
+                     tree_tolerance, replication_depth, 0.05,
+                     get_test_mac_theta() );
     solver.template setup<Position, Charge>( particles,
                                              num_particles_per_rank );
 

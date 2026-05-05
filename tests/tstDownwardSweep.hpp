@@ -25,6 +25,7 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
@@ -36,6 +37,15 @@ using namespace Canopy;
 
 namespace DownwardSweepTest
 {
+
+// Read CANOPY_MAC_THETA env var to allow rerunning tests at different MAC
+// values without rebuilding. Defaults to 0.5 (Canopy default).
+inline double get_test_mac_theta()
+{
+    if ( const char* s = std::getenv( "CANOPY_MAC_THETA" ) )
+        return std::atof( s );
+    return 0.5;
+}
 
 enum FieldIdx
 {
@@ -139,7 +149,7 @@ void testZeroChargesGiveZeroLocalsAndPotential( int num_particles_per_rank,
     builder.build( positions, num_local );
 
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
-        MPI_COMM_WORLD );
+        MPI_COMM_WORLD, get_test_mac_theta() );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -230,7 +240,7 @@ void testLocalsAndPotentialNonzeroAfterExecute( int num_particles_per_rank,
     builder.build( positions, num_local );
 
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
-        MPI_COMM_WORLD );
+        MPI_COMM_WORLD, get_test_mac_theta() );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -330,7 +340,7 @@ void testIdempotentExecution( int num_particles_per_rank, int ncrit,
     builder.build( positions, num_local );
 
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
-        MPI_COMM_WORLD );
+        MPI_COMM_WORLD, get_test_mac_theta() );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -470,7 +480,7 @@ void testL2PApproximatesDirectSumSingleRank( int num_sources, int num_targets,
     builder.build( positions, num_local );
 
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
-        MPI_COMM_WORLD );
+        MPI_COMM_WORLD, get_test_mac_theta() );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -638,7 +648,7 @@ void testL2PApproximatesDirectSumMultiRank( int num_sources, int num_targets,
     builder.build( positions, num_local );
 
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
-        MPI_COMM_WORLD );
+        MPI_COMM_WORLD, get_test_mac_theta() );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -814,7 +824,7 @@ void testM2LListInvariants( int num_particles, int ncrit, int max_depth,
     builder.build( positions, num_local );
 
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
-        MPI_COMM_WORLD );
+        MPI_COMM_WORLD, get_test_mac_theta() );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
@@ -986,7 +996,7 @@ void testL2PApproximatesDirectSumAdaptive( int num_dense_sources,
     builder.build( positions, num_local );
 
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
-        MPI_COMM_WORLD );
+        MPI_COMM_WORLD, get_test_mac_theta() );
     comm_plan.build( builder.cells(), partitioner.ownership(),
                      partitioner.cell_owner_map(), replication_depth );
 
