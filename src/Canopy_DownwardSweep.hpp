@@ -240,6 +240,27 @@ class DownwardSweep
     // Per-pair bin id, parallel to _m2l_source_cells_flat. -1 = fallback.
     Kokkos::View<int*, memory_space> _m2l_pair_bins;
 
+    // Bin-major pair layout for batched-GEMM M2L.
+    //
+    // Pairs at active depth d_idx and bin b are stored contiguously as
+    //   slot s in [_m2l_bin_pair_offsets(d_idx, b),
+    //              _m2l_bin_pair_offsets(d_idx, b+1)) ->
+    //     target = _m2l_bin_pair_targets(s)
+    //     source = _m2l_bin_pair_sources(s)
+    // The offsets array prefix-sums *globally* across (d_idx, b) so that
+    // a single flat pair table holds all binnable pairs at all depths.
+    // _m2l_bin_pair_offsets has shape (n_active, M2L_NUM_BINS + 1).
+    //
+    // Out-of-bin pairs (bin == -1) are collected into a separate fallback
+    // table per active depth, sliced by _m2l_fallback_offsets.
+    Kokkos::View<int*, memory_space> _m2l_bin_pair_targets;
+    Kokkos::View<int*, memory_space> _m2l_bin_pair_sources;
+    Kokkos::View<int**, memory_space> _m2l_bin_pair_offsets;
+
+    Kokkos::View<int*, memory_space> _m2l_fallback_targets;
+    Kokkos::View<int*, memory_space> _m2l_fallback_sources;
+    Kokkos::View<int*, memory_space> _m2l_fallback_offsets; // size n_active + 1
+
     // Scratch: reference to the multipoles view during execute().
     // The M2L kernels capture this. Set at the start of execute()
     // and used by run_m2l_at_depth().
@@ -412,6 +433,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _m2l_op_table = Kokkos::View<complex_type****, memory_space>();
     _m2l_depth_to_op_idx.clear();
     _m2l_pair_bins = Kokkos::View<int*, memory_space>();
+    _m2l_bin_pair_targets = Kokkos::View<int*, memory_space>();
+    _m2l_bin_pair_sources = Kokkos::View<int*, memory_space>();
+    _m2l_bin_pair_offsets = Kokkos::View<int**, memory_space>();
+    _m2l_fallback_targets = Kokkos::View<int*, memory_space>();
+    _m2l_fallback_sources = Kokkos::View<int*, memory_space>();
+    _m2l_fallback_offsets = Kokkos::View<int*, memory_space>();
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -656,6 +683,153 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         for ( int i = 0; i < total_pairs; i++ )
             h_pb( i ) = pair_bins[i];
         Kokkos::deep_copy( _m2l_pair_bins, h_pb );
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 4: bin-major pair layout for batched-GEMM M2L.
+    //
+    // Re-bucket the (target, source) pairs so that all pairs sharing the
+    // same active-depth-index d_idx and bin b are contiguous in memory.
+    // Out-of-bin pairs (bin == -1) go into a separate fallback table sliced
+    // by depth — they will be processed by the per-pair m2l_translate
+    // kernel and are typically <1% of pairs.
+    //
+    // bin_offsets_h(d_idx, b) is a global prefix sum over all (d_idx, b),
+    // so a single flat (target, source) array holds every binnable pair.
+    // -----------------------------------------------------------------------
+    Kokkos::View<int**, Kokkos::HostSpace> bin_offsets_h(
+        "m2l_bin_pair_offsets_host", n_active > 0 ? n_active : 1,
+        M2L_NUM_BINS + 1 );
+    std::vector<int> fallback_offsets_h( n_active + 1, 0 );
+
+    // First pass: count.
+    {
+        size_t pair_cursor = 0;
+        for ( const auto& e : entries )
+        {
+            const int d_idx =
+                ( e.depth >= 0 && e.depth <= _max_depth )
+                    ? _m2l_depth_to_op_idx[e.depth]
+                    : -1;
+            for ( size_t s = 0; s < e.sources.size(); s++ )
+            {
+                const int bin = pair_bins[pair_cursor++];
+                if ( d_idx >= 0 && bin >= 0 )
+                    bin_offsets_h( d_idx, bin + 1 )++;
+                else if ( d_idx >= 0 )
+                    fallback_offsets_h[d_idx + 1]++;
+                // (d_idx < 0 means depth has no operator table entry; such
+                //  pairs do not participate in the batched path. We do not
+                //  expect any to exist because depth_to_op_idx was built
+                //  from the same entries vector, but be defensive.)
+            }
+        }
+    }
+
+    // Global prefix sum across (d_idx, b) for binnable pairs, and per-depth
+    // prefix sum for fallback pairs.
+    int total_binnable = 0;
+    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
+    {
+        bin_offsets_h( d_idx, 0 ) = total_binnable;
+        for ( int b = 0; b < M2L_NUM_BINS; b++ )
+            bin_offsets_h( d_idx, b + 1 ) += bin_offsets_h( d_idx, b );
+        total_binnable = bin_offsets_h( d_idx, M2L_NUM_BINS );
+    }
+    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
+        fallback_offsets_h[d_idx + 1] += fallback_offsets_h[d_idx];
+    const int total_fallback = fallback_offsets_h[n_active];
+
+    // Second pass: scatter. bin_cursors / fb_cursors track the next free
+    // slot per bucket, advancing as we place pairs.
+    Kokkos::View<int**, Kokkos::HostSpace> bin_cursors(
+        "m2l_bin_pair_cursors_host", n_active > 0 ? n_active : 1,
+        M2L_NUM_BINS );
+    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
+        for ( int b = 0; b < M2L_NUM_BINS; b++ )
+            bin_cursors( d_idx, b ) = bin_offsets_h( d_idx, b );
+    std::vector<int> fb_cursors = fallback_offsets_h;
+
+    std::vector<int> bin_targets_h( total_binnable );
+    std::vector<int> bin_sources_h( total_binnable );
+    std::vector<int> fb_targets_h( total_fallback );
+    std::vector<int> fb_sources_h( total_fallback );
+
+    {
+        size_t pair_cursor = 0;
+        for ( const auto& e : entries )
+        {
+            const int d_idx =
+                ( e.depth >= 0 && e.depth <= _max_depth )
+                    ? _m2l_depth_to_op_idx[e.depth]
+                    : -1;
+            for ( int src : e.sources )
+            {
+                const int bin = pair_bins[pair_cursor++];
+                if ( d_idx < 0 )
+                    continue;
+                if ( bin >= 0 )
+                {
+                    const int slot = bin_cursors( d_idx, bin )++;
+                    bin_targets_h[slot] = e.target_idx;
+                    bin_sources_h[slot] = src;
+                }
+                else
+                {
+                    const int slot = fb_cursors[d_idx]++;
+                    fb_targets_h[slot] = e.target_idx;
+                    fb_sources_h[slot] = src;
+                }
+            }
+        }
+    }
+
+    // Upload to device.
+    _m2l_bin_pair_targets = Kokkos::View<int*, memory_space>(
+        "m2l_bin_pair_targets", total_binnable );
+    _m2l_bin_pair_sources = Kokkos::View<int*, memory_space>(
+        "m2l_bin_pair_sources", total_binnable );
+    _m2l_bin_pair_offsets = Kokkos::View<int**, memory_space>(
+        "m2l_bin_pair_offsets", n_active > 0 ? n_active : 1,
+        M2L_NUM_BINS + 1 );
+    _m2l_fallback_targets = Kokkos::View<int*, memory_space>(
+        "m2l_fallback_targets", total_fallback );
+    _m2l_fallback_sources = Kokkos::View<int*, memory_space>(
+        "m2l_fallback_sources", total_fallback );
+    _m2l_fallback_offsets = Kokkos::View<int*, memory_space>(
+        "m2l_fallback_offsets", n_active + 1 );
+
+    if ( total_binnable > 0 )
+    {
+        auto h_t = Kokkos::create_mirror_view( _m2l_bin_pair_targets );
+        auto h_s = Kokkos::create_mirror_view( _m2l_bin_pair_sources );
+        for ( int i = 0; i < total_binnable; i++ )
+        {
+            h_t( i ) = bin_targets_h[i];
+            h_s( i ) = bin_sources_h[i];
+        }
+        Kokkos::deep_copy( _m2l_bin_pair_targets, h_t );
+        Kokkos::deep_copy( _m2l_bin_pair_sources, h_s );
+    }
+    Kokkos::deep_copy( _m2l_bin_pair_offsets, bin_offsets_h );
+
+    if ( total_fallback > 0 )
+    {
+        auto h_t = Kokkos::create_mirror_view( _m2l_fallback_targets );
+        auto h_s = Kokkos::create_mirror_view( _m2l_fallback_sources );
+        for ( int i = 0; i < total_fallback; i++ )
+        {
+            h_t( i ) = fb_targets_h[i];
+            h_s( i ) = fb_sources_h[i];
+        }
+        Kokkos::deep_copy( _m2l_fallback_targets, h_t );
+        Kokkos::deep_copy( _m2l_fallback_sources, h_s );
+    }
+    {
+        auto h_o = Kokkos::create_mirror_view( _m2l_fallback_offsets );
+        for ( int i = 0; i <= n_active; i++ )
+            h_o( i ) = fallback_offsets_h[i];
+        Kokkos::deep_copy( _m2l_fallback_offsets, h_o );
     }
 }
 

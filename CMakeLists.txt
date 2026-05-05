@@ -46,6 +46,36 @@ if(Kokkos_ENABLE_CUDA)
   kokkos_check(OPTIONS CUDA_LAMBDA)
 endif()
 
+#------------------------------------------------------------------------------#
+# Vendor BLAS for batched-GEMM M2L
+#
+# Canopy's M2L kernel groups (target, source) pairs by translation-operator
+# bin and dispatches one dense complex GEMM per bin. The CUDA build uses
+# cuBLAS; the HIP build uses hipBLAS (which dispatches to rocBLAS on AMD).
+# When neither is available the M2L driver falls back to the per-pair
+# Kokkos kernel — correct but slow.
+#------------------------------------------------------------------------------#
+set(Canopy_ENABLE_CUBLAS OFF)
+set(Canopy_ENABLE_HIPBLAS OFF)
+
+if(Kokkos_ENABLE_CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  if(TARGET CUDA::cublas)
+    set(Canopy_ENABLE_CUBLAS ON)
+  else()
+    message(FATAL_ERROR "Kokkos CUDA backend is enabled but CUDA::cublas was not found")
+  endif()
+endif()
+
+if(Kokkos_ENABLE_HIP)
+  find_package(hipblas REQUIRED)
+  if(TARGET roc::hipblas)
+    set(Canopy_ENABLE_HIPBLAS ON)
+  else()
+    message(FATAL_ERROR "Kokkos HIP backend is enabled but roc::hipblas was not found")
+  endif()
+endif()
+
 # find cabana
 find_package(Cabana REQUIRED COMPONENTS Cabana::Grid Cabana::Core)
 if( NOT Cabana_ENABLE_MPI )
