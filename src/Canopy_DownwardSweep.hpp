@@ -12,6 +12,7 @@
 #ifndef CANOPY_DOWNWARD_SWEEP_HPP
 #define CANOPY_DOWNWARD_SWEEP_HPP
 
+#include "Canopy_BatchedGemm.hpp"
 #include "Canopy_CommunicationPlan.hpp"
 #include "Canopy_Profiling.hpp"
 #include "Canopy_LaplaceKernel.hpp"
@@ -231,9 +232,13 @@ class DownwardSweep
         M2L_BIN_DIM * M2L_BIN_DIM * M2L_BIN_DIM;
     static constexpr int M2L_NUM_SRC = ( P + 1 ) * ( P + 1 );
 
-    // Operator tables: shape (num_active_depths, num_bins, num_coeffs,
-    // num_src). Only depths with M2L work are present.
-    Kokkos::View<complex_type****, memory_space> _m2l_op_table;
+    // Operator tables: shape (num_coeffs, num_src, num_bins, num_active).
+    // Only depths with M2L work are present. Stored explicitly LayoutLeft
+    // so that subview(_m2l_op_table, ALL, ALL, bin, d_idx) is a contiguous
+    // column-major (Nt, Ns) matrix — directly consumable by cuBLAS /
+    // hipBLAS / KokkosBlas::gemm without copy or transpose.
+    Kokkos::View<complex_type****, Kokkos::LayoutLeft, memory_space>
+        _m2l_op_table;
     // Map from depth -> active-depth index in _m2l_op_table; -1 if none.
     // Host-side; used to pick the right slice when launching M2L per depth.
     std::vector<int> _m2l_depth_to_op_idx;
@@ -261,6 +266,30 @@ class DownwardSweep
     Kokkos::View<int*, memory_space> _m2l_fallback_sources;
     Kokkos::View<int*, memory_space> _m2l_fallback_offsets; // size n_active + 1
 
+    // Host mirror of _m2l_bin_pair_offsets, kept persistent so the per-depth
+    // driver can read per-bin slice ranges without a device->host copy on
+    // every solve. Sized identically to _m2l_bin_pair_offsets.
+    typename Kokkos::View<int**, memory_space>::HostMirror
+        _m2l_bin_pair_offsets_host;
+    // Host mirror of _m2l_fallback_offsets — same rationale.
+    typename Kokkos::View<int*, memory_space>::HostMirror
+        _m2l_fallback_offsets_host;
+
+    // Per-solve scratch buffers for the batched-GEMM M2L pipeline:
+    //   M_packed shape (Ns, max_pairs_at_depth * NComps)
+    //   L_packed shape (Nt, max_pairs_at_depth * NComps)
+    // Sized after build_interaction_list_device to the largest active depth
+    // and reused across all solves and across all depths within a solve.
+    // LayoutLeft so the GEMM operates on contiguous column-major matrices.
+    Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>
+        _m2l_M_packed;
+    Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>
+        _m2l_L_packed;
+
+    // Vendor / KokkosKernels GEMM wrapper. Default-constructible; a real
+    // backend handle (cuBLAS / hipBLAS) is created on first solve.
+    detail::M2LBatchedGemm<execution_space, scalar_type> _m2l_gemm;
+
     // Scratch: reference to the multipoles view during execute().
     // The M2L kernels capture this. Set at the start of execute()
     // and used by run_m2l_at_depth().
@@ -280,6 +309,14 @@ class DownwardSweep
 
     void run_m2l_at_depth( int depth );
     void run_l2l_at_depth( int depth );
+
+    // Per-pair fallback for out-of-bin pairs at depth `depth`. Iterates
+    // _m2l_fallback_{targets,sources}[fallback_offsets[op_d_idx]:...] and
+    // applies the on-the-fly m2l_translate to each pair. Called from
+    // run_m2l_at_depth after the batched-GEMM path has run.
+    void run_m2l_fallback_at_depth( int op_d_idx );
+
+  public:
 
     template <class PositionType>
     void run_l2p( const PositionType& particle_positions,
@@ -430,7 +467,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _m2l_offsets = Kokkos::View<int*, memory_space>();
     _m2l_counts = Kokkos::View<int*, memory_space>();
     _m2l_depth_offsets.clear();
-    _m2l_op_table = Kokkos::View<complex_type****, memory_space>();
+    _m2l_op_table =
+        Kokkos::View<complex_type****, Kokkos::LayoutLeft, memory_space>();
     _m2l_depth_to_op_idx.clear();
     _m2l_pair_bins = Kokkos::View<int*, memory_space>();
     _m2l_bin_pair_targets = Kokkos::View<int*, memory_space>();
@@ -439,6 +477,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _m2l_fallback_targets = Kokkos::View<int*, memory_space>();
     _m2l_fallback_sources = Kokkos::View<int*, memory_space>();
     _m2l_fallback_offsets = Kokkos::View<int*, memory_space>();
+    _m2l_bin_pair_offsets_host =
+        typename Kokkos::View<int**, memory_space>::HostMirror();
+    _m2l_fallback_offsets_host =
+        typename Kokkos::View<int*, memory_space>::HostMirror();
+    _m2l_M_packed =
+        Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>();
+    _m2l_L_packed =
+        Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>();
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -637,13 +683,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     // Build operator tables on host for each active depth, every
-    // in-range bin offset.
+    // in-range bin offset. The 4D shape is laid out so that subview(_,
+    // ALL, ALL, bin, d_idx) is a contiguous LayoutLeft (Nt, Ns) matrix —
+    // see _m2l_op_table declaration.
     const int n_active = static_cast<int>( active_depths.size() );
     using complex_t = complex_type;
-    Kokkos::View<complex_t****, memory_space> op_table(
+    Kokkos::View<complex_t****, Kokkos::LayoutLeft, memory_space> op_table(
         Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_op_table" ),
-        n_active, M2L_NUM_BINS, KernelType::num_coeffs_per_cell,
-        KernelType::m2l_num_src_coeffs );
+        KernelType::num_coeffs_per_cell, KernelType::m2l_num_src_coeffs,
+        M2L_NUM_BINS, n_active > 0 ? n_active : 1 );
     auto h_op = Kokkos::create_mirror_view( op_table );
 
     auto h_A = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
@@ -662,7 +710,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                             M2L_BIN_DIM +
                         ( kk + M2L_BIN_RANGE );
                     auto T_slice = Kokkos::subview(
-                        h_op, d_idx, bin, Kokkos::ALL, Kokkos::ALL );
+                        h_op, Kokkos::ALL, Kokkos::ALL, bin, d_idx );
                     KernelType::m2l_build_operator(
                         static_cast<scalar_type>( ii * w ),
                         static_cast<scalar_type>( jj * w ),
@@ -696,10 +744,18 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     //
     // bin_offsets_h(d_idx, b) is a global prefix sum over all (d_idx, b),
     // so a single flat (target, source) array holds every binnable pair.
+    //
+    // Allocate the device view up front so its HostMirror has a matching
+    // layout (LayoutLeft on CudaSpace; LayoutRight on host spaces). Using
+    // a fresh HostSpace LayoutRight scratch View here would prevent the
+    // later cross-space deep_copy because no exec space can bridge the
+    // two layouts.
     // -----------------------------------------------------------------------
-    Kokkos::View<int**, Kokkos::HostSpace> bin_offsets_h(
-        "m2l_bin_pair_offsets_host", n_active > 0 ? n_active : 1,
+    _m2l_bin_pair_offsets = Kokkos::View<int**, memory_space>(
+        "m2l_bin_pair_offsets", n_active > 0 ? n_active : 1,
         M2L_NUM_BINS + 1 );
+    auto bin_offsets_h = Kokkos::create_mirror_view( _m2l_bin_pair_offsets );
+    Kokkos::deep_copy( bin_offsets_h, 0 );
     std::vector<int> fallback_offsets_h( n_active + 1, 0 );
 
     // First pass: count.
@@ -784,14 +840,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         }
     }
 
-    // Upload to device.
+    // Upload to device. _m2l_bin_pair_offsets was allocated earlier so
+    // bin_offsets_h could be its HostMirror with a matching layout.
     _m2l_bin_pair_targets = Kokkos::View<int*, memory_space>(
         "m2l_bin_pair_targets", total_binnable );
     _m2l_bin_pair_sources = Kokkos::View<int*, memory_space>(
         "m2l_bin_pair_sources", total_binnable );
-    _m2l_bin_pair_offsets = Kokkos::View<int**, memory_space>(
-        "m2l_bin_pair_offsets", n_active > 0 ? n_active : 1,
-        M2L_NUM_BINS + 1 );
     _m2l_fallback_targets = Kokkos::View<int*, memory_space>(
         "m2l_fallback_targets", total_fallback );
     _m2l_fallback_sources = Kokkos::View<int*, memory_space>(
@@ -812,6 +866,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         Kokkos::deep_copy( _m2l_bin_pair_sources, h_s );
     }
     Kokkos::deep_copy( _m2l_bin_pair_offsets, bin_offsets_h );
+    // bin_offsets_h is already the matching HostMirror — retain it
+    // directly as the persistent host-side cache used by run_m2l_at_depth.
+    _m2l_bin_pair_offsets_host = bin_offsets_h;
 
     if ( total_fallback > 0 )
     {
@@ -830,7 +887,33 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         for ( int i = 0; i <= n_active; i++ )
             h_o( i ) = fallback_offsets_h[i];
         Kokkos::deep_copy( _m2l_fallback_offsets, h_o );
+        _m2l_fallback_offsets_host = h_o;
     }
+
+    // -----------------------------------------------------------------------
+    // Stage 5: size and allocate the packed-multipole / packed-local
+    // scratch buffers used by the batched-GEMM M2L pipeline. Sized to the
+    // largest active depth's binnable pair count so the buffers are reused
+    // across depths (depths run sequentially) and across solves.
+    // -----------------------------------------------------------------------
+    int max_pairs_at_depth = 0;
+    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
+    {
+        const int n =
+            _m2l_bin_pair_offsets_host( d_idx, M2L_NUM_BINS ) -
+            _m2l_bin_pair_offsets_host( d_idx, 0 );
+        if ( n > max_pairs_at_depth )
+            max_pairs_at_depth = n;
+    }
+    const int Ns = KernelType::m2l_num_src_coeffs;
+    const int Nt = KernelType::num_coeffs_per_cell;
+    const int n_cols = max_pairs_at_depth * NComps;
+    _m2l_M_packed =
+        Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>(
+            "m2l_M_packed", Ns, n_cols > 0 ? n_cols : 1 );
+    _m2l_L_packed =
+        Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>(
+            "m2l_L_packed", Nt, n_cols > 0 ? n_cols : 1 );
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -931,27 +1014,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
     int depth )
 {
     CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2L_KERNEL );
-    // Targets are stored sorted by depth, so we launch only over the
-    // contiguous slice [depth_offsets[depth], depth_offsets[depth+1]).
-    if ( depth < 0 ||
-         depth + 1 >= static_cast<int>( _m2l_depth_offsets.size() ) )
-        return;
-    const int begin = _m2l_depth_offsets[depth];
-    const int end = _m2l_depth_offsets[depth + 1];
-    const int N = end - begin;
-    if ( N == 0 )
-        return;
-
-    auto device_cells = _device_cells;
-    auto m2l_targets = _m2l_target_cells;
-    auto m2l_offsets = _m2l_offsets;
-    auto m2l_counts = _m2l_counts;
-    auto m2l_sources = _m2l_source_cells_flat;
-    auto m2l_pair_bins = _m2l_pair_bins;
-    auto locals = _locals;
-    auto A_table = _A_table;
-    auto multipoles = _m2l_multipoles_view;
-    auto op_table = _m2l_op_table;
 
     // Resolve depth -> active-depth slice (host-side lookup).
     const int op_d_idx =
@@ -959,57 +1021,175 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
           depth < static_cast<int>( _m2l_depth_to_op_idx.size() ) )
             ? _m2l_depth_to_op_idx[depth]
             : -1;
-    const bool have_op_table = ( op_d_idx >= 0 ) &&
-                               ( op_table.extent( 0 ) > 0 ) &&
-                               ( m2l_pair_bins.extent( 0 ) > 0 );
+    if ( op_d_idx < 0 )
+        return;
+
+    // Per-depth slice into the bin-major pair table (globally prefix-summed
+    // across active depths, so this is a contiguous range of slot indices).
+    const int per_depth_begin =
+        _m2l_bin_pair_offsets_host( op_d_idx, 0 );
+    const int per_depth_end =
+        _m2l_bin_pair_offsets_host( op_d_idx, M2L_NUM_BINS );
+    const int n_pairs = per_depth_end - per_depth_begin;
+
+    constexpr int Ns = KernelType::m2l_num_src_coeffs;
+    constexpr int Nt = KernelType::num_coeffs_per_cell;
+    constexpr int P_local = KernelType::max_order;
+
+    if ( n_pairs > 0 )
+    {
+        // -------------------------------------------------------------------
+        // (a) Pack source multipoles for every binnable pair at this depth
+        //     into _m2l_M_packed of shape (Ns, n_pairs * NComps), LayoutLeft.
+        //     Within column index `p * NComps + c`, the rows enumerate the
+        //     symmetry-expanded source basis index src_idx = n*n + n + m.
+        // -------------------------------------------------------------------
+        auto bin_pair_sources = _m2l_bin_pair_sources;
+        auto multipoles = _m2l_multipoles_view;
+        auto M_packed = _m2l_M_packed;
+
+        Kokkos::parallel_for(
+            "M2L_pack",
+            Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<3>>(
+                { 0, 0, 0 }, { n_pairs, P_local + 1, NComps } ),
+            KOKKOS_LAMBDA( int p, int n, int c ) {
+                const int src_cell =
+                    bin_pair_sources( per_depth_begin + p );
+                for ( int m = -n; m <= n; ++m )
+                {
+                    const int src_idx = n * n + n + m;
+                    const int abs_m = ( m < 0 ) ? -m : m;
+                    const int storage_idx = n * ( n + 1 ) / 2 + abs_m;
+                    const complex_type stored =
+                        multipoles( src_cell, storage_idx, c );
+                    const complex_type val =
+                        ( m >= 0 )
+                            ? stored
+                            : complex_type( stored.real(), -stored.imag() );
+                    M_packed( src_idx, p * NComps + c ) = val;
+                }
+            } );
+
+        // -------------------------------------------------------------------
+        // (b) Per-bin batched GEMM. Each non-empty bin owns a contiguous
+        //     column slice of M_packed / L_packed; the operator T is a
+        //     contiguous (Nt, Ns) LayoutLeft slice of _m2l_op_table.
+        // -------------------------------------------------------------------
+        static_assert(
+            detail::M2LBatchedGemm<execution_space, scalar_type>::available,
+            "Canopy DownwardSweep: no batched-GEMM backend is available for "
+            "this execution space. Build with cuBLAS (CUDA), hipBLAS (HIP), "
+            "or KokkosKernels — see CMakeLists.txt batched-gemm M2L block." );
+
+        for ( int b = 0; b < M2L_NUM_BINS; ++b )
+        {
+            const int bin_lo = _m2l_bin_pair_offsets_host( op_d_idx, b );
+            const int bin_hi =
+                _m2l_bin_pair_offsets_host( op_d_idx, b + 1 );
+            const int n_b = bin_hi - bin_lo;
+            if ( n_b == 0 )
+                continue;
+
+            auto T_slice = Kokkos::subview( _m2l_op_table, Kokkos::ALL,
+                                            Kokkos::ALL, b, op_d_idx );
+
+            const int col_off = ( bin_lo - per_depth_begin ) * NComps;
+            const int n_cols = n_b * NComps;
+
+            // Column-major leading dimensions equal row counts because
+            // both M_packed and L_packed are tightly packed LayoutLeft.
+            _m2l_gemm.gemm_NN(
+                Nt, n_cols, Ns, T_slice.data(),
+                static_cast<int>( T_slice.stride_1() ),
+                _m2l_M_packed.data() +
+                    col_off * static_cast<std::ptrdiff_t>(
+                                  _m2l_M_packed.stride_1() ),
+                static_cast<int>( _m2l_M_packed.stride_1() ),
+                _m2l_L_packed.data() +
+                    col_off * static_cast<std::ptrdiff_t>(
+                                  _m2l_L_packed.stride_1() ),
+                static_cast<int>( _m2l_L_packed.stride_1() ) );
+        }
+
+        // -------------------------------------------------------------------
+        // (c) Scatter-accumulate L_packed back into _locals. A single target
+        //     cell appears in multiple bins, so accumulation is atomic.
+        // -------------------------------------------------------------------
+        {
+            auto bin_pair_targets = _m2l_bin_pair_targets;
+            auto L_packed = _m2l_L_packed;
+            auto locals = _locals;
+
+            Kokkos::parallel_for(
+                "M2L_scatter",
+                Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<3>>(
+                    { 0, 0, 0 }, { n_pairs, Nt, NComps } ),
+                KOKKOS_LAMBDA( int p, int out_idx, int c ) {
+                    const int tgt_cell =
+                        bin_pair_targets( per_depth_begin + p );
+                    const complex_type val =
+                        L_packed( out_idx, p * NComps + c );
+                    Kokkos::atomic_add( &locals( tgt_cell, out_idx, c ),
+                                        val );
+                } );
+        }
+    }
+
+    // (d) Out-of-bin pairs at this depth go through the on-the-fly
+    //     m2l_translate kernel, restricted to the precomputed fallback list.
+    run_m2l_fallback_at_depth( op_d_idx );
+
+    Kokkos::fence();
+}
+
+// -------------------------------------------------------------------------
+// Per-pair m2l_translate fallback for out-of-bin pairs at one active
+// depth. Reads the (target, source) slice
+//   [_m2l_fallback_offsets[op_d_idx], _m2l_fallback_offsets[op_d_idx + 1])
+// and applies the existing m2l_translate kernel one team per pair. This
+// is the same code path that previously handled every pair, now restricted
+// to the small (typically <1%) tail that the bin-major path cannot batch.
+// -------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace, class KernelType>
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
+    run_m2l_fallback_at_depth( int op_d_idx )
+{
+    if ( op_d_idx < 0 ||
+         _m2l_fallback_offsets_host.extent( 0 ) == 0 )
+        return;
+    const int fb_begin = _m2l_fallback_offsets_host( op_d_idx );
+    const int fb_end = _m2l_fallback_offsets_host( op_d_idx + 1 );
+    const int n_fb = fb_end - fb_begin;
+    if ( n_fb == 0 )
+        return;
+
+    auto device_cells = _device_cells;
+    auto fb_targets = _m2l_fallback_targets;
+    auto fb_sources = _m2l_fallback_sources;
+    auto locals = _locals;
+    auto A_table = _A_table;
+    auto multipoles = _m2l_multipoles_view;
 
     using team_policy = Kokkos::TeamPolicy<execution_space>;
-    using team_member_type = typename team_policy::member_type;
-
-    team_policy policy( N, Kokkos::AUTO );
+    using member_t = typename team_policy::member_type;
+    team_policy policy( n_fb, Kokkos::AUTO );
 
     Kokkos::parallel_for(
-        "M2L", policy, KOKKOS_LAMBDA( const team_member_type& team ) {
-            const int league = team.league_rank() + begin;
-            const int target_cell = m2l_targets( league );
+        "M2L_fallback", policy, KOKKOS_LAMBDA( const member_t& team ) {
+            const int slot = fb_begin + team.league_rank();
+            const int target_cell = fb_targets( slot );
+            const int source_cell = fb_sources( slot );
             const auto& target_ci = device_cells( target_cell );
+            const auto& src_ci = device_cells( source_cell );
+            const scalar_type dx = src_ci.center[0] - target_ci.center[0];
+            const scalar_type dy = src_ci.center[1] - target_ci.center[1];
+            const scalar_type dz = src_ci.center[2] - target_ci.center[2];
 
             auto L_target = Kokkos::subview( locals, target_cell, Kokkos::ALL,
                                              Kokkos::ALL );
-
-            const int start = m2l_offsets( league );
-            const int count = m2l_counts( league );
-
-            for ( int s = 0; s < count; s++ )
-            {
-                const int source_cell = m2l_sources( start + s );
-                const int bin =
-                    have_op_table ? m2l_pair_bins( start + s ) : -1;
-
-                if ( bin >= 0 )
-                {
-                    auto T_slice = Kokkos::subview(
-                        op_table, op_d_idx, bin, Kokkos::ALL, Kokkos::ALL );
-                    KernelType::m2l_apply_operator(
-                        team, multipoles, source_cell, T_slice, L_target );
-                }
-                else
-                {
-                    const auto& src_ci = device_cells( source_cell );
-                    const scalar_type dx =
-                        src_ci.center[0] - target_ci.center[0];
-                    const scalar_type dy =
-                        src_ci.center[1] - target_ci.center[1];
-                    const scalar_type dz =
-                        src_ci.center[2] - target_ci.center[2];
-                    KernelType::m2l_translate( team, multipoles, source_cell,
-                                               dx, dy, dz, A_table,
-                                               L_target );
-                }
-            }
+            KernelType::m2l_translate( team, multipoles, source_cell, dx, dy,
+                                       dz, A_table, L_target );
         } );
-
-    Kokkos::fence();
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>

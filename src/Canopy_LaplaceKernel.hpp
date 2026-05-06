@@ -430,8 +430,16 @@ struct LaplaceKernel
                     }
                 }
 
+                // Atomic because the bin-major M2L driver may launch
+                // multiple teams that share a target cell in the fallback
+                // path (out-of-bin pairs). The non-atomic version raced
+                // on CUDA when fallback pairs colliding on a target ran
+                // concurrently — manifest only at nproc > 1 because the
+                // multi-rank tree partition produces colliding fallback
+                // pairs more often than single-rank.
                 for ( int c = 0; c < NComps; c++ )
-                    L_target_out( out_idx, c ) += accum[c];
+                    Kokkos::atomic_add( &L_target_out( out_idx, c ),
+                                        accum[c] );
             } );
     }
 
