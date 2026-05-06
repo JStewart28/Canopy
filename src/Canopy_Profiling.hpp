@@ -16,6 +16,7 @@
 
 #ifdef CANOPY_ENABLE_PROFILING
 
+#include <Kokkos_Core.hpp>
 #include <mpi.h>
 
 #include <cstdio>
@@ -107,10 +108,13 @@ struct ScopedTimer
     explicit ScopedTimer( const char* phase_key )
         : key( phase_key )
         , t0( MPI_Wtime() )
-    {}
+    {
+        Kokkos::Profiling::pushRegion( key );
+    }
 
     ~ScopedTimer()
     {
+        Kokkos::Profiling::popRegion();
         accumulate( key, MPI_Wtime() - t0 );
     }
 
