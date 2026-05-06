@@ -345,6 +345,11 @@ class Solver
     const potential_view_type& potential() const { return _potential; }
     const gradient_view_type& gradient() const { return _gradient; }
 
+    // Read-only access to internal sweep stages, primarily for tests and
+    // diagnostics (e.g. asserting that the M2L bin-edge fallback path was
+    // exercised). Not part of the supported runtime API.
+    const downward_type& downward() const { return _downward; }
+
     const builder_type& builder() const { return _builder; }
     const partitioner_type& partitioner() const { return _partitioner; }
     const comm_plan_type& comm_plan() const { return _comm_plan; }

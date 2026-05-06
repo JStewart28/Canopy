@@ -149,12 +149,24 @@ dispatch_maintain( Solver& solver, AoSoA& particles, MultiSolveTest::Mode mode )
     }
 }
 
-inline void testMultiStepGravity( MultiSolveTest::Mode mode,
-                                  int num_particles_per_rank, int num_steps,
-                                  double dt, double drift_multiplier, int ncrit,
-                                  int max_depth, double tree_tolerance,
-                                  int replication_depth, double fmm_tolerance,
-                                  int* out_action_counts = nullptr )
+inline void testMultiStepGravity(
+    MultiSolveTest::Mode mode, int num_particles_per_rank, int num_steps,
+    double dt, double drift_multiplier, int ncrit, int max_depth,
+    double tree_tolerance, int replication_depth, double fmm_tolerance,
+    int* out_action_counts = nullptr,
+    // The next three knobs are used by the bin-edge regression test.
+    // clustered: draw 80% of particles from a tight Gaussian blob in
+    //   one corner (forces deep refinement in that octant) and 20%
+    //   uniform — produces same-depth M2L pairs at integer offsets
+    //   beyond M2L_BIN_RANGE, which feeds the m2l_translate fallback.
+    // mac_theta_override: if positive, replaces get_test_mac_theta();
+    //   a tighter theta admits more far-field pairs and amplifies the
+    //   fallback population.
+    // out_max_fallback_total: if non-null, written with the maximum
+    //   (across solves and across MPI ranks summed) fallback pair count
+    //   observed during the run.
+    bool clustered = false, double mac_theta_override = 0.0,
+    long long* out_max_fallback_total = nullptr )
 {
     using namespace MultiSolveTest;
 
@@ -187,13 +199,34 @@ inline void testMultiStepGravity( MultiSolveTest::Mode mode,
         std::uniform_real_distribution<double> pos_dist( 0.1, 0.9 );
         std::uniform_real_distribution<double> q_dist( 0.5, 1.5 );
         std::uniform_real_distribution<double> v_dist( -0.05, 0.05 );
+        // Clustered mode: 80% drawn from a tight Gaussian blob in one
+        // corner of [0,1]^3 (clipped to (0.01, 0.99) so particles stay
+        // inside the bounding box) and 20% from the same uniform used by
+        // the standard tests. The blob density triggers refinement deep
+        // into one octant, which produces same-depth M2L pairs at integer
+        // offsets > M2L_BIN_RANGE — the tail that the m2l_translate
+        // fallback path handles.
+        std::normal_distribution<double> blob_dist( 0.15, 0.05 );
+        auto sample_pos = [&]( int idx ) {
+            if ( !clustered )
+                return pos_dist( gen );
+            const bool in_blob = ( idx % 5 != 0 ); // 80% blob, 20% uniform
+            if ( !in_blob )
+                return pos_dist( gen );
+            double v = blob_dist( gen );
+            if ( v < 0.01 )
+                v = 0.01;
+            if ( v > 0.99 )
+                v = 0.99;
+            return v;
+        };
 
         const int gid_base = rank * num_particles_per_rank;
         for ( int i = 0; i < num_particles_per_rank; i++ )
         {
-            hp( i, 0 ) = pos_dist( gen );
-            hp( i, 1 ) = pos_dist( gen );
-            hp( i, 2 ) = pos_dist( gen );
+            hp( i, 0 ) = sample_pos( i );
+            hp( i, 1 ) = sample_pos( i + 1 );
+            hp( i, 2 ) = sample_pos( i + 2 );
             hq( i, 0 ) = q_dist( gen );
             hv( i, 0 ) = v_dist( gen );
             hv( i, 1 ) = v_dist( gen );
@@ -283,14 +316,18 @@ inline void testMultiStepGravity( MultiSolveTest::Mode mode,
     // -----------------------------------------------------------------------
     // Set up FMM solver.
     // -----------------------------------------------------------------------
+    const double mac_theta_used =
+        ( mac_theta_override > 0.0 ) ? mac_theta_override
+                                     : get_test_mac_theta();
     Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth,
                      std::array<double, 3>{tree_tolerance, tree_tolerance, tree_tolerance},
                      tree_tolerance, replication_depth, 0.05,
-                     get_test_mac_theta() );
+                     mac_theta_used );
     solver.template setup<Position, Charge>( particles,
                                              num_particles_per_rank );
 
     int action_counts[3] = { 0, 0, 0 }; // [Migrate, Rebalance, Rebuild]
+    long long max_fallback_total = 0;   // max across solves of (sum across ranks)
 
     // -----------------------------------------------------------------------
     // Time loop
@@ -300,6 +337,22 @@ inline void testMultiStepGravity( MultiSolveTest::Mode mode,
         // FMM solve for current state
         solver.template solve<Position, Charge>( particles,
                                                  /*compute_gradient=*/true );
+
+        // Fallback-count probe. Each rank's downward sweep tracks how many
+        // out-of-bin pairs it carried through m2l_translate this build;
+        // sum those across ranks to get the global tally. Tracked as a
+        // running max so the regression test can assert >0 without caring
+        // which solve produced the work.
+        if ( out_max_fallback_total != nullptr )
+        {
+            const long long local_fb =
+                solver.downward().total_fallback_pair_count();
+            long long global_fb = 0;
+            MPI_Allreduce( &local_fb, &global_fb, 1, MPI_LONG_LONG, MPI_SUM,
+                           MPI_COMM_WORLD );
+            if ( global_fb > max_fallback_total )
+                max_fallback_total = global_fb;
+        }
 
         // Update local positions and velocities from gradient.
         // Symplectic Euler: v += dt*g;  r += dt * drift * v.
@@ -366,6 +419,8 @@ inline void testMultiStepGravity( MultiSolveTest::Mode mode,
         for ( int i = 0; i < 3; i++ )
             out_action_counts[i] = action_counts[i];
     }
+    if ( out_max_fallback_total )
+        *out_max_fallback_total = max_fallback_total;
 
     // -----------------------------------------------------------------------
     // Gather FMM final state to rank 0 and compare against brute-force.
@@ -559,6 +614,50 @@ TEST( MultiSolve, AutoMaintain )
     {
         const int total = counts[0] + counts[1] + counts[2];
         EXPECT_GT( total, 0 ) << "auto_maintain was never called";
+    }
+}
+
+//---------------------------------------------------------------------------//
+// Test 5: Bin-edge fallback — exercise the per-pair m2l_translate path.
+//
+// The batched-GEMM M2L pipeline assigns each (target, source) pair to a
+// translation-operator bin keyed on the integer offset
+//   (i, j, k) = round((src_center - tgt_center) / cell_width)
+// with |i|,|j|,|k| <= M2L_BIN_RANGE = 3. Pairs that fall outside that
+// stencil are routed through the on-the-fly m2l_translate kernel. A
+// silent regression in that fallback (e.g. the atomic-accumulation race
+// previously fixed in m2l_translate) would only surface in a workload
+// that actually generates bin == -1 pairs.
+//
+// Configuration: clustered particle distribution to force deep refinement
+// in one octant, tight MAC theta = 0.3 to admit more far-field pairs at
+// large offsets, and ncrit/max_depth that match the existing tests'
+// scale. The probe inside testMultiStepGravity sums fallback pairs across
+// ranks each solve and reports the running max; we assert it's strictly
+// positive.
+//---------------------------------------------------------------------------//
+TEST( MultiSolve, M2L_BinEdge_Fallback )
+{
+    long long max_fallback = 0;
+    testMultiStepGravity( MultiSolveTest::Mode::Migrate,
+                          /*npp=*/300, /*nsteps=*/2,
+                          /*dt=*/1.0e-4, /*drift_multiplier=*/1.0,
+                          /*ncrit=*/8, /*max_depth=*/8,
+                          /*tree_tol=*/0.1, /*repl_depth=*/2,
+                          /*fmm_tol=*/3.0e-2,
+                          /*out_action_counts=*/nullptr,
+                          /*clustered=*/true,
+                          /*mac_theta_override=*/0.3, &max_fallback );
+
+    int rank;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    if ( rank == 0 )
+    {
+        EXPECT_GT( max_fallback, 0 )
+            << "no out-of-bin M2L pairs were produced — the m2l_translate "
+               "fallback path was not exercised, so this regression is a "
+               "no-op. Either the clustered distribution stopped reaching "
+               "deep enough or M2L_BIN_RANGE was widened.";
     }
 }
 

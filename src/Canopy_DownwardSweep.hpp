@@ -266,6 +266,13 @@ class DownwardSweep
     Kokkos::View<int*, memory_space> _m2l_fallback_sources;
     Kokkos::View<int*, memory_space> _m2l_fallback_offsets; // size n_active + 1
 
+    // Per-active-depth count of out-of-bin (m2l_translate) pairs. Populated
+    // at the end of build_interaction_list_device from the same prefix-sum
+    // used to lay out the fallback list, so it costs nothing extra to keep.
+    // Surfaced via total_fallback_pair_count() so a regression test can
+    // assert that the fallback path is actually being exercised.
+    std::vector<long long> _m2l_fallback_count_per_active_depth;
+
     // Host mirror of _m2l_bin_pair_offsets, kept persistent so the per-depth
     // driver can read per-bin slice ranges without a device->host copy on
     // every solve. Sized identically to _m2l_bin_pair_offsets.
@@ -309,6 +316,19 @@ class DownwardSweep
 
     void run_m2l_at_depth( int depth );
     void run_l2l_at_depth( int depth );
+
+    // Total number of out-of-bin M2L pairs this rank carries through the
+    // m2l_translate fallback path, summed over all active depths. Held at
+    // zero before the first build_interaction_list_device. Used by the
+    // bin-edge regression test to assert that a configuration intended to
+    // exercise the fallback actually does.
+    long long total_fallback_pair_count() const
+    {
+        long long s = 0;
+        for ( long long x : _m2l_fallback_count_per_active_depth )
+            s += x;
+        return s;
+    }
 
     // Per-pair fallback for out-of-bin pairs at depth `depth`. Iterates
     // _m2l_fallback_{targets,sources}[fallback_offsets[op_d_idx]:...] and
@@ -485,6 +505,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
         Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>();
     _m2l_L_packed =
         Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>();
+    _m2l_fallback_count_per_active_depth.clear();
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -889,6 +910,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         Kokkos::deep_copy( _m2l_fallback_offsets, h_o );
         _m2l_fallback_offsets_host = h_o;
     }
+
+    // Per-active-depth fallback pair count, derived from the same prefix
+    // sum we just uploaded.
+    _m2l_fallback_count_per_active_depth.assign( n_active, 0 );
+    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
+        _m2l_fallback_count_per_active_depth[d_idx] =
+            static_cast<long long>( fallback_offsets_h[d_idx + 1] -
+                                    fallback_offsets_h[d_idx] );
 
     // -----------------------------------------------------------------------
     // Stage 5: size and allocate the packed-multipole / packed-local
