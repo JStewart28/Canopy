@@ -22,3 +22,7 @@ target_link_libraries(example_fmm Canopy)
 add_test(NAME Canopy_Tutorial_02_full_fmm COMMAND ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG}
 ${MPIEXEC_MAX_NUMPROCS} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:example_fmm> ${MPIEXEC_POSTFLAGS})
 set_tests_properties(Canopy_Tutorial_02_full_fmm PROPERTIES PROCESSORS ${MPIEXEC_MAX_NUMPROCS})
+if(Canopy_INSTALL_TEST_EXECUTABLES)
+      install(TARGETS example_fmm
+              RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/tests)
+endif()

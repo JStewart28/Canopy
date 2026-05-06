@@ -269,6 +269,8 @@ else()
 endif()
 
 option(Canopy_ENABLE_EXAMPLES "Build tutorial examples" OFF)
+# Set installing examples to off by default
+option(Canopy_INSTALL_EXAMPLES "Install Canopy example executables" OFF)
 add_feature_info(Examples Canopy_ENABLE_EXAMPLES "Build tutorial examples")
 if(Canopy_ENABLE_EXAMPLES)
   add_subdirectory(examples)
