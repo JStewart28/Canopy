@@ -33,7 +33,7 @@ macro(Canopy_add_tests_nobackend)
     endif()
     if(Canopy_INSTALL_TEST_EXECUTABLES)
       install(TARGETS ${_target}
-              RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/tests)
+              RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif()
   endforeach()
 endmacro()
