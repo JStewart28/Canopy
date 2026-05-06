@@ -270,10 +270,30 @@ endif()
 ## Diagnostics / profiling timers
 ##---------------------------------------------------------------------------##
 option(Canopy_ENABLE_PROFILING "Profiling" OFF)
-add_feature_info(Profiling Canopy_ENABLE_PROFILING "Enable FMM phase timing via MPI_Wtime")
-if(Canopy_ENABLE_PROFILING)
-  add_compile_definitions(CANOPY_ENABLE_PROFILING)
+set(Canopy_PROFILING_LEVEL "" CACHE STRING
+    "Profiling detail level: 0=off, 1=basic phases, 2=detailed sub-phases, 3=verbose (reserved)")
+set_property(CACHE Canopy_PROFILING_LEVEL PROPERTY STRINGS "" 0 1 2 3)
+
+# Resolve the effective profiling level. If Canopy_ENABLE_PROFILING is ON and
+# no explicit level was given, default to level 1 (the original behavior).
+if(Canopy_PROFILING_LEVEL STREQUAL "")
+  if(Canopy_ENABLE_PROFILING)
+    set(_canopy_profiling_level 1)
+  else()
+    set(_canopy_profiling_level 0)
+  endif()
+else()
+  set(_canopy_profiling_level ${Canopy_PROFILING_LEVEL})
 endif()
+
+if(_canopy_profiling_level GREATER 0)
+  set(Canopy_ENABLE_PROFILING ON CACHE BOOL "Profiling" FORCE)
+  add_compile_definitions(CANOPY_ENABLE_PROFILING)
+  add_compile_definitions(CANOPY_PROFILING_LEVEL=${_canopy_profiling_level})
+endif()
+
+add_feature_info(Profiling Canopy_ENABLE_PROFILING
+    "Enable FMM phase timing via MPI_Wtime (level=${_canopy_profiling_level})")
 
 ##---------------------------------------------------------------------------##
 ## Libraries and Examples

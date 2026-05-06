@@ -1806,14 +1806,23 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_DOWNWARD_TOTAL );
         // Zero local coefficients
-        Kokkos::deep_copy( _locals, complex_type( 0.0, 0.0 ) );
+        {
+            CANOPY_SCOPED_TIMER_DETAILED(
+                Canopy::Profiling::TIMER_DN_ZERO_LOCALS );
+            Kokkos::deep_copy( _locals, complex_type( 0.0, 0.0 ) );
+            Kokkos::fence();
+        }
 
         // Stash the multipoles for the M2L kernel
         _m2l_multipoles_view = multipoles;
 
         // Build device-side interaction list if needed
         if ( _m2l_target_cells.extent( 0 ) == 0 )
+        {
+            CANOPY_SCOPED_TIMER_DETAILED(
+                Canopy::Profiling::TIMER_DN_BUILD_ILIST );
             build_interaction_list_device( comm_plan );
+        }
 
         // Pre-sweep: exchange remote multipoles needed for M2L
         exchange_multipoles_for_m2l( multipoles, comm_plan );
@@ -1828,12 +1837,24 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
         // allreduce shared M2L delta, L2L, exchange children.
         for ( int d = 0; d <= _max_depth; d++ )
         {
-            snapshot_shared_locals_at_depth( d, comm_plan );
-            run_m2l_at_depth( d );
-            allreduce_shared_locals_at_depth( d, comm_plan );
-            run_l2l_at_depth( d );
-            if ( d < _max_depth )
-                exchange_locals_after_l2l_at_depth( d, comm_plan );
+            {
+                CANOPY_SCOPED_TIMER_DETAILED(
+                    Canopy::Profiling::TIMER_DN_PRE_M2L );
+                snapshot_shared_locals_at_depth( d, comm_plan );
+            }
+            {
+                CANOPY_SCOPED_TIMER_DETAILED(
+                    Canopy::Profiling::TIMER_DN_M2L_CALL );
+                run_m2l_at_depth( d );
+            }
+            {
+                CANOPY_SCOPED_TIMER_DETAILED(
+                    Canopy::Profiling::TIMER_DN_POST_M2L );
+                allreduce_shared_locals_at_depth( d, comm_plan );
+                run_l2l_at_depth( d );
+                if ( d < _max_depth )
+                    exchange_locals_after_l2l_at_depth( d, comm_plan );
+            }
         }
 
         // L2P: evaluate local expansion at each particle

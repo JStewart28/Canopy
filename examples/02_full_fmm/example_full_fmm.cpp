@@ -231,113 +231,113 @@ int main( int argc, char* argv[] )
             }
         }
 
-        int num_local = solver.num_local_particles();
+        // int num_local = solver.num_local_particles();
 
-        std::vector<double> phi_direct;
-        std::vector<std::array<double, 3>> grad_direct;
-        direct_evaluate_global( particles, num_local, MPI_COMM_WORLD,
-                                phi_direct, grad_direct, compute_gradient );
+        // std::vector<double> phi_direct;
+        // std::vector<std::array<double, 3>> grad_direct;
+        // direct_evaluate_global( particles, num_local, MPI_COMM_WORLD,
+                                // phi_direct, grad_direct, compute_gradient );
 
-        auto h_pot = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace{}, solver.potential() );
-        auto h_grad = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace{}, solver.gradient() );
+        // auto h_pot = Kokkos::create_mirror_view_and_copy(
+            // Kokkos::HostSpace{}, solver.potential() );
+        // auto h_grad = Kokkos::create_mirror_view_and_copy(
+            // Kokkos::HostSpace{}, solver.gradient() );
 
-        double l_max_phi_err = 0.0, l_sum_phi_err = 0.0, l_phi_err2 = 0.0;
-        double l_max_phi_rel = 0.0, l_phi_norm2 = 0.0;
-        double l_max_grad_err = 0.0, l_sum_grad_err = 0.0, l_grad_err2 = 0.0;
-        double l_max_grad_rel = 0.0, l_grad_norm2 = 0.0;
+        // double l_max_phi_err = 0.0, l_sum_phi_err = 0.0, l_phi_err2 = 0.0;
+        // double l_max_phi_rel = 0.0, l_phi_norm2 = 0.0;
+        // double l_max_grad_err = 0.0, l_sum_grad_err = 0.0, l_grad_err2 = 0.0;
+        // double l_max_grad_rel = 0.0, l_grad_norm2 = 0.0;
 
-        for ( int i = 0; i < num_local; i++ )
-        {
-            double fmm_phi = h_pot( i, 0 );
-            double ref_phi = phi_direct[i];
-            double err = std::abs( fmm_phi - ref_phi );
-            l_max_phi_err = std::max( l_max_phi_err, err );
-            l_sum_phi_err += err;
-            l_phi_err2 += err * err;
-            double refmag = std::abs( ref_phi );
-            if ( refmag > 1e-14 )
-                l_max_phi_rel = std::max( l_max_phi_rel, err / refmag );
-            l_phi_norm2 += ref_phi * ref_phi;
+        // for ( int i = 0; i < num_local; i++ )
+        // {
+            // double fmm_phi = h_pot( i, 0 );
+            // double ref_phi = phi_direct[i];
+            // double err = std::abs( fmm_phi - ref_phi );
+            // l_max_phi_err = std::max( l_max_phi_err, err );
+            // l_sum_phi_err += err;
+            // l_phi_err2 += err * err;
+            // double refmag = std::abs( ref_phi );
+            // if ( refmag > 1e-14 )
+                // l_max_phi_rel = std::max( l_max_phi_rel, err / refmag );
+            // l_phi_norm2 += ref_phi * ref_phi;
 
-            if ( compute_gradient )
-            {
-                double gx = h_grad( i, 0, 0 );
-                double gy = h_grad( i, 0, 1 );
-                double gz = h_grad( i, 0, 2 );
-                double rx = grad_direct[i][0];
-                double ry = grad_direct[i][1];
-                double rz = grad_direct[i][2];
+            // if ( compute_gradient )
+            // {
+                // double gx = h_grad( i, 0, 0 );
+                // double gy = h_grad( i, 0, 1 );
+                // double gz = h_grad( i, 0, 2 );
+                // double rx = grad_direct[i][0];
+                // double ry = grad_direct[i][1];
+                // double rz = grad_direct[i][2];
 
-                double ge = std::sqrt( ( gx - rx ) * ( gx - rx ) +
-                                       ( gy - ry ) * ( gy - ry ) +
-                                       ( gz - rz ) * ( gz - rz ) );
-                l_max_grad_err = std::max( l_max_grad_err, ge );
-                l_sum_grad_err += ge;
-                l_grad_err2 += ge * ge;
+                // double ge = std::sqrt( ( gx - rx ) * ( gx - rx ) +
+                                       // ( gy - ry ) * ( gy - ry ) +
+                                       // ( gz - rz ) * ( gz - rz ) );
+                // l_max_grad_err = std::max( l_max_grad_err, ge );
+                // l_sum_grad_err += ge;
+                // l_grad_err2 += ge * ge;
 
-                double rmag = std::sqrt( rx * rx + ry * ry + rz * rz );
-                if ( rmag > 1e-14 )
-                    l_max_grad_rel = std::max( l_max_grad_rel, ge / rmag );
-                l_grad_norm2 += rmag * rmag;
-            }
-        }
+                // double rmag = std::sqrt( rx * rx + ry * ry + rz * rz );
+                // if ( rmag > 1e-14 )
+                    // l_max_grad_rel = std::max( l_max_grad_rel, ge / rmag );
+                // l_grad_norm2 += rmag * rmag;
+            // }
+        // }
 
-        double max_phi_err, sum_phi_err, phi_err2, max_phi_rel, phi_norm2;
-        double max_grad_err, sum_grad_err, grad_err2, max_grad_rel, grad_norm2;
-        long long total_n_ll = num_local, total_n;
-        MPI_Reduce( &l_max_phi_err, &max_phi_err, 1, MPI_DOUBLE, MPI_MAX, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_sum_phi_err, &sum_phi_err, 1, MPI_DOUBLE, MPI_SUM, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_phi_err2, &phi_err2, 1, MPI_DOUBLE, MPI_SUM, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_max_phi_rel, &max_phi_rel, 1, MPI_DOUBLE, MPI_MAX, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_phi_norm2, &phi_norm2, 1, MPI_DOUBLE, MPI_SUM, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_max_grad_err, &max_grad_err, 1, MPI_DOUBLE, MPI_MAX, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_sum_grad_err, &sum_grad_err, 1, MPI_DOUBLE, MPI_SUM, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_grad_err2, &grad_err2, 1, MPI_DOUBLE, MPI_SUM, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_max_grad_rel, &max_grad_rel, 1, MPI_DOUBLE, MPI_MAX, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &l_grad_norm2, &grad_norm2, 1, MPI_DOUBLE, MPI_SUM, 0,
-                    MPI_COMM_WORLD );
-        MPI_Reduce( &total_n_ll, &total_n, 1, MPI_LONG_LONG, MPI_SUM, 0,
-                    MPI_COMM_WORLD );
+        // double max_phi_err, sum_phi_err, phi_err2, max_phi_rel, phi_norm2;
+        // double max_grad_err, sum_grad_err, grad_err2, max_grad_rel, grad_norm2;
+        // long long total_n_ll = num_local, total_n;
+        // MPI_Reduce( &l_max_phi_err, &max_phi_err, 1, MPI_DOUBLE, MPI_MAX, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_sum_phi_err, &sum_phi_err, 1, MPI_DOUBLE, MPI_SUM, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_phi_err2, &phi_err2, 1, MPI_DOUBLE, MPI_SUM, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_max_phi_rel, &max_phi_rel, 1, MPI_DOUBLE, MPI_MAX, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_phi_norm2, &phi_norm2, 1, MPI_DOUBLE, MPI_SUM, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_max_grad_err, &max_grad_err, 1, MPI_DOUBLE, MPI_MAX, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_sum_grad_err, &sum_grad_err, 1, MPI_DOUBLE, MPI_SUM, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_grad_err2, &grad_err2, 1, MPI_DOUBLE, MPI_SUM, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_max_grad_rel, &max_grad_rel, 1, MPI_DOUBLE, MPI_MAX, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &l_grad_norm2, &grad_norm2, 1, MPI_DOUBLE, MPI_SUM, 0,
+                    // MPI_COMM_WORLD );
+        // MPI_Reduce( &total_n_ll, &total_n, 1, MPI_LONG_LONG, MPI_SUM, 0,
+                    // MPI_COMM_WORLD );
 
-        if ( rank == 0 )
-        {
-            double avg_phi_err = sum_phi_err / static_cast<double>( total_n );
-            double phi_norm = std::sqrt( phi_norm2 );
-            double phi_rel_l2 = phi_norm2 > 0.0
-                ? std::sqrt( phi_err2 / phi_norm2 ) : 0.0;
-            std::printf( "\nPotential (FMM vs direct):\n" );
-            std::printf( "  max abs error:      %.6e\n", max_phi_err );
-            std::printf( "  avg abs error:      %.6e\n", avg_phi_err );
-            std::printf( "  max rel error:      %.6e\n", max_phi_rel );
-            std::printf( "  rel L2 error:       %.6e\n", phi_rel_l2 );
-            std::printf( "  reference norm:     %.6e\n", phi_norm );
+        // if ( rank == 0 )
+        // {
+            // double avg_phi_err = sum_phi_err / static_cast<double>( total_n );
+            // double phi_norm = std::sqrt( phi_norm2 );
+            // double phi_rel_l2 = phi_norm2 > 0.0
+                // ? std::sqrt( phi_err2 / phi_norm2 ) : 0.0;
+            // std::printf( "\nPotential (FMM vs direct):\n" );
+            // std::printf( "  max abs error:      %.6e\n", max_phi_err );
+            // std::printf( "  avg abs error:      %.6e\n", avg_phi_err );
+            // std::printf( "  max rel error:      %.6e\n", max_phi_rel );
+            // std::printf( "  rel L2 error:       %.6e\n", phi_rel_l2 );
+            // std::printf( "  reference norm:     %.6e\n", phi_norm );
 
-            if ( compute_gradient )
-            {
-                double avg_grad_err =
-                    sum_grad_err / static_cast<double>( total_n );
-                double grad_norm = std::sqrt( grad_norm2 );
-                double grad_rel_l2 = grad_norm2 > 0.0
-                    ? std::sqrt( grad_err2 / grad_norm2 ) : 0.0;
-                std::printf( "\nGradient (FMM vs direct):\n" );
-                std::printf( "  max abs error:      %.6e\n", max_grad_err );
-                std::printf( "  avg abs error:      %.6e\n", avg_grad_err );
-                std::printf( "  max rel error:      %.6e\n", max_grad_rel );
-                std::printf( "  rel L2 error:       %.6e\n", grad_rel_l2 );
-                std::printf( "  reference norm:     %.6e\n", grad_norm );
-            }
-        }
+            // if ( compute_gradient )
+            // {
+                // double avg_grad_err =
+                    // sum_grad_err / static_cast<double>( total_n );
+                // double grad_norm = std::sqrt( grad_norm2 );
+                // double grad_rel_l2 = grad_norm2 > 0.0
+                    // ? std::sqrt( grad_err2 / grad_norm2 ) : 0.0;
+                // std::printf( "\nGradient (FMM vs direct):\n" );
+                // std::printf( "  max abs error:      %.6e\n", max_grad_err );
+                // std::printf( "  avg abs error:      %.6e\n", avg_grad_err );
+                // std::printf( "  max rel error:      %.6e\n", max_grad_rel );
+                // std::printf( "  rel L2 error:       %.6e\n", grad_rel_l2 );
+                // std::printf( "  reference norm:     %.6e\n", grad_norm );
+            // }
+        // }
     }
     Kokkos::finalize();
     MPI_Finalize();

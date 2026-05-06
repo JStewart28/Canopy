@@ -14,6 +14,26 @@
 
 #include "Canopy_Config.hpp"
 
+// ---------------------------------------------------------------------------
+// Profiling level hierarchy
+//
+//   0 — off (no instrumentation)
+//   1 — basic: top-level phases (P2M, M2M, M2L kernel, L2L, L2P, P2P, ...)
+//   2 — detailed: sub-phases inside DownwardSweep::execute() — allocations,
+//       interaction-list build, per-depth pre-M2L / M2L call / post-M2L
+//   3 — verbose (reserved for future even finer-grained timers)
+//
+// Set via CMake: -DCanopy_PROFILING_LEVEL=2 (or the legacy
+// -DCanopy_ENABLE_PROFILING=ON, which defaults to level 1).
+// ---------------------------------------------------------------------------
+#ifndef CANOPY_PROFILING_LEVEL
+#  ifdef CANOPY_ENABLE_PROFILING
+#    define CANOPY_PROFILING_LEVEL 1
+#  else
+#    define CANOPY_PROFILING_LEVEL 0
+#  endif
+#endif
+
 #ifdef CANOPY_ENABLE_PROFILING
 
 #include <Kokkos_Core.hpp>
@@ -56,6 +76,15 @@ static constexpr const char* TIMER_M2L_ALLREDUCE  = "m2l_allreduce";
 static constexpr const char* TIMER_L2L_KERNEL     = "l2l_kernel";
 static constexpr const char* TIMER_L2L_COMM       = "l2l_comm";
 static constexpr const char* TIMER_L2P            = "l2p";
+
+// Downward sweep — detailed (level 2) sub-phases.
+// These dissolve unaccounted time inside DownwardSweep::execute() that the
+// basic timers do not name explicitly.
+static constexpr const char* TIMER_DN_ZERO_LOCALS = "dn_zero_locals";
+static constexpr const char* TIMER_DN_BUILD_ILIST = "dn_build_ilist";
+static constexpr const char* TIMER_DN_PRE_M2L     = "dn_pre_m2l";
+static constexpr const char* TIMER_DN_M2L_CALL    = "dn_m2l_call";
+static constexpr const char* TIMER_DN_POST_M2L    = "dn_post_m2l";
 
 // solve() — P2P
 static constexpr const char* TIMER_P2P_TOTAL        = "p2p_total";
@@ -158,7 +187,7 @@ inline std::vector<PhaseEntry> upward_phase_entries()
 
 inline std::vector<PhaseEntry> downward_phase_entries()
 {
-    return {
+    std::vector<PhaseEntry> entries = {
         { "Downward sweep total",       TIMER_DOWNWARD_TOTAL, 0 },
         { "M2L comm (all depths)",      TIMER_M2L_COMM,       1 },
         { "M2L kernel (all depths)",    TIMER_M2L_KERNEL,     1 },
@@ -167,6 +196,17 @@ inline std::vector<PhaseEntry> downward_phase_entries()
         { "L2L comm (all depths)",      TIMER_L2L_COMM,       1 },
         { "L2P",                        TIMER_L2P,            1 },
     };
+#if CANOPY_PROFILING_LEVEL >= 2
+    // Detailed sub-phases — sum to the in-execute() share of "Downward
+    // sweep total" not already attributed above. Indented one further
+    // level in the printed table for readability.
+    entries.push_back( { "[detail] Zero locals",      TIMER_DN_ZERO_LOCALS, 1 } );
+    entries.push_back( { "[detail] Build ilist",     TIMER_DN_BUILD_ILIST, 1 } );
+    entries.push_back( { "[detail] Pre-M2L setup",   TIMER_DN_PRE_M2L,     1 } );
+    entries.push_back( { "[detail] M2L call (loop)", TIMER_DN_M2L_CALL,    1 } );
+    entries.push_back( { "[detail] Post-M2L (loop)", TIMER_DN_POST_M2L,    1 } );
+#endif
+    return entries;
 }
 
 inline std::vector<PhaseEntry> p2p_phase_entries()
@@ -377,6 +417,20 @@ inline void print_timing_table( MPI_Comm comm, const char* section_name,
 #  define CANOPY_PRINT_REBALANCE_TIMERS( comm ) \
        ::Canopy::Profiling::print_timing_table( \
            (comm), "rebalance()", ::Canopy::Profiling::rebalance_phase_entries() )
+// Detailed (level 2) and verbose (level 3) timer macros. They compile away
+// to no-ops below the requested level so call sites can be left in place.
+#  if CANOPY_PROFILING_LEVEL >= 2
+#    define CANOPY_SCOPED_TIMER_DETAILED( key ) \
+         ::Canopy::Profiling::ScopedTimer _canopy_timer_d_##__LINE__( (key) )
+#  else
+#    define CANOPY_SCOPED_TIMER_DETAILED( key ) do {} while ( 0 )
+#  endif
+#  if CANOPY_PROFILING_LEVEL >= 3
+#    define CANOPY_SCOPED_TIMER_VERBOSE( key ) \
+         ::Canopy::Profiling::ScopedTimer _canopy_timer_v_##__LINE__( (key) )
+#  else
+#    define CANOPY_SCOPED_TIMER_VERBOSE( key ) do {} while ( 0 )
+#  endif
 #else
 #  define CANOPY_SCOPED_TIMER( key )            do {} while ( 0 )
 #  define CANOPY_RESET_TIMERS()                 do {} while ( 0 )
@@ -389,6 +443,8 @@ inline void print_timing_table( MPI_Comm comm, const char* section_name,
        do { (void)(comm); (void)(t_up); (void)(t_dn); (void)(t_p2p); } while(0)
 #  define CANOPY_PRINT_MIGRATE_TIMERS( comm )   do {} while ( 0 )
 #  define CANOPY_PRINT_REBALANCE_TIMERS( comm ) do {} while ( 0 )
+#  define CANOPY_SCOPED_TIMER_DETAILED( key )    do {} while ( 0 )
+#  define CANOPY_SCOPED_TIMER_VERBOSE( key )     do {} while ( 0 )
 #endif
 
 #endif // CANOPY_PROFILING_HPP

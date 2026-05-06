@@ -22,8 +22,10 @@ set(HEADERS_PUBLIC
 
 add_library(Canopy INTERFACE)
 
-if(CANOPY_ENABLE_PROFILING)
+if(_canopy_profiling_level GREATER 0)
   target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_PROFILING)
+  target_compile_definitions(Canopy INTERFACE
+      CANOPY_PROFILING_LEVEL=${_canopy_profiling_level})
 endif()
 
 # Require minimum of C++17
