@@ -47,6 +47,11 @@ if(Canopy_ENABLE_HIPBLAS)
   target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_HIPBLAS)
 endif()
 
+if(Canopy_ENABLE_KOKKOSKERNELS)
+  target_link_libraries(Canopy INTERFACE Kokkos::kokkoskernels)
+  target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_KOKKOSKERNELS)
+endif()
+
 target_include_directories(Canopy INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>

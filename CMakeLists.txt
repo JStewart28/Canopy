@@ -47,34 +47,68 @@ if(Kokkos_ENABLE_CUDA)
 endif()
 
 #------------------------------------------------------------------------------#
-# Vendor BLAS for batched-GEMM M2L
+# Batched-GEMM M2L backend selection
 #
 # Canopy's M2L kernel groups (target, source) pairs by translation-operator
-# bin and dispatches one dense complex GEMM per bin. The CUDA build uses
-# cuBLAS; the HIP build uses hipBLAS (which dispatches to rocBLAS on AMD).
-# When neither is available the M2L driver falls back to the per-pair
-# Kokkos kernel — correct but slow.
+# bin and dispatches one dense complex GEMM per bin. Backend preference:
+#   1. cuBLAS, when Kokkos is built with CUDA support.
+#   2. hipBLAS (dispatches to rocBLAS on AMD), when Kokkos is built with HIP.
+#   3. KokkosKernels — required fallback, also used for Serial / OpenMP /
+#      OpenMPTarget builds where no GPU vendor BLAS is appropriate.
+# At least one backend must be present; the M2LBatchedGemm wrapper picks
+# the right specialization at compile time per execution space.
 #------------------------------------------------------------------------------#
 set(Canopy_ENABLE_CUBLAS OFF)
 set(Canopy_ENABLE_HIPBLAS OFF)
+set(Canopy_ENABLE_KOKKOSKERNELS OFF)
 
 if(Kokkos_ENABLE_CUDA)
-  find_package(CUDAToolkit REQUIRED)
+  find_package(CUDAToolkit QUIET)
   if(TARGET CUDA::cublas)
     set(Canopy_ENABLE_CUBLAS ON)
+    message(STATUS "Canopy M2L: cuBLAS found — using CUDA::cublas for the CUDA backend")
   else()
-    message(FATAL_ERROR "Kokkos CUDA backend is enabled but CUDA::cublas was not found")
+    message(STATUS "Canopy M2L: cuBLAS not found — CUDA backend will fall back to KokkosKernels")
   endif()
 endif()
 
 if(Kokkos_ENABLE_HIP)
-  find_package(hipblas REQUIRED)
+  find_package(hipblas QUIET)
   if(TARGET roc::hipblas)
     set(Canopy_ENABLE_HIPBLAS ON)
+    message(STATUS "Canopy M2L: hipBLAS found — using roc::hipblas for the HIP backend")
   else()
-    message(FATAL_ERROR "Kokkos HIP backend is enabled but roc::hipblas was not found")
+    message(STATUS "Canopy M2L: hipBLAS not found — HIP backend will fall back to KokkosKernels")
   endif()
 endif()
+
+# KokkosKernels is required when:
+#   - any non-CUDA/non-HIP Kokkos backend is enabled (Serial/OpenMP/SYCL/
+#     OpenMPTarget/Threads), since those have no vendor BLAS path here, OR
+#   - CUDA or HIP is enabled but the matching vendor BLAS was not found.
+set(_canopy_need_kokkoskernels OFF)
+if(NOT Canopy_ENABLE_CUBLAS AND Kokkos_ENABLE_CUDA)
+  set(_canopy_need_kokkoskernels ON)
+endif()
+if(NOT Canopy_ENABLE_HIPBLAS AND Kokkos_ENABLE_HIP)
+  set(_canopy_need_kokkoskernels ON)
+endif()
+foreach(_dev SERIAL THREADS OPENMP SYCL OPENMPTARGET)
+  if(Kokkos_ENABLE_${_dev})
+    set(_canopy_need_kokkoskernels ON)
+  endif()
+endforeach()
+
+if(_canopy_need_kokkoskernels)
+  find_package(KokkosKernels REQUIRED)
+  set(Canopy_ENABLE_KOKKOSKERNELS ON)
+  message(STATUS "Canopy M2L: KokkosKernels enabled — used as fallback / portable backend")
+endif()
+unset(_canopy_need_kokkoskernels)
+
+add_feature_info(BatchedGemm_cuBLAS Canopy_ENABLE_CUBLAS "Use cuBLAS for batched-GEMM M2L on the CUDA backend")
+add_feature_info(BatchedGemm_hipBLAS Canopy_ENABLE_HIPBLAS "Use hipBLAS for batched-GEMM M2L on the HIP backend")
+add_feature_info(BatchedGemm_KokkosKernels Canopy_ENABLE_KOKKOSKERNELS "Use KokkosKernels as the batched-GEMM M2L backend / fallback")
 
 # find cabana
 find_package(Cabana REQUIRED COMPONENTS Cabana::Grid Cabana::Core)

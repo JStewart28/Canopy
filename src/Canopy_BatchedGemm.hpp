@@ -26,6 +26,10 @@
 #include <hipblas/hipblas.h>
 #endif
 
+#if defined( CANOPY_ENABLE_KOKKOSKERNELS )
+#include <KokkosBlas3_gemm.hpp>
+#endif
+
 namespace Canopy
 {
 namespace detail
@@ -278,6 +282,126 @@ class M2LBatchedGemm<Kokkos::HIP, Scalar>
 };
 
 #endif // CANOPY_ENABLE_HIPBLAS && KOKKOS_ENABLE_HIP
+
+// ----------------------------------------------------------------------------
+// KokkosKernels specializations (Serial / OpenMP / OpenMPTarget)
+//
+// On execution spaces without a vendor BLAS path, dispatch the per-bin
+// complex GEMM through KokkosBlas::gemm. The shared helper builds the
+// unmanaged column-major Views from raw pointers + leading dimensions
+// (LayoutStride to honor caller-supplied lds without forcing tight
+// packing), then issues the GEMM bound to the caller's exec instance so
+// the call serializes against surrounding Kokkos kernels.
+//
+// Performance discipline matches the cuBLAS/hipBLAS paths: callers are
+// expected to collapse NComps into the GEMM `n` axis so each bin is a
+// single wide GEMM rather than many narrow ones. Per-bin dispatch (one
+// KokkosBlas::gemm per non-empty bin) is preferred over a fused
+// strided-batched call because bins differ in `n_b` — fusing would
+// require padding and waste work.
+// ----------------------------------------------------------------------------
+#if defined( CANOPY_ENABLE_KOKKOSKERNELS )
+
+namespace kk_impl
+{
+template <class ExecSpace, class Scalar>
+inline void
+kk_gemm_NN( ExecSpace& exec, int Nt, int n, int Ns,
+            const Kokkos::complex<Scalar>* T, int ldT,
+            const Kokkos::complex<Scalar>* M, int ldM,
+            Kokkos::complex<Scalar>* C, int ldC )
+{
+    using complex_type = Kokkos::complex<Scalar>;
+    using mem_space = typename ExecSpace::memory_space;
+    using unmanaged = Kokkos::MemoryTraits<Kokkos::Unmanaged>;
+
+    // Column-major: stride(rows)=1, stride(cols)=ld.
+    const Kokkos::LayoutStride T_layout( Nt, 1, Ns, ldT );
+    const Kokkos::LayoutStride M_layout( Ns, 1, n, ldM );
+    const Kokkos::LayoutStride C_layout( Nt, 1, n, ldC );
+
+    Kokkos::View<const complex_type**, Kokkos::LayoutStride, mem_space,
+                 unmanaged>
+        T_view( T, T_layout );
+    Kokkos::View<const complex_type**, Kokkos::LayoutStride, mem_space,
+                 unmanaged>
+        M_view( M, M_layout );
+    Kokkos::View<complex_type**, Kokkos::LayoutStride, mem_space, unmanaged>
+        C_view( C, C_layout );
+
+    const complex_type one( static_cast<Scalar>( 1 ),
+                            static_cast<Scalar>( 0 ) );
+    const complex_type zero( static_cast<Scalar>( 0 ),
+                             static_cast<Scalar>( 0 ) );
+
+    KokkosBlas::gemm( exec, "N", "N", one, T_view, M_view, zero, C_view );
+}
+} // namespace kk_impl
+
+// Common base — three thin specializations below pick this up by
+// inheritance to avoid duplicating the (identical) per-backend body.
+template <class ExecSpace, class Scalar>
+class M2LBatchedGemmKK
+{
+    static_assert( std::is_same_v<Scalar, float> ||
+                       std::is_same_v<Scalar, double>,
+                   "M2LBatchedGemm: Scalar must be float or double" );
+
+  public:
+    using execution_space = ExecSpace;
+    using scalar_type = Scalar;
+    using complex_type = Kokkos::complex<Scalar>;
+
+    static constexpr bool available = true;
+
+    explicit M2LBatchedGemmKK( ExecSpace exec = ExecSpace{} )
+        : _exec( exec )
+    {
+    }
+
+    void gemm_NN( int Nt, int n, int Ns, const complex_type* T, int ldT,
+                  const complex_type* M, int ldM, complex_type* C, int ldC )
+    {
+        kk_impl::kk_gemm_NN<ExecSpace, Scalar>( _exec, Nt, n, Ns, T, ldT, M,
+                                                 ldM, C, ldC );
+    }
+
+  private:
+    ExecSpace _exec;
+};
+
+#if defined( KOKKOS_ENABLE_SERIAL )
+template <class Scalar>
+class M2LBatchedGemm<Kokkos::Serial, Scalar>
+    : public M2LBatchedGemmKK<Kokkos::Serial, Scalar>
+{
+  public:
+    using M2LBatchedGemmKK<Kokkos::Serial, Scalar>::M2LBatchedGemmKK;
+};
+#endif
+
+#if defined( KOKKOS_ENABLE_OPENMP )
+template <class Scalar>
+class M2LBatchedGemm<Kokkos::OpenMP, Scalar>
+    : public M2LBatchedGemmKK<Kokkos::OpenMP, Scalar>
+{
+  public:
+    using M2LBatchedGemmKK<Kokkos::OpenMP, Scalar>::M2LBatchedGemmKK;
+};
+#endif
+
+#if defined( KOKKOS_ENABLE_OPENMPTARGET )
+template <class Scalar>
+class M2LBatchedGemm<Kokkos::Experimental::OpenMPTarget, Scalar>
+    : public M2LBatchedGemmKK<Kokkos::Experimental::OpenMPTarget, Scalar>
+{
+  public:
+    using M2LBatchedGemmKK<Kokkos::Experimental::OpenMPTarget,
+                           Scalar>::M2LBatchedGemmKK;
+};
+#endif
+
+#endif // CANOPY_ENABLE_KOKKOSKERNELS
 
 } // namespace detail
 } // namespace Canopy
