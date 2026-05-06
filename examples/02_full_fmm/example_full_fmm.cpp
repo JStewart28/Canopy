@@ -243,9 +243,9 @@ int main( int argc, char* argv[] )
         auto h_grad = Kokkos::create_mirror_view_and_copy(
             Kokkos::HostSpace{}, solver.gradient() );
 
-        double l_max_phi_err = 0.0, l_sum_phi_err = 0.0;
+        double l_max_phi_err = 0.0, l_sum_phi_err = 0.0, l_phi_err2 = 0.0;
         double l_max_phi_rel = 0.0, l_phi_norm2 = 0.0;
-        double l_max_grad_err = 0.0, l_sum_grad_err = 0.0;
+        double l_max_grad_err = 0.0, l_sum_grad_err = 0.0, l_grad_err2 = 0.0;
         double l_max_grad_rel = 0.0, l_grad_norm2 = 0.0;
 
         for ( int i = 0; i < num_local; i++ )
@@ -255,6 +255,7 @@ int main( int argc, char* argv[] )
             double err = std::abs( fmm_phi - ref_phi );
             l_max_phi_err = std::max( l_max_phi_err, err );
             l_sum_phi_err += err;
+            l_phi_err2 += err * err;
             double refmag = std::abs( ref_phi );
             if ( refmag > 1e-14 )
                 l_max_phi_rel = std::max( l_max_phi_rel, err / refmag );
@@ -274,6 +275,7 @@ int main( int argc, char* argv[] )
                                        ( gz - rz ) * ( gz - rz ) );
                 l_max_grad_err = std::max( l_max_grad_err, ge );
                 l_sum_grad_err += ge;
+                l_grad_err2 += ge * ge;
 
                 double rmag = std::sqrt( rx * rx + ry * ry + rz * rz );
                 if ( rmag > 1e-14 )
@@ -282,12 +284,14 @@ int main( int argc, char* argv[] )
             }
         }
 
-        double max_phi_err, sum_phi_err, max_phi_rel, phi_norm2;
-        double max_grad_err, sum_grad_err, max_grad_rel, grad_norm2;
+        double max_phi_err, sum_phi_err, phi_err2, max_phi_rel, phi_norm2;
+        double max_grad_err, sum_grad_err, grad_err2, max_grad_rel, grad_norm2;
         long long total_n_ll = num_local, total_n;
         MPI_Reduce( &l_max_phi_err, &max_phi_err, 1, MPI_DOUBLE, MPI_MAX, 0,
                     MPI_COMM_WORLD );
         MPI_Reduce( &l_sum_phi_err, &sum_phi_err, 1, MPI_DOUBLE, MPI_SUM, 0,
+                    MPI_COMM_WORLD );
+        MPI_Reduce( &l_phi_err2, &phi_err2, 1, MPI_DOUBLE, MPI_SUM, 0,
                     MPI_COMM_WORLD );
         MPI_Reduce( &l_max_phi_rel, &max_phi_rel, 1, MPI_DOUBLE, MPI_MAX, 0,
                     MPI_COMM_WORLD );
@@ -296,6 +300,8 @@ int main( int argc, char* argv[] )
         MPI_Reduce( &l_max_grad_err, &max_grad_err, 1, MPI_DOUBLE, MPI_MAX, 0,
                     MPI_COMM_WORLD );
         MPI_Reduce( &l_sum_grad_err, &sum_grad_err, 1, MPI_DOUBLE, MPI_SUM, 0,
+                    MPI_COMM_WORLD );
+        MPI_Reduce( &l_grad_err2, &grad_err2, 1, MPI_DOUBLE, MPI_SUM, 0,
                     MPI_COMM_WORLD );
         MPI_Reduce( &l_max_grad_rel, &max_grad_rel, 1, MPI_DOUBLE, MPI_MAX, 0,
                     MPI_COMM_WORLD );
@@ -308,10 +314,13 @@ int main( int argc, char* argv[] )
         {
             double avg_phi_err = sum_phi_err / static_cast<double>( total_n );
             double phi_norm = std::sqrt( phi_norm2 );
+            double phi_rel_l2 = phi_norm2 > 0.0
+                ? std::sqrt( phi_err2 / phi_norm2 ) : 0.0;
             std::printf( "\nPotential (FMM vs direct):\n" );
             std::printf( "  max abs error:      %.6e\n", max_phi_err );
             std::printf( "  avg abs error:      %.6e\n", avg_phi_err );
             std::printf( "  max rel error:      %.6e\n", max_phi_rel );
+            std::printf( "  rel L2 error:       %.6e\n", phi_rel_l2 );
             std::printf( "  reference norm:     %.6e\n", phi_norm );
 
             if ( compute_gradient )
@@ -319,10 +328,13 @@ int main( int argc, char* argv[] )
                 double avg_grad_err =
                     sum_grad_err / static_cast<double>( total_n );
                 double grad_norm = std::sqrt( grad_norm2 );
+                double grad_rel_l2 = grad_norm2 > 0.0
+                    ? std::sqrt( grad_err2 / grad_norm2 ) : 0.0;
                 std::printf( "\nGradient (FMM vs direct):\n" );
                 std::printf( "  max abs error:      %.6e\n", max_grad_err );
                 std::printf( "  avg abs error:      %.6e\n", avg_grad_err );
                 std::printf( "  max rel error:      %.6e\n", max_grad_rel );
+                std::printf( "  rel L2 error:       %.6e\n", grad_rel_l2 );
                 std::printf( "  reference norm:     %.6e\n", grad_norm );
             }
         }
