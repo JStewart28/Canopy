@@ -170,6 +170,23 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 ##---------------------------------------------------------------------------##
+## RelWithDebInfo: profiling-friendly flags
+##
+## Targets -O3 (keep optimized code paths) with host -g (already in the
+## CMake default) and -lineinfo on device code so Nsight Compute can map
+## hardware counters back to source lines.
+##---------------------------------------------------------------------------##
+if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+  string(REPLACE "-O2" "-O3"
+    CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+  if(Kokkos_ENABLE_CUDA)
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
+      "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -lineinfo")
+  endif()
+  message(STATUS "RelWithDebInfo CXX flags: ${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+endif()
+
+##---------------------------------------------------------------------------##
 ## Code coverage testing
 ##---------------------------------------------------------------------------##
 option(Canopy_ENABLE_COVERAGE_BUILD "Do a coverage build" OFF)
