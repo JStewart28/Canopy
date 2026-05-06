@@ -220,67 +220,111 @@ class DownwardSweep
     Kokkos::View<int*, memory_space> _m2l_counts;  // size N
     std::vector<int> _m2l_depth_offsets;           // size max_depth + 2 (host)
 
-    // Stage 3: precomputed M2L operator tables. For each (target, source)
-    // pair, the integer offset (i,j,k) = round((src_center - tgt_center)/w_d)
-    // is reduced to a bin id; pairs sharing a bin at the same depth share
-    // a common M2L operator T(out_idx, src_idx). Pairs whose offset falls
-    // outside the well-separated stencil get bin = -1 and fall back to the
-    // direct m2l_translate path.
-    static constexpr int M2L_BIN_RANGE = 3;
-    static constexpr int M2L_BIN_DIM = 2 * M2L_BIN_RANGE + 1;
-    static constexpr int M2L_NUM_BINS =
-        M2L_BIN_DIM * M2L_BIN_DIM * M2L_BIN_DIM;
+    // Stage 3: hashed cross-depth M2L operator table.
+    //
+    // The M2L operator T is a function of the physical translation vector
+    // only. Two pairs sharing a vector share the operator regardless of
+    // the depths involved. We canonicalize each pair to an integer key
+    //   key = (max_d, dd, ii, jj, kk)
+    //   max_d = max(d_t, d_s)        // deeper of target/source depths
+    //   dd    = d_s - d_t            // depth difference (signed)
+    //   unit_w = w0 / 2^max_d        // smaller cell width
+    //   (ii,jj,kk) = round((c_s - c_t) / unit_w)
+    // and reuse one T(Nt, Ns) per unique key.
+    //
+    // Range guards (|dd|<=6, |offset|<=32) catch pathological pairs and
+    // route them to the per-pair m2l_translate fallback. Healthy MAC
+    // traversals never trip these.
+    static constexpr int M2L_KEY_DD_MAX = 6;
+    static constexpr int M2L_KEY_OFFSET_MAX = 32;
+    static constexpr int M2L_OP_COUNT_CAP = 32768;
+
     static constexpr int M2L_NUM_SRC = ( P + 1 ) * ( P + 1 );
 
-    // Operator tables: shape (num_coeffs, num_src, num_bins, num_active).
-    // Only depths with M2L work are present. Stored explicitly LayoutLeft
-    // so that subview(_m2l_op_table, ALL, ALL, bin, d_idx) is a contiguous
-    // column-major (Nt, Ns) matrix — directly consumable by cuBLAS /
-    // hipBLAS / KokkosBlas::gemm without copy or transpose.
-    Kokkos::View<complex_type****, Kokkos::LayoutLeft, memory_space>
+    struct M2LKey
+    {
+        int max_d;
+        int dd;
+        int ii;
+        int jj;
+        int kk;
+        bool operator==( const M2LKey& o ) const noexcept
+        {
+            return max_d == o.max_d && dd == o.dd && ii == o.ii &&
+                   jj == o.jj && kk == o.kk;
+        }
+    };
+    struct M2LKeyHash
+    {
+        std::size_t operator()( const M2LKey& k ) const noexcept
+        {
+            std::uint64_t h = 1469598103934665603ull;
+            auto mix = [&]( int v )
+            {
+                h ^= static_cast<std::uint32_t>( v );
+                h *= 1099511628211ull;
+            };
+            mix( k.max_d );
+            mix( k.dd );
+            mix( k.ii );
+            mix( k.jj );
+            mix( k.kk );
+            return static_cast<std::size_t>( h );
+        }
+    };
+
+    // Operator tables: shape (Nt, Ns, n_unique_ops). LayoutLeft so a
+    // subview(_m2l_op_table, ALL, ALL, op_idx) is a contiguous column-major
+    // (Nt, Ns) matrix consumable by cuBLAS / hipBLAS / KokkosBlas::gemm
+    // without copy or transpose.
+    Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
         _m2l_op_table;
-    // Map from depth -> active-depth index in _m2l_op_table; -1 if none.
-    // Host-side; used to pick the right slice when launching M2L per depth.
-    std::vector<int> _m2l_depth_to_op_idx;
-    // Per-pair bin id, parallel to _m2l_source_cells_flat. -1 = fallback.
-    Kokkos::View<int*, memory_space> _m2l_pair_bins;
 
-    // Bin-major pair layout for batched-GEMM M2L.
+    // Op-major pair layout, partitioned into "non-shared-target" and
+    // "shared-target" sets:
     //
-    // Pairs at active depth d_idx and bin b are stored contiguously as
-    //   slot s in [_m2l_bin_pair_offsets(d_idx, b),
-    //              _m2l_bin_pair_offsets(d_idx, b+1)) ->
-    //     target = _m2l_bin_pair_targets(s)
-    //     source = _m2l_bin_pair_sources(s)
-    // The offsets array prefix-sums *globally* across (d_idx, b) so that
-    // a single flat pair table holds all binnable pairs at all depths.
-    // _m2l_bin_pair_offsets has shape (n_active, M2L_NUM_BINS + 1).
+    //   nonshared: pairs whose target cell has owner_rank != OWNER_SHARED.
+    //              Processed in run_m2l_all() once per solve, before the
+    //              per-depth loop. M2L for these targets does not interact
+    //              with the snapshot/allreduce barrier, so we batch all
+    //              depths together for maximum GEMM size.
     //
-    // Out-of-bin pairs (bin == -1) are collected into a separate fallback
-    // table per active depth, sliced by _m2l_fallback_offsets.
-    Kokkos::View<int*, memory_space> _m2l_bin_pair_targets;
-    Kokkos::View<int*, memory_space> _m2l_bin_pair_sources;
-    Kokkos::View<int**, memory_space> _m2l_bin_pair_offsets;
+    //   shared:    pairs whose target cell is shared (rank-0 only — see
+    //              entry-collection filter). Sub-sliced by target depth so
+    //              that run_m2l_at_depth(d) runs only the contributions
+    //              landing on shared cells at depth d, preserving the
+    //              snapshot/allreduce semantics.
+    //
+    // Within each set, pairs are grouped by op_idx (so a single GEMM per op
+    // lands on a contiguous column slice of the packed scratch buffers).
+    // Within shared ops, pairs are additionally sorted by target depth.
+    Kokkos::View<int*, memory_space> _m2l_nonshared_pair_targets;
+    Kokkos::View<int*, memory_space> _m2l_nonshared_pair_sources;
+    std::vector<int> _m2l_nonshared_op_keys;     // op_idx per nonshared op
+    std::vector<int> _m2l_nonshared_op_offsets;  // length n_nonshared_ops + 1
 
+    Kokkos::View<int*, memory_space> _m2l_shared_pair_targets;
+    Kokkos::View<int*, memory_space> _m2l_shared_pair_sources;
+    std::vector<int> _m2l_shared_op_keys;        // op_idx per shared op
+    std::vector<int> _m2l_shared_op_offsets;     // length n_shared_ops + 1
+    // For shared op i, pairs at target depths < d live in slots
+    //   [_m2l_shared_op_offsets[i], _m2l_shared_op_offsets[i] +
+    //    _m2l_shared_op_depth_starts[i][d]).
+    // Length per op: max_depth + 2.
+    std::vector<std::vector<int>> _m2l_shared_op_depth_starts;
+
+    // Fallback (per-pair m2l_translate) for pairs hitting the M2L_KEY_*
+    // guardrails or the M2L_OP_COUNT_CAP overflow valve. Sliced per depth
+    // so run_m2l_at_depth(d) handles the depth-d slice (snapshot/allreduce
+    // for shared targets at d works the same as the GEMM-path scatter).
     Kokkos::View<int*, memory_space> _m2l_fallback_targets;
     Kokkos::View<int*, memory_space> _m2l_fallback_sources;
-    Kokkos::View<int*, memory_space> _m2l_fallback_offsets; // size n_active + 1
+    std::vector<int> _m2l_fallback_offsets_host;  // length max_depth + 2
 
-    // Per-active-depth count of out-of-bin (m2l_translate) pairs. Populated
-    // at the end of build_interaction_list_device from the same prefix-sum
-    // used to lay out the fallback list, so it costs nothing extra to keep.
-    // Surfaced via total_fallback_pair_count() so a regression test can
-    // assert that the fallback path is actually being exercised.
+    // Per-depth fallback pair counts (= consecutive differences of
+    // _m2l_fallback_offsets_host). Surfaced via total_fallback_pair_count()
+    // so the bin-edge regression test can assert the fallback path fires.
     std::vector<long long> _m2l_fallback_count_per_active_depth;
-
-    // Host mirror of _m2l_bin_pair_offsets, kept persistent so the per-depth
-    // driver can read per-bin slice ranges without a device->host copy on
-    // every solve. Sized identically to _m2l_bin_pair_offsets.
-    typename Kokkos::View<int**, memory_space>::HostMirror
-        _m2l_bin_pair_offsets_host;
-    // Host mirror of _m2l_fallback_offsets — same rationale.
-    typename Kokkos::View<int*, memory_space>::HostMirror
-        _m2l_fallback_offsets_host;
 
     // Per-solve scratch buffers for the batched-GEMM M2L pipeline:
     //   M_packed shape (Ns, max_pairs_at_depth * NComps)
@@ -314,12 +358,16 @@ class DownwardSweep
     void build_interaction_list_device(
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
 
+    // Process all M2L pairs whose target is non-shared, batched across
+    // every depth. Called once per solve, before the per-depth loop.
+    void run_m2l_all();
+
     void run_m2l_at_depth( int depth );
     void run_l2l_at_depth( int depth );
 
-    // Total number of out-of-bin M2L pairs this rank carries through the
-    // m2l_translate fallback path, summed over all active depths. Held at
-    // zero before the first build_interaction_list_device. Used by the
+    // Total number of M2L pairs this rank carries through the per-pair
+    // m2l_translate fallback path (only pairs hitting the M2L_KEY_*
+    // guardrails or the M2L_OP_COUNT_CAP overflow valve). Used by the
     // bin-edge regression test to assert that a configuration intended to
     // exercise the fallback actually does.
     long long total_fallback_pair_count() const
@@ -330,11 +378,20 @@ class DownwardSweep
         return s;
     }
 
-    // Per-pair fallback for out-of-bin pairs at depth `depth`. Iterates
-    // _m2l_fallback_{targets,sources}[fallback_offsets[op_d_idx]:...] and
-    // applies the on-the-fly m2l_translate to each pair. Called from
-    // run_m2l_at_depth after the batched-GEMM path has run.
-    void run_m2l_fallback_at_depth( int op_d_idx );
+    // Total M2L pair count carried by this rank: GEMM path (nonshared +
+    // shared) plus fallback path. Used alongside total_fallback_pair_count()
+    // to compute the fraction of pairs missing the GEMM fast path.
+    long long total_m2l_pair_count() const
+    {
+        return static_cast<long long>(
+                   _m2l_nonshared_pair_targets.extent( 0 ) ) +
+               static_cast<long long>(
+                   _m2l_shared_pair_targets.extent( 0 ) ) +
+               static_cast<long long>( _m2l_fallback_targets.extent( 0 ) );
+    }
+
+    // Per-pair fallback for out-of-range pairs at depth `depth`.
+    void run_m2l_fallback_at_depth( int depth );
 
   public:
 
@@ -488,19 +545,19 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _m2l_counts = Kokkos::View<int*, memory_space>();
     _m2l_depth_offsets.clear();
     _m2l_op_table =
-        Kokkos::View<complex_type****, Kokkos::LayoutLeft, memory_space>();
-    _m2l_depth_to_op_idx.clear();
-    _m2l_pair_bins = Kokkos::View<int*, memory_space>();
-    _m2l_bin_pair_targets = Kokkos::View<int*, memory_space>();
-    _m2l_bin_pair_sources = Kokkos::View<int*, memory_space>();
-    _m2l_bin_pair_offsets = Kokkos::View<int**, memory_space>();
+        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>();
+    _m2l_nonshared_pair_targets = Kokkos::View<int*, memory_space>();
+    _m2l_nonshared_pair_sources = Kokkos::View<int*, memory_space>();
+    _m2l_nonshared_op_keys.clear();
+    _m2l_nonshared_op_offsets.clear();
+    _m2l_shared_pair_targets = Kokkos::View<int*, memory_space>();
+    _m2l_shared_pair_sources = Kokkos::View<int*, memory_space>();
+    _m2l_shared_op_keys.clear();
+    _m2l_shared_op_offsets.clear();
+    _m2l_shared_op_depth_starts.clear();
     _m2l_fallback_targets = Kokkos::View<int*, memory_space>();
     _m2l_fallback_sources = Kokkos::View<int*, memory_space>();
-    _m2l_fallback_offsets = Kokkos::View<int*, memory_space>();
-    _m2l_bin_pair_offsets_host =
-        typename Kokkos::View<int**, memory_space>::HostMirror();
-    _m2l_fallback_offsets_host =
-        typename Kokkos::View<int*, memory_space>::HostMirror();
+    _m2l_fallback_offsets_host.clear();
     _m2l_M_packed =
         Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>();
     _m2l_L_packed =
@@ -641,302 +698,375 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     // -----------------------------------------------------------------------
-    // Stage 3: per-pair bin ids and per-active-depth M2L operator tables.
+    // Stage 3: hash-map every (target, source) pair to a unique M2L operator
+    // key (max_d, dd, ii, jj, kk). Pairs sharing a key share an operator T,
+    // regardless of which depths target / source live at.
     //
-    // For each (target, source) pair we compute the integer offset
-    //   (i, j, k) = round((src_center - tgt_center) / w_d)
-    // where w_d = 2 * tgt.half_width is the cell width at depth d. If
-    // |i|, |j|, |k| <= M2L_BIN_RANGE, the pair shares an M2L operator
-    // with every other pair at the same depth and same offset. Pairs with
-    // out-of-range offsets get bin = -1 and use the direct m2l_translate
-    // fallback in run_m2l_at_depth.
+    // Unit grid: cell at depth d, index i has center (2i+1) * half_w_d, so
+    // the difference of any two centers (at any depths) is an integer
+    // multiple of half_w_max_d, where max_d = max(d_t, d_s). We use that as
+    // the unit length.
+    //
+    // Range guards: pairs with |dd| > M2L_KEY_DD_MAX or |offset| component >
+    // M2L_KEY_OFFSET_MAX route to per-pair m2l_translate fallback. These
+    // guards exist purely to defend against pathological tree state; a
+    // healthy MAC traversal does not produce out-of-range pairs.
     // -----------------------------------------------------------------------
-    const int total_pairs = static_cast<int>( sources_flat.size() );
-    std::vector<int> pair_bins( total_pairs, -1 );
     std::vector<double> half_width_at_depth( _max_depth + 1, 0.0 );
+    {
+        const int num_cells = _device_cells.extent( 0 );
+        for ( int i = 0; i < num_cells; i++ )
+        {
+            const auto& dci = h_dc_for_filter( i );
+            if ( dci.depth >= 0 && dci.depth <= _max_depth )
+                half_width_at_depth[dci.depth] = dci.half_width;
+        }
+    }
+
+    const int total_pairs = static_cast<int>( sources_flat.size() );
+
+    // Per-pair information collected during the classification pass.
+    // op_idx == -1 means the pair routes to the fallback path.
+    std::vector<int> pair_op_idx( total_pairs, -1 );
+    std::vector<int> pair_target( total_pairs );
+    std::vector<int> pair_source( total_pairs );
+    std::vector<int> pair_target_depth( total_pairs );
+    std::vector<unsigned char> pair_target_is_shared( total_pairs, 0 );
+
+    std::unordered_map<M2LKey, int, M2LKeyHash> key_to_op;
+    std::vector<M2LKey> ops;
+    bool overflow_warned = false;
+
     {
         size_t pair_cursor = 0;
         for ( const auto& e : entries )
         {
             const auto& tci = h_dc_for_filter( e.target_idx );
-            const double w = 2.0 * tci.half_width;
-            half_width_at_depth[e.depth] = tci.half_width;
-            const double inv_w = ( w > 0.0 ) ? ( 1.0 / w ) : 0.0;
+            const bool tgt_shared =
+                ( tci.owner_rank == OWNER_SHARED );
             for ( int s : e.sources )
             {
                 const auto& sci = h_dc_for_filter( s );
+                const int max_d = std::max( e.depth, sci.depth );
+                const double unit_w =
+                    ( max_d >= 0 && max_d <= _max_depth )
+                        ? half_width_at_depth[max_d]
+                        : 0.0;
+                const double inv_unit_w =
+                    ( unit_w > 0.0 ) ? ( 1.0 / unit_w ) : 0.0;
                 const double dx = sci.center[0] - tci.center[0];
                 const double dy = sci.center[1] - tci.center[1];
                 const double dz = sci.center[2] - tci.center[2];
                 const int ii = static_cast<int>(
-                    std::lround( dx * inv_w ) );
+                    std::lround( dx * inv_unit_w ) );
                 const int jj = static_cast<int>(
-                    std::lround( dy * inv_w ) );
+                    std::lround( dy * inv_unit_w ) );
                 const int kk = static_cast<int>(
-                    std::lround( dz * inv_w ) );
-                int bin = -1;
-                const bool same_depth = ( sci.depth == e.depth );
-                if ( same_depth && std::abs( ii ) <= M2L_BIN_RANGE &&
-                     std::abs( jj ) <= M2L_BIN_RANGE &&
-                     std::abs( kk ) <= M2L_BIN_RANGE )
+                    std::lround( dz * inv_unit_w ) );
+                const int dd = sci.depth - e.depth;
+
+                int op_idx = -1;
+                if ( unit_w > 0.0 && std::abs( dd ) <= M2L_KEY_DD_MAX &&
+                     std::abs( ii ) <= M2L_KEY_OFFSET_MAX &&
+                     std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
+                     std::abs( kk ) <= M2L_KEY_OFFSET_MAX )
                 {
-                    bin = ( ( ii + M2L_BIN_RANGE ) * M2L_BIN_DIM +
-                            ( jj + M2L_BIN_RANGE ) ) *
-                              M2L_BIN_DIM +
-                          ( kk + M2L_BIN_RANGE );
+                    M2LKey key{ max_d, dd, ii, jj, kk };
+                    auto it = key_to_op.find( key );
+                    if ( it != key_to_op.end() )
+                    {
+                        op_idx = it->second;
+                    }
+                    else if ( static_cast<int>( ops.size() ) <
+                              M2L_OP_COUNT_CAP )
+                    {
+                        op_idx = static_cast<int>( ops.size() );
+                        key_to_op.emplace( key, op_idx );
+                        ops.push_back( key );
+                    }
+                    else if ( !overflow_warned )
+                    {
+                        std::fprintf(
+                            stderr,
+                            "[Canopy] M2L op count exceeded cap %d; "
+                            "remaining pairs route to fallback path.\n",
+                            M2L_OP_COUNT_CAP );
+                        overflow_warned = true;
+                    }
                 }
-                pair_bins[pair_cursor++] = bin;
+
+                pair_op_idx[pair_cursor] = op_idx;
+                pair_target[pair_cursor] = e.target_idx;
+                pair_source[pair_cursor] = s;
+                pair_target_depth[pair_cursor] = e.depth;
+                pair_target_is_shared[pair_cursor] =
+                    tgt_shared ? 1u : 0u;
+                ++pair_cursor;
             }
         }
     }
 
-    // Determine which depths actually have any M2L work.
-    std::vector<int> depth_to_op_idx( _max_depth + 1, -1 );
-    std::vector<int> active_depths;
-    for ( const auto& e : entries )
-    {
-        if ( !e.sources.empty() && depth_to_op_idx[e.depth] == -1 )
-        {
-            depth_to_op_idx[e.depth] =
-                static_cast<int>( active_depths.size() );
-            active_depths.push_back( e.depth );
-        }
-    }
-
-    // Build operator tables on host for each active depth, every
-    // in-range bin offset. The 4D shape is laid out so that subview(_,
-    // ALL, ALL, bin, d_idx) is a contiguous LayoutLeft (Nt, Ns) matrix —
-    // see _m2l_op_table declaration.
-    const int n_active = static_cast<int>( active_depths.size() );
-    using complex_t = complex_type;
-    Kokkos::View<complex_t****, Kokkos::LayoutLeft, memory_space> op_table(
-        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_op_table" ),
-        KernelType::num_coeffs_per_cell, KernelType::m2l_num_src_coeffs,
-        M2L_NUM_BINS, n_active > 0 ? n_active : 1 );
-    auto h_op = Kokkos::create_mirror_view( op_table );
-
-    auto h_A = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
-                                                    _A_table );
-    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
-    {
-        const int d = active_depths[d_idx];
-        const double w = 2.0 * half_width_at_depth[d];
-        for ( int ii = -M2L_BIN_RANGE; ii <= M2L_BIN_RANGE; ii++ )
-            for ( int jj = -M2L_BIN_RANGE; jj <= M2L_BIN_RANGE; jj++ )
-                for ( int kk = -M2L_BIN_RANGE; kk <= M2L_BIN_RANGE; kk++ )
-                {
-                    const int bin =
-                        ( ( ii + M2L_BIN_RANGE ) * M2L_BIN_DIM +
-                          ( jj + M2L_BIN_RANGE ) ) *
-                            M2L_BIN_DIM +
-                        ( kk + M2L_BIN_RANGE );
-                    auto T_slice = Kokkos::subview(
-                        h_op, Kokkos::ALL, Kokkos::ALL, bin, d_idx );
-                    KernelType::m2l_build_operator(
-                        static_cast<scalar_type>( ii * w ),
-                        static_cast<scalar_type>( jj * w ),
-                        static_cast<scalar_type>( kk * w ), h_A, T_slice );
-                }
-    }
-    Kokkos::deep_copy( op_table, h_op );
-    _m2l_op_table = op_table;
-
-    _m2l_depth_to_op_idx = std::move( depth_to_op_idx );
-
-    // pair bins on device
-    _m2l_pair_bins =
-        Kokkos::View<int*, memory_space>( "m2l_pair_bins", total_pairs );
-    if ( total_pairs > 0 )
-    {
-        auto h_pb = Kokkos::create_mirror_view( _m2l_pair_bins );
-        for ( int i = 0; i < total_pairs; i++ )
-            h_pb( i ) = pair_bins[i];
-        Kokkos::deep_copy( _m2l_pair_bins, h_pb );
-    }
+    const int n_unique_ops = static_cast<int>( ops.size() );
 
     // -----------------------------------------------------------------------
-    // Stage 4: bin-major pair layout for batched-GEMM M2L.
-    //
-    // Re-bucket the (target, source) pairs so that all pairs sharing the
-    // same active-depth-index d_idx and bin b are contiguous in memory.
-    // Out-of-bin pairs (bin == -1) go into a separate fallback table sliced
-    // by depth — they will be processed by the per-pair m2l_translate
-    // kernel and are typically <1% of pairs.
-    //
-    // bin_offsets_h(d_idx, b) is a global prefix sum over all (d_idx, b),
-    // so a single flat (target, source) array holds every binnable pair.
-    //
-    // Allocate the device view up front so its HostMirror has a matching
-    // layout (LayoutLeft on CudaSpace; LayoutRight on host spaces). Using
-    // a fresh HostSpace LayoutRight scratch View here would prevent the
-    // later cross-space deep_copy because no exec space can bridge the
-    // two layouts.
+    // Stage 4: build the (Nt, Ns, n_unique_ops) operator table on host,
+    // then deep_copy to device. Each op key encodes the physical translation
+    // (ii, jj, kk) * unit_w, with unit_w = width_at_depth[max_d]; the
+    // operator only depends on this physical vector.
     // -----------------------------------------------------------------------
-    _m2l_bin_pair_offsets = Kokkos::View<int**, memory_space>(
-        "m2l_bin_pair_offsets", n_active > 0 ? n_active : 1,
-        M2L_NUM_BINS + 1 );
-    auto bin_offsets_h = Kokkos::create_mirror_view( _m2l_bin_pair_offsets );
-    Kokkos::deep_copy( bin_offsets_h, 0 );
-    std::vector<int> fallback_offsets_h( n_active + 1, 0 );
-
-    // First pass: count.
     {
-        size_t pair_cursor = 0;
-        for ( const auto& e : entries )
+        const int Nt = KernelType::num_coeffs_per_cell;
+        const int Ns = KernelType::m2l_num_src_coeffs;
+        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
+            op_table( Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                          "m2l_op_table" ),
+                      Nt, Ns, n_unique_ops > 0 ? n_unique_ops : 1 );
+        auto h_op = Kokkos::create_mirror_view( op_table );
+
+        if ( n_unique_ops > 0 )
         {
-            const int d_idx =
-                ( e.depth >= 0 && e.depth <= _max_depth )
-                    ? _m2l_depth_to_op_idx[e.depth]
-                    : -1;
-            for ( size_t s = 0; s < e.sources.size(); s++ )
+            auto h_A = Kokkos::create_mirror_view_and_copy(
+                Kokkos::HostSpace{}, _A_table );
+            for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
             {
-                const int bin = pair_bins[pair_cursor++];
-                if ( d_idx >= 0 && bin >= 0 )
-                    bin_offsets_h( d_idx, bin + 1 )++;
-                else if ( d_idx >= 0 )
-                    fallback_offsets_h[d_idx + 1]++;
-                // (d_idx < 0 means depth has no operator table entry; such
-                //  pairs do not participate in the batched path. We do not
-                //  expect any to exist because depth_to_op_idx was built
-                //  from the same entries vector, but be defensive.)
+                const auto& k = ops[op_idx];
+                const double unit_w = half_width_at_depth[k.max_d];
+                auto T_slice = Kokkos::subview( h_op, Kokkos::ALL,
+                                                Kokkos::ALL, op_idx );
+                KernelType::m2l_build_operator(
+                    static_cast<scalar_type>( k.ii * unit_w ),
+                    static_cast<scalar_type>( k.jj * unit_w ),
+                    static_cast<scalar_type>( k.kk * unit_w ), h_A,
+                    T_slice );
             }
+        }
+        Kokkos::deep_copy( op_table, h_op );
+        _m2l_op_table = op_table;
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 5: classify ops as nonshared (every pair has a non-shared
+    // target) vs shared (at least one shared-target pair). Shared ops must
+    // be processed inside the per-depth loop so the snapshot/allreduce
+    // barrier can isolate the M2L delta to shared cells at depth d.
+    // Nonshared ops can be processed once before the depth loop, with all
+    // depths batched together for maximum GEMM size — see run_m2l_all().
+    // -----------------------------------------------------------------------
+    std::vector<int> op_pair_count( n_unique_ops, 0 );
+    std::vector<unsigned char> op_has_shared( n_unique_ops, 0 );
+    for ( int p = 0; p < total_pairs; p++ )
+    {
+        const int oi = pair_op_idx[p];
+        if ( oi < 0 )
+            continue;
+        ++op_pair_count[oi];
+        if ( pair_target_is_shared[p] )
+            op_has_shared[oi] = 1u;
+    }
+
+    _m2l_nonshared_op_keys.clear();
+    _m2l_shared_op_keys.clear();
+    std::vector<int> op_idx_to_nonshared( n_unique_ops, -1 );
+    std::vector<int> op_idx_to_shared( n_unique_ops, -1 );
+    for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
+    {
+        if ( op_pair_count[op_idx] == 0 )
+            continue;
+        if ( op_has_shared[op_idx] )
+        {
+            op_idx_to_shared[op_idx] =
+                static_cast<int>( _m2l_shared_op_keys.size() );
+            _m2l_shared_op_keys.push_back( op_idx );
+        }
+        else
+        {
+            op_idx_to_nonshared[op_idx] =
+                static_cast<int>( _m2l_nonshared_op_keys.size() );
+            _m2l_nonshared_op_keys.push_back( op_idx );
+        }
+    }
+    const int n_nonshared_ops =
+        static_cast<int>( _m2l_nonshared_op_keys.size() );
+    const int n_shared_ops =
+        static_cast<int>( _m2l_shared_op_keys.size() );
+
+    // -----------------------------------------------------------------------
+    // Stage 6: emit op-major pair tables.
+    //
+    // Nonshared layout: pairs grouped by nonshared-op-index; within an op,
+    // the order is whatever the entries iteration produced (any order is
+    // correct because run_m2l_all packs the whole op slice in one shot).
+    //
+    // Shared layout: pairs grouped by shared-op-index; within an op, sorted
+    // by target depth (ascending). _m2l_shared_op_depth_starts[i][d] gives
+    // the slot offset *within op i* where target-depth-d pairs begin.
+    //
+    // Fallback layout: pairs sorted by target depth so run_m2l_at_depth(d)
+    // can extract a contiguous depth-d slice.
+    // -----------------------------------------------------------------------
+
+    // Per-op pair counts in the partitioned layout.
+    _m2l_nonshared_op_offsets.assign( n_nonshared_ops + 1, 0 );
+    _m2l_shared_op_offsets.assign( n_shared_ops + 1, 0 );
+    _m2l_shared_op_depth_starts.assign(
+        n_shared_ops, std::vector<int>( _max_depth + 2, 0 ) );
+    _m2l_fallback_offsets_host.assign( _max_depth + 2, 0 );
+
+    // First counting pass.
+    for ( int p = 0; p < total_pairs; p++ )
+    {
+        const int oi = pair_op_idx[p];
+        const int d = pair_target_depth[p];
+        if ( oi < 0 )
+        {
+            if ( d >= 0 && d <= _max_depth )
+                _m2l_fallback_offsets_host[d + 1]++;
+        }
+        else if ( op_idx_to_nonshared[oi] >= 0 )
+        {
+            _m2l_nonshared_op_offsets[op_idx_to_nonshared[oi] + 1]++;
+        }
+        else
+        {
+            const int si = op_idx_to_shared[oi];
+            _m2l_shared_op_offsets[si + 1]++;
+            if ( d >= 0 && d <= _max_depth )
+                _m2l_shared_op_depth_starts[si][d + 1]++;
         }
     }
 
-    // Global prefix sum across (d_idx, b) for binnable pairs, and per-depth
-    // prefix sum for fallback pairs.
-    int total_binnable = 0;
-    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
+    // Prefix sums.
+    for ( int i = 0; i < n_nonshared_ops; i++ )
+        _m2l_nonshared_op_offsets[i + 1] += _m2l_nonshared_op_offsets[i];
+    for ( int i = 0; i < n_shared_ops; i++ )
     {
-        bin_offsets_h( d_idx, 0 ) = total_binnable;
-        for ( int b = 0; b < M2L_NUM_BINS; b++ )
-            bin_offsets_h( d_idx, b + 1 ) += bin_offsets_h( d_idx, b );
-        total_binnable = bin_offsets_h( d_idx, M2L_NUM_BINS );
+        _m2l_shared_op_offsets[i + 1] += _m2l_shared_op_offsets[i];
+        for ( int d = 0; d <= _max_depth; d++ )
+            _m2l_shared_op_depth_starts[i][d + 1] +=
+                _m2l_shared_op_depth_starts[i][d];
     }
-    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
-        fallback_offsets_h[d_idx + 1] += fallback_offsets_h[d_idx];
-    const int total_fallback = fallback_offsets_h[n_active];
+    for ( int d = 0; d <= _max_depth; d++ )
+        _m2l_fallback_offsets_host[d + 1] +=
+            _m2l_fallback_offsets_host[d];
 
-    // Second pass: scatter. bin_cursors / fb_cursors track the next free
-    // slot per bucket, advancing as we place pairs.
-    Kokkos::View<int**, Kokkos::HostSpace> bin_cursors(
-        "m2l_bin_pair_cursors_host", n_active > 0 ? n_active : 1,
-        M2L_NUM_BINS );
-    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
-        for ( int b = 0; b < M2L_NUM_BINS; b++ )
-            bin_cursors( d_idx, b ) = bin_offsets_h( d_idx, b );
-    std::vector<int> fb_cursors = fallback_offsets_h;
+    const int total_nonshared =
+        _m2l_nonshared_op_offsets[n_nonshared_ops];
+    const int total_shared = _m2l_shared_op_offsets[n_shared_ops];
+    const int total_fallback = _m2l_fallback_offsets_host[_max_depth + 1];
 
-    std::vector<int> bin_targets_h( total_binnable );
-    std::vector<int> bin_sources_h( total_binnable );
+    std::vector<int> ns_targets_h( total_nonshared );
+    std::vector<int> ns_sources_h( total_nonshared );
+    std::vector<int> sh_targets_h( total_shared );
+    std::vector<int> sh_sources_h( total_shared );
     std::vector<int> fb_targets_h( total_fallback );
     std::vector<int> fb_sources_h( total_fallback );
 
+    // Cursors. For shared, we track per-(op, depth) cursors so writes
+    // place pairs into the right depth sub-slice within the op.
+    std::vector<int> ns_cursors = _m2l_nonshared_op_offsets;
+    std::vector<int> sh_op_base_cursors = _m2l_shared_op_offsets;
+    std::vector<std::vector<int>> sh_depth_cursors(
+        n_shared_ops, std::vector<int>( _max_depth + 2, 0 ) );
+    for ( int i = 0; i < n_shared_ops; i++ )
+        sh_depth_cursors[i] = _m2l_shared_op_depth_starts[i];
+    std::vector<int> fb_cursors = _m2l_fallback_offsets_host;
+
+    // Second pass: scatter.
+    for ( int p = 0; p < total_pairs; p++ )
     {
-        size_t pair_cursor = 0;
-        for ( const auto& e : entries )
+        const int oi = pair_op_idx[p];
+        const int d = pair_target_depth[p];
+        if ( oi < 0 )
         {
-            const int d_idx =
-                ( e.depth >= 0 && e.depth <= _max_depth )
-                    ? _m2l_depth_to_op_idx[e.depth]
-                    : -1;
-            for ( int src : e.sources )
-            {
-                const int bin = pair_bins[pair_cursor++];
-                if ( d_idx < 0 )
-                    continue;
-                if ( bin >= 0 )
-                {
-                    const int slot = bin_cursors( d_idx, bin )++;
-                    bin_targets_h[slot] = e.target_idx;
-                    bin_sources_h[slot] = src;
-                }
-                else
-                {
-                    const int slot = fb_cursors[d_idx]++;
-                    fb_targets_h[slot] = e.target_idx;
-                    fb_sources_h[slot] = src;
-                }
-            }
+            if ( d < 0 || d > _max_depth )
+                continue;
+            const int slot = fb_cursors[d]++;
+            fb_targets_h[slot] = pair_target[p];
+            fb_sources_h[slot] = pair_source[p];
+        }
+        else if ( op_idx_to_nonshared[oi] >= 0 )
+        {
+            const int ni = op_idx_to_nonshared[oi];
+            const int slot = ns_cursors[ni]++;
+            ns_targets_h[slot] = pair_target[p];
+            ns_sources_h[slot] = pair_source[p];
+        }
+        else
+        {
+            const int si = op_idx_to_shared[oi];
+            const int dd =
+                ( d >= 0 && d <= _max_depth ) ? d : _max_depth;
+            const int slot = sh_op_base_cursors[si] +
+                             sh_depth_cursors[si][dd]++;
+            sh_targets_h[slot] = pair_target[p];
+            sh_sources_h[slot] = pair_source[p];
         }
     }
 
-    // Upload to device. _m2l_bin_pair_offsets was allocated earlier so
-    // bin_offsets_h could be its HostMirror with a matching layout.
-    _m2l_bin_pair_targets = Kokkos::View<int*, memory_space>(
-        "m2l_bin_pair_targets", total_binnable );
-    _m2l_bin_pair_sources = Kokkos::View<int*, memory_space>(
-        "m2l_bin_pair_sources", total_binnable );
+    // Upload to device.
+    _m2l_nonshared_pair_targets = Kokkos::View<int*, memory_space>(
+        "m2l_nonshared_targets", total_nonshared );
+    _m2l_nonshared_pair_sources = Kokkos::View<int*, memory_space>(
+        "m2l_nonshared_sources", total_nonshared );
+    _m2l_shared_pair_targets = Kokkos::View<int*, memory_space>(
+        "m2l_shared_targets", total_shared );
+    _m2l_shared_pair_sources = Kokkos::View<int*, memory_space>(
+        "m2l_shared_sources", total_shared );
     _m2l_fallback_targets = Kokkos::View<int*, memory_space>(
         "m2l_fallback_targets", total_fallback );
     _m2l_fallback_sources = Kokkos::View<int*, memory_space>(
         "m2l_fallback_sources", total_fallback );
-    _m2l_fallback_offsets = Kokkos::View<int*, memory_space>(
-        "m2l_fallback_offsets", n_active + 1 );
 
-    if ( total_binnable > 0 )
+    auto upload = []( const std::vector<int>& src,
+                      Kokkos::View<int*, memory_space>& dst )
     {
-        auto h_t = Kokkos::create_mirror_view( _m2l_bin_pair_targets );
-        auto h_s = Kokkos::create_mirror_view( _m2l_bin_pair_sources );
-        for ( int i = 0; i < total_binnable; i++ )
-        {
-            h_t( i ) = bin_targets_h[i];
-            h_s( i ) = bin_sources_h[i];
-        }
-        Kokkos::deep_copy( _m2l_bin_pair_targets, h_t );
-        Kokkos::deep_copy( _m2l_bin_pair_sources, h_s );
-    }
-    Kokkos::deep_copy( _m2l_bin_pair_offsets, bin_offsets_h );
-    // bin_offsets_h is already the matching HostMirror — retain it
-    // directly as the persistent host-side cache used by run_m2l_at_depth.
-    _m2l_bin_pair_offsets_host = bin_offsets_h;
+        if ( src.empty() )
+            return;
+        auto h = Kokkos::create_mirror_view( dst );
+        for ( size_t i = 0; i < src.size(); i++ )
+            h( i ) = src[i];
+        Kokkos::deep_copy( dst, h );
+    };
+    upload( ns_targets_h, _m2l_nonshared_pair_targets );
+    upload( ns_sources_h, _m2l_nonshared_pair_sources );
+    upload( sh_targets_h, _m2l_shared_pair_targets );
+    upload( sh_sources_h, _m2l_shared_pair_sources );
+    upload( fb_targets_h, _m2l_fallback_targets );
+    upload( fb_sources_h, _m2l_fallback_sources );
 
-    if ( total_fallback > 0 )
-    {
-        auto h_t = Kokkos::create_mirror_view( _m2l_fallback_targets );
-        auto h_s = Kokkos::create_mirror_view( _m2l_fallback_sources );
-        for ( int i = 0; i < total_fallback; i++ )
-        {
-            h_t( i ) = fb_targets_h[i];
-            h_s( i ) = fb_sources_h[i];
-        }
-        Kokkos::deep_copy( _m2l_fallback_targets, h_t );
-        Kokkos::deep_copy( _m2l_fallback_sources, h_s );
-    }
-    {
-        auto h_o = Kokkos::create_mirror_view( _m2l_fallback_offsets );
-        for ( int i = 0; i <= n_active; i++ )
-            h_o( i ) = fallback_offsets_h[i];
-        Kokkos::deep_copy( _m2l_fallback_offsets, h_o );
-        _m2l_fallback_offsets_host = h_o;
-    }
-
-    // Per-active-depth fallback pair count, derived from the same prefix
-    // sum we just uploaded.
-    _m2l_fallback_count_per_active_depth.assign( n_active, 0 );
-    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
-        _m2l_fallback_count_per_active_depth[d_idx] =
-            static_cast<long long>( fallback_offsets_h[d_idx + 1] -
-                                    fallback_offsets_h[d_idx] );
+    // Per-depth fallback counts for total_fallback_pair_count().
+    _m2l_fallback_count_per_active_depth.assign( _max_depth + 1, 0 );
+    for ( int d = 0; d <= _max_depth; d++ )
+        _m2l_fallback_count_per_active_depth[d] =
+            static_cast<long long>( _m2l_fallback_offsets_host[d + 1] -
+                                    _m2l_fallback_offsets_host[d] );
 
     // -----------------------------------------------------------------------
-    // Stage 5: size and allocate the packed-multipole / packed-local
-    // scratch buffers used by the batched-GEMM M2L pipeline. Sized to the
-    // largest active depth's binnable pair count so the buffers are reused
-    // across depths (depths run sequentially) and across solves.
+    // Stage 7: size and allocate the packed-multipole / packed-local
+    // scratch buffers. We need at least:
+    //   - total_nonshared * NComps columns (single all-at-once pack used
+    //     by run_m2l_all)
+    //   - max over (shared op i, depth d) of pair_count(i, d) * NComps
+    //     (per-(op, depth) pack used inside run_m2l_at_depth)
     // -----------------------------------------------------------------------
-    int max_pairs_at_depth = 0;
-    for ( int d_idx = 0; d_idx < n_active; d_idx++ )
+    int max_shared_op_depth_pairs = 0;
+    for ( int i = 0; i < n_shared_ops; i++ )
     {
-        const int n =
-            _m2l_bin_pair_offsets_host( d_idx, M2L_NUM_BINS ) -
-            _m2l_bin_pair_offsets_host( d_idx, 0 );
-        if ( n > max_pairs_at_depth )
-            max_pairs_at_depth = n;
+        for ( int d = 0; d <= _max_depth; d++ )
+        {
+            const int n =
+                _m2l_shared_op_depth_starts[i][d + 1] -
+                _m2l_shared_op_depth_starts[i][d];
+            if ( n > max_shared_op_depth_pairs )
+                max_shared_op_depth_pairs = n;
+        }
     }
+    const int max_pairs_per_phase =
+        std::max( total_nonshared, max_shared_op_depth_pairs );
+
     const int Ns = KernelType::m2l_num_src_coeffs;
     const int Nt = KernelType::num_coeffs_per_cell;
-    const int n_cols = max_pairs_at_depth * NComps;
+    const int n_cols = max_pairs_per_phase * NComps;
     _m2l_M_packed =
         Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>(
             "m2l_M_packed", Ns, n_cols > 0 ? n_cols : 1 );
@@ -1038,52 +1168,43 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     Kokkos::deep_copy( multipoles, h_mults );
 }
 
+// -------------------------------------------------------------------------
+// run_m2l_all: process every M2L pair whose target is non-shared. Run
+// once per solve, before the per-depth loop. Pairs are pre-grouped by
+// op_idx in _m2l_nonshared_pair_*; each op gets a single GEMM whose `n`
+// dimension spans all that op's pairs across every depth — the largest
+// possible batch the snapshot/allreduce barrier permits.
+// -------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace, class KernelType>
-void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
-    int depth )
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_all()
 {
     CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2L_KERNEL );
 
-    // Resolve depth -> active-depth slice (host-side lookup).
-    const int op_d_idx =
-        ( depth >= 0 &&
-          depth < static_cast<int>( _m2l_depth_to_op_idx.size() ) )
-            ? _m2l_depth_to_op_idx[depth]
-            : -1;
-    if ( op_d_idx < 0 )
+    const int n_nonshared_ops =
+        static_cast<int>( _m2l_nonshared_op_keys.size() );
+    if ( n_nonshared_ops == 0 )
         return;
-
-    // Per-depth slice into the bin-major pair table (globally prefix-summed
-    // across active depths, so this is a contiguous range of slot indices).
-    const int per_depth_begin =
-        _m2l_bin_pair_offsets_host( op_d_idx, 0 );
-    const int per_depth_end =
-        _m2l_bin_pair_offsets_host( op_d_idx, M2L_NUM_BINS );
-    const int n_pairs = per_depth_end - per_depth_begin;
+    const int n_pairs =
+        static_cast<int>( _m2l_nonshared_pair_targets.extent( 0 ) );
+    if ( n_pairs == 0 )
+        return;
 
     constexpr int Ns = KernelType::m2l_num_src_coeffs;
     constexpr int Nt = KernelType::num_coeffs_per_cell;
     constexpr int P_local = KernelType::max_order;
 
-    if ( n_pairs > 0 )
+    // (a) Pack source multipoles for every nonshared pair into M_packed,
+    //     column index = pair_slot * NComps + c.
     {
-        // -------------------------------------------------------------------
-        // (a) Pack source multipoles for every binnable pair at this depth
-        //     into _m2l_M_packed of shape (Ns, n_pairs * NComps), LayoutLeft.
-        //     Within column index `p * NComps + c`, the rows enumerate the
-        //     symmetry-expanded source basis index src_idx = n*n + n + m.
-        // -------------------------------------------------------------------
-        auto bin_pair_sources = _m2l_bin_pair_sources;
+        auto pair_sources = _m2l_nonshared_pair_sources;
         auto multipoles = _m2l_multipoles_view;
         auto M_packed = _m2l_M_packed;
-
         Kokkos::parallel_for(
-            "M2L_pack",
+            "M2L_pack_nonshared",
             Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<3>>(
                 { 0, 0, 0 }, { n_pairs, P_local + 1, NComps } ),
             KOKKOS_LAMBDA( int p, int n, int c ) {
-                const int src_cell =
-                    bin_pair_sources( per_depth_begin + p );
+                const int src_cell = pair_sources( p );
                 for ( int m = -n; m <= n; ++m )
                 {
                     const int src_idx = n * n + n + m;
@@ -1094,100 +1215,181 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
                     const complex_type val =
                         ( m >= 0 )
                             ? stored
-                            : complex_type( stored.real(), -stored.imag() );
+                            : complex_type( stored.real(),
+                                            -stored.imag() );
                     M_packed( src_idx, p * NComps + c ) = val;
                 }
             } );
-
-        // -------------------------------------------------------------------
-        // (b) Per-bin batched GEMM. Each non-empty bin owns a contiguous
-        //     column slice of M_packed / L_packed; the operator T is a
-        //     contiguous (Nt, Ns) LayoutLeft slice of _m2l_op_table.
-        // -------------------------------------------------------------------
-        static_assert(
-            detail::M2LBatchedGemm<execution_space, scalar_type>::available,
-            "Canopy DownwardSweep: no batched-GEMM backend is available for "
-            "this execution space. Build with cuBLAS (CUDA), hipBLAS (HIP), "
-            "or KokkosKernels — see CMakeLists.txt batched-gemm M2L block." );
-
-        for ( int b = 0; b < M2L_NUM_BINS; ++b )
-        {
-            const int bin_lo = _m2l_bin_pair_offsets_host( op_d_idx, b );
-            const int bin_hi =
-                _m2l_bin_pair_offsets_host( op_d_idx, b + 1 );
-            const int n_b = bin_hi - bin_lo;
-            if ( n_b == 0 )
-                continue;
-
-            auto T_slice = Kokkos::subview( _m2l_op_table, Kokkos::ALL,
-                                            Kokkos::ALL, b, op_d_idx );
-
-            const int col_off = ( bin_lo - per_depth_begin ) * NComps;
-            const int n_cols = n_b * NComps;
-
-            // Column-major leading dimensions equal row counts because
-            // both M_packed and L_packed are tightly packed LayoutLeft.
-            _m2l_gemm.gemm_NN(
-                Nt, n_cols, Ns, T_slice.data(),
-                static_cast<int>( T_slice.stride_1() ),
-                _m2l_M_packed.data() +
-                    col_off * static_cast<std::ptrdiff_t>(
-                                  _m2l_M_packed.stride_1() ),
-                static_cast<int>( _m2l_M_packed.stride_1() ),
-                _m2l_L_packed.data() +
-                    col_off * static_cast<std::ptrdiff_t>(
-                                  _m2l_L_packed.stride_1() ),
-                static_cast<int>( _m2l_L_packed.stride_1() ) );
-        }
-
-        // -------------------------------------------------------------------
-        // (c) Scatter-accumulate L_packed back into _locals. A single target
-        //     cell appears in multiple bins, so accumulation is atomic.
-        // -------------------------------------------------------------------
-        {
-            auto bin_pair_targets = _m2l_bin_pair_targets;
-            auto L_packed = _m2l_L_packed;
-            auto locals = _locals;
-
-            Kokkos::parallel_for(
-                "M2L_scatter",
-                Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<3>>(
-                    { 0, 0, 0 }, { n_pairs, Nt, NComps } ),
-                KOKKOS_LAMBDA( int p, int out_idx, int c ) {
-                    const int tgt_cell =
-                        bin_pair_targets( per_depth_begin + p );
-                    const complex_type val =
-                        L_packed( out_idx, p * NComps + c );
-                    Kokkos::atomic_add( &locals( tgt_cell, out_idx, c ),
-                                        val );
-                } );
-        }
     }
 
-    // (d) Out-of-bin pairs at this depth go through the on-the-fly
-    //     m2l_translate kernel, restricted to the precomputed fallback list.
-    run_m2l_fallback_at_depth( op_d_idx );
+    // (b) One GEMM per nonshared op on its column slice of M_packed.
+    static_assert(
+        detail::M2LBatchedGemm<execution_space, scalar_type>::available,
+        "Canopy DownwardSweep: no batched-GEMM backend is available for "
+        "this execution space. Build with cuBLAS (CUDA), hipBLAS (HIP), "
+        "or KokkosKernels — see CMakeLists.txt batched-gemm M2L block." );
+
+    for ( int oi = 0; oi < n_nonshared_ops; ++oi )
+    {
+        const int op_idx = _m2l_nonshared_op_keys[oi];
+        const int slot_lo = _m2l_nonshared_op_offsets[oi];
+        const int slot_hi = _m2l_nonshared_op_offsets[oi + 1];
+        const int n_op = slot_hi - slot_lo;
+        if ( n_op == 0 )
+            continue;
+
+        auto T_slice = Kokkos::subview( _m2l_op_table, Kokkos::ALL,
+                                        Kokkos::ALL, op_idx );
+        const int col_off = slot_lo * NComps;
+        const int n_cols = n_op * NComps;
+        _m2l_gemm.gemm_NN(
+            Nt, n_cols, Ns, T_slice.data(),
+            static_cast<int>( T_slice.stride_1() ),
+            _m2l_M_packed.data() +
+                col_off * static_cast<std::ptrdiff_t>(
+                              _m2l_M_packed.stride_1() ),
+            static_cast<int>( _m2l_M_packed.stride_1() ),
+            _m2l_L_packed.data() +
+                col_off * static_cast<std::ptrdiff_t>(
+                              _m2l_L_packed.stride_1() ),
+            static_cast<int>( _m2l_L_packed.stride_1() ) );
+    }
+
+    // (c) Atomic scatter L_packed back into _locals.
+    {
+        auto pair_targets = _m2l_nonshared_pair_targets;
+        auto L_packed = _m2l_L_packed;
+        auto locals = _locals;
+        Kokkos::parallel_for(
+            "M2L_scatter_nonshared",
+            Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<3>>(
+                { 0, 0, 0 }, { n_pairs, Nt, NComps } ),
+            KOKKOS_LAMBDA( int p, int out_idx, int c ) {
+                const int tgt_cell = pair_targets( p );
+                const complex_type val =
+                    L_packed( out_idx, p * NComps + c );
+                Kokkos::atomic_add( &locals( tgt_cell, out_idx, c ),
+                                    val );
+            } );
+    }
 
     Kokkos::fence();
 }
 
 // -------------------------------------------------------------------------
-// Per-pair m2l_translate fallback for out-of-bin pairs at one active
+// run_m2l_at_depth: process M2L contributions whose target sits at the
+// given depth and is shared (i.e., needs the snapshot/allreduce barrier),
+// plus the per-depth fallback slice. Nonshared targets are handled
+// separately by run_m2l_all().
+//
+// Shared-op pairs are sorted by target depth within each op, so the
+// depth-d sub-slice of each op is a contiguous range. We pack/GEMM/scatter
+// per shared op (typically a small number, since shared cells live in the
+// top of the tree).
+// -------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace, class KernelType>
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_at_depth(
+    int depth )
+{
+    CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2L_KERNEL );
+    if ( depth < 0 || depth > _max_depth )
+        return;
+
+    constexpr int Ns = KernelType::m2l_num_src_coeffs;
+    constexpr int Nt = KernelType::num_coeffs_per_cell;
+    constexpr int P_local = KernelType::max_order;
+
+    const int n_shared_ops =
+        static_cast<int>( _m2l_shared_op_keys.size() );
+
+    for ( int si = 0; si < n_shared_ops; ++si )
+    {
+        const int op_idx = _m2l_shared_op_keys[si];
+        const int op_base = _m2l_shared_op_offsets[si];
+        const int sub_lo =
+            op_base + _m2l_shared_op_depth_starts[si][depth];
+        const int sub_hi =
+            op_base + _m2l_shared_op_depth_starts[si][depth + 1];
+        const int n_b = sub_hi - sub_lo;
+        if ( n_b == 0 )
+            continue;
+
+        auto pair_sources = _m2l_shared_pair_sources;
+        auto pair_targets = _m2l_shared_pair_targets;
+        auto multipoles = _m2l_multipoles_view;
+        auto M_packed = _m2l_M_packed;
+        auto L_packed = _m2l_L_packed;
+        auto locals = _locals;
+
+        // Pack n_b pairs into columns [0, n_b * NComps) of M_packed.
+        Kokkos::parallel_for(
+            "M2L_pack_shared",
+            Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<3>>(
+                { 0, 0, 0 }, { n_b, P_local + 1, NComps } ),
+            KOKKOS_LAMBDA( int p, int n, int c ) {
+                const int src_cell = pair_sources( sub_lo + p );
+                for ( int m = -n; m <= n; ++m )
+                {
+                    const int src_idx = n * n + n + m;
+                    const int abs_m = ( m < 0 ) ? -m : m;
+                    const int storage_idx = n * ( n + 1 ) / 2 + abs_m;
+                    const complex_type stored =
+                        multipoles( src_cell, storage_idx, c );
+                    const complex_type val =
+                        ( m >= 0 )
+                            ? stored
+                            : complex_type( stored.real(),
+                                            -stored.imag() );
+                    M_packed( src_idx, p * NComps + c ) = val;
+                }
+            } );
+
+        auto T_slice = Kokkos::subview( _m2l_op_table, Kokkos::ALL,
+                                        Kokkos::ALL, op_idx );
+        const int n_cols = n_b * NComps;
+        _m2l_gemm.gemm_NN(
+            Nt, n_cols, Ns, T_slice.data(),
+            static_cast<int>( T_slice.stride_1() ),
+            _m2l_M_packed.data(),
+            static_cast<int>( _m2l_M_packed.stride_1() ),
+            _m2l_L_packed.data(),
+            static_cast<int>( _m2l_L_packed.stride_1() ) );
+
+        Kokkos::parallel_for(
+            "M2L_scatter_shared",
+            Kokkos::MDRangePolicy<execution_space, Kokkos::Rank<3>>(
+                { 0, 0, 0 }, { n_b, Nt, NComps } ),
+            KOKKOS_LAMBDA( int p, int out_idx, int c ) {
+                const int tgt_cell = pair_targets( sub_lo + p );
+                const complex_type val =
+                    L_packed( out_idx, p * NComps + c );
+                Kokkos::atomic_add( &locals( tgt_cell, out_idx, c ),
+                                    val );
+            } );
+    }
+
+    // Per-pair fallback for guard-rail-violating pairs at this depth.
+    run_m2l_fallback_at_depth( depth );
+
+    Kokkos::fence();
+}
+
+// -------------------------------------------------------------------------
+// Per-pair m2l_translate fallback for guard-rail-violating pairs at one
 // depth. Reads the (target, source) slice
-//   [_m2l_fallback_offsets[op_d_idx], _m2l_fallback_offsets[op_d_idx + 1])
-// and applies the existing m2l_translate kernel one team per pair. This
-// is the same code path that previously handled every pair, now restricted
-// to the small (typically <1%) tail that the bin-major path cannot batch.
+//   [_m2l_fallback_offsets_host[depth], _m2l_fallback_offsets_host[depth+1])
+// and applies the existing m2l_translate kernel one team per pair. In
+// healthy MAC traversals this list is empty.
 // -------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
-    run_m2l_fallback_at_depth( int op_d_idx )
+    run_m2l_fallback_at_depth( int depth )
 {
-    if ( op_d_idx < 0 ||
-         _m2l_fallback_offsets_host.extent( 0 ) == 0 )
+    if ( depth < 0 || depth > _max_depth ||
+         _m2l_fallback_offsets_host.empty() )
         return;
-    const int fb_begin = _m2l_fallback_offsets_host( op_d_idx );
-    const int fb_end = _m2l_fallback_offsets_host( op_d_idx + 1 );
+    const int fb_begin = _m2l_fallback_offsets_host[depth];
+    const int fb_end = _m2l_fallback_offsets_host[depth + 1];
     const int n_fb = fb_end - fb_begin;
     if ( n_fb == 0 )
         return;
@@ -1616,8 +1818,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
         // Pre-sweep: exchange remote multipoles needed for M2L
         exchange_multipoles_for_m2l( multipoles, comm_plan );
 
-        // Layer-by-layer: snapshot shared, M2L, allreduce shared M2L delta,
-        // L2L, exchange children
+        // Process all M2L pairs whose target is non-shared in one batch,
+        // pooling across depths for maximum GEMM size. Safe because the
+        // snapshot/allreduce barrier in the per-depth loop only operates
+        // on shared cells, which run_m2l_all does not touch.
+        run_m2l_all();
+
+        // Layer-by-layer: snapshot shared, M2L (shared targets only),
+        // allreduce shared M2L delta, L2L, exchange children.
         for ( int d = 0; d <= _max_depth; d++ )
         {
             snapshot_shared_locals_at_depth( d, comm_plan );
