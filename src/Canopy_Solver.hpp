@@ -407,6 +407,9 @@ class Solver
                                   _partitioner.cell_owner_map(),
                                   _replication_depth );
             }
+            // Tree topology and comm plan just changed; the cached M2L
+            // interaction list must be rebuilt on the next solve.
+            _downward.invalidate_interaction_list();
 
             // Step 7: setup sweeps and P2P (not individually timed)
             _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
@@ -445,6 +448,8 @@ class Solver
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_COMM_PLAN_BUILD );
           _comm_plan.build( _builder.cells(), _partitioner.ownership(),
                             _partitioner.cell_owner_map(), _replication_depth ); }
+        // Tree topology and comm plan just changed; invalidate the cache.
+        _downward.invalidate_interaction_list();
 
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
                        _builder.particle_keys(), _num_local );

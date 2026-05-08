@@ -176,6 +176,28 @@ class DownwardSweep
     // Access the computed local coefficients after execute()
     const coeff_view_type& locals() const { return _locals; }
 
+    // -----------------------------------------------------------------------
+    // invalidate_interaction_list()
+    //
+    // Marks the cached M2L interaction list (all per-tree / per-comm-plan
+    // device structures populated by build_interaction_list_device) as
+    // stale, so the next execute() rebuilds it. Must be called whenever
+    // the tree topology or communication plan changes — e.g. after
+    // TreeBuilder::build() that adds/removes cells, after
+    // TreePartitioner::repartition(), or after CommunicationPlan::build().
+    // setup() does this implicitly, so callers that already re-run setup()
+    // do not need to call this directly.
+    // -----------------------------------------------------------------------
+    void invalidate_interaction_list() { _interaction_list_dirty = true; }
+
+    // Number of times build_interaction_list_device has actually performed
+    // a rebuild (i.e. did not early-return because dirty was false). Used
+    // by tests to verify caching.
+    int interaction_list_build_count() const
+    {
+        return _interaction_list_build_count;
+    }
+
   private:
     MPI_Comm _comm;
     int _rank;
@@ -346,6 +368,16 @@ class DownwardSweep
     // and used by run_m2l_at_depth().
     typename UpwardSweep<MemorySpace, ExecutionSpace,
                          KernelType>::coeff_view_type _m2l_multipoles_view;
+
+    // Caching: build_interaction_list_device early-returns when this is
+    // false. setup() and invalidate_interaction_list() set it to true; the
+    // builder clears it at the end of a successful rebuild.
+    bool _interaction_list_dirty = true;
+
+    // Count of actual rebuilds done by build_interaction_list_device (does
+    // not increment on the early-return path). Surfaced by
+    // interaction_list_build_count() for the caching tests.
+    int _interaction_list_build_count = 0;
 
     // Per-depth snapshot of shared-cell locals taken before M2L at that
     // depth. Used by allreduce_shared_locals_at_depth to isolate the
@@ -563,6 +595,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _m2l_L_packed =
         Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>();
     _m2l_fallback_count_per_active_depth.clear();
+    _interaction_list_dirty = true;
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -570,6 +603,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     build_interaction_list_device(
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
+    if ( !_interaction_list_dirty )
+        return;
+
     const auto& m2l = comm_plan.m2l_plan();
     const auto& ilists = m2l.interaction_lists;
 
@@ -665,11 +701,16 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     // Upload to device
     const int N = static_cast<int>( target_cells.size() );
-    _m2l_target_cells = Kokkos::View<int*, memory_space>( "m2l_targets", N );
-    _m2l_counts = Kokkos::View<int*, memory_space>( "m2l_counts", N );
-    _m2l_offsets = Kokkos::View<int*, memory_space>( "m2l_offsets", N + 1 );
+    _m2l_target_cells = Kokkos::View<int*, memory_space>(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_targets" ), N );
+    _m2l_counts = Kokkos::View<int*, memory_space>(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_counts" ), N );
+    _m2l_offsets = Kokkos::View<int*, memory_space>(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_offsets" ),
+        N + 1 );
     _m2l_source_cells_flat = Kokkos::View<int*, memory_space>(
-        "m2l_sources_flat", static_cast<int>( sources_flat.size() ) );
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_sources_flat" ),
+        static_cast<int>( sources_flat.size() ) );
 
     if ( N > 0 )
     {
@@ -1003,19 +1044,32 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         }
     }
 
-    // Upload to device.
+    // Upload to device. WithoutInitializing because the upload helper below
+    // overwrites every element before any reader touches it.
     _m2l_nonshared_pair_targets = Kokkos::View<int*, memory_space>(
-        "m2l_nonshared_targets", total_nonshared );
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "m2l_nonshared_targets" ),
+        total_nonshared );
     _m2l_nonshared_pair_sources = Kokkos::View<int*, memory_space>(
-        "m2l_nonshared_sources", total_nonshared );
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "m2l_nonshared_sources" ),
+        total_nonshared );
     _m2l_shared_pair_targets = Kokkos::View<int*, memory_space>(
-        "m2l_shared_targets", total_shared );
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "m2l_shared_targets" ),
+        total_shared );
     _m2l_shared_pair_sources = Kokkos::View<int*, memory_space>(
-        "m2l_shared_sources", total_shared );
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "m2l_shared_sources" ),
+        total_shared );
     _m2l_fallback_targets = Kokkos::View<int*, memory_space>(
-        "m2l_fallback_targets", total_fallback );
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "m2l_fallback_targets" ),
+        total_fallback );
     _m2l_fallback_sources = Kokkos::View<int*, memory_space>(
-        "m2l_fallback_sources", total_fallback );
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "m2l_fallback_sources" ),
+        total_fallback );
 
     auto upload = []( const std::vector<int>& src,
                       Kokkos::View<int*, memory_space>& dst )
@@ -1067,12 +1121,22 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     const int Ns = KernelType::m2l_num_src_coeffs;
     const int Nt = KernelType::num_coeffs_per_cell;
     const int n_cols = max_pairs_per_phase * NComps;
+    // M_packed is fully populated by the M2L pack kernel before any GEMM
+    // reader; L_packed is the GEMM `C` output with beta = 0 on every
+    // backend (cuBLAS, hipBLAS, KokkosKernels — see Canopy_BatchedGemm.hpp).
+    // Both are safe to allocate WithoutInitializing, eliminating the
+    // complex<double> zero-fill that dominated the kernel summary.
     _m2l_M_packed =
         Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>(
-            "m2l_M_packed", Ns, n_cols > 0 ? n_cols : 1 );
+            Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_M_packed" ),
+            Ns, n_cols > 0 ? n_cols : 1 );
     _m2l_L_packed =
         Kokkos::View<complex_type**, Kokkos::LayoutLeft, memory_space>(
-            "m2l_L_packed", Nt, n_cols > 0 ? n_cols : 1 );
+            Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_L_packed" ),
+            Nt, n_cols > 0 ? n_cols : 1 );
+
+    _interaction_list_dirty = false;
+    _interaction_list_build_count++;
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -1816,8 +1880,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
         // Stash the multipoles for the M2L kernel
         _m2l_multipoles_view = multipoles;
 
-        // Build device-side interaction list if needed
-        if ( _m2l_target_cells.extent( 0 ) == 0 )
+        // Build device-side interaction list if dirty. The function
+        // early-returns when clean, so the timer just measures the
+        // dirty-flag check on the cached path.
         {
             CANOPY_SCOPED_TIMER_DETAILED(
                 Canopy::Profiling::TIMER_DN_BUILD_ILIST );

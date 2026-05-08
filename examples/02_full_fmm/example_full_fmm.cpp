@@ -178,7 +178,7 @@ int main( int argc, char* argv[] )
             case 'r': replication_depth = std::atoi( optarg ); break;
             case 'i': imbalance_tolerance = std::atof( optarg ); break;
             case 'n': ncrit = std::atoi( optarg ); break;
-            case 't': ncrit_tol = std::atof( optarg ); break;
+            case 'c': ncrit_tol = std::atof( optarg ); break;
             case 'b': bbox_tol = std::atof( optarg ); break;
             case 'm': mac_theta = std::atof( optarg ); break;
             default:

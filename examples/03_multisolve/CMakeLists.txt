@@ -9,7 +9,18 @@
 # SPDX-License-Identifier: BSD-3-Clause                                    #
 ############################################################################
 
-# Currently not used
-# add_subdirectory(01_development) # XXX - Remove this later and add a real example.
-add_subdirectory(02_full_fmm)
-add_subdirectory(03_multisolve)
+cmake_minimum_required(VERSION 3.16)
+project(Canopy_MultiSolve)
+if(NOT TARGET Canopy)
+  find_package(Canopy)
+endif()
+
+add_executable(multisolve example_multisolve.cpp)
+target_link_libraries(multisolve Canopy)
+add_test(NAME Canopy_Tutorial_03_multisolve COMMAND ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG}
+${MPIEXEC_MAX_NUMPROCS} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:multisolve> ${MPIEXEC_POSTFLAGS})
+set_tests_properties(Canopy_Tutorial_03_multisolve PROPERTIES PROCESSORS ${MPIEXEC_MAX_NUMPROCS})
+if(Canopy_INSTALL_EXAMPLES)
+      install(TARGETS multisolve
+              RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()

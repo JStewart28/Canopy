@@ -1153,5 +1153,156 @@ TEST( DownwardSweep, testL2PApproximatesDirectSumAdaptiveSmall )
 }
 
 //---------------------------------------------------------------------------//
+// DownwardSweepCaching: verify that build_interaction_list_device is a
+// no-op when the dirty flag is clear, and that invalidate_interaction_list
+// forces a rebuild. Both tests assert the second-solve answer matches the
+// first within tolerance for the existing P=6 problem.
+//---------------------------------------------------------------------------//
+
+namespace DownwardSweepTest
+{
+template <class TEST_MS, class TEST_ES>
+struct CachingFixture
+{
+    using kernel = Kernel;
+    int num_particles = 1000;
+    int ncrit = 32;
+    int max_depth = 6;
+    double tolerance = 0.1;
+    int replication_depth = 2;
+
+    AoSoA_t particles{ "particles", 0 };
+    TreeBuilder<TEST_MS, TEST_ES> builder;
+    TreePartitioner<TEST_MS, TEST_ES> partitioner;
+    CommunicationPlan<TEST_MS, TEST_ES> comm_plan;
+    UpwardSweep<TEST_MS, TEST_ES, kernel> upward;
+    DownwardSweep<TEST_MS, TEST_ES, kernel> downward;
+    int num_local = 0;
+
+    CachingFixture()
+        : builder( MPI_COMM_WORLD, ncrit, max_depth,
+                   std::array<double, 3>{ tolerance, tolerance, tolerance },
+                   tolerance )
+        , partitioner( MPI_COMM_WORLD, replication_depth )
+        , comm_plan( MPI_COMM_WORLD, get_test_mac_theta() )
+        , upward( MPI_COMM_WORLD )
+        , downward( MPI_COMM_WORLD )
+    {
+        int rank;
+        MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+
+        particles = AoSoA_t( "particles", num_particles );
+        generate_test_particles( particles, num_particles, rank );
+
+        auto positions = Cabana::slice<Position>( particles );
+        builder.build( positions, num_particles );
+        partitioner.partition( builder, particles, num_particles );
+        num_local = partitioner.num_local_particles();
+
+        positions = Cabana::slice<Position>( particles );
+        builder.build( positions, num_local );
+
+        comm_plan.build( builder.cells(), partitioner.ownership(),
+                         partitioner.cell_owner_map(), replication_depth );
+
+        upward.setup( builder.cells(), partitioner.cell_owner_map(),
+                      builder.particle_keys(), num_local );
+        upward.execute( Cabana::slice<Charge>( particles ),
+                        Cabana::slice<Position>( particles ), comm_plan );
+
+        downward.setup( upward, num_local );
+    }
+};
+
+template <class TEST_MS, class TEST_ES>
+void testSkipsRebuildWhenClean()
+{
+    CachingFixture<TEST_MS, TEST_ES> fix;
+
+    auto positions = Cabana::slice<Position>( fix.particles );
+
+    auto pot1 = fix.downward.allocate_potential( fix.num_local );
+    auto grad1 = fix.downward.allocate_gradient( fix.num_local );
+    Kokkos::deep_copy( pot1, 0.0 );
+    fix.downward.execute( fix.upward.multipoles(), positions, pot1, grad1,
+                          false, fix.comm_plan );
+
+    const int build_count_after_first =
+        fix.downward.interaction_list_build_count();
+    EXPECT_EQ( build_count_after_first, 1 );
+
+    auto pot2 = fix.downward.allocate_potential( fix.num_local );
+    auto grad2 = fix.downward.allocate_gradient( fix.num_local );
+    Kokkos::deep_copy( pot2, 0.0 );
+    fix.downward.execute( fix.upward.multipoles(), positions, pot2, grad2,
+                          false, fix.comm_plan );
+
+    EXPECT_EQ( fix.downward.interaction_list_build_count(),
+               build_count_after_first );
+
+    auto h1 = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), pot1 );
+    auto h2 = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), pot2 );
+    for ( int p = 0; p < fix.num_local; p++ )
+    {
+        const double a = h1( p, 0 );
+        const double b = h2( p, 0 );
+        const double scale = std::max( 1.0, std::abs( a ) );
+        EXPECT_NEAR( a, b, 1e-12 * scale );
+    }
+}
+
+template <class TEST_MS, class TEST_ES>
+void testRebuildsAfterInvalidate()
+{
+    CachingFixture<TEST_MS, TEST_ES> fix;
+
+    auto positions = Cabana::slice<Position>( fix.particles );
+
+    auto pot1 = fix.downward.allocate_potential( fix.num_local );
+    auto grad1 = fix.downward.allocate_gradient( fix.num_local );
+    Kokkos::deep_copy( pot1, 0.0 );
+    fix.downward.execute( fix.upward.multipoles(), positions, pot1, grad1,
+                          false, fix.comm_plan );
+
+    const int build_count_after_first =
+        fix.downward.interaction_list_build_count();
+    EXPECT_EQ( build_count_after_first, 1 );
+
+    fix.downward.invalidate_interaction_list();
+
+    auto pot2 = fix.downward.allocate_potential( fix.num_local );
+    auto grad2 = fix.downward.allocate_gradient( fix.num_local );
+    Kokkos::deep_copy( pot2, 0.0 );
+    fix.downward.execute( fix.upward.multipoles(), positions, pot2, grad2,
+                          false, fix.comm_plan );
+
+    EXPECT_EQ( fix.downward.interaction_list_build_count(),
+               build_count_after_first + 1 );
+
+    auto h1 = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), pot1 );
+    auto h2 = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), pot2 );
+    for ( int p = 0; p < fix.num_local; p++ )
+    {
+        const double a = h1( p, 0 );
+        const double b = h2( p, 0 );
+        const double scale = std::max( 1.0, std::abs( a ) );
+        EXPECT_NEAR( a, b, 1e-12 * scale );
+    }
+}
+} // namespace DownwardSweepTest
+
+TEST( DownwardSweepCaching, skipsRebuildWhenClean )
+{
+    DownwardSweepTest::testSkipsRebuildWhenClean<TEST_MEMSPACE,
+                                                 TEST_EXECSPACE>();
+}
+
+TEST( DownwardSweepCaching, rebuildsAfterInvalidate )
+{
+    DownwardSweepTest::testRebuildsAfterInvalidate<TEST_MEMSPACE,
+                                                   TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
 
 } // end namespace Test
