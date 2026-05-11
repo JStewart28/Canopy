@@ -213,24 +213,6 @@ int main( int argc, char* argv[] )
         solver.setup<Position, Charge>( particles, num_particles_per_rank );
         solver.solve<Position, Charge>( particles, compute_gradient );
 
-        {
-            const long long fb = solver.downward().total_fallback_pair_count();
-            const long long tot = solver.downward().total_m2l_pair_count();
-            long long g_fb = 0, g_tot = 0;
-            MPI_Reduce( &fb, &g_fb, 1, MPI_LONG_LONG, MPI_SUM, 0,
-                        MPI_COMM_WORLD );
-            MPI_Reduce( &tot, &g_tot, 1, MPI_LONG_LONG, MPI_SUM, 0,
-                        MPI_COMM_WORLD );
-            if ( rank == 0 )
-            {
-                const double frac = g_tot > 0
-                    ? static_cast<double>( g_fb ) / static_cast<double>( g_tot )
-                    : 0.0;
-                std::printf( "M2L diag: fallback=%lld total=%lld frac=%.4f\n",
-                             g_fb, g_tot, frac );
-            }
-        }
-
         // int num_local = solver.num_local_particles();
 
         // std::vector<double> phi_direct;
