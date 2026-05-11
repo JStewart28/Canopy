@@ -73,8 +73,11 @@ class DownwardSweep
     static constexpr int coeffs_per_cell = KernelType::num_coeffs_per_cell;
     static constexpr int NComps = KernelType::num_components;
 
-    // Local coefficient storage
-    using coeff_view_type = Kokkos::View<complex_type***, memory_space>;
+    // Local coefficient storage. LayoutRight so a single thread can scan
+    // within-cell coefficients contiguously and a warp writing different
+    // out_idx values for one target writes consecutive bytes.
+    using coeff_view_type =
+        Kokkos::View<complex_type***, Kokkos::LayoutRight, memory_space>;
 
     // Potential output: (num_particles, NComps)
     using potential_view_type =
@@ -1124,17 +1127,22 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_fused(
     using team_policy = Kokkos::TeamPolicy<execution_space>;
     using member_t = typename team_policy::member_type;
     using scratch_space = typename execution_space::scratch_memory_space;
-    using ScratchAcc =
-        Kokkos::View<complex_type*, scratch_space,
+    using ScratchReal =
+        Kokkos::View<scalar_type*, scratch_space,
                      Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
-    const size_t scratch_bytes = ScratchAcc::shmem_size( n_acc );
+    // Two scalar scratch arrays (real + imag) so each thread accesses 8
+    // bytes per accumulator update, halving shared-memory bank conflicts
+    // vs a single complex_type (16-byte) scratch view.
+    const size_t scratch_bytes_re = ScratchReal::shmem_size( n_acc );
+    const size_t scratch_bytes_im = ScratchReal::shmem_size( n_acc );
 
     // Kokkos::AUTO picks a sensible team_size per backend (e.g. 32-128 on
     // CUDA, 1 on Serial). Nt=28 at P=6 fits inside a warp; AUTO has been
     // observed to choose ~32 there, which gives good occupancy.
     team_policy policy( n_teams, Kokkos::AUTO );
-    policy.set_scratch_size( 0, Kokkos::PerTeam( scratch_bytes ) );
+    policy.set_scratch_size(
+        0, Kokkos::PerTeam( scratch_bytes_re + scratch_bytes_im ) );
 
     Kokkos::parallel_for(
         "M2L_fused", policy, KOKKOS_LAMBDA( const member_t& team ) {
@@ -1143,11 +1151,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_fused(
             const int off_lo = csr_offsets( k );
             const int off_hi = csr_offsets( k + 1 );
 
-            ScratchAcc team_acc( team.team_scratch( 0 ), n_acc );
+            ScratchReal team_acc_re( team.team_scratch( 0 ), n_acc );
+            ScratchReal team_acc_im( team.team_scratch( 0 ), n_acc );
 
             Kokkos::parallel_for(
                 Kokkos::TeamVectorRange( team, n_acc ),
-                [&]( int i ) { team_acc( i ) = complex_type( 0, 0 ); } );
+                [&]( int i ) {
+                    team_acc_re( i ) = scalar_type( 0 );
+                    team_acc_im( i ) = scalar_type( 0 );
+                } );
             team.team_barrier();
 
             for ( int s = off_lo; s < off_hi; s++ )
@@ -1183,10 +1195,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_fused(
                                            m_val;
                                 }
                             }
-                            team_acc( out_idx * NComps + c ) += acc;
+                            const int slot = out_idx * NComps + c;
+                            team_acc_re( slot ) += acc.real();
+                            team_acc_im( slot ) += acc.imag();
                         }
                     } );
-                team.team_barrier();
             }
 
             // Single += per (out_idx, c). No atomics: each target has one
@@ -1196,8 +1209,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_fused(
             Kokkos::parallel_for(
                 Kokkos::TeamThreadRange( team, Nt ), [&]( int out_idx ) {
                     for ( int c = 0; c < NComps; c++ )
+                    {
+                        const int slot = out_idx * NComps + c;
                         locals( target_cell, out_idx, c ) +=
-                            team_acc( out_idx * NComps + c );
+                            complex_type( team_acc_re( slot ),
+                                          team_acc_im( slot ) );
+                    }
                 } );
         } );
 }

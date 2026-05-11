@@ -1305,4 +1305,30 @@ TEST( DownwardSweepCaching, rebuildsAfterInvalidate )
 
 //---------------------------------------------------------------------------//
 
+namespace DownwardSweepTest
+{
+template <class TEST_MEMSPACE_, class TEST_EXECSPACE_>
+void testLayoutTagIsLayoutRight()
+{
+    using DS = DownwardSweep<TEST_MEMSPACE_, TEST_EXECSPACE_, Kernel>;
+    using US = UpwardSweep<TEST_MEMSPACE_, TEST_EXECSPACE_, Kernel>;
+    static_assert(
+        std::is_same<typename DS::coeff_view_type::array_layout,
+                     Kokkos::LayoutRight>::value,
+        "DownwardSweep::coeff_view_type must be LayoutRight" );
+    static_assert(
+        std::is_same<typename US::coeff_view_type::array_layout,
+                     Kokkos::LayoutRight>::value,
+        "UpwardSweep::coeff_view_type must be LayoutRight" );
+}
+} // namespace DownwardSweepTest
+
+TEST( DownwardSweepLayout, layoutTagIsLayoutRight )
+{
+    DownwardSweepTest::testLayoutTagIsLayoutRight<TEST_MEMSPACE,
+                                                  TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+
 } // end namespace Test

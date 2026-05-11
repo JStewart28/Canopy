@@ -65,8 +65,11 @@ class UpwardSweep
     static constexpr int coeffs_per_cell = KernelType::num_coeffs_per_cell;
     static constexpr int NComps = KernelType::num_components;
 
-    // Coefficient storage: (cell_idx, coeff_idx, comp_idx)
-    using coeff_view_type = Kokkos::View<complex_type***, memory_space>;
+    // Coefficient storage: (cell_idx, coeff_idx, comp_idx).
+    // LayoutRight so within-cell coefficient traversals are contiguous —
+    // matches what M2L_fused needs for coalesced reads/writes.
+    using coeff_view_type =
+        Kokkos::View<complex_type***, Kokkos::LayoutRight, memory_space>;
 
     using a_view_type = Kokkos::View<scalar_type*, memory_space>;
 
