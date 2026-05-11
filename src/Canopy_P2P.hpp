@@ -206,6 +206,12 @@ class P2P
     Kokkos::View<int*, memory_space>
         _ghost_nbr_leaf_idx; // flat ghost neighbor indexes
 
+    // Maps each local particle index to its league (index into
+    // _local_leaf_cells). Entry is -1 for particles not owned by any local
+    // leaf. Built in setup(); used by inter-leaf kernel for flat
+    // thread-per-particle decomposition.
+    Kokkos::View<int*, memory_space> _particle_to_league;
+
   public:
     // -----------------------------------------------------------------------
     // Internal helpers
@@ -249,6 +255,38 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::setup(
     // Build neighbor lists on device (maps target leaf -> local + ghost
     // neighbors). Uses key_to_idx + _ghost_leaf_key_to_idx.
     build_neighbor_lists_device( comm_plan, key_to_idx );
+
+    // Build particle -> league mapping for the flat inter-leaf kernel.
+    {
+        auto leaf_off_h = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), _leaf_particle_offsets );
+        auto local_leaves_h = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), _local_leaf_cells );
+        const int num_cells =
+            static_cast<int>( _leaf_particle_offsets.extent( 0 ) ) - 1;
+        const int n_total = ( num_cells >= 0 ) ? leaf_off_h( num_cells ) : 0;
+        _particle_to_league = Kokkos::View<int*, memory_space>(
+            Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                "p2p_particle_to_league" ),
+            n_total );
+        Kokkos::View<int*, Kokkos::HostSpace> p2l_h(
+            Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                "p2p_particle_to_league_h" ),
+            n_total );
+        for ( int i = 0; i < n_total; i++ )
+            p2l_h( i ) = -1;
+        const int num_target_leaves =
+            static_cast<int>( _local_leaf_cells.extent( 0 ) );
+        for ( int g = 0; g < num_target_leaves; g++ )
+        {
+            const int cidx = local_leaves_h( g );
+            const int ps = leaf_off_h( cidx );
+            const int pe = leaf_off_h( cidx + 1 );
+            for ( int pi = ps; pi < pe; pi++ )
+                p2l_h( pi ) = g;
+        }
+        Kokkos::deep_copy( _particle_to_league, p2l_h );
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -748,145 +786,126 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
 
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_INTER_KERNEL );
-        if ( num_target_leaves > 0 )
+        const int n_local = static_cast<int>( positions.size() );
+        if ( n_local > 0 )
         {
-        team_policy policy( num_target_leaves, Kokkos::AUTO );
+        auto particle_to_league_v = _particle_to_league;
 
         Kokkos::parallel_for(
-            "P2P_inter_leaf", policy,
-            KOKKOS_LAMBDA( const team_member_type& team ) {
-                const int league = team.league_rank();
-                const int cidx = local_leaf_cells( league );
-                const int pstart = leaf_offsets( cidx );
-                const int pend = leaf_offsets( cidx + 1 );
-                const int ntarget = pend - pstart;
-                if ( ntarget == 0 )
+            "P2P_inter_leaf",
+            Kokkos::RangePolicy<execution_space>( 0, n_local ),
+            KOKKOS_LAMBDA( const int pi ) {
+                const int league = particle_to_league_v( pi );
+                if ( league < 0 )
                     return;
 
-                // Iterate target particles in parallel across team threads
-                Kokkos::parallel_for(
-                    Kokkos::TeamThreadRange( team, ntarget ),
-                    [&]( const int t )
+                const scalar_type xi =
+                    static_cast<scalar_type>( positions( pi, 0 ) );
+                const scalar_type yi =
+                    static_cast<scalar_type>( positions( pi, 1 ) );
+                const scalar_type zi =
+                    static_cast<scalar_type>( positions( pi, 2 ) );
+
+                scalar_type phi[NComps];
+                scalar_type gx[NComps], gy[NComps], gz[NComps];
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    phi[c] = static_cast<scalar_type>( 0 );
+                    gx[c] = static_cast<scalar_type>( 0 );
+                    gy[c] = static_cast<scalar_type>( 0 );
+                    gz[c] = static_cast<scalar_type>( 0 );
+                }
+
+                // --- Local neighbors ---
+                const int l_start = local_nbr_off( league );
+                const int l_end = local_nbr_off( league + 1 );
+                for ( int nn = l_start; nn < l_end; nn++ )
+                {
+                    const int n_cidx = local_nbr_idx( nn );
+                    const int ns = leaf_offsets( n_cidx );
+                    const int ne = leaf_offsets( n_cidx + 1 );
+                    for ( int pj = ns; pj < ne; pj++ )
                     {
-                        const int pi = pstart + t;
-
-                        const scalar_type xi =
-                            static_cast<scalar_type>( positions( pi, 0 ) );
-                        const scalar_type yi =
-                            static_cast<scalar_type>( positions( pi, 1 ) );
-                        const scalar_type zi =
-                            static_cast<scalar_type>( positions( pi, 2 ) );
-
-                        scalar_type phi[NComps];
-                        scalar_type gx[NComps], gy[NComps], gz[NComps];
+                        const scalar_type dx =
+                            xi -
+                            static_cast<scalar_type>( positions( pj, 0 ) );
+                        const scalar_type dy =
+                            yi -
+                            static_cast<scalar_type>( positions( pj, 1 ) );
+                        const scalar_type dz =
+                            zi -
+                            static_cast<scalar_type>( positions( pj, 2 ) );
+                        const scalar_type r2 = dx * dx + dy * dy + dz * dz;
+                        if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
+                            continue;
+                        const scalar_type inv_r =
+                            static_cast<scalar_type>( 1.0 ) /
+                            Kokkos::sqrt( r2 );
+                        const scalar_type inv_r3 = inv_r * inv_r * inv_r;
                         for ( int c = 0; c < NComps; c++ )
                         {
-                            phi[c] = 0.0;
-                            gx[c] = 0.0;
-                            gy[c] = 0.0;
-                            gz[c] = 0.0;
-                        }
-
-                        // --- Local neighbors ---
-                        const int l_start = local_nbr_off( league );
-                        const int l_end = local_nbr_off( league + 1 );
-                        for ( int nn = l_start; nn < l_end; nn++ )
-                        {
-                            const int n_cidx = local_nbr_idx( nn );
-                            const int ns = leaf_offsets( n_cidx );
-                            const int ne = leaf_offsets( n_cidx + 1 );
-                            for ( int pj = ns; pj < ne; pj++ )
-                            {
-                                const scalar_type dx =
-                                    xi - static_cast<scalar_type>(
-                                             positions( pj, 0 ) );
-                                const scalar_type dy =
-                                    yi - static_cast<scalar_type>(
-                                             positions( pj, 1 ) );
-                                const scalar_type dz =
-                                    zi - static_cast<scalar_type>(
-                                             positions( pj, 2 ) );
-                                const scalar_type r2 =
-                                    dx * dx + dy * dy + dz * dz;
-                                if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
-                                    continue;
-                                const scalar_type inv_r =
-                                    static_cast<scalar_type>( 1.0 ) /
-                                    Kokkos::sqrt( r2 );
-                                const scalar_type inv_r3 =
-                                    inv_r * inv_r * inv_r;
-                                for ( int c = 0; c < NComps; c++ )
-                                {
-                                    const scalar_type qj =
-                                        static_cast<scalar_type>(
-                                            charges( pj, c ) );
-                                    phi[c] += qj * inv_r;
-                                    if ( compute_gradient )
-                                    {
-                                        gx[c] -= qj * dx * inv_r3;
-                                        gy[c] -= qj * dy * inv_r3;
-                                        gz[c] -= qj * dz * inv_r3;
-                                    }
-                                }
-                            }
-                        }
-
-                        // --- Ghost neighbors ---
-                        const int g_start = ghost_nbr_off( league );
-                        const int g_end = ghost_nbr_off( league + 1 );
-                        for ( int nn = g_start; nn < g_end; nn++ )
-                        {
-                            const int g_idx = ghost_nbr_idx( nn );
-                            const int gs = ghost_leaf_off( g_idx );
-                            const int ge = ghost_leaf_off( g_idx + 1 );
-                            for ( int pj = gs; pj < ge; pj++ )
-                            {
-                                const scalar_type dx =
-                                    xi - ghost_positions( pj, 0 );
-                                const scalar_type dy =
-                                    yi - ghost_positions( pj, 1 );
-                                const scalar_type dz =
-                                    zi - ghost_positions( pj, 2 );
-                                const scalar_type r2 =
-                                    dx * dx + dy * dy + dz * dz;
-                                if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
-                                    continue;
-                                const scalar_type inv_r =
-                                    static_cast<scalar_type>( 1.0 ) /
-                                    Kokkos::sqrt( r2 );
-                                const scalar_type inv_r3 =
-                                    inv_r * inv_r * inv_r;
-                                for ( int c = 0; c < NComps; c++ )
-                                {
-                                    const scalar_type qj =
-                                        ghost_charges( pj, c );
-                                    phi[c] += qj * inv_r;
-                                    if ( compute_gradient )
-                                    {
-                                        gx[c] -= qj * dx * inv_r3;
-                                        gy[c] -= qj * dy * inv_r3;
-                                        gz[c] -= qj * dz * inv_r3;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Single-writer: no atomic needed
-                        for ( int c = 0; c < NComps; c++ )
-                        {
-                            potential_out( pi, c ) += phi[c];
+                            const scalar_type qj =
+                                static_cast<scalar_type>( charges( pj, c ) );
+                            phi[c] += qj * inv_r;
                             if ( compute_gradient )
                             {
-                                gradient_out( pi, c, 0 ) += gx[c];
-                                gradient_out( pi, c, 1 ) += gy[c];
-                                gradient_out( pi, c, 2 ) += gz[c];
+                                gx[c] -= qj * dx * inv_r3;
+                                gy[c] -= qj * dy * inv_r3;
+                                gz[c] -= qj * dz * inv_r3;
                             }
                         }
-                    } );
+                    }
+                }
+
+                // --- Ghost neighbors ---
+                const int g_start = ghost_nbr_off( league );
+                const int g_end = ghost_nbr_off( league + 1 );
+                for ( int nn = g_start; nn < g_end; nn++ )
+                {
+                    const int g_idx = ghost_nbr_idx( nn );
+                    const int gs = ghost_leaf_off( g_idx );
+                    const int ge = ghost_leaf_off( g_idx + 1 );
+                    for ( int pj = gs; pj < ge; pj++ )
+                    {
+                        const scalar_type dx = xi - ghost_positions( pj, 0 );
+                        const scalar_type dy = yi - ghost_positions( pj, 1 );
+                        const scalar_type dz = zi - ghost_positions( pj, 2 );
+                        const scalar_type r2 = dx * dx + dy * dy + dz * dz;
+                        if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
+                            continue;
+                        const scalar_type inv_r =
+                            static_cast<scalar_type>( 1.0 ) /
+                            Kokkos::sqrt( r2 );
+                        const scalar_type inv_r3 = inv_r * inv_r * inv_r;
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            const scalar_type qj = ghost_charges( pj, c );
+                            phi[c] += qj * inv_r;
+                            if ( compute_gradient )
+                            {
+                                gx[c] -= qj * dx * inv_r3;
+                                gy[c] -= qj * dy * inv_r3;
+                                gz[c] -= qj * dz * inv_r3;
+                            }
+                        }
+                    }
+                }
+
+                // Single-writer: no atomic needed
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    potential_out( pi, c ) += phi[c];
+                    if ( compute_gradient )
+                    {
+                        gradient_out( pi, c, 0 ) += gx[c];
+                        gradient_out( pi, c, 1 ) += gy[c];
+                        gradient_out( pi, c, 2 ) += gz[c];
+                    }
+                }
             } );
 
         Kokkos::fence();
-        } // if ( num_target_leaves > 0 )
+        } // if ( n_local > 0 )
     } // TIMER_P2P_INTER_KERNEL
     } // TIMER_P2P_TOTAL
     CANOPY_PRINT_P2P_TIMERS( _comm );
