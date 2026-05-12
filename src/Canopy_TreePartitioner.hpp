@@ -23,6 +23,7 @@
 
 #include <Teuchos_Comm.hpp>
 #include <Teuchos_DefaultMpiComm.hpp>
+#include <Teuchos_DefaultSerialComm.hpp>
 #include <Teuchos_ParameterList.hpp>
 #include <Tpetra_Map.hpp>
 
@@ -328,13 +329,14 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     for ( int i = 0; i < num_leaves; i++ )
         global_ids[i] = static_cast<glbl_id_t>( i );
 
-    // Build a Teuchos communicator for Zoltan2
-    // Note: Use MPI_COMM_SELF because every rank is running the same
-    // deterministic partitioning on the same data. This avoids Zoltan2
-    // trying to do distributed partitioning (which would fail since
-    // each rank claims to have ALL leaves).
+    // Build a Teuchos communicator for Zoltan2.
+    // Use SerialComm (not MpiComm(MPI_COMM_SELF)) so Zoltan2's internal
+    // sends/receives never enter MPICH. Every rank runs the same
+    // deterministic partition on identical data, so no real MPI is needed;
+    // routing self-sends through Cray MPICH's CMA single-copy path was
+    // triggering process_vm_readv: Bad address on AMD/HIP builds.
     auto teuchos_comm =
-        Teuchos::rcp( new Teuchos::MpiComm<int>( MPI_COMM_SELF ) );
+        Teuchos::rcp( new Teuchos::SerialComm<int>() );
 
     const glbl_id_t* ids_ptr = global_ids.data();
     const scalar_t* x_ptr = leaf_x.data();
