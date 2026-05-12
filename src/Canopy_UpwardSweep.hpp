@@ -140,6 +140,13 @@ class UpwardSweep
     // Access device cell info (shared with DownwardSweep)
     const cell_view_type& device_cells() const { return _device_cells; }
 
+    using children_view_type =
+        Kokkos::View<int* [8], Kokkos::LayoutRight, memory_space>;
+
+    // Per-cell child index table (shared with DownwardSweep). Row i lists the
+    // device-cell indices of cell i's children, padded with -1.
+    const children_view_type& cell_children() const { return _d_cell_children; }
+
     // Access host-side key lookup (shared with DownwardSweep)
     const std::unordered_map<MortonKey, int>& key_to_cell_idx() const
     {
@@ -171,6 +178,8 @@ class UpwardSweep
 
     std::vector<Kokkos::View<int*, memory_space>> _d_leaves_at_depth;
     std::vector<Kokkos::View<int*, memory_space>> _d_internals_at_depth;
+
+    children_view_type _d_cell_children;
 
     particle_cell_idx_view_type _particle_cell_idx;
     int _num_local_particles;
@@ -292,6 +301,32 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
         }
     }
 
+    _d_cell_children =
+        children_view_type( Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                                "cell_children" ),
+                            num_cells );
+    {
+        auto h_children = Kokkos::create_mirror_view( _d_cell_children );
+        for ( int i = 0; i < num_cells; i++ )
+        {
+            for ( int k = 0; k < 8; k++ )
+                h_children( i, k ) = -1;
+            if ( cells[i].is_leaf )
+                continue;
+            const MortonKey pk = cells[i].key;
+            int slot = 0;
+            for ( int oct = 0; oct < 8; oct++ )
+            {
+                const MortonKey ck =
+                    ( pk << 3 ) | static_cast<MortonKey>( oct );
+                auto it = _key_to_cell_idx.find( ck );
+                if ( it != _key_to_cell_idx.end() )
+                    h_children( i, slot++ ) = it->second;
+            }
+        }
+        Kokkos::deep_copy( _d_cell_children, h_children );
+    }
+
     build_particle_cell_idx( particle_keys, num_local_particles );
 }
 
@@ -380,6 +415,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2m_at_depth(
     auto device_cells = _device_cells;
     auto A_table = _A_table;
     auto& d_internals = _d_internals_at_depth[depth];
+    auto children = _d_cell_children;
     const int this_rank = _rank;
 
     using team_policy = Kokkos::TeamPolicy<execution_space>;
@@ -396,16 +432,12 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2m_at_depth(
             auto M_parent = Kokkos::subview( multipoles, parent_cell,
                                              Kokkos::ALL, Kokkos::ALL );
 
-            const MortonKey pk = parent_ci.key;
-            const int num_all = device_cells.extent( 0 );
-
-            for ( int ci = 0; ci < num_all; ci++ )
+            for ( int k = 0; k < 8; k++ )
             {
+                const int ci = children( parent_cell, k );
+                if ( ci < 0 )
+                    break;
                 const auto& ccell = device_cells( ci );
-                if ( ( ccell.key >> 3 ) != pk )
-                    continue;
-                if ( ccell.depth != parent_ci.depth + 1 )
-                    continue;
 
                 // When both parent and child are shared (replicated), every
                 // rank holds the same post-Allreduce child multipole. Only

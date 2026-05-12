@@ -211,6 +211,9 @@ class DownwardSweep
     // upward sweep is alive and setup() has been called.
     cell_view_type _device_cells;
     const std::unordered_map<MortonKey, int>* _key_to_cell_idx;
+    using children_view_type = typename UpwardSweep<
+        MemorySpace, ExecutionSpace, KernelType>::children_view_type;
+    const children_view_type* _d_cell_children;
     particle_cell_idx_view_type _particle_cell_idx;
     a_view_type _A_table;
 
@@ -460,6 +463,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     // Borrow metadata from UpwardSweep
     _device_cells = upward_sweep.device_cells();
     _key_to_cell_idx = &upward_sweep.key_to_cell_idx();
+    _d_cell_children = &upward_sweep.cell_children();
     _A_table = upward_sweep.A_table();
     _max_depth = upward_sweep.max_depth();
 
@@ -1333,6 +1337,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth(
     auto device_cells = _device_cells;
     auto A_table = _A_table;
     auto& d_parents = _d_internals_at_depth[depth];
+    auto children = *_d_cell_children;
 
     using team_policy = Kokkos::TeamPolicy<execution_space>;
     using team_member_type = typename team_policy::member_type;
@@ -1345,18 +1350,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth(
             const int parent_cell = d_parents( league );
             const auto& parent_ci = device_cells( parent_cell );
 
-            const MortonKey pk = parent_ci.key;
-            const int num_all = device_cells.extent( 0 );
-
-            // Find children of this parent by linear scan (same pattern
-            // as M2M; can be optimized with precomputed child tables).
-            for ( int ci = 0; ci < num_all; ci++ )
+            for ( int k = 0; k < 8; k++ )
             {
+                const int ci = children( parent_cell, k );
+                if ( ci < 0 )
+                    break;
                 const auto& ccell = device_cells( ci );
-                if ( ( ccell.key >> 3 ) != pk )
-                    continue;
-                if ( ccell.depth != parent_ci.depth + 1 )
-                    continue;
 
                 const scalar_type dx = ccell.center[0] - parent_ci.center[0];
                 const scalar_type dy = ccell.center[1] - parent_ci.center[1];
