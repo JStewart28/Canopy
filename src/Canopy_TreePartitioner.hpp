@@ -30,6 +30,8 @@
 #include <mpi.h>
 
 #include <cstdint>
+#include <iostream>
+#include <typeinfo>
 #include <unordered_map>
 #include <vector>
 
@@ -364,14 +366,24 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     params.set( "zoltan_parameters", zoltanParams );
 
     // Solve
-    Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
-                                                     teuchos_comm );
-    problem.solve();
-
-    // Extract assignments
-    const auto& solution = problem.getSolution();
-    // Array of which rank should get which particle.
-    const int* parts = solution.getPartListView();
+    std::vector<int> parts_storage( num_leaves );
+    try
+    {
+        Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
+                                                         teuchos_comm );
+        problem.solve();
+        const auto& solution = problem.getSolution();
+        const int* parts_view = solution.getPartListView();
+        for ( int i = 0; i < num_leaves; i++ )
+            parts_storage[i] = parts_view[i];
+    }
+    catch ( const std::exception& e )
+    {
+        std::cerr << "[rank " << _rank << "] Zoltan2 threw: " << e.what()
+                  << " (typeid=" << typeid( e ).name() << ")" << std::endl;
+        throw;
+    }
+    const int* parts = parts_storage.data();
 
     std::unordered_map<MortonKey, int> result;
     result.reserve( num_leaves );
