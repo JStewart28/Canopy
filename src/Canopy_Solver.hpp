@@ -223,6 +223,7 @@ class Solver
             }
         } // TIMER_MIGRATE_TOTAL destructs here
         CANOPY_PRINT_MIGRATE_TIMERS( _comm );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
         return result;
     }
 
@@ -250,6 +251,7 @@ class Solver
             _finish_topology_change<PositionIdx>( particles );
         } // TIMER_REBALANCE_TOTAL destructs here
         CANOPY_PRINT_REBALANCE_TIMERS( _comm );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
     }
 
     // -----------------------------------------------------------------------
@@ -419,6 +421,7 @@ class Solver
 
         } // TIMER_SETUP_TOTAL destructs here
         CANOPY_PRINT_SETUP_TIMERS( _comm );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
     }
 
     // -----------------------------------------------------------------------

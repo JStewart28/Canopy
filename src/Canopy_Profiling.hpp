@@ -86,6 +86,28 @@ static constexpr const char* TIMER_DN_PRE_M2L     = "dn_pre_m2l";
 static constexpr const char* TIMER_DN_M2L_CALL    = "dn_m2l_call";
 static constexpr const char* TIMER_DN_POST_M2L    = "dn_post_m2l";
 
+// Comm-plan build — detailed (level 2) sub-phases inside
+// CommunicationPlan::build().
+static constexpr const char* TIMER_COMMPLAN_CELL_MAP_FILL      = "commplan_cell_map_fill";
+static constexpr const char* TIMER_COMMPLAN_VERTICAL_PLANS     = "commplan_vertical_plans";
+static constexpr const char* TIMER_COMMPLAN_SUBTREE_RELEVANCE  = "commplan_subtree_relevance";
+static constexpr const char* TIMER_COMMPLAN_DTT_TRAVERSAL      = "commplan_dtt_traversal";
+static constexpr const char* TIMER_COMMPLAN_FINALIZE_M2L       = "commplan_finalize_m2l";
+static constexpr const char* TIMER_COMMPLAN_FINALIZE_P2P       = "commplan_finalize_p2p";
+
+// Build-ilist — detailed (level 2) sub-phases inside
+// DownwardSweep::build_interaction_list_device(). Names match the Stage 1-5
+// comments in that routine.
+static constexpr const char* TIMER_ILIST_S1_COLLECT_ENTRIES   = "ilist_s1_collect_entries";
+static constexpr const char* TIMER_ILIST_S2_SORT_BY_DEPTH     = "ilist_s2_sort_by_depth";
+static constexpr const char* TIMER_ILIST_S3_CLASSIFY_PAIRS    = "ilist_s3_classify_pairs";
+static constexpr const char* TIMER_ILIST_S4_OP_TABLE_BUILD    = "ilist_s4_op_table_build";
+static constexpr const char* TIMER_ILIST_S4_OP_TABLE_COPY     = "ilist_s4_op_table_copy";
+static constexpr const char* TIMER_ILIST_S5_CSR_PARTITION_SORT = "ilist_s5_csr_partition_sort";
+static constexpr const char* TIMER_ILIST_S5_CSR_BUILD         = "ilist_s5_csr_build";
+static constexpr const char* TIMER_ILIST_S5_FALLBACK_TABLE    = "ilist_s5_fallback_table";
+static constexpr const char* TIMER_ILIST_S5_DEVICE_UPLOAD     = "ilist_s5_device_upload";
+
 // solve() — P2P
 static constexpr const char* TIMER_P2P_TOTAL        = "p2p_total";
 static constexpr const char* TIMER_P2P_GHOST_COMM   = "p2p_ghost_comm";
@@ -216,6 +238,35 @@ inline std::vector<PhaseEntry> p2p_phase_entries()
         { "P2P ghost comm",        TIMER_P2P_GHOST_COMM,   1 },
         { "P2P intra-leaf kernel", TIMER_P2P_INTRA_KERNEL, 1 },
         { "P2P inter-leaf kernel", TIMER_P2P_INTER_KERNEL, 1 },
+    };
+}
+
+inline std::vector<PhaseEntry> commplan_phase_entries()
+{
+    return {
+        { "Comm plan build (total)",  TIMER_COMM_PLAN_BUILD,           0 },
+        { "Cell-map fill",            TIMER_COMMPLAN_CELL_MAP_FILL,    1 },
+        { "Vertical plans (M2M/L2L)", TIMER_COMMPLAN_VERTICAL_PLANS,   1 },
+        { "Subtree relevance",        TIMER_COMMPLAN_SUBTREE_RELEVANCE,1 },
+        { "DTT traversal",            TIMER_COMMPLAN_DTT_TRAVERSAL,    1 },
+        { "Finalize M2L plan",        TIMER_COMMPLAN_FINALIZE_M2L,     1 },
+        { "Finalize P2P plan",        TIMER_COMMPLAN_FINALIZE_P2P,     1 },
+    };
+}
+
+inline std::vector<PhaseEntry> ilist_phase_entries()
+{
+    return {
+        { "Build ilist (total)",     TIMER_DN_BUILD_ILIST,           0 },
+        { "S1 collect entries",      TIMER_ILIST_S1_COLLECT_ENTRIES, 1 },
+        { "S2 sort by depth",        TIMER_ILIST_S2_SORT_BY_DEPTH,   1 },
+        { "S3 classify pairs",       TIMER_ILIST_S3_CLASSIFY_PAIRS,  1 },
+        { "S4 op-table build",       TIMER_ILIST_S4_OP_TABLE_BUILD,  1 },
+        { "S4 op-table deep_copy",   TIMER_ILIST_S4_OP_TABLE_COPY,   1 },
+        { "S5 CSR partition+sort",   TIMER_ILIST_S5_CSR_PARTITION_SORT, 1 },
+        { "S5 CSR build",            TIMER_ILIST_S5_CSR_BUILD,       1 },
+        { "S5 fallback table",       TIMER_ILIST_S5_FALLBACK_TABLE,  1 },
+        { "S5 device upload",        TIMER_ILIST_S5_DEVICE_UPLOAD,   1 },
     };
 }
 
@@ -417,6 +468,14 @@ inline void print_timing_table( MPI_Comm comm, const char* section_name,
 #  define CANOPY_PRINT_REBALANCE_TIMERS( comm ) \
        ::Canopy::Profiling::print_timing_table( \
            (comm), "rebalance()", ::Canopy::Profiling::rebalance_phase_entries() )
+#  define CANOPY_PRINT_COMMPLAN_TIMERS( comm ) \
+       ::Canopy::Profiling::print_timing_table( \
+           (comm), "CommunicationPlan::build()", \
+           ::Canopy::Profiling::commplan_phase_entries() )
+#  define CANOPY_PRINT_ILIST_TIMERS( comm ) \
+       ::Canopy::Profiling::print_timing_table( \
+           (comm), "DownwardSweep::build_interaction_list_device()", \
+           ::Canopy::Profiling::ilist_phase_entries() )
 // Detailed (level 2) and verbose (level 3) timer macros. They compile away
 // to no-ops below the requested level so call sites can be left in place.
 #  if CANOPY_PROFILING_LEVEL >= 2
@@ -443,6 +502,8 @@ inline void print_timing_table( MPI_Comm comm, const char* section_name,
        do { (void)(comm); (void)(t_up); (void)(t_dn); (void)(t_p2p); } while(0)
 #  define CANOPY_PRINT_MIGRATE_TIMERS( comm )   do {} while ( 0 )
 #  define CANOPY_PRINT_REBALANCE_TIMERS( comm ) do {} while ( 0 )
+#  define CANOPY_PRINT_COMMPLAN_TIMERS( comm )  do {} while ( 0 )
+#  define CANOPY_PRINT_ILIST_TIMERS( comm )     do {} while ( 0 )
 #  define CANOPY_SCOPED_TIMER_DETAILED( key )    do {} while ( 0 )
 #  define CANOPY_SCOPED_TIMER_VERBOSE( key )     do {} while ( 0 )
 #endif

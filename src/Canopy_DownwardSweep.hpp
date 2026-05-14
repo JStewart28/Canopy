@@ -612,6 +612,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     std::vector<TargetEntry> entries;
     entries.reserve( ilists.size() );
 
+    {
+    CANOPY_SCOPED_TIMER_DETAILED(
+        Canopy::Profiling::TIMER_ILIST_S1_COLLECT_ENTRIES );
     for ( const auto& [target_key, sources] : ilists )
     {
         auto it = _key_to_cell_idx->find( target_key );
@@ -636,7 +639,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         }
         entries.push_back( std::move( e ) );
     }
+    } // S1
 
+    {
+    CANOPY_SCOPED_TIMER_DETAILED(
+        Canopy::Profiling::TIMER_ILIST_S2_SORT_BY_DEPTH );
     std::sort( entries.begin(), entries.end(),
                []( const TargetEntry& a, const TargetEntry& b )
                {
@@ -644,6 +651,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                        return a.depth < b.depth;
                    return a.target_idx < b.target_idx;
                } );
+    } // S2
 
     // Compute total pair count for the classification pass that follows.
     int total_pairs_count = 0;
@@ -666,31 +674,29 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // healthy MAC traversal does not produce out-of-range pairs.
     // -----------------------------------------------------------------------
     std::vector<double> half_width_at_depth( _max_depth + 1, 0.0 );
-    {
-        const int num_cells = _device_cells.extent( 0 );
-        for ( int i = 0; i < num_cells; i++ )
-        {
-            const auto& dci = h_dc_for_filter( i );
-            if ( dci.depth >= 0 && dci.depth <= _max_depth )
-                half_width_at_depth[dci.depth] = dci.half_width;
-        }
-    }
-
     const int total_pairs = total_pairs_count;
-
-    // Per-pair information collected during the classification pass.
-    // op_idx == -1 means the pair routes to the fallback path.
     std::vector<int> pair_op_idx( total_pairs, -1 );
     std::vector<int> pair_target( total_pairs );
     std::vector<int> pair_source( total_pairs );
     std::vector<int> pair_target_depth( total_pairs );
     std::vector<unsigned char> pair_target_is_shared( total_pairs, 0 );
-
     std::unordered_map<M2LKey, int, M2LKeyHash> key_to_op;
     std::vector<M2LKey> ops;
     bool overflow_warned = false;
 
     {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_ILIST_S3_CLASSIFY_PAIRS );
+        {
+            const int num_cells = _device_cells.extent( 0 );
+            for ( int i = 0; i < num_cells; i++ )
+            {
+                const auto& dci = h_dc_for_filter( i );
+                if ( dci.depth >= 0 && dci.depth <= _max_depth )
+                    half_width_at_depth[dci.depth] = dci.half_width;
+            }
+        }
+
         size_t pair_cursor = 0;
         for ( const auto& e : entries )
         {
@@ -778,6 +784,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
         if ( n_unique_ops > 0 )
         {
+            CANOPY_SCOPED_TIMER_DETAILED(
+                Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
             auto h_A = Kokkos::create_mirror_view_and_copy(
                 Kokkos::HostSpace{}, _A_table );
             for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
@@ -793,7 +801,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                     T_slice );
             }
         }
-        Kokkos::deep_copy( op_table, h_op );
+        {
+            CANOPY_SCOPED_TIMER_DETAILED(
+                Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_COPY );
+            Kokkos::deep_copy( op_table, h_op );
+        }
         _m2l_op_table = op_table;
     }
 
@@ -830,6 +842,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     sh_target_entries.reserve( entries.size() );
 
     {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_ILIST_S5_CSR_PARTITION_SORT );
         int pair_cursor = 0;
         for ( const auto& e : entries )
         {
@@ -845,20 +859,20 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 ns_target_entries.push_back( ce );
             pair_cursor = end;
         }
-    }
 
-    auto sort_by_depth = []( std::vector<CsrTargetEntry>& v )
-    {
-        std::sort( v.begin(), v.end(),
-                   []( const CsrTargetEntry& a, const CsrTargetEntry& b )
-                   {
-                       if ( a.depth != b.depth )
-                           return a.depth < b.depth;
-                       return a.target_idx < b.target_idx;
-                   } );
-    };
-    sort_by_depth( ns_target_entries );
-    sort_by_depth( sh_target_entries );
+        auto sort_by_depth = []( std::vector<CsrTargetEntry>& v )
+        {
+            std::sort( v.begin(), v.end(),
+                       []( const CsrTargetEntry& a, const CsrTargetEntry& b )
+                       {
+                           if ( a.depth != b.depth )
+                               return a.depth < b.depth;
+                           return a.target_idx < b.target_idx;
+                       } );
+        };
+        sort_by_depth( ns_target_entries );
+        sort_by_depth( sh_target_entries );
+    }
 
     auto build_csr = [&]( const std::vector<CsrTargetEntry>& tgt_entries,
                           std::vector<int>& csr_targets_h,
@@ -894,14 +908,16 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     std::vector<int> ns_targets_h, ns_offsets_h, ns_sources_h, ns_op_idx_h;
     std::vector<int> sh_targets_h, sh_offsets_h, sh_sources_h, sh_op_idx_h;
-    build_csr( ns_target_entries, ns_targets_h, ns_offsets_h, ns_sources_h,
-               ns_op_idx_h );
-    build_csr( sh_target_entries, sh_targets_h, sh_offsets_h, sh_sources_h,
-               sh_op_idx_h );
-
-    // Per-depth offsets into the shared-CSR target list.
-    _m2l_sh_csr_depth_offsets.assign( _max_depth + 2, 0 );
     {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_ILIST_S5_CSR_BUILD );
+        build_csr( ns_target_entries, ns_targets_h, ns_offsets_h, ns_sources_h,
+                   ns_op_idx_h );
+        build_csr( sh_target_entries, sh_targets_h, sh_offsets_h, sh_sources_h,
+                   sh_op_idx_h );
+
+        // Per-depth offsets into the shared-CSR target list.
+        _m2l_sh_csr_depth_offsets.assign( _max_depth + 2, 0 );
         int cursor = 0;
         const int n_sh_t = static_cast<int>( sh_target_entries.size() );
         for ( int d = 0; d <= _max_depth + 1; d++ )
@@ -916,6 +932,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // Fallback table: collect per-depth (target, source) pairs with
     // op_idx == -1, ordered by target depth.
     {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_ILIST_S5_FALLBACK_TABLE );
         for ( int p = 0; p < total_pairs; p++ )
         {
             if ( pair_op_idx[p] >= 0 )
@@ -975,29 +993,33 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     // Upload the two CSRs to device.
-    auto upload_int = []( const std::vector<int>& src, const char* label,
-                          Kokkos::View<int*, memory_space>& dst )
     {
-        dst = Kokkos::View<int*, memory_space>(
-            Kokkos::view_alloc( std::string( label ),
-                                Kokkos::WithoutInitializing ),
-            src.size() );
-        if ( src.empty() )
-            return;
-        auto h = Kokkos::create_mirror_view( dst );
-        for ( size_t i = 0; i < src.size(); i++ )
-            h( i ) = src[i];
-        Kokkos::deep_copy( dst, h );
-    };
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_ILIST_S5_DEVICE_UPLOAD );
+        auto upload_int = []( const std::vector<int>& src, const char* label,
+                              Kokkos::View<int*, memory_space>& dst )
+        {
+            dst = Kokkos::View<int*, memory_space>(
+                Kokkos::view_alloc( std::string( label ),
+                                    Kokkos::WithoutInitializing ),
+                src.size() );
+            if ( src.empty() )
+                return;
+            auto h = Kokkos::create_mirror_view( dst );
+            for ( size_t i = 0; i < src.size(); i++ )
+                h( i ) = src[i];
+            Kokkos::deep_copy( dst, h );
+        };
 
-    upload_int( ns_targets_h, "m2l_ns_csr_targets", _m2l_ns_csr_targets );
-    upload_int( ns_offsets_h, "m2l_ns_csr_offsets", _m2l_ns_csr_offsets );
-    upload_int( ns_sources_h, "m2l_ns_csr_sources", _m2l_ns_csr_sources );
-    upload_int( ns_op_idx_h,  "m2l_ns_csr_op_idx",  _m2l_ns_csr_op_idx );
-    upload_int( sh_targets_h, "m2l_sh_csr_targets", _m2l_sh_csr_targets );
-    upload_int( sh_offsets_h, "m2l_sh_csr_offsets", _m2l_sh_csr_offsets );
-    upload_int( sh_sources_h, "m2l_sh_csr_sources", _m2l_sh_csr_sources );
-    upload_int( sh_op_idx_h,  "m2l_sh_csr_op_idx",  _m2l_sh_csr_op_idx );
+        upload_int( ns_targets_h, "m2l_ns_csr_targets", _m2l_ns_csr_targets );
+        upload_int( ns_offsets_h, "m2l_ns_csr_offsets", _m2l_ns_csr_offsets );
+        upload_int( ns_sources_h, "m2l_ns_csr_sources", _m2l_ns_csr_sources );
+        upload_int( ns_op_idx_h,  "m2l_ns_csr_op_idx",  _m2l_ns_csr_op_idx );
+        upload_int( sh_targets_h, "m2l_sh_csr_targets", _m2l_sh_csr_targets );
+        upload_int( sh_offsets_h, "m2l_sh_csr_offsets", _m2l_sh_csr_offsets );
+        upload_int( sh_sources_h, "m2l_sh_csr_sources", _m2l_sh_csr_sources );
+        upload_int( sh_op_idx_h,  "m2l_sh_csr_op_idx",  _m2l_sh_csr_op_idx );
+    }
 
     _interaction_list_dirty = false;
     _interaction_list_build_count++;
@@ -1685,6 +1707,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
                  compute_gradient );
     }
     CANOPY_PRINT_DOWNWARD_TIMERS( _comm );
+    CANOPY_PRINT_ILIST_TIMERS( _comm );
 }
 
 } // namespace Canopy

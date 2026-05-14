@@ -12,6 +12,7 @@
 #ifndef CANOPY_COMMUNICATIONPLAN_HPP
 #define CANOPY_COMMUNICATIONPLAN_HPP
 
+#include <Canopy_Profiling.hpp>
 #include <Canopy_TreeBuilder.hpp>
 #include <Canopy_TreePartitioner.hpp>
 
@@ -791,28 +792,51 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     _owner_map = &cell_owner_map;
     _replication_depth = replication_depth;
 
-    // Build cell lookup
-    _cell_map.clear();
-    _cell_map.reserve( cells.size() );
-    for ( const auto& c : cells )
-        _cell_map[c.key] = &c;
+    {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_COMMPLAN_CELL_MAP_FILL );
+        _cell_map.clear();
+        _cell_map.reserve( cells.size() );
+        for ( const auto& c : cells )
+            _cell_map[c.key] = &c;
+    }
 
     // Vertical plans (M2M / L2L) follow the parent-child topology and are
     // independent of the M2L/P2P pair set.
-    build_vertical_plans( cells );
+    {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_COMMPLAN_VERTICAL_PLANS );
+        build_vertical_plans( cells );
+    }
 
     // Compute subtree-relevance flags before the DTT so the traversal can
     // skip branches that don't intersect this rank's responsibilities.
-    compute_subtree_relevance( cells );
+    {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_COMMPLAN_SUBTREE_RELEVANCE );
+        compute_subtree_relevance( cells );
+    }
 
     // Single dual-tree traversal builds both the M2L interaction lists
     // and the P2P neighbor lists with symmetric (target, source) emissions.
-    build_all_interaction_lists( cells );
+    {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_COMMPLAN_DTT_TRAVERSAL );
+        build_all_interaction_lists( cells );
+    }
 
     // Materialize the scratch send/receive/ghost sets into the public plan
     // vectors.
-    finalize_m2l_plan();
-    finalize_p2p_plan();
+    {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_COMMPLAN_FINALIZE_M2L );
+        finalize_m2l_plan();
+    }
+    {
+        CANOPY_SCOPED_TIMER_DETAILED(
+            Canopy::Profiling::TIMER_COMMPLAN_FINALIZE_P2P );
+        finalize_p2p_plan();
+    }
 
     _valid = true;
 }
