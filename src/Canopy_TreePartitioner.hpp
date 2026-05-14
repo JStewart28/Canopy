@@ -354,7 +354,7 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
 
     // Configure Zoltan2
     Teuchos::ParameterList params;
-    params.set( "algorithm", "rcb" );
+    params.set( "algorithm", "multijagged" );
     params.set( "num_global_parts", _comm_size );
     params.set( "imbalance_tolerance", _imbalance_tolerance );
     params.set( "debug_level", "no_status" );
@@ -365,29 +365,19 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     zoltanParams.set( "DEBUG_LEVEL", "0" );
     params.set( "zoltan_parameters", zoltanParams );
 
-    // Solve on rank 0 only, then broadcast. Running Zoltan2 concurrently on
-    // every rank over identical replicated data was triggering bare
-    // std::exception throws inside Trilinos on AMD MI300A APUs (likely
-    // contention in Kokkos/HIP-backed internals under HSA_XNACK=1).
+    // Solve on rank 0 only, then broadcast. We cannot use ther deterministic "rcb"
+    // algorithm because it breaks on Tuolumne. The "multijagged" algorithm is
+    // non-deterministic, so only rank 0 computes, then broadcasts.
     std::vector<int> parts_storage( num_leaves );
     if ( _rank == 0 )
     {
-        try
-        {
-            Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
-                                                             teuchos_comm );
-            problem.solve();
-            const auto& solution = problem.getSolution();
-            const int* parts_view = solution.getPartListView();
-            for ( int i = 0; i < num_leaves; i++ )
-                parts_storage[i] = parts_view[i];
-        }
-        catch ( const std::exception& e )
-        {
-            std::cerr << "[rank " << _rank << "] Zoltan2 threw: " << e.what()
-                      << " (typeid=" << typeid( e ).name() << ")" << std::endl;
-            throw;
-        }
+        Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
+                                                            teuchos_comm );
+        problem.solve();
+        const auto& solution = problem.getSolution();
+        const int* parts_view = solution.getPartListView();
+        for ( int i = 0; i < num_leaves; i++ )
+            parts_storage[i] = parts_view[i];
     }
     MPI_Bcast( parts_storage.data(), num_leaves, MPI_INT, 0, _comm );
     const int* parts = parts_storage.data();
