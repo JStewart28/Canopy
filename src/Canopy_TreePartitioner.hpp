@@ -365,24 +365,31 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     zoltanParams.set( "DEBUG_LEVEL", "0" );
     params.set( "zoltan_parameters", zoltanParams );
 
-    // Solve
+    // Solve on rank 0 only, then broadcast. Running Zoltan2 concurrently on
+    // every rank over identical replicated data was triggering bare
+    // std::exception throws inside Trilinos on AMD MI300A APUs (likely
+    // contention in Kokkos/HIP-backed internals under HSA_XNACK=1).
     std::vector<int> parts_storage( num_leaves );
-    try
+    if ( _rank == 0 )
     {
-        Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
-                                                         teuchos_comm );
-        problem.solve();
-        const auto& solution = problem.getSolution();
-        const int* parts_view = solution.getPartListView();
-        for ( int i = 0; i < num_leaves; i++ )
-            parts_storage[i] = parts_view[i];
+        try
+        {
+            Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
+                                                             teuchos_comm );
+            problem.solve();
+            const auto& solution = problem.getSolution();
+            const int* parts_view = solution.getPartListView();
+            for ( int i = 0; i < num_leaves; i++ )
+                parts_storage[i] = parts_view[i];
+        }
+        catch ( const std::exception& e )
+        {
+            std::cerr << "[rank " << _rank << "] Zoltan2 threw: " << e.what()
+                      << " (typeid=" << typeid( e ).name() << ")" << std::endl;
+            throw;
+        }
     }
-    catch ( const std::exception& e )
-    {
-        std::cerr << "[rank " << _rank << "] Zoltan2 threw: " << e.what()
-                  << " (typeid=" << typeid( e ).name() << ")" << std::endl;
-        throw;
-    }
+    MPI_Bcast( parts_storage.data(), num_leaves, MPI_INT, 0, _comm );
     const int* parts = parts_storage.data();
 
     std::unordered_map<MortonKey, int> result;
