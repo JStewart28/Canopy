@@ -930,72 +930,98 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     // Fallback table: collect per-depth (target, source) pairs with
-    // op_idx == -1, ordered by target depth.
+    // op_idx == -1, ordered by target depth. In a healthy MAC traversal
+    // no pairs are out-of-range, so do a cheap detection scan first and
+    // skip the two full O(total_pairs) walks when there's nothing to
+    // place. _m2l_fallback_offsets_host is already zero-initialized
+    // above, which is the correct empty-table state.
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_ILIST_S5_FALLBACK_TABLE );
+
+        bool any_fallback = false;
         for ( int p = 0; p < total_pairs; p++ )
         {
-            if ( pair_op_idx[p] >= 0 )
-                continue;
-            const int d = pair_target_depth[p];
-            if ( d < 0 || d > _max_depth )
-                continue;
-            _m2l_fallback_offsets_host[d + 1]++;
-        }
-        for ( int d = 0; d <= _max_depth; d++ )
-            _m2l_fallback_offsets_host[d + 1] +=
-                _m2l_fallback_offsets_host[d];
-
-        const int total_fallback =
-            _m2l_fallback_offsets_host[_max_depth + 1];
-        std::vector<int> fb_targets_h( total_fallback );
-        std::vector<int> fb_sources_h( total_fallback );
-        std::vector<int> fb_cursors = _m2l_fallback_offsets_host;
-        for ( int p = 0; p < total_pairs; p++ )
-        {
-            if ( pair_op_idx[p] >= 0 )
-                continue;
-            const int d = pair_target_depth[p];
-            if ( d < 0 || d > _max_depth )
-                continue;
-            const int slot = fb_cursors[d]++;
-            fb_targets_h[slot] = pair_target[p];
-            fb_sources_h[slot] = pair_source[p];
-        }
-
-        _m2l_fallback_targets = Kokkos::View<int*, memory_space>(
-            Kokkos::view_alloc( Kokkos::WithoutInitializing,
-                                "m2l_fallback_targets" ),
-            total_fallback );
-        _m2l_fallback_sources = Kokkos::View<int*, memory_space>(
-            Kokkos::view_alloc( Kokkos::WithoutInitializing,
-                                "m2l_fallback_sources" ),
-            total_fallback );
-        if ( total_fallback > 0 )
-        {
-            auto h_t = Kokkos::create_mirror_view( _m2l_fallback_targets );
-            auto h_s = Kokkos::create_mirror_view( _m2l_fallback_sources );
-            for ( int i = 0; i < total_fallback; i++ )
+            if ( pair_op_idx[p] < 0 )
             {
-                h_t( i ) = fb_targets_h[i];
-                h_s( i ) = fb_sources_h[i];
+                any_fallback = true;
+                break;
             }
-            Kokkos::deep_copy( _m2l_fallback_targets, h_t );
-            Kokkos::deep_copy( _m2l_fallback_sources, h_s );
         }
 
         _m2l_fallback_count_per_active_depth.assign( _max_depth + 1, 0 );
-        for ( int d = 0; d <= _max_depth; d++ )
-            _m2l_fallback_count_per_active_depth[d] =
-                static_cast<long long>( _m2l_fallback_offsets_host[d + 1] -
-                                        _m2l_fallback_offsets_host[d] );
+
+        if ( !any_fallback )
+        {
+            _m2l_fallback_targets = Kokkos::View<int*, memory_space>(
+                "m2l_fallback_targets", 0 );
+            _m2l_fallback_sources = Kokkos::View<int*, memory_space>(
+                "m2l_fallback_sources", 0 );
+        }
+        else
+        {
+            for ( int p = 0; p < total_pairs; p++ )
+            {
+                if ( pair_op_idx[p] >= 0 )
+                    continue;
+                const int d = pair_target_depth[p];
+                if ( d < 0 || d > _max_depth )
+                    continue;
+                _m2l_fallback_offsets_host[d + 1]++;
+            }
+            for ( int d = 0; d <= _max_depth; d++ )
+                _m2l_fallback_offsets_host[d + 1] +=
+                    _m2l_fallback_offsets_host[d];
+
+            const int total_fallback =
+                _m2l_fallback_offsets_host[_max_depth + 1];
+            std::vector<int> fb_targets_h( total_fallback );
+            std::vector<int> fb_sources_h( total_fallback );
+            std::vector<int> fb_cursors = _m2l_fallback_offsets_host;
+            for ( int p = 0; p < total_pairs; p++ )
+            {
+                if ( pair_op_idx[p] >= 0 )
+                    continue;
+                const int d = pair_target_depth[p];
+                if ( d < 0 || d > _max_depth )
+                    continue;
+                const int slot = fb_cursors[d]++;
+                fb_targets_h[slot] = pair_target[p];
+                fb_sources_h[slot] = pair_source[p];
+            }
+
+            _m2l_fallback_targets = Kokkos::View<int*, memory_space>(
+                Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                    "m2l_fallback_targets" ),
+                total_fallback );
+            _m2l_fallback_sources = Kokkos::View<int*, memory_space>(
+                Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                    "m2l_fallback_sources" ),
+                total_fallback );
+            Kokkos::View<const int*, Kokkos::HostSpace,
+                         Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+                h_t( fb_targets_h.data(), total_fallback );
+            Kokkos::View<const int*, Kokkos::HostSpace,
+                         Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+                h_s( fb_sources_h.data(), total_fallback );
+            Kokkos::deep_copy( _m2l_fallback_targets, h_t );
+            Kokkos::deep_copy( _m2l_fallback_sources, h_s );
+
+            for ( int d = 0; d <= _max_depth; d++ )
+                _m2l_fallback_count_per_active_depth[d] =
+                    static_cast<long long>(
+                        _m2l_fallback_offsets_host[d + 1] -
+                        _m2l_fallback_offsets_host[d] );
+        }
     }
 
     // Upload the two CSRs to device.
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_ILIST_S5_DEVICE_UPLOAD );
+        // Wrap the source std::vector in an unmanaged host view and
+        // deep_copy it directly to the device — avoids the per-element
+        // mirror copy loop and the temporary mirror allocation.
         auto upload_int = []( const std::vector<int>& src, const char* label,
                               Kokkos::View<int*, memory_space>& dst )
         {
@@ -1005,10 +1031,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 src.size() );
             if ( src.empty() )
                 return;
-            auto h = Kokkos::create_mirror_view( dst );
-            for ( size_t i = 0; i < src.size(); i++ )
-                h( i ) = src[i];
-            Kokkos::deep_copy( dst, h );
+            Kokkos::View<const int*, Kokkos::HostSpace,
+                         Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+                h_src( src.data(), src.size() );
+            Kokkos::deep_copy( dst, h_src );
         };
 
         upload_int( ns_targets_h, "m2l_ns_csr_targets", _m2l_ns_csr_targets );

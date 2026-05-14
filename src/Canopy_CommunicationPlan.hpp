@@ -361,6 +361,13 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::compute_subtree_relevance(
     const std::vector<CellInfo>& cells )
 {
     _subtree_relevant.clear();
+
+    // Single-rank fast path: every cell is processed by this rank, so the
+    // relevance map is universally true and the DTT pruning branch is a
+    // no-op. Skip both populating the map and the upward propagation.
+    if ( _nprocs == 1 )
+        return;
+
     _subtree_relevant.reserve( cells.size() );
     for ( const auto& c : cells )
         _subtree_relevant[c.key] = rank_processes( c.key );
@@ -525,13 +532,17 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
         const CellInfo* S = s_it->second;
 
         // Subtree-ownership pruning — skip pairs that touch nothing this
-        // rank cares about.
-        auto tr_it = _subtree_relevant.find( tk );
-        auto sr_it = _subtree_relevant.find( sk );
-        const bool tr = ( tr_it != _subtree_relevant.end() ) && tr_it->second;
-        const bool sr = ( sr_it != _subtree_relevant.end() ) && sr_it->second;
-        if ( !tr && !sr )
-            continue;
+        // rank cares about. Skipped on a single rank since every cell is
+        // relevant by definition (no remote ownership to consult).
+        if ( _nprocs > 1 )
+        {
+            auto tr_it = _subtree_relevant.find( tk );
+            auto sr_it = _subtree_relevant.find( sk );
+            const bool tr = ( tr_it != _subtree_relevant.end() ) && tr_it->second;
+            const bool sr = ( sr_it != _subtree_relevant.end() ) && sr_it->second;
+            if ( !tr && !sr )
+                continue;
+        }
 
         // Self-pair: at a leaf this is the P2P self-interaction; at an
         // internal cell we split asymmetrically into child pairs (i, j)
@@ -745,8 +756,23 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_m2l_plan()
     _m2l_plan.sends.clear();
     _m2l_plan.receives.clear();
 
-    for ( auto& kv : _m2l_plan.interaction_lists )
-        std::sort( kv.second.begin(), kv.second.end() );
+    // Sort each per-target source list for downstream determinism.
+    // The sorts are independent across targets — parallelize over a
+    // materialized pointer array so the host execution space (OpenMP if
+    // enabled, else Serial) can sort lists concurrently.
+    {
+        std::vector<std::vector<MortonKey>*> list_ptrs;
+        list_ptrs.reserve( _m2l_plan.interaction_lists.size() );
+        for ( auto& kv : _m2l_plan.interaction_lists )
+            list_ptrs.push_back( &kv.second );
+        const int n_lists = static_cast<int>( list_ptrs.size() );
+        Kokkos::parallel_for(
+            "finalize_m2l_sort_lists",
+            Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
+                0, n_lists ),
+            [&]( int i )
+            { std::sort( list_ptrs[i]->begin(), list_ptrs[i]->end() ); } );
+    }
 
     for ( const auto& [key, from_rank] : _m2l_receives_set )
         _m2l_plan.receives.push_back( { key, from_rank } );
