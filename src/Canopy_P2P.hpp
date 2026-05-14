@@ -442,31 +442,61 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     const int num_ghost_leaves = static_cast<int>( _ghost_leaf_keys.size() );
     const int num_send_entries = static_cast<int>( _send_entries.size() );
 
-    std::vector<int> recv_counts( num_ghost_leaves, 0 );
-    std::vector<int> send_counts( num_send_entries, 0 );
-
-    // Fill send counts from leaf_particle_offsets
+    // Group sends/receives by peer rank, sorted by MortonKey so that both
+    // sides agree on the in-buffer order without an extra metadata exchange.
+    // One MPI_Isend / MPI_Irecv per peer instead of one per leaf — the
+    // per-leaf pattern exhausts the MPI request freelist at large
+    // particle counts.
+    std::map<int, std::vector<std::pair<MortonKey, int>>> sends_by_peer_kv;
     for ( int i = 0; i < num_send_entries; i++ )
-    {
-        const int cidx = _send_entries[i].cell_idx;
-        send_counts[i] = h_offsets( cidx + 1 ) - h_offsets( cidx );
-    }
+        sends_by_peer_kv[_send_entries[i].dest_rank].emplace_back(
+            _send_entries[i].leaf_key, i );
+    for ( auto& kv : sends_by_peer_kv )
+        std::sort( kv.second.begin(), kv.second.end(),
+                   []( const std::pair<MortonKey, int>& a,
+                       const std::pair<MortonKey, int>& b )
+                   { return a.first < b.first; } );
 
-    // --- Count exchange phase ---
-    std::vector<MPI_Request> recv_count_reqs( num_ghost_leaves );
+    std::map<int, std::vector<std::pair<MortonKey, int>>> recvs_by_peer_kv;
     for ( int i = 0; i < num_ghost_leaves; i++ )
+        recvs_by_peer_kv[_ghost_leaf_owners[i]].emplace_back(
+            _ghost_leaf_keys[i], i );
+    for ( auto& kv : recvs_by_peer_kv )
+        std::sort( kv.second.begin(), kv.second.end(),
+                   []( const std::pair<MortonKey, int>& a,
+                       const std::pair<MortonKey, int>& b )
+                   { return a.first < b.first; } );
+
+    // --- Count exchange phase (one message per peer, host-side) ---
+    std::map<int, std::vector<int>> recv_count_bufs;
+    std::vector<MPI_Request> recv_count_reqs;
+    recv_count_reqs.reserve( recvs_by_peer_kv.size() );
+    for ( auto& kv : recvs_by_peer_kv )
     {
-        int tag = static_cast<int>( _ghost_leaf_keys[i] & 0x7fffffff );
-        MPI_Irecv( &recv_counts[i], 1, MPI_INT, _ghost_leaf_owners[i], tag,
-                   _comm, &recv_count_reqs[i] );
+        auto& buf = recv_count_bufs[kv.first];
+        buf.resize( kv.second.size() );
+        MPI_Request req;
+        MPI_Irecv( buf.data(), static_cast<int>( buf.size() ), MPI_INT,
+                   kv.first, /*tag=*/0, _comm, &req );
+        recv_count_reqs.push_back( req );
     }
 
-    std::vector<MPI_Request> send_count_reqs( num_send_entries );
-    for ( int i = 0; i < num_send_entries; i++ )
+    std::map<int, std::vector<int>> send_count_bufs;
+    std::vector<MPI_Request> send_count_reqs;
+    send_count_reqs.reserve( sends_by_peer_kv.size() );
+    for ( auto& kv : sends_by_peer_kv )
     {
-        int tag = static_cast<int>( _send_entries[i].leaf_key & 0x7fffffff );
-        MPI_Isend( &send_counts[i], 1, MPI_INT, _send_entries[i].dest_rank, tag,
-                   _comm, &send_count_reqs[i] );
+        auto& buf = send_count_bufs[kv.first];
+        buf.reserve( kv.second.size() );
+        for ( const auto& pr : kv.second )
+        {
+            const int cidx = _send_entries[pr.second].cell_idx;
+            buf.push_back( h_offsets( cidx + 1 ) - h_offsets( cidx ) );
+        }
+        MPI_Request req;
+        MPI_Isend( buf.data(), static_cast<int>( buf.size() ), MPI_INT,
+                   kv.first, /*tag=*/0, _comm, &req );
+        send_count_reqs.push_back( req );
     }
 
     if ( !recv_count_reqs.empty() )
@@ -475,6 +505,15 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     if ( !send_count_reqs.empty() )
         MPI_Waitall( send_count_reqs.size(), send_count_reqs.data(),
                      MPI_STATUSES_IGNORE );
+
+    // Scatter received per-peer counts into per-ghost-leaf array
+    std::vector<int> recv_counts( num_ghost_leaves, 0 );
+    for ( const auto& kv : recvs_by_peer_kv )
+    {
+        const auto& buf = recv_count_bufs.at( kv.first );
+        for ( size_t i = 0; i < kv.second.size(); i++ )
+            recv_counts[kv.second[i].second] = buf[i];
+    }
 
     // Build ghost offsets and allocate ghost buffers
     _ghost_leaf_offsets = Kokkos::View<int*, memory_space>(
@@ -501,66 +540,157 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     }
 
     constexpr int per_particle = 3 + NComps;
-
-    // --- Particle data exchange ---
-    auto h_pos =
-        Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(), positions );
-    auto h_chg =
-        Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(), charges );
-
-    auto h_gpos = Kokkos::create_mirror_view( _ghost_positions );
-    auto h_gchg = Kokkos::create_mirror_view( _ghost_charges );
-
     MPI_Datatype mpi_scalar =
         ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
 
-    // Post recvs for particle data
-    std::vector<std::vector<scalar_type>> recv_bufs( num_ghost_leaves );
-    std::vector<MPI_Request> recv_data_reqs( num_ghost_leaves,
-                                             MPI_REQUEST_NULL );
-    for ( int i = 0; i < num_ghost_leaves; i++ )
-    {
-        const int count = recv_counts[i];
-        if ( count == 0 )
-            continue;
-        recv_bufs[i].resize( per_particle * count );
+    // --- Particle data exchange (one message per peer, device-side pack) ---
+    //
+    // Pack and unpack run on the execution space of the views; the .data()
+    // pointers passed to MPI are device pointers on GPU backends. This
+    // requires MPICH_GPU_SUPPORT_ENABLED=1 at runtime on GPU backends
+    // (Cray MPICH on Slingshot/HSN). On host backends the pointers are
+    // host pointers and no env var is needed.
+    const int n_send_peers = static_cast<int>( sends_by_peer_kv.size() );
+    const int n_recv_peers = static_cast<int>( recvs_by_peer_kv.size() );
 
-        int tag =
-            static_cast<int>( ( _ghost_leaf_keys[i] & 0x7fffffff ) ^ 0xABCD );
-        MPI_Irecv( recv_bufs[i].data(), per_particle * count, mpi_scalar,
-                   _ghost_leaf_owners[i], tag, _comm, &recv_data_reqs[i] );
+    std::vector<Kokkos::View<int*, memory_space>> send_idx_views( n_send_peers );
+    std::vector<Kokkos::View<scalar_type*, memory_space>> send_bufs(
+        n_send_peers );
+    std::vector<int> send_peer_ranks( n_send_peers );
+    std::vector<size_t> send_peer_nparticles( n_send_peers );
+
+    std::vector<Kokkos::View<int*, memory_space>> recv_idx_views( n_recv_peers );
+    std::vector<Kokkos::View<scalar_type*, memory_space>> recv_bufs(
+        n_recv_peers );
+    std::vector<int> recv_peer_ranks( n_recv_peers );
+    std::vector<size_t> recv_peer_nparticles( n_recv_peers );
+
+    // Build per-peer send index (which local particles to pack) and post
+    // recv-side index / buffer allocations.
+    {
+        int q = 0;
+        for ( const auto& kv : sends_by_peer_kv )
+        {
+            send_peer_ranks[q] = kv.first;
+            size_t total = 0;
+            for ( const auto& pr : kv.second )
+            {
+                const int cidx = _send_entries[pr.second].cell_idx;
+                total += static_cast<size_t>( h_offsets( cidx + 1 ) -
+                                              h_offsets( cidx ) );
+            }
+            send_peer_nparticles[q] = total;
+            send_idx_views[q] = Kokkos::View<int*, memory_space>(
+                Kokkos::view_alloc( "p2p_send_idx",
+                                    Kokkos::WithoutInitializing ),
+                total );
+            send_bufs[q] = Kokkos::View<scalar_type*, memory_space>(
+                Kokkos::view_alloc( "p2p_send_buf",
+                                    Kokkos::WithoutInitializing ),
+                per_particle * total );
+            if ( total > 0 )
+            {
+                auto h_idx = Kokkos::create_mirror_view( send_idx_views[q] );
+                size_t pos = 0;
+                for ( const auto& pr : kv.second )
+                {
+                    const int cidx = _send_entries[pr.second].cell_idx;
+                    const int start = h_offsets( cidx );
+                    const int count = h_offsets( cidx + 1 ) - start;
+                    for ( int p = 0; p < count; p++ )
+                        h_idx( pos++ ) = start + p;
+                }
+                Kokkos::deep_copy( send_idx_views[q], h_idx );
+            }
+            ++q;
+        }
     }
 
-    // Post sends for particle data
-    std::vector<std::vector<scalar_type>> send_bufs( num_send_entries );
-    std::vector<MPI_Request> send_data_reqs( num_send_entries,
-                                             MPI_REQUEST_NULL );
-    for ( int i = 0; i < num_send_entries; i++ )
+    // Post receives first.
+    std::vector<MPI_Request> recv_data_reqs;
+    recv_data_reqs.reserve( n_recv_peers );
     {
-        const int cidx = _send_entries[i].cell_idx;
-        const int start = h_offsets( cidx );
-        const int count = h_offsets( cidx + 1 ) - start;
-        if ( count == 0 )
-            continue;
-
-        send_bufs[i].resize( per_particle * count );
-        for ( int p = 0; p < count; p++ )
+        int q = 0;
+        for ( const auto& kv : recvs_by_peer_kv )
         {
-            send_bufs[i][per_particle * p + 0] =
-                static_cast<scalar_type>( h_pos( start + p, 0 ) );
-            send_bufs[i][per_particle * p + 1] =
-                static_cast<scalar_type>( h_pos( start + p, 1 ) );
-            send_bufs[i][per_particle * p + 2] =
-                static_cast<scalar_type>( h_pos( start + p, 2 ) );
-            for ( int c = 0; c < NComps; c++ )
-                send_bufs[i][per_particle * p + 3 + c] =
-                    static_cast<scalar_type>( h_chg( start + p, c ) );
-        }
+            recv_peer_ranks[q] = kv.first;
+            size_t total = 0;
+            for ( const auto& pr : kv.second )
+                total += static_cast<size_t>( recv_counts[pr.second] );
+            recv_peer_nparticles[q] = total;
+            recv_idx_views[q] = Kokkos::View<int*, memory_space>(
+                Kokkos::view_alloc( "p2p_recv_idx",
+                                    Kokkos::WithoutInitializing ),
+                total );
+            recv_bufs[q] = Kokkos::View<scalar_type*, memory_space>(
+                Kokkos::view_alloc( "p2p_recv_buf",
+                                    Kokkos::WithoutInitializing ),
+                per_particle * total );
+            if ( total > 0 )
+            {
+                auto h_idx = Kokkos::create_mirror_view( recv_idx_views[q] );
+                size_t pos = 0;
+                for ( const auto& pr : kv.second )
+                {
+                    const int ghost_leaf_idx = pr.second;
+                    const int count = recv_counts[ghost_leaf_idx];
+                    const int base = h_goff( ghost_leaf_idx );
+                    for ( int p = 0; p < count; p++ )
+                        h_idx( pos++ ) = base + p;
+                }
+                Kokkos::deep_copy( recv_idx_views[q], h_idx );
 
-        int tag = static_cast<int>( ( _send_entries[i].leaf_key & 0x7fffffff ) ^
-                                    0xABCD );
-        MPI_Isend( send_bufs[i].data(), per_particle * count, mpi_scalar,
-                   _send_entries[i].dest_rank, tag, _comm, &send_data_reqs[i] );
+                MPI_Request req;
+                MPI_Irecv( recv_bufs[q].data(),
+                           static_cast<int>( per_particle * total ),
+                           mpi_scalar, kv.first, /*tag=*/1, _comm, &req );
+                recv_data_reqs.push_back( req );
+            }
+            ++q;
+        }
+    }
+
+    // Pack send buffers on device.
+    for ( int q = 0; q < n_send_peers; q++ )
+    {
+        const size_t n = send_peer_nparticles[q];
+        if ( n == 0 )
+            continue;
+        auto idx_v = send_idx_views[q];
+        auto buf_v = send_bufs[q];
+        auto pos_v = positions;
+        auto chg_v = charges;
+        const int pp = per_particle;
+        const int nc = NComps;
+        Kokkos::parallel_for(
+            "p2p_pack",
+            Kokkos::RangePolicy<execution_space>( 0, static_cast<int>( n ) ),
+            KOKKOS_LAMBDA( const int i ) {
+                const int src = idx_v( i );
+                const int base = i * pp;
+                buf_v( base + 0 ) = static_cast<scalar_type>( pos_v( src, 0 ) );
+                buf_v( base + 1 ) = static_cast<scalar_type>( pos_v( src, 1 ) );
+                buf_v( base + 2 ) = static_cast<scalar_type>( pos_v( src, 2 ) );
+                for ( int c = 0; c < nc; c++ )
+                    buf_v( base + 3 + c ) =
+                        static_cast<scalar_type>( chg_v( src, c ) );
+            } );
+    }
+    Kokkos::fence();
+
+    // Post sends with device pointers.
+    std::vector<MPI_Request> send_data_reqs;
+    send_data_reqs.reserve( n_send_peers );
+    for ( int q = 0; q < n_send_peers; q++ )
+    {
+        const size_t n = send_peer_nparticles[q];
+        if ( n == 0 )
+            continue;
+        MPI_Request req;
+        MPI_Isend( send_bufs[q].data(),
+                   static_cast<int>( per_particle * n ), mpi_scalar,
+                   send_peer_ranks[q], /*tag=*/1, _comm, &req );
+        send_data_reqs.push_back( req );
     }
 
     if ( !recv_data_reqs.empty() )
@@ -570,26 +700,32 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         MPI_Waitall( send_data_reqs.size(), send_data_reqs.data(),
                      MPI_STATUSES_IGNORE );
 
-    // Unpack recv buffers into ghost views
-    for ( int i = 0; i < num_ghost_leaves; i++ )
+    // Unpack on device.
+    auto ghost_pos_v = _ghost_positions;
+    auto ghost_chg_v = _ghost_charges;
+    for ( int q = 0; q < n_recv_peers; q++ )
     {
-        const int count = recv_counts[i];
-        const int base = h_goff( i );
-        for ( int p = 0; p < count; p++ )
-        {
-            h_gpos( base + p, 0 ) = recv_bufs[i][per_particle * p + 0];
-            h_gpos( base + p, 1 ) = recv_bufs[i][per_particle * p + 1];
-            h_gpos( base + p, 2 ) = recv_bufs[i][per_particle * p + 2];
-            for ( int c = 0; c < NComps; c++ )
-                h_gchg( base + p, c ) = recv_bufs[i][per_particle * p + 3 + c];
-        }
+        const size_t n = recv_peer_nparticles[q];
+        if ( n == 0 )
+            continue;
+        auto idx_v = recv_idx_views[q];
+        auto buf_v = recv_bufs[q];
+        const int pp = per_particle;
+        const int nc = NComps;
+        Kokkos::parallel_for(
+            "p2p_unpack",
+            Kokkos::RangePolicy<execution_space>( 0, static_cast<int>( n ) ),
+            KOKKOS_LAMBDA( const int i ) {
+                const int dst = idx_v( i );
+                const int base = i * pp;
+                ghost_pos_v( dst, 0 ) = buf_v( base + 0 );
+                ghost_pos_v( dst, 1 ) = buf_v( base + 1 );
+                ghost_pos_v( dst, 2 ) = buf_v( base + 2 );
+                for ( int c = 0; c < nc; c++ )
+                    ghost_chg_v( dst, c ) = buf_v( base + 3 + c );
+            } );
     }
-
-    if ( _num_ghost_particles > 0 )
-    {
-        Kokkos::deep_copy( _ghost_positions, h_gpos );
-        Kokkos::deep_copy( _ghost_charges, h_gchg );
-    }
+    Kokkos::fence();
 }
 
 // --------------------------------------------------------------------------
