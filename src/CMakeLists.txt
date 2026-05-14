@@ -6,6 +6,7 @@ set(HEADERS_PUBLIC
   Canopy_DownwardSweep.hpp
   Canopy_Helpers.hpp
   Canopy_LaplaceKernel.hpp
+  Canopy_MpiCoalescedExchange.hpp
   Canopy_P2P.hpp
   Canopy_Profiling.hpp
   Canopy_Solver.hpp

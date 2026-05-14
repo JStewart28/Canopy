@@ -13,6 +13,7 @@
 #define CANOPY_DOWNWARD_SWEEP_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_MpiCoalescedExchange.hpp"
 #include "Canopy_Profiling.hpp"
 #include "Canopy_LaplaceKernel.hpp"
 #include "Canopy_SphericalCoefficients.hpp"
@@ -1016,83 +1017,54 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // cell indices in our view.
     const auto& m2l = comm_plan.m2l_plan();
 
-    const int per_cell_complex = coeffs_per_cell * NComps;
-    const int per_cell_real = 2 * per_cell_complex;
-    MPI_Datatype mpi_scalar =
-        ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
-
-    auto h_mults =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, multipoles );
-
-    // Post receives
-    std::vector<MPI_Request> recv_reqs( m2l.receives.size() );
-    std::vector<std::vector<complex_type>> recv_bufs( m2l.receives.size() );
-    std::vector<int> recv_cell_idx( m2l.receives.size() );
-
-    for ( size_t i = 0; i < m2l.receives.size(); i++ )
+    // Group transfers by peer rank so we issue O(#peers) messages instead
+    // of O(#cells). On Tuolumne the per-cell pattern exhausts Cray-MPICH's
+    // internal request freelist at O(1e5) in-flight Isends.
+    //
+    // Both sender and receiver sort each peer's cell list by MortonKey so
+    // pack/unpack order matches without an extra metadata exchange.
+    std::map<int, std::vector<std::pair<MortonKey, int>>> send_by_peer_kv;
+    for ( const auto& ct : m2l.sends )
     {
-        const MortonKey key = m2l.receives[i].cell_key;
-        auto it = _key_to_cell_idx->find( key );
+        auto it = _key_to_cell_idx->find( ct.cell_key );
         if ( it == _key_to_cell_idx->end() )
-        {
-            recv_reqs[i] = MPI_REQUEST_NULL;
-            recv_cell_idx[i] = -1;
             continue;
-        }
-        recv_cell_idx[i] = it->second;
-        recv_bufs[i].resize( per_cell_complex );
-
-        int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Irecv( reinterpret_cast<scalar_type*>( recv_bufs[i].data() ),
-                   per_cell_real, mpi_scalar, m2l.receives[i].remote_rank, tag,
-                   _comm, &recv_reqs[i] );
+        send_by_peer_kv[ct.remote_rank].emplace_back( ct.cell_key, it->second );
     }
 
-    // Post sends
-    std::vector<MPI_Request> send_reqs( m2l.sends.size() );
-    std::vector<std::vector<complex_type>> send_bufs( m2l.sends.size() );
-
-    for ( size_t i = 0; i < m2l.sends.size(); i++ )
+    std::map<int, std::vector<std::pair<MortonKey, int>>> recv_by_peer_kv;
+    for ( const auto& ct : m2l.receives )
     {
-        const MortonKey key = m2l.sends[i].cell_key;
-        auto it = _key_to_cell_idx->find( key );
+        auto it = _key_to_cell_idx->find( ct.cell_key );
         if ( it == _key_to_cell_idx->end() )
-        {
-            send_reqs[i] = MPI_REQUEST_NULL;
             continue;
-        }
-        const int cidx = it->second;
-        send_bufs[i].resize( per_cell_complex );
-
-        int idx = 0;
-        for ( int ci = 0; ci < coeffs_per_cell; ci++ )
-            for ( int c = 0; c < NComps; c++ )
-                send_bufs[i][idx++] = h_mults( cidx, ci, c );
-
-        int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Isend( reinterpret_cast<scalar_type*>( send_bufs[i].data() ),
-                   per_cell_real, mpi_scalar, m2l.sends[i].remote_rank, tag,
-                   _comm, &send_reqs[i] );
+        recv_by_peer_kv[ct.remote_rank].emplace_back( ct.cell_key, it->second );
     }
 
-    if ( !recv_reqs.empty() )
-        MPI_Waitall( recv_reqs.size(), recv_reqs.data(), MPI_STATUSES_IGNORE );
-    if ( !send_reqs.empty() )
-        MPI_Waitall( send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE );
-
-    // Unpack received multipoles into the multipole view
-    for ( size_t i = 0; i < m2l.receives.size(); i++ )
+    auto sort_and_flatten =
+        []( std::map<int, std::vector<std::pair<MortonKey, int>>>& in )
     {
-        if ( recv_cell_idx[i] < 0 )
-            continue;
-        const int cidx = recv_cell_idx[i];
-        int idx = 0;
-        for ( int ci = 0; ci < coeffs_per_cell; ci++ )
-            for ( int c = 0; c < NComps; c++ )
-                h_mults( cidx, ci, c ) = recv_bufs[i][idx++];
-    }
+        std::map<int, std::vector<int>> out;
+        for ( auto& kv : in )
+        {
+            std::sort( kv.second.begin(), kv.second.end(),
+                       []( const std::pair<MortonKey, int>& a,
+                           const std::pair<MortonKey, int>& b )
+                       { return a.first < b.first; } );
+            auto& dst = out[kv.first];
+            dst.reserve( kv.second.size() );
+            for ( const auto& p : kv.second )
+                dst.push_back( p.second );
+        }
+        return out;
+    };
 
-    Kokkos::deep_copy( multipoles, h_mults );
+    auto sends_by_peer = sort_and_flatten( send_by_peer_kv );
+    auto recvs_by_peer = sort_and_flatten( recv_by_peer_kv );
+
+    detail::coalesced_view_exchange( multipoles, _comm, sends_by_peer,
+                                     recvs_by_peer,
+                                     /*accumulate_on_recv=*/false );
 }
 
 // -------------------------------------------------------------------------
@@ -1514,31 +1486,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     const auto& l2l = comm_plan.l2l_plan();
 
-    const int per_cell_complex = coeffs_per_cell * NComps;
-    const int per_cell_real = 2 * per_cell_complex;
-    MPI_Datatype mpi_scalar =
-        ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
-
     auto h_dc = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
                                                      _device_cells );
 
-    // The cell_key in each L2L plan entry is the CHILD's key. Filter
-    // entries to those whose child is at depth+1 (i.e. whose parent is
-    // at the depth we just finished L2L'ing on).
-    struct PendingSend
-    {
-        int child_cell_idx;
-        int remote_rank;
-    };
-    std::vector<PendingSend> sends;
-
-    struct PendingRecv
-    {
-        int child_cell_idx;
-        int remote_rank;
-    };
-    std::vector<PendingRecv> recvs;
-
+    // The cell_key in each L2L plan entry is the CHILD's key. Filter to
+    // entries whose child is at depth+1 (i.e. whose parent is at the depth
+    // we just finished L2L'ing on), then group by peer rank and sort each
+    // peer's list by MortonKey for deterministic pack/unpack alignment.
+    std::map<int, std::vector<std::pair<MortonKey, int>>> send_by_peer_kv;
     for ( const auto& ct : l2l.sends )
     {
         auto it = _key_to_cell_idx->find( ct.cell_key );
@@ -1547,9 +1502,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         const int cidx = it->second;
         if ( h_dc( cidx ).depth != depth + 1 )
             continue;
-        sends.push_back( { cidx, ct.remote_rank } );
+        send_by_peer_kv[ct.remote_rank].emplace_back( ct.cell_key, cidx );
     }
 
+    std::map<int, std::vector<std::pair<MortonKey, int>>> recv_by_peer_kv;
     for ( const auto& ct : l2l.receives )
     {
         auto it = _key_to_cell_idx->find( ct.cell_key );
@@ -1558,62 +1514,38 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         const int cidx = it->second;
         if ( h_dc( cidx ).depth != depth + 1 )
             continue;
-        recvs.push_back( { cidx, ct.remote_rank } );
+        recv_by_peer_kv[ct.remote_rank].emplace_back( ct.cell_key, cidx );
     }
 
-    if ( sends.empty() && recvs.empty() )
+    if ( send_by_peer_kv.empty() && recv_by_peer_kv.empty() )
         return;
 
-    auto h_locals =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, _locals );
-
-    std::vector<MPI_Request> recv_reqs( recvs.size() );
-    std::vector<std::vector<complex_type>> recv_bufs( recvs.size() );
-    for ( size_t i = 0; i < recvs.size(); i++ )
+    auto sort_and_flatten =
+        []( std::map<int, std::vector<std::pair<MortonKey, int>>>& in )
     {
-        recv_bufs[i].resize( per_cell_complex );
-        const MortonKey key = h_dc( recvs[i].child_cell_idx ).key;
-        int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Irecv( reinterpret_cast<scalar_type*>( recv_bufs[i].data() ),
-                   per_cell_real, mpi_scalar, recvs[i].remote_rank, tag, _comm,
-                   &recv_reqs[i] );
-    }
+        std::map<int, std::vector<int>> out;
+        for ( auto& kv : in )
+        {
+            std::sort( kv.second.begin(), kv.second.end(),
+                       []( const std::pair<MortonKey, int>& a,
+                           const std::pair<MortonKey, int>& b )
+                       { return a.first < b.first; } );
+            auto& dst = out[kv.first];
+            dst.reserve( kv.second.size() );
+            for ( const auto& p : kv.second )
+                dst.push_back( p.second );
+        }
+        return out;
+    };
 
-    std::vector<MPI_Request> send_reqs( sends.size() );
-    std::vector<std::vector<complex_type>> send_bufs( sends.size() );
-    for ( size_t i = 0; i < sends.size(); i++ )
-    {
-        send_bufs[i].resize( per_cell_complex );
-        const int cidx = sends[i].child_cell_idx;
-        int idx = 0;
-        for ( int ci = 0; ci < coeffs_per_cell; ci++ )
-            for ( int c = 0; c < NComps; c++ )
-                send_bufs[i][idx++] = h_locals( cidx, ci, c );
+    auto sends_by_peer = sort_and_flatten( send_by_peer_kv );
+    auto recvs_by_peer = sort_and_flatten( recv_by_peer_kv );
 
-        const MortonKey key = h_dc( cidx ).key;
-        int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Isend( reinterpret_cast<scalar_type*>( send_bufs[i].data() ),
-                   per_cell_real, mpi_scalar, sends[i].remote_rank, tag, _comm,
-                   &send_reqs[i] );
-    }
-
-    if ( !recv_reqs.empty() )
-        MPI_Waitall( recv_reqs.size(), recv_reqs.data(), MPI_STATUSES_IGNORE );
-    if ( !send_reqs.empty() )
-        MPI_Waitall( send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE );
-
-    // Accumulate received locals into the child's local (the child
-    // owner may already have M2L contributions there)
-    for ( size_t i = 0; i < recvs.size(); i++ )
-    {
-        const int cidx = recvs[i].child_cell_idx;
-        int idx = 0;
-        for ( int ci = 0; ci < coeffs_per_cell; ci++ )
-            for ( int c = 0; c < NComps; c++ )
-                h_locals( cidx, ci, c ) += recv_bufs[i][idx++];
-    }
-
-    Kokkos::deep_copy( _locals, h_locals );
+    // Received locals accumulate into the child's local (child owner may
+    // already have M2L contributions in place).
+    detail::coalesced_view_exchange( _locals, _comm, sends_by_peer,
+                                     recvs_by_peer,
+                                     /*accumulate_on_recv=*/true );
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>

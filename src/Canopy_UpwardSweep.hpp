@@ -13,6 +13,7 @@
 #define CANOPY_UPWARD_SWEEP_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_MpiCoalescedExchange.hpp"
 #include "Canopy_Profiling.hpp"
 #include "Canopy_SphericalCoefficients.hpp"
 #include "Canopy_TreeBuilder.hpp"
@@ -482,128 +483,124 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     // Bytes per cell for all components
     const int per_cell_complex = coeffs_per_cell * NComps;
-    const int per_cell_real = 2 * per_cell_complex;
     MPI_Datatype mpi_scalar =
         ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
 
-    // Allreduce shared cells
+    // Allreduce shared cells — single device-side buffer, GPU-direct.
     if ( !shared_cell_indices.empty() )
     {
         const int nshared = static_cast<int>( shared_cell_indices.size() );
-        const int total_complex = nshared * per_cell_complex;
+        const size_t total_complex =
+            static_cast<size_t>( nshared ) * per_cell_complex;
 
-        std::vector<complex_type> sendbuf( total_complex );
-        std::vector<complex_type> recvbuf( total_complex );
-
-        auto h_mults = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
-                                                            _multipoles );
-
-        for ( int i = 0; i < nshared; i++ )
+        Kokkos::View<int*, memory_space> d_idx(
+            Kokkos::view_alloc( "m2m_allreduce_idx",
+                                Kokkos::WithoutInitializing ),
+            nshared );
         {
-            const int cidx = shared_cell_indices[i];
-            int idx = 0;
-            for ( int ci = 0; ci < coeffs_per_cell; ci++ )
-                for ( int c = 0; c < NComps; c++ )
-                    sendbuf[i * per_cell_complex + ( idx++ )] =
-                        h_mults( cidx, ci, c );
+            auto h_idx = Kokkos::create_mirror_view( d_idx );
+            for ( int i = 0; i < nshared; i++ )
+                h_idx( i ) = shared_cell_indices[i];
+            Kokkos::deep_copy( d_idx, h_idx );
         }
+
+        Kokkos::View<complex_type*, memory_space> sendbuf(
+            Kokkos::view_alloc( "m2m_allreduce_send",
+                                Kokkos::WithoutInitializing ),
+            total_complex );
+        Kokkos::View<complex_type*, memory_space> recvbuf(
+            Kokkos::view_alloc( "m2m_allreduce_recv",
+                                Kokkos::WithoutInitializing ),
+            total_complex );
+
+        auto mults = _multipoles;
+        const int cpc = coeffs_per_cell;
+        const int nc = NComps;
+        Kokkos::parallel_for(
+            "m2m_allreduce_pack",
+            Kokkos::RangePolicy<execution_space>( 0, nshared ),
+            KOKKOS_LAMBDA( const int i ) {
+                const int cidx = d_idx( i );
+                const int base = i * cpc * nc;
+                for ( int ci = 0; ci < cpc; ci++ )
+                    for ( int c = 0; c < nc; c++ )
+                        sendbuf( base + ci * nc + c ) = mults( cidx, ci, c );
+            } );
+        Kokkos::fence();
 
         {
             CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2M_ALLREDUCE );
             MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
                            reinterpret_cast<scalar_type*>( recvbuf.data() ),
-                           2 * total_complex, mpi_scalar, MPI_SUM, _comm );
+                           static_cast<int>( 2 * total_complex ), mpi_scalar,
+                           MPI_SUM, _comm );
         }
 
-        for ( int i = 0; i < nshared; i++ )
-        {
-            const int cidx = shared_cell_indices[i];
-            int idx = 0;
-            for ( int ci = 0; ci < coeffs_per_cell; ci++ )
-                for ( int c = 0; c < NComps; c++ )
-                    h_mults( cidx, ci, c ) =
-                        recvbuf[i * per_cell_complex + ( idx++ )];
-        }
-
-        Kokkos::deep_copy( _multipoles, h_mults );
+        Kokkos::parallel_for(
+            "m2m_allreduce_unpack",
+            Kokkos::RangePolicy<execution_space>( 0, nshared ),
+            KOKKOS_LAMBDA( const int i ) {
+                const int cidx = d_idx( i );
+                const int base = i * cpc * nc;
+                for ( int ci = 0; ci < cpc; ci++ )
+                    for ( int c = 0; c < nc; c++ )
+                        mults( cidx, ci, c ) = recvbuf( base + ci * nc + c );
+            } );
+        Kokkos::fence();
     }
 
-    // Point-to-point sends/receives for this depth
-    struct Transfer
-    {
-        int cell_idx;
-        int remote_rank;
-    };
-    std::vector<Transfer> my_sends, my_recvs;
-
+    // Point-to-point sends/receives for this depth — coalesced per peer
+    // rank to keep MPI request counts at O(#peers) rather than O(#cells).
+    std::map<int, std::vector<std::pair<MortonKey, int>>> send_by_peer_kv;
     for ( const auto& ct : m2m.sends )
     {
         auto it = _key_to_cell_idx.find( ct.cell_key );
         if ( it == _key_to_cell_idx.end() )
             continue;
-        if ( h_dc_all( it->second ).depth == depth )
-            my_sends.push_back( { it->second, ct.remote_rank } );
+        if ( h_dc_all( it->second ).depth != depth )
+            continue;
+        send_by_peer_kv[ct.remote_rank].emplace_back( ct.cell_key,
+                                                      it->second );
     }
+    std::map<int, std::vector<std::pair<MortonKey, int>>> recv_by_peer_kv;
     for ( const auto& ct : m2m.receives )
     {
         auto it = _key_to_cell_idx.find( ct.cell_key );
         if ( it == _key_to_cell_idx.end() )
             continue;
-        if ( h_dc_all( it->second ).depth == depth )
-            my_recvs.push_back( { it->second, ct.remote_rank } );
+        if ( h_dc_all( it->second ).depth != depth )
+            continue;
+        recv_by_peer_kv[ct.remote_rank].emplace_back( ct.cell_key,
+                                                      it->second );
     }
 
-    if ( my_sends.empty() && my_recvs.empty() )
+    if ( send_by_peer_kv.empty() && recv_by_peer_kv.empty() )
         return;
 
-    auto h_mults =
-        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, _multipoles );
-
-    std::vector<MPI_Request> recv_reqs( my_recvs.size() );
-    std::vector<std::vector<complex_type>> recv_bufs( my_recvs.size() );
-    for ( size_t i = 0; i < my_recvs.size(); i++ )
+    auto sort_and_flatten =
+        []( std::map<int, std::vector<std::pair<MortonKey, int>>>& in )
     {
-        recv_bufs[i].resize( per_cell_complex );
-        const MortonKey key = h_dc_all( my_recvs[i].cell_idx ).key;
-        int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Irecv( reinterpret_cast<scalar_type*>( recv_bufs[i].data() ),
-                   per_cell_real, mpi_scalar, my_recvs[i].remote_rank, tag,
-                   _comm, &recv_reqs[i] );
-    }
+        std::map<int, std::vector<int>> out;
+        for ( auto& kv : in )
+        {
+            std::sort( kv.second.begin(), kv.second.end(),
+                       []( const std::pair<MortonKey, int>& a,
+                           const std::pair<MortonKey, int>& b )
+                       { return a.first < b.first; } );
+            auto& dst = out[kv.first];
+            dst.reserve( kv.second.size() );
+            for ( const auto& p : kv.second )
+                dst.push_back( p.second );
+        }
+        return out;
+    };
 
-    std::vector<MPI_Request> send_reqs( my_sends.size() );
-    std::vector<std::vector<complex_type>> send_bufs( my_sends.size() );
-    for ( size_t i = 0; i < my_sends.size(); i++ )
-    {
-        send_bufs[i].resize( per_cell_complex );
-        const int cidx = my_sends[i].cell_idx;
-        int idx = 0;
-        for ( int ci = 0; ci < coeffs_per_cell; ci++ )
-            for ( int c = 0; c < NComps; c++ )
-                send_bufs[i][idx++] = h_mults( cidx, ci, c );
+    auto sends_by_peer = sort_and_flatten( send_by_peer_kv );
+    auto recvs_by_peer = sort_and_flatten( recv_by_peer_kv );
 
-        const MortonKey key = h_dc_all( cidx ).key;
-        int tag = static_cast<int>( key & 0x7fffffff );
-        MPI_Isend( reinterpret_cast<scalar_type*>( send_bufs[i].data() ),
-                   per_cell_real, mpi_scalar, my_sends[i].remote_rank, tag,
-                   _comm, &send_reqs[i] );
-    }
-
-    if ( !recv_reqs.empty() )
-        MPI_Waitall( recv_reqs.size(), recv_reqs.data(), MPI_STATUSES_IGNORE );
-    if ( !send_reqs.empty() )
-        MPI_Waitall( send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE );
-
-    for ( size_t i = 0; i < my_recvs.size(); i++ )
-    {
-        const int cidx = my_recvs[i].cell_idx;
-        int idx = 0;
-        for ( int ci = 0; ci < coeffs_per_cell; ci++ )
-            for ( int c = 0; c < NComps; c++ )
-                h_mults( cidx, ci, c ) = recv_bufs[i][idx++];
-    }
-
-    Kokkos::deep_copy( _multipoles, h_mults );
+    detail::coalesced_view_exchange( _multipoles, _comm, sends_by_peer,
+                                     recvs_by_peer,
+                                     /*accumulate_on_recv=*/false );
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
