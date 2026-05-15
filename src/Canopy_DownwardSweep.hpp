@@ -621,21 +621,21 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         if ( it == _key_to_cell_idx->end() )
             continue;
         const int target_idx = it->second;
-        const bool target_is_shared =
-            ( h_dc_for_filter( target_idx ).owner_rank == OWNER_SHARED );
-        if ( target_is_shared && _rank != 0 )
+        const auto& tci = h_dc_for_filter( target_idx );
+        if ( tci.owner_rank == OWNER_SHARED && _rank != 0 )
             continue;
 
         TargetEntry e;
         e.target_idx = target_idx;
-        e.depth = h_dc_for_filter( target_idx ).depth;
+        e.depth = tci.depth;
         e.sources.reserve( sources.size() );
-        for ( MortonKey src_key : sources )
+        // sources is vector<pair<MortonKey, int>> — the second element is
+        // the cell index in `cells`, populated by CP when it emitted the
+        // pair. No per-source hash lookup needed.
+        for ( const auto& [src_key, src_idx] : sources )
         {
-            auto sit = _key_to_cell_idx->find( src_key );
-            if ( sit == _key_to_cell_idx->end() )
-                continue;
-            e.sources.push_back( sit->second );
+            (void)src_key;
+            e.sources.push_back( src_idx );
         }
         entries.push_back( std::move( e ) );
     }
@@ -687,6 +687,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_ILIST_S3_CLASSIFY_PAIRS );
+        std::vector<double> inv_half_width_at_depth( _max_depth + 1, 0.0 );
         {
             const int num_cells = _device_cells.extent( 0 );
             for ( int i = 0; i < num_cells; i++ )
@@ -695,6 +696,13 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 if ( dci.depth >= 0 && dci.depth <= _max_depth )
                     half_width_at_depth[dci.depth] = dci.half_width;
             }
+            // Precompute inverses once so the inner loop is hash-find +
+            // table lookup with no divisions (84M pairs at 4M particles).
+            for ( int d = 0; d <= _max_depth; d++ )
+                inv_half_width_at_depth[d] =
+                    ( half_width_at_depth[d] > 0.0 )
+                        ? ( 1.0 / half_width_at_depth[d] )
+                        : 0.0;
         }
 
         size_t pair_cursor = 0;
@@ -707,12 +715,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             {
                 const auto& sci = h_dc_for_filter( s );
                 const int max_d = std::max( e.depth, sci.depth );
-                const double unit_w =
-                    ( max_d >= 0 && max_d <= _max_depth )
-                        ? half_width_at_depth[max_d]
-                        : 0.0;
                 const double inv_unit_w =
-                    ( unit_w > 0.0 ) ? ( 1.0 / unit_w ) : 0.0;
+                    ( max_d >= 0 && max_d <= _max_depth )
+                        ? inv_half_width_at_depth[max_d]
+                        : 0.0;
                 const double dx = sci.center[0] - tci.center[0];
                 const double dy = sci.center[1] - tci.center[1];
                 const double dz = sci.center[2] - tci.center[2];
@@ -725,7 +731,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 const int dd = sci.depth - e.depth;
 
                 int op_idx = -1;
-                if ( unit_w > 0.0 && std::abs( dd ) <= M2L_KEY_DD_MAX &&
+                if ( inv_unit_w > 0.0 && std::abs( dd ) <= M2L_KEY_DD_MAX &&
                      std::abs( ii ) <= M2L_KEY_OFFSET_MAX &&
                      std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
                      std::abs( kk ) <= M2L_KEY_OFFSET_MAX )

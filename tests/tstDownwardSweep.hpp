@@ -846,8 +846,9 @@ void testM2LListInvariants( int num_particles, int ncrit, int max_depth,
     for ( const auto& kv : ilists )
     {
         MortonKey A = kv.first;
-        for ( MortonKey B : kv.second )
+        for ( const auto& [B, b_idx] : kv.second )
         {
+            (void)b_idx;
             auto da = depth_of.find( A );
             auto db = depth_of.find( B );
             if ( da == depth_of.end() || db == depth_of.end() )
@@ -860,8 +861,9 @@ void testM2LListInvariants( int num_particles, int ncrit, int max_depth,
             bool reciprocal = false;
             if ( it != ilists.end() )
             {
-                for ( MortonKey k : it->second )
+                for ( const auto& [k, k_idx] : it->second )
                 {
+                    (void)k_idx;
                     if ( k == A )
                     {
                         reciprocal = true;
@@ -900,8 +902,9 @@ void testM2LListInvariants( int num_particles, int ncrit, int max_depth,
             continue;
         std::unordered_set<MortonKey> p2p_set( pp_it->second.begin(),
                                                pp_it->second.end() );
-        for ( MortonKey B : kv.second )
+        for ( const auto& [B, b_idx] : kv.second )
         {
+            (void)b_idx;
             if ( p2p_set.count( B ) )
             {
                 n_overlaps++;

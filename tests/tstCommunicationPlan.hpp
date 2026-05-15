@@ -306,15 +306,17 @@ void testM2LInteractionLists( int num_particles_per_rank, int ncrit,
     for ( const auto& [target_key, sources] : ilists )
     {
         // Check 1: no self-interaction
-        for ( MortonKey src : sources )
+        for ( const auto& [src, src_idx] : sources )
         {
+            (void)src_idx;
             EXPECT_NE( src, target_key )
                 << "Cell " << target_key << " has itself in interaction list";
         }
 
         // Check 2: every source key exists in the tree
-        for ( MortonKey src : sources )
+        for ( const auto& [src, src_idx] : sources )
         {
+            (void)src_idx;
             EXPECT_TRUE( cell_key_set.count( src ) > 0 )
                 << "Interaction list source " << src << " not in tree";
         }

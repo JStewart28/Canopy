@@ -86,8 +86,13 @@ struct M2LPlan
 {
     // The full interaction list for each cell this rank owns or shares.
     // Key: target cell that this rank will compute M2L for.
-    // Value: list of source cells whose multipoles are needed.
-    std::unordered_map<MortonKey, std::vector<MortonKey>> interaction_lists;
+    // Value: list of (source cell key, source cell index in cells vector).
+    // Carrying the index alongside the key lets the downstream consumer
+    // (DownwardSweep::build_interaction_list_device) skip a hash lookup
+    // per source pair — there are tens of millions of source entries at
+    // production sizes.
+    std::unordered_map<MortonKey, std::vector<std::pair<MortonKey, int>>>
+        interaction_lists;
 
     // Cross-rank transfers: source cells this rank needs from others
     std::vector<CellTransfer> receives;
@@ -227,6 +232,12 @@ class CommunicationPlan
     const std::unordered_map<MortonKey, int>* _owner_map;
     int _replication_depth;
 
+    // Base pointer of the `cells` vector passed to build(). Used by
+    // emit_m2l_pair to compute the cell index of each source via pointer
+    // arithmetic, which matches the index UpwardSweep stores in
+    // _key_to_cell_idx (both index into the same `cells` vector).
+    const CellInfo* _cells_base = nullptr;
+
     // Subtree relevance: true iff the subtree rooted at this cell contains
     // at least one cell that this rank processes (owns or shares). Used to
     // prune the dual-tree traversal in build_all_interaction_lists().
@@ -334,7 +345,7 @@ class CommunicationPlan
     void finalize_p2p_plan();
 
     // Symmetric emit helpers used by the DTT pass.
-    void emit_m2l_pair( MortonKey a, MortonKey b );
+    void emit_m2l_pair( const CellInfo* A, const CellInfo* B );
     void emit_p2p_pair( MortonKey a, MortonKey b );
 };
 
@@ -411,8 +422,12 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::compute_subtree_relevance(
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
 void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_m2l_pair(
-    MortonKey a, MortonKey b )
+    const CellInfo* A, const CellInfo* B )
 {
+    const MortonKey a = A->key;
+    const MortonKey b = B->key;
+    const int a_idx = static_cast<int>( A - _cells_base );
+    const int b_idx = static_cast<int>( B - _cells_base );
     const int oa = owner_of( a );
     const int ob = owner_of( b );
 
@@ -425,12 +440,12 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_m2l_pair(
     //
     // Shared sources are replicated on every rank after the M2M allreduce,
     // so they never require point-to-point communication.
-    auto handle = [&]( MortonKey t, int ot, MortonKey s, int os )
+    auto handle = [&]( MortonKey t, int ot, MortonKey s, int s_idx, int os )
     {
         const int compute_rank = ( ot == OWNER_SHARED ) ? 0 : ot;
         if ( compute_rank == _rank )
         {
-            _m2l_plan.interaction_lists[t].push_back( s );
+            _m2l_plan.interaction_lists[t].push_back( { s, s_idx } );
             if ( os != OWNER_SHARED && os != _rank )
                 _m2l_receives_set.insert( { s, os } );
         }
@@ -439,8 +454,8 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_m2l_pair(
             _m2l_sends_set.insert( { s, compute_rank } );
         }
     };
-    handle( a, oa, b, ob );
-    handle( b, ob, a, oa );
+    handle( a, oa, b, b_idx, ob );
+    handle( b, ob, a, a_idx, oa );
 }
 
 template <class MemorySpace, class ExecutionSpace>
@@ -514,30 +529,27 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
     if ( root_it == _cell_map.end() )
         return;
 
-    std::vector<std::pair<MortonKey, MortonKey>> stack;
+    // Carry CellInfo* on the stack — child enumeration looks up keys in
+    // _cell_map once at push time, so pops are pointer dereferences with
+    // no further hashing. Saves 2 hash lookups per visited pair vs. the
+    // MortonKey-on-stack variant.
+    using CellPair = std::pair<const CellInfo*, const CellInfo*>;
+    std::vector<CellPair> stack;
     stack.reserve( 1024 );
-    stack.push_back( { ROOT_KEY, ROOT_KEY } );
+    stack.push_back( { root_it->second, root_it->second } );
 
     while ( !stack.empty() )
     {
-        auto [tk, sk] = stack.back();
+        auto [T, S] = stack.back();
         stack.pop_back();
-
-        auto t_it = _cell_map.find( tk );
-        auto s_it = _cell_map.find( sk );
-        if ( t_it == _cell_map.end() || s_it == _cell_map.end() )
-            continue;
-
-        const CellInfo* T = t_it->second;
-        const CellInfo* S = s_it->second;
 
         // Subtree-ownership pruning — skip pairs that touch nothing this
         // rank cares about. Skipped on a single rank since every cell is
         // relevant by definition (no remote ownership to consult).
         if ( _nprocs > 1 )
         {
-            auto tr_it = _subtree_relevant.find( tk );
-            auto sr_it = _subtree_relevant.find( sk );
+            auto tr_it = _subtree_relevant.find( T->key );
+            auto sr_it = _subtree_relevant.find( S->key );
             const bool tr = ( tr_it != _subtree_relevant.end() ) && tr_it->second;
             const bool sr = ( sr_it != _subtree_relevant.end() ) && sr_it->second;
             if ( !tr && !sr )
@@ -547,24 +559,29 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
         // Self-pair: at a leaf this is the P2P self-interaction; at an
         // internal cell we split asymmetrically into child pairs (i, j)
         // for i <= j to avoid double-visiting reflected pairs.
-        if ( tk == sk )
+        if ( T == S )
         {
             if ( T->is_leaf )
             {
-                emit_p2p_pair( tk, tk );
+                emit_p2p_pair( T->key, T->key );
                 continue;
+            }
+            const CellInfo* children[8] = { nullptr };
+            for ( int i = 0; i < 8; i++ )
+            {
+                auto ci_it = _cell_map.find( child_key( T->key, i ) );
+                if ( ci_it != _cell_map.end() )
+                    children[i] = ci_it->second;
             }
             for ( int i = 0; i < 8; i++ )
             {
-                MortonKey ci = child_key( tk, i );
-                if ( !_cell_map.count( ci ) )
+                if ( !children[i] )
                     continue;
                 for ( int j = i; j < 8; j++ )
                 {
-                    MortonKey cj = child_key( tk, j );
-                    if ( !_cell_map.count( cj ) )
+                    if ( !children[j] )
                         continue;
-                    stack.push_back( { ci, cj } );
+                    stack.push_back( { children[i], children[j] } );
                 }
             }
             continue;
@@ -573,14 +590,14 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
         // MAC satisfied → M2L (one unordered pair, both directed M2Ls).
         if ( mac_satisfied( *T, *S ) )
         {
-            emit_m2l_pair( tk, sk );
+            emit_m2l_pair( T, S );
             continue;
         }
 
         // Both leaves, not well-separated → P2P.
         if ( T->is_leaf && S->is_leaf )
         {
-            emit_p2p_pair( tk, sk );
+            emit_p2p_pair( T->key, S->key );
             continue;
         }
 
@@ -592,18 +609,18 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
         {
             for ( int oct = 0; oct < 8; oct++ )
             {
-                MortonKey ck = child_key( tk, oct );
-                if ( _cell_map.count( ck ) )
-                    stack.push_back( { ck, sk } );
+                auto ck_it = _cell_map.find( child_key( T->key, oct ) );
+                if ( ck_it != _cell_map.end() )
+                    stack.push_back( { ck_it->second, S } );
             }
         }
         else
         {
             for ( int oct = 0; oct < 8; oct++ )
             {
-                MortonKey ck = child_key( sk, oct );
-                if ( _cell_map.count( ck ) )
-                    stack.push_back( { tk, ck } );
+                auto ck_it = _cell_map.find( child_key( S->key, oct ) );
+                if ( ck_it != _cell_map.end() )
+                    stack.push_back( { T, ck_it->second } );
             }
         }
     }
@@ -761,7 +778,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_m2l_plan()
     // materialized pointer array so the host execution space (OpenMP if
     // enabled, else Serial) can sort lists concurrently.
     {
-        std::vector<std::vector<MortonKey>*> list_ptrs;
+        std::vector<std::vector<std::pair<MortonKey, int>>*> list_ptrs;
         list_ptrs.reserve( _m2l_plan.interaction_lists.size() );
         for ( auto& kv : _m2l_plan.interaction_lists )
             list_ptrs.push_back( &kv.second );
@@ -817,6 +834,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
 {
     _owner_map = &cell_owner_map;
     _replication_depth = replication_depth;
+    _cells_base = cells.data();
 
     {
         CANOPY_SCOPED_TIMER_DETAILED(
