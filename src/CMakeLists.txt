@@ -1,7 +1,6 @@
 configure_file(Canopy_Config.hpp.cmakein Canopy_Config.hpp)
 
 set(HEADERS_PUBLIC
-  Canopy_BatchedGemm.hpp
   Canopy_CommunicationPlan.hpp
   Canopy_DownwardSweep.hpp
   Canopy_Helpers.hpp
@@ -39,21 +38,6 @@ target_link_libraries(Canopy INTERFACE MPI::MPI_CXX)
 target_link_libraries(Canopy INTERFACE Cabana::Core Cabana::Grid)
 
 target_link_libraries(Canopy INTERFACE ${Trilinos_LIBRARIES})
-
-if(Canopy_ENABLE_CUBLAS)
-  target_link_libraries(Canopy INTERFACE CUDA::cublas)
-  target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_CUBLAS)
-endif()
-
-if(Canopy_ENABLE_HIPBLAS)
-  target_link_libraries(Canopy INTERFACE roc::hipblas)
-  target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_HIPBLAS)
-endif()
-
-if(Canopy_ENABLE_KOKKOSKERNELS)
-  target_link_libraries(Canopy INTERFACE Kokkos::kokkoskernels)
-  target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_KOKKOSKERNELS)
-endif()
 
 target_include_directories(Canopy INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
