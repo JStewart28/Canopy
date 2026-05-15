@@ -10,17 +10,17 @@
 ############################################################################
 
 cmake_minimum_required(VERSION 3.16)
-project(Canopy_MultiSolve)
+project(Canopy_GravitySolve)
 if(NOT TARGET Canopy)
   find_package(Canopy)
 endif()
 
-add_executable(multisolve example_multisolve.cpp)
-target_link_libraries(multisolve Canopy)
-add_test(NAME Canopy_Tutorial_03_multisolve COMMAND ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG}
-${MPIEXEC_MAX_NUMPROCS} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:multisolve> ${MPIEXEC_POSTFLAGS})
-set_tests_properties(Canopy_Tutorial_03_multisolve PROPERTIES PROCESSORS ${MPIEXEC_MAX_NUMPROCS})
+add_executable(gravity_solve gravity_solve.cpp)
+target_link_libraries(gravity_solve Canopy)
+add_test(NAME Canopy_Tutorial_03_gravity_solve COMMAND ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG}
+${MPIEXEC_MAX_NUMPROCS} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gravity_solve> ${MPIEXEC_POSTFLAGS})
+set_tests_properties(Canopy_Tutorial_03_gravity_solve PROPERTIES PROCESSORS ${MPIEXEC_MAX_NUMPROCS})
 if(Canopy_INSTALL_EXAMPLES)
-      install(TARGETS multisolve
+      install(TARGETS gravity_solve
               RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
