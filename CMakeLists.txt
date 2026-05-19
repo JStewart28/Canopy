@@ -212,7 +212,11 @@ set_property(CACHE Canopy_PROFILING_LEVEL PROPERTY STRINGS "" 0 1 2 3)
 
 # Resolve the effective profiling level. If Canopy_ENABLE_PROFILING is ON and
 # no explicit level was given, default to level 1 (the original behavior).
-if(Canopy_PROFILING_LEVEL STREQUAL "")
+# Canopy_ENABLE_PROFILING=OFF is an authoritative kill switch: it forces the
+# level to 0 regardless of any Canopy_PROFILING_LEVEL the user supplied.
+if(NOT Canopy_ENABLE_PROFILING AND NOT Canopy_PROFILING_LEVEL STREQUAL "")
+  set(_canopy_profiling_level 0)
+elseif(Canopy_PROFILING_LEVEL STREQUAL "")
   if(Canopy_ENABLE_PROFILING)
     set(_canopy_profiling_level 1)
   else()
