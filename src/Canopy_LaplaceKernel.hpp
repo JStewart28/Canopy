@@ -223,15 +223,22 @@ struct LaplaceKernel
     //   dx, dy, dz  - particle_position - cell_center (Cartesian)
     //   M_out       - 2D slice: M_out(coeff_idx, comp_idx)
     // =======================================================================
+    // Scale-normalized P2M: produces M̄_{n,m} = M_{n,m} / w_self^{n+1}.
+    // w_self is the leaf cell's half-width. The {n+1} convention keeps
+    // intermediates O(q · 2^max_d) (linear in depth) rather than
+    // geometric, so FP32 stays well-conditioned at deep trees.
     template <class MSliceType>
     KOKKOS_INLINE_FUNCTION static void
     p2m_contribution( const Scalar ( &charges )[NComps], Scalar dx, Scalar dy,
-                      Scalar dz, const MSliceType& M_out )
+                      Scalar dz, Scalar w_self, const MSliceType& M_out )
     {
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
 
-        Scalar rho_pow_n = 1.0;
+        const Scalar inv_w = static_cast<Scalar>( 1 ) / w_self;
+        // term_n = rho^n / w_self^{n+1};  term_0 = 1/w_self.
+        Scalar term = inv_w;
+        const Scalar rho_inv_w = rho * inv_w;
         for ( int n = 0; n <= P; n++ )
         {
             for ( int m = 0; m <= n; m++ )
@@ -242,14 +249,14 @@ struct LaplaceKernel
                 for ( int c = 0; c < NComps; c++ )
                 {
                     const complex_type contrib =
-                        charges[c] * rho_pow_n * Ynm_neg_m;
+                        charges[c] * term * Ynm_neg_m;
                     Kokkos::atomic_add( &M_out( idx, c ).real(),
                                         contrib.real() );
                     Kokkos::atomic_add( &M_out( idx, c ).imag(),
                                         contrib.imag() );
                 }
             }
-            rho_pow_n *= rho;
+            term *= rho_inv_w;
         }
     }
 
@@ -257,14 +264,32 @@ struct LaplaceKernel
     // M2M: translate a child's multipole into the parent's frame.
     // Greengard Theorem 5.22.
     // =======================================================================
+    // Scale-normalized M2M: consumes M̄^c = M^c / w_c^{n+1} and produces
+    // M̄^p = M^p / w_p^{j+1}. The rho^n factor becomes (rho/w_c)^n and a
+    // per-output-row constant (w_c/w_p)^{j+1} is applied at the end.
+    // For a standard octree (w_c = w_p/2) this is 2^{-(j+1)}, but we
+    // compute it from the actual widths so the kernel doesn't assume
+    // a fixed refinement ratio.
     template <class TeamMember, class MView, class AType, class MParentType>
     KOKKOS_INLINE_FUNCTION static void
     m2m_translate( const TeamMember& team_member, const MView& M_full,
                    int child_cell, Scalar dx, Scalar dy, Scalar dz,
+                   Scalar w_child, Scalar w_parent,
                    const AType& A_table, const MParentType& M_parent_out )
     {
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
+
+        const Scalar inv_w_c = static_cast<Scalar>( 1 ) / w_child;
+        const Scalar rho_norm = rho * inv_w_c;       // rho / w_c, O(1)
+        const Scalar w_ratio = w_child / w_parent;   // w_c / w_p, O(1)
+
+        // Precompute (w_c/w_p)^{j+1} for j = 0..P. Shared by every output
+        // row in this team. Avoids a per-thread O(P) inner loop.
+        Scalar w_factor_tbl[P + 1];
+        w_factor_tbl[0] = w_ratio;
+        for ( int e = 1; e <= P; e++ )
+            w_factor_tbl[e] = w_factor_tbl[e - 1] * w_ratio;
 
         Kokkos::parallel_for(
             Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
@@ -314,11 +339,14 @@ struct LaplaceKernel
                             accum[c] += M_child_val * pre_factor;
                         }
                     }
-                    rho_pow_n *= rho;
+                    rho_pow_n *= rho_norm;
                 }
 
+                // Apply per-row scale (w_c / w_p)^{j+1}.
+                const Scalar w_factor = w_factor_tbl[j];
+
                 for ( int c = 0; c < NComps; c++ )
-                    M_parent_out( out_idx, c ) += accum[c];
+                    M_parent_out( out_idx, c ) += accum[c] * w_factor;
             } );
     }
 
@@ -338,26 +366,34 @@ struct LaplaceKernel
     //
     // where (rho, alpha, beta) = source_center - target_center in spherical.
     // =======================================================================
+    // Scale-normalized fallback M2L. Consumes M̄^s = M^s / w_s^{n+1} and
+    // produces L̄^t = L^t · w_t^j. The original 1/rho^{n+j+1} factor
+    // expands as (w_s/rho)^{n+1} · (w_t/rho)^j so each per-pair table is
+    // O(1) magnitude regardless of cell depths — FP32-safe.
     template <class TeamMember, class MView, class AType, class LTargetType>
     KOKKOS_INLINE_FUNCTION static void
     m2l_translate( const TeamMember& team_member, const MView& M_full,
                    int source_cell, Scalar dx, Scalar dy, Scalar dz,
+                   Scalar w_source, Scalar w_target,
                    const AType& A_table, const LTargetType& L_target_out )
     {
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
 
         const Scalar inv_rho = ( rho > 0.0 ) ? ( 1.0 / rho ) : 0.0;
+        const Scalar ws_inv_rho = w_source * inv_rho;   // (w_s/rho), O(1)
+        const Scalar wt_inv_rho = w_target * inv_rho;   // (w_t/rho), O(1)
 
-        // Per-pair precomputed tables. With P=6 these are 14 scalars,
-        // 169 complex (Y), 91 complex (ip) — fit comfortably in registers/L1
-        // and replace the dominant Ynm/tgamma recomputation that previously
-        // ran inside the (j,k,n,m) loop nest for every (target, source) pair.
-        constexpr int max_rho_pow = 2 * P + 2;
-        Scalar inv_rho_pow_tbl[max_rho_pow];
-        inv_rho_pow_tbl[0] = 1.0;
-        for ( int e = 1; e < max_rho_pow; e++ )
-            inv_rho_pow_tbl[e] = inv_rho_pow_tbl[e - 1] * inv_rho;
+        // (w_s/rho)^{n+1} for n = 0..P  — index by (n+1).
+        Scalar ws_pow_tbl[P + 2];
+        ws_pow_tbl[0] = static_cast<Scalar>( 1 );
+        for ( int e = 1; e <= P + 1; e++ )
+            ws_pow_tbl[e] = ws_pow_tbl[e - 1] * ws_inv_rho;
+        // (w_t/rho)^j for j = 0..P
+        Scalar wt_pow_tbl[P + 1];
+        wt_pow_tbl[0] = static_cast<Scalar>( 1 );
+        for ( int e = 1; e <= P; e++ )
+            wt_pow_tbl[e] = wt_pow_tbl[e - 1] * wt_inv_rho;
 
         constexpr int max_L = 2 * P;
         constexpr int Y_size = ( max_L + 1 ) * ( max_L + 1 );
@@ -388,6 +424,7 @@ struct LaplaceKernel
                 unflatten_triangular( out_idx, j, k );
 
                 const Scalar A_jk = A_table( a_index( j, k ) );
+                const Scalar wt_pow_j = wt_pow_tbl[j];
 
                 complex_type accum[NComps];
                 for ( int c = 0; c < NComps; c++ )
@@ -395,7 +432,7 @@ struct LaplaceKernel
 
                 for ( int n = 0; n <= P; n++ )
                 {
-                    const Scalar inv_rho_pow = inv_rho_pow_tbl[n + j + 1];
+                    const Scalar scale = ws_pow_tbl[n + 1] * wt_pow_j;
 
                     for ( int m = -n; m <= n; m++ )
                     {
@@ -418,7 +455,7 @@ struct LaplaceKernel
 
                         const Scalar sign_n = ( n % 2 == 0 ) ? 1.0 : -1.0;
                         const Scalar coef_scalar =
-                            sign_n * A_nm * A_jk / A_npj_mmk * inv_rho_pow;
+                            sign_n * A_nm * A_jk / A_npj_mmk * scale;
                         const complex_type pre_factor = ip * coef_scalar * Y;
 
                         for ( int c = 0; c < NComps; c++ )
@@ -463,11 +500,29 @@ struct LaplaceKernel
     // rho^-(n+j+1)) is absorbed into T_out and reused across every source-
     // target pair that shares this offset.
     // =======================================================================
+    // Scale-normalized M2L operator builder.
+    //
+    // Key (dd, ii, jj, kk):
+    //   dd            = d_source - d_target  ∈ [-DD_MAX, DD_MAX]
+    //   (ii, jj, kk)  = round((c_source - c_target) / w_unit), with
+    //                   w_unit = half-width at the deeper of the two depths
+    //
+    // The operator is depth-independent given (dd, ii, jj, kk); a per-pair
+    // F(dd, n, j) factor absorbs the residual (w_s/w_t)^{n+1} or
+    // (w_t/w_s)^j scaling that would otherwise live in the multipoles:
+    //   dd ≥ 0  →  F = 2^{ j · dd}           (per output row j)
+    //   dd <  0 →  F = 2^{-(n+1) · dd}       (per source column n)
+    // F(dd=0, ·, ·) = 1, so same-depth operators have no extra scaling.
     template <class AType, class TView>
     KOKKOS_INLINE_FUNCTION static void
-    m2l_build_operator( Scalar dx, Scalar dy, Scalar dz, const AType& A_table,
+    m2l_build_operator( int dd, int ix, int iy, int iz, const AType& A_table,
                         const TView& T_out )
     {
+        // (ix, iy, iz) is the integer offset in deeper-cell half-widths.
+        // T̃ depends only on this dimensionless geometry plus dd.
+        const Scalar dx = static_cast<Scalar>( ix );
+        const Scalar dy = static_cast<Scalar>( iy );
+        const Scalar dz = static_cast<Scalar>( iz );
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
 
@@ -478,6 +533,32 @@ struct LaplaceKernel
         inv_rho_pow_tbl[0] = 1.0;
         for ( int e = 1; e < max_rho_pow; e++ )
             inv_rho_pow_tbl[e] = inv_rho_pow_tbl[e - 1] * inv_rho;
+
+        // F factor tables. Only one of these is populated; the other
+        // stays all-ones. dd in [-6, 6] so the exponents are small
+        // (max 7·6 = 42), exact in both double and float.
+        Scalar F_row[P + 1];  // F_row[j] for dd ≥ 0
+        Scalar F_col[P + 1];  // F_col[n] for dd < 0
+        for ( int e = 0; e <= P; e++ )
+        {
+            F_row[e] = static_cast<Scalar>( 1 );
+            F_col[e] = static_cast<Scalar>( 1 );
+        }
+        if ( dd > 0 )
+        {
+            // F_row[j] = 2^{j · dd}
+            const Scalar step = static_cast<Scalar>( 1 << dd );
+            for ( int j = 1; j <= P; j++ )
+                F_row[j] = F_row[j - 1] * step;
+        }
+        else if ( dd < 0 )
+        {
+            // F_col[n] = 2^{(n+1) · |dd|}
+            const Scalar step = static_cast<Scalar>( 1 << ( -dd ) );
+            F_col[0] = step; // n=0 ⇒ 2^{|dd|}
+            for ( int n = 1; n <= P; n++ )
+                F_col[n] = F_col[n - 1] * step;
+        }
 
         constexpr int max_L = 2 * P;
         constexpr int Y_size = ( max_L + 1 ) * ( max_L + 1 );
@@ -509,9 +590,15 @@ struct LaplaceKernel
             unflatten_triangular( out_idx, j, k );
             const Scalar A_jk = A_table( a_index( j, k ) );
 
+            // F_row[j] is non-trivial only for dd ≥ 0; F_col[n] only for
+            // dd < 0. The other stays 1, so the product is the correct
+            // F(dd, n, j) in either case.
+            const Scalar F_j = F_row[j];
+
             for ( int n = 0; n <= P; n++ )
             {
                 const Scalar inv_rho_pow = inv_rho_pow_tbl[n + j + 1];
+                const Scalar F_nj = F_j * F_col[n];
 
                 for ( int m = -n; m <= n; m++ )
                 {
@@ -533,7 +620,7 @@ struct LaplaceKernel
 
                     const Scalar sign_n = ( n % 2 == 0 ) ? 1.0 : -1.0;
                     const Scalar coef_scalar =
-                        sign_n * A_nm * A_jk / A_npj_mmk * inv_rho_pow;
+                        sign_n * A_nm * A_jk / A_npj_mmk * inv_rho_pow * F_nj;
 
                     T_out( out_idx, n * n + n + m ) =
                         ip * coef_scalar * Y;
@@ -595,14 +682,29 @@ struct LaplaceKernel
     //
     // where (rho, alpha, beta) = child_center - parent_center in spherical.
     // =======================================================================
+    // Scale-normalized L2L: consumes L̄^p = L^p · w_p^n and produces
+    // L̄^c = L^c · w_c^j. The rho^{n-j} factor becomes (rho/w_p)^{n-j}
+    // and a per-output-row constant (w_c/w_p)^j is applied at the end.
     template <class TeamMember, class LView, class AType, class LChildType>
     KOKKOS_INLINE_FUNCTION static void
     l2l_translate( const TeamMember& team_member, const LView& L_full,
                    int parent_cell, Scalar dx, Scalar dy, Scalar dz,
+                   Scalar w_child, Scalar w_parent,
                    const AType& A_table, const LChildType& L_child_out )
     {
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
+
+        const Scalar inv_w_p = static_cast<Scalar>( 1 ) / w_parent;
+        const Scalar rho_norm = rho * inv_w_p;       // rho / w_p, O(1)
+        const Scalar w_ratio = w_child * inv_w_p;    // w_c / w_p, O(1)
+
+        // Precompute (w_c/w_p)^j for j = 0..P. Shared by every output
+        // row in this team and across every NComps inner accumulation.
+        Scalar w_factor_tbl[P + 1];
+        w_factor_tbl[0] = static_cast<Scalar>( 1 );
+        for ( int e = 1; e <= P; e++ )
+            w_factor_tbl[e] = w_factor_tbl[e - 1] * w_ratio;
 
         Kokkos::parallel_for(
             Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
@@ -623,7 +725,7 @@ struct LaplaceKernel
                 {
                     Scalar rho_pow_nmj = 1.0;
                     for ( int e = 0; e < n - j; e++ )
-                        rho_pow_nmj *= rho;
+                        rho_pow_nmj *= rho_norm;
 
                     for ( int m = -n; m <= n; m++ )
                     {
@@ -663,8 +765,11 @@ struct LaplaceKernel
                     }
                 }
 
+                // Apply per-row scale (w_c / w_p)^j (= 1 at j=0).
+                const Scalar w_factor = w_factor_tbl[j];
+
                 for ( int c = 0; c < NComps; c++ )
-                    L_child_out( out_idx, c ) += accum[c];
+                    L_child_out( out_idx, c ) += accum[c] * w_factor;
             } );
     }
 
@@ -687,12 +792,19 @@ struct LaplaceKernel
     //                    Must be valid if compute_gradient is true.
     //   compute_gradient - true to populate grad_out; false to skip.
     // =======================================================================
+    // Scale-normalized L2P: consumes L̄_{n,m} = L_{n,m} · w_self^{n} and
+    // evaluates phi += L̄_{n,m} · (rho_p / w_self)^n · Y_{n,m}. Fused
+    // form so we never materialize the physical (rho_p)^n separately —
+    // (rho_p / w_self) is O(1) for any particle inside its leaf, which
+    // is the FP32-safe form.
     template <class LView, class GradAccess>
     KOKKOS_INLINE_FUNCTION static void
     l2p_evaluate( const LView& L_full, int leaf_cell, Scalar dx, Scalar dy,
-                  Scalar dz, Scalar ( &phi_out )[NComps],
+                  Scalar dz, Scalar w_self, Scalar ( &phi_out )[NComps],
                   const GradAccess& grad_out, bool compute_gradient )
     {
+        const Scalar inv_w = static_cast<Scalar>( 1 ) / w_self;
+
         // Inline evaluator for potential at an arbitrary offset
         auto eval_phi =
             [&]( Scalar ex, Scalar ey, Scalar ez, Scalar( &phi )[NComps] )
@@ -703,6 +815,7 @@ struct LaplaceKernel
             Scalar rho, theta, phi_ang;
             cartesian_to_spherical( ex, ey, ez, rho, theta, phi_ang );
 
+            const Scalar rho_norm = rho * inv_w;
             Scalar rho_pow_n = 1.0;
             for ( int n = 0; n <= P; n++ )
             {
@@ -729,7 +842,7 @@ struct LaplaceKernel
                         phi[c] += 2.0 * term.real();
                     }
                 }
-                rho_pow_n *= rho;
+                rho_pow_n *= rho_norm;
             }
         };
 

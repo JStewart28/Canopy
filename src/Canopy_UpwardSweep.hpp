@@ -200,6 +200,11 @@ class UpwardSweep
     void exchange_multipoles_at_depth(
         int depth,
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan );
+
+    // Step-2 scaffolding: multiplies every leaf cell's multipole by
+    // w_self^{n+1} so the bridged pipeline (P2M produces M̄, M2M
+    // consumes physical M) is numerically identical to the original.
+    void apply_p2m_normalization_bridge();
 };
 
 // ============================================================================
@@ -396,9 +401,45 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_p2m_at_depth(
             // Slice M_out(coeff_idx, comp_idx) for this cell
             auto M_out =
                 Kokkos::subview( multipoles, cidx, Kokkos::ALL, Kokkos::ALL );
-            KernelType::p2m_contribution( charges, dx, dy, dz, M_out );
+            KernelType::p2m_contribution( charges, dx, dy, dz,
+                                          dci.half_width, M_out );
         } );
 
+    Kokkos::fence();
+}
+
+template <class MemorySpace, class ExecutionSpace, class KernelType>
+void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
+    apply_p2m_normalization_bridge()
+{
+    auto multipoles = _multipoles;
+    auto device_cells = _device_cells;
+    const int num_cells = device_cells.extent( 0 );
+    constexpr int P_local = KernelType::max_order;
+    constexpr int NComps_local = KernelType::num_components;
+
+    Kokkos::parallel_for(
+        "p2m_norm_bridge",
+        Kokkos::RangePolicy<execution_space>( 0, num_cells ),
+        KOKKOS_LAMBDA( int cidx ) {
+            const auto& dci = device_cells( cidx );
+            const scalar_type w = dci.half_width;
+            scalar_type w_pow = w; // w^{n+1} starting at n = 0
+            for ( int n = 0; n <= P_local; n++ )
+            {
+                for ( int m = 0; m <= n; m++ )
+                {
+                    const int idx = n * ( n + 1 ) / 2 + m;
+                    for ( int c = 0; c < NComps_local; c++ )
+                    {
+                        auto& M = multipoles( cidx, idx, c );
+                        M.real() *= w_pow;
+                        M.imag() *= w_pow;
+                    }
+                }
+                w_pow *= w;
+            }
+        } );
     Kokkos::fence();
 }
 
@@ -453,6 +494,8 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2m_at_depth(
                 const scalar_type dz = ccell.center[2] - parent_ci.center[2];
 
                 KernelType::m2m_translate( team, multipoles, ci, dx, dy, dz,
+                                           ccell.half_width,
+                                           parent_ci.half_width,
                                            A_table, M_parent );
             }
         } );
