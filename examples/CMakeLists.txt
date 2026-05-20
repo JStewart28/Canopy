@@ -12,4 +12,4 @@
 # Currently not used
 # add_subdirectory(01_development) # XXX - Remove this later and add a real example.
 add_subdirectory(02_full_fmm)
-add_subdirectory(03_multisolve)
+add_subdirectory(03_gravity_solve)
