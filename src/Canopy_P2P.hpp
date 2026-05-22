@@ -738,40 +738,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     const potential_view_type& potential_out,
     const gradient_view_type& gradient_out, bool compute_gradient )
 {
-    int _diag_rank = 0;
-    MPI_Comm_rank( _comm, &_diag_rank );
-    auto _diag = [&]( const char* tag )
-    {
-        Kokkos::fence( tag );
-        if ( _diag_rank == 0 )
-        {
-            std::printf( "[Canopy Diag] p2p: %s\n", tag );
-            std::fflush( stdout );
-        }
-    };
-
-    if ( _diag_rank == 0 )
-    {
-        std::printf( "[Canopy Diag] p2p: execute() entry  "
-                     "local_leaf_cells=%zu  leaf_part_off=%zu  "
-                     "local_nbr_off=%zu  local_nbr_idx=%zu  "
-                     "ghost_nbr_off=%zu  ghost_nbr_idx=%zu  "
-                     "ghost_leaf_off=%zu  ghost_pos=%zu  ghost_chg=%zu  "
-                     "particle_to_league=%zu  positions.size=%d\n",
-                     static_cast<size_t>( _local_leaf_cells.extent( 0 ) ),
-                     static_cast<size_t>( _leaf_particle_offsets.extent( 0 ) ),
-                     static_cast<size_t>( _local_nbr_offsets.extent( 0 ) ),
-                     static_cast<size_t>( _local_nbr_cell_idx.extent( 0 ) ),
-                     static_cast<size_t>( _ghost_nbr_offsets.extent( 0 ) ),
-                     static_cast<size_t>( _ghost_nbr_leaf_idx.extent( 0 ) ),
-                     static_cast<size_t>( _ghost_leaf_offsets.extent( 0 ) ),
-                     static_cast<size_t>( _ghost_positions.size() ),
-                     static_cast<size_t>( _ghost_charges.size() ),
-                     static_cast<size_t>( _particle_to_league.extent( 0 ) ),
-                     static_cast<int>( positions.size() ) );
-        std::fflush( stdout );
-    }
-
     CANOPY_RESET_TIMERS();
     {
     CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_TOTAL );
@@ -779,9 +745,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     // ------------------------------------------------------------------
     // 1. Gather ghost particles
     // ------------------------------------------------------------------
-    _diag( "before gather_ghost_particles" );
     gather_ghost_particles( positions, charges );
-    _diag( "after gather_ghost_particles" );
 
     // ------------------------------------------------------------------
     // 2. Phase 1: intra-leaf pairs with Newton's third law
@@ -801,17 +765,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_INTRA_KERNEL );
         if ( num_target_leaves > 0 )
         {
-        if ( _diag_rank == 0 )
-        {
-            std::printf( "[Canopy Diag] p2p: launching P2P_intra_leaf (num_target_leaves=%d, leaf_off.extent=%zu, particle_to_league.extent=%zu, n_local=%d)\n",
-                         num_target_leaves,
-                         static_cast<size_t>( _leaf_particle_offsets.extent( 0 ) ),
-                         static_cast<size_t>( _particle_to_league.extent( 0 ) ),
-                         static_cast<int>( positions.size() ) );
-            std::fflush( stdout );
-        }
-        Kokkos::fence( "p2p: pre-intra launch" );
-
         // Particle-centric intra-leaf kernel. Each thread handles one
         // local particle pi: it iterates all other particles in pi's leaf
         // and accumulates into pi's own output slot (single-writer, no
@@ -819,26 +772,16 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         // avoids the unified-memory atomic-contention hang observed on
         // MI300A APUs under the previous TeamPolicy+atomic_add design.
         auto particle_to_league_v = _particle_to_league;
-        const int p2l_extent_intra =
-            static_cast<int>( _particle_to_league.extent( 0 ) );
-        const int leaf_off_extent_intra =
-            static_cast<int>( _leaf_particle_offsets.extent( 0 ) );
-        const int local_leaf_cells_extent =
-            static_cast<int>( _local_leaf_cells.extent( 0 ) );
         const int n_local_intra = static_cast<int>( positions.size() );
 
         Kokkos::parallel_for(
             "P2P_intra_leaf",
             Kokkos::RangePolicy<execution_space>( 0, n_local_intra ),
             KOKKOS_LAMBDA( const int pi ) {
-                if ( pi >= p2l_extent_intra )
-                    return;
                 const int league = particle_to_league_v( pi );
-                if ( league < 0 || league >= local_leaf_cells_extent )
+                if ( league < 0 )
                     return;
                 const int cidx = local_leaf_cells( league );
-                if ( cidx < 0 || cidx + 1 >= leaf_off_extent_intra )
-                    return;
                 const int pstart = leaf_offsets( cidx );
                 const int pend = leaf_offsets( cidx + 1 );
                 if ( pend - pstart < 2 )
@@ -908,16 +851,9 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                 }
             } );
 
-        if ( _diag_rank == 0 )
-        {
-            std::printf( "[Canopy Diag] p2p: intra parallel_for returned to host (pre-fence)\n" );
-            std::fflush( stdout );
-        }
-
         Kokkos::fence();
         } // if ( num_target_leaves > 0 )
     } // TIMER_P2P_INTRA_KERNEL
-    _diag( "after P2P_intra_leaf" );
 
     // ------------------------------------------------------------------
     // 3. Phase 2: inter-leaf pairs (one-way, no atomics needed)
@@ -944,42 +880,13 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         if ( n_local > 0 )
         {
         auto particle_to_league_v = _particle_to_league;
-        const int p2l_extent =
-            static_cast<int>( _particle_to_league.extent( 0 ) );
-        const int local_nbr_off_extent =
-            static_cast<int>( _local_nbr_offsets.extent( 0 ) );
-        const int ghost_nbr_off_extent =
-            static_cast<int>( _ghost_nbr_offsets.extent( 0 ) );
-        const int leaf_off_extent =
-            static_cast<int>( _leaf_particle_offsets.extent( 0 ) );
-        const int local_nbr_idx_extent =
-            static_cast<int>( _local_nbr_cell_idx.extent( 0 ) );
-        const int ghost_leaf_off_extent =
-            static_cast<int>( _ghost_leaf_offsets.extent( 0 ) );
-        const int ghost_nbr_idx_extent =
-            static_cast<int>( _ghost_nbr_leaf_idx.extent( 0 ) );
-        const int ghost_pos_extent =
-            static_cast<int>( _ghost_positions.size() );
-
-        if ( _diag_rank == 0 )
-        {
-            std::printf( "[Canopy Diag] p2p: launching P2P_inter_leaf (n_local=%d, p2l_extent=%d, local_nbr_off_extent=%d, ghost_nbr_off_extent=%d)\n",
-                         n_local, p2l_extent, local_nbr_off_extent,
-                         ghost_nbr_off_extent );
-            std::fflush( stdout );
-        }
 
         Kokkos::parallel_for(
             "P2P_inter_leaf",
             Kokkos::RangePolicy<execution_space>( 0, n_local ),
             KOKKOS_LAMBDA( const int pi ) {
-                if ( pi >= p2l_extent )
-                    return;
                 const int league = particle_to_league_v( pi );
                 if ( league < 0 )
-                    return;
-                if ( league + 1 >= local_nbr_off_extent ||
-                     league + 1 >= ghost_nbr_off_extent )
                     return;
 
                 const scalar_type xi =
@@ -1004,11 +911,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                 const int l_end = local_nbr_off( league + 1 );
                 for ( int nn = l_start; nn < l_end; nn++ )
                 {
-                    if ( nn < 0 || nn >= local_nbr_idx_extent )
-                        break;
                     const int n_cidx = local_nbr_idx( nn );
-                    if ( n_cidx < 0 || n_cidx + 1 >= leaf_off_extent )
-                        continue;
                     const int ns = leaf_offsets( n_cidx );
                     const int ne = leaf_offsets( n_cidx + 1 );
                     for ( int pj = ns; pj < ne; pj++ )
@@ -1049,15 +952,9 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                 const int g_end = ghost_nbr_off( league + 1 );
                 for ( int nn = g_start; nn < g_end; nn++ )
                 {
-                    if ( nn < 0 || nn >= ghost_nbr_idx_extent )
-                        break;
                     const int g_idx = ghost_nbr_idx( nn );
-                    if ( g_idx < 0 || g_idx + 1 >= ghost_leaf_off_extent )
-                        continue;
                     const int gs = ghost_leaf_off( g_idx );
                     const int ge = ghost_leaf_off( g_idx + 1 );
-                    if ( ge > ghost_pos_extent )
-                        continue;
                     for ( int pj = gs; pj < ge; pj++ )
                     {
                         const scalar_type dx = xi - ghost_positions( pj, 0 );
@@ -1100,7 +997,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         Kokkos::fence();
         } // if ( n_local > 0 )
     } // TIMER_P2P_INTER_KERNEL
-    _diag( "after P2P_inter_leaf" );
     } // TIMER_P2P_TOTAL
     CANOPY_PRINT_P2P_TIMERS( _comm );
 }

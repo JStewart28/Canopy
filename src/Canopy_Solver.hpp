@@ -144,37 +144,19 @@ class Solver
             _gradient = gradient_view_type( "fmm_gradient", 0 );
         }
 
-        int _diag_rank = 0;
-        MPI_Comm_rank( _comm, &_diag_rank );
-#define CANOPY_DIAG_MARK( label )                                              \
-    do                                                                         \
-    {                                                                          \
-        Kokkos::fence( "diag:" label );                                        \
-        if ( _diag_rank == 0 )                                                 \
-        {                                                                      \
-            std::printf( "[Canopy Diag] " label "\n" );                        \
-            std::fflush( stdout );                                             \
-        }                                                                      \
-    } while ( 0 )
-
-        CANOPY_DIAG_MARK( "solve: before upward.execute" );
         double _t0 = CANOPY_WTIME();
         _upward.execute( charges, positions, _comm_plan );
         double _t_up = CANOPY_WTIME() - _t0;
-        CANOPY_DIAG_MARK( "solve: after upward.execute" );
 
         _t0 = CANOPY_WTIME();
         _downward.execute( _upward.multipoles(), positions, _potential,
                            _gradient, compute_gradient, _comm_plan );
         double _t_dn = CANOPY_WTIME() - _t0;
-        CANOPY_DIAG_MARK( "solve: after downward.execute" );
 
         _t0 = CANOPY_WTIME();
         _p2p.execute( positions, charges, _potential, _gradient,
                       compute_gradient );
         double _t_p2p = CANOPY_WTIME() - _t0;
-        CANOPY_DIAG_MARK( "solve: after p2p.execute" );
-#undef CANOPY_DIAG_MARK
 
         CANOPY_PRINT_SOLVE_BREAKDOWN( _comm, _t_up, _t_dn, _t_p2p );
     }

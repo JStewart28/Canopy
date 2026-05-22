@@ -509,32 +509,12 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         int depth,
         const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
-    int _diag_rank2 = 0;
-    MPI_Comm_rank( _comm, &_diag_rank2 );
-#define CANOPY_EXMP_DIAG( fmt, ... )                                           \
-    do                                                                         \
-    {                                                                          \
-        Kokkos::fence( "exmp_diag" );                                          \
-        if ( _diag_rank2 == 0 )                                                \
-        {                                                                      \
-            std::printf( "[Canopy Diag] exmp(d=%d): " fmt "\n", depth,         \
-                         ##__VA_ARGS__ );                                      \
-            std::fflush( stdout );                                             \
-        }                                                                      \
-    } while ( 0 )
-
-    CANOPY_EXMP_DIAG( "entry" );
     const auto& m2m = comm_plan.m2m_plan();
-    CANOPY_EXMP_DIAG( "got m2m_plan: shared=%zu sends=%zu recvs=%zu",
-                      m2m.shared_cells.size(), m2m.sends.size(),
-                      m2m.receives.size() );
 
     // Filter shared cells to current depth
     std::vector<int> shared_cell_indices;
     auto h_dc_all = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{},
                                                          _device_cells );
-    CANOPY_EXMP_DIAG( "after mirror_view_and_copy device_cells (size=%zu)",
-                      static_cast<size_t>( _device_cells.extent( 0 ) ) );
     for ( MortonKey k : m2m.shared_cells )
     {
         auto it = _key_to_cell_idx.find( k );
@@ -548,9 +528,6 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     const int per_cell_complex = coeffs_per_cell * NComps;
     MPI_Datatype mpi_scalar =
         ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
-
-    CANOPY_EXMP_DIAG( "filtered shared_cell_indices=%zu",
-                      shared_cell_indices.size() );
 
     // Allreduce shared cells — single device-side buffer, GPU-direct.
     if ( !shared_cell_indices.empty() )
@@ -570,8 +547,6 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             Kokkos::deep_copy( d_idx, h_idx );
         }
 
-        CANOPY_EXMP_DIAG( "allocating allreduce buffers total_complex=%zu",
-                          total_complex );
         Kokkos::View<complex_type*, memory_space> sendbuf(
             Kokkos::view_alloc( "m2m_allreduce_send",
                                 Kokkos::WithoutInitializing ),
@@ -580,7 +555,6 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             Kokkos::view_alloc( "m2m_allreduce_recv",
                                 Kokkos::WithoutInitializing ),
             total_complex );
-        CANOPY_EXMP_DIAG( "allreduce buffers allocated" );
 
         auto mults = _multipoles;
         const int cpc = coeffs_per_cell;
@@ -597,8 +571,6 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             } );
         Kokkos::fence();
 
-        CANOPY_EXMP_DIAG( "before MPI_Allreduce count=%zu",
-                          static_cast<size_t>( 2 * total_complex ) );
         {
             CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2M_ALLREDUCE );
             MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
@@ -606,7 +578,6 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                            static_cast<int>( 2 * total_complex ), mpi_scalar,
                            MPI_SUM, _comm );
         }
-        CANOPY_EXMP_DIAG( "after MPI_Allreduce" );
 
         Kokkos::parallel_for(
             "m2m_allreduce_unpack",
@@ -646,13 +617,8 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                                                       it->second );
     }
 
-    CANOPY_EXMP_DIAG( "p2p peers: send=%zu recv=%zu",
-                      send_by_peer_kv.size(), recv_by_peer_kv.size() );
     if ( send_by_peer_kv.empty() && recv_by_peer_kv.empty() )
-    {
-        CANOPY_EXMP_DIAG( "early-return (no p2p peers)" );
         return;
-    }
 
     auto sort_and_flatten =
         []( std::map<int, std::vector<std::pair<MortonKey, int>>>& in )
@@ -675,12 +641,9 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     auto sends_by_peer = sort_and_flatten( send_by_peer_kv );
     auto recvs_by_peer = sort_and_flatten( recv_by_peer_kv );
 
-    CANOPY_EXMP_DIAG( "before coalesced_view_exchange" );
     detail::coalesced_view_exchange( _multipoles, _comm, sends_by_peer,
                                      recvs_by_peer,
                                      /*accumulate_on_recv=*/false );
-    CANOPY_EXMP_DIAG( "after coalesced_view_exchange" );
-#undef CANOPY_EXMP_DIAG
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -689,55 +652,22 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
     const ChargeView& particle_charges, const PositionType& particle_positions,
     const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
-    int _diag_rank = 0;
-    MPI_Comm_rank( _comm, &_diag_rank );
-    auto _diag = [&]( const char* tag )
-    {
-        Kokkos::fence( tag );
-        if ( _diag_rank == 0 )
-        {
-            std::printf( "[Canopy Diag] upward: %s\n", tag );
-            std::fflush( stdout );
-        }
-    };
-
     CANOPY_RESET_TIMERS();
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_UPWARD_TOTAL );
         Kokkos::deep_copy( _multipoles, complex_type( 0.0, 0.0 ) );
-        _diag( "after multipoles zero" );
 
         for ( int d = 0; d <= _max_depth; d++ )
             if ( !_leaves_at_depth_local[d].empty() )
                 run_p2m_at_depth( d, particle_charges, particle_positions );
-        _diag( "after P2M loop" );
 
         exchange_multipoles_at_depth( _max_depth, comm_plan );
-        _diag( "after exchange_multipoles(max_depth)" );
 
         for ( int d = _max_depth - 1; d >= 0; d-- )
         {
-            if ( _diag_rank == 0 )
-            {
-                std::printf( "[Canopy Diag] upward: M2M iter d=%d enter\n", d );
-                std::fflush( stdout );
-            }
             run_m2m_at_depth( d );
-            Kokkos::fence( "diag:after run_m2m_at_depth" );
-            if ( _diag_rank == 0 )
-            {
-                std::printf( "[Canopy Diag] upward: M2M iter d=%d after run_m2m\n", d );
-                std::fflush( stdout );
-            }
             exchange_multipoles_at_depth( d, comm_plan );
-            Kokkos::fence( "diag:after exchange_multipoles" );
-            if ( _diag_rank == 0 )
-            {
-                std::printf( "[Canopy Diag] upward: M2M iter d=%d after exchange\n", d );
-                std::fflush( stdout );
-            }
         }
-        _diag( "after M2M loop" );
     }
     CANOPY_PRINT_UPWARD_TIMERS( _comm );
 }
