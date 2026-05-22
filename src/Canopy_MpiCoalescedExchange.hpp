@@ -48,14 +48,31 @@ namespace detail
 template <class CoeffView>
 void coalesced_view_exchange(
     const CoeffView& view, MPI_Comm comm,
-    const std::map<int, std::vector<int>>& send_cells_by_peer,
-    const std::map<int, std::vector<int>>& recv_cells_by_peer,
+    const std::map<int, std::vector<int>>& send_cells_by_peer_in,
+    const std::map<int, std::vector<int>>& recv_cells_by_peer_in,
     bool accumulate_on_recv )
 {
     using complex_type = typename CoeffView::non_const_value_type;
     using scalar_type = typename complex_type::value_type;
     using memory_space = typename CoeffView::memory_space;
     using execution_space = typename CoeffView::execution_space;
+
+    // Drop self-peer entries before doing any MPI work. With 1 MPI rank
+    // the comm plan can still emit entries with remote_rank == self; the
+    // referenced cells already live in `view` at the same local indices,
+    // so the exchange is a no-op semantically. Posting self-send/recv on
+    // device buffers under GPU-aware Cray-MPICH on MI300A has been
+    // observed to deadlock or trigger a memory-access fault.
+    int self_rank = 0;
+    MPI_Comm_rank( comm, &self_rank );
+    std::map<int, std::vector<int>> send_cells_by_peer;
+    std::map<int, std::vector<int>> recv_cells_by_peer;
+    for ( const auto& kv : send_cells_by_peer_in )
+        if ( kv.first != self_rank )
+            send_cells_by_peer.emplace( kv.first, kv.second );
+    for ( const auto& kv : recv_cells_by_peer_in )
+        if ( kv.first != self_rank )
+            recv_cells_by_peer.emplace( kv.first, kv.second );
 
     const int coeffs_per_cell = static_cast<int>( view.extent( 1 ) );
     const int NComps = static_cast<int>( view.extent( 2 ) );
