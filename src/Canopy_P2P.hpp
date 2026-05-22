@@ -750,6 +750,28 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         }
     };
 
+    if ( _diag_rank == 0 )
+    {
+        std::printf( "[Canopy Diag] p2p: execute() entry  "
+                     "local_leaf_cells=%zu  leaf_part_off=%zu  "
+                     "local_nbr_off=%zu  local_nbr_idx=%zu  "
+                     "ghost_nbr_off=%zu  ghost_nbr_idx=%zu  "
+                     "ghost_leaf_off=%zu  ghost_pos=%zu  ghost_chg=%zu  "
+                     "particle_to_league=%zu  positions.size=%d\n",
+                     static_cast<size_t>( _local_leaf_cells.extent( 0 ) ),
+                     static_cast<size_t>( _leaf_particle_offsets.extent( 0 ) ),
+                     static_cast<size_t>( _local_nbr_offsets.extent( 0 ) ),
+                     static_cast<size_t>( _local_nbr_cell_idx.extent( 0 ) ),
+                     static_cast<size_t>( _ghost_nbr_offsets.extent( 0 ) ),
+                     static_cast<size_t>( _ghost_nbr_leaf_idx.extent( 0 ) ),
+                     static_cast<size_t>( _ghost_leaf_offsets.extent( 0 ) ),
+                     static_cast<size_t>( _ghost_positions.size() ),
+                     static_cast<size_t>( _ghost_charges.size() ),
+                     static_cast<size_t>( _particle_to_league.extent( 0 ) ),
+                     static_cast<int>( positions.size() ) );
+        std::fflush( stdout );
+    }
+
     CANOPY_RESET_TIMERS();
     {
     CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_TOTAL );
@@ -956,6 +978,16 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
             static_cast<int>( _local_nbr_offsets.extent( 0 ) );
         const int ghost_nbr_off_extent =
             static_cast<int>( _ghost_nbr_offsets.extent( 0 ) );
+        const int leaf_off_extent =
+            static_cast<int>( _leaf_particle_offsets.extent( 0 ) );
+        const int local_nbr_idx_extent =
+            static_cast<int>( _local_nbr_cell_idx.extent( 0 ) );
+        const int ghost_leaf_off_extent =
+            static_cast<int>( _ghost_leaf_offsets.extent( 0 ) );
+        const int ghost_nbr_idx_extent =
+            static_cast<int>( _ghost_nbr_leaf_idx.extent( 0 ) );
+        const int ghost_pos_extent =
+            static_cast<int>( _ghost_positions.size() );
 
         if ( _diag_rank == 0 )
         {
@@ -1000,7 +1032,11 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                 const int l_end = local_nbr_off( league + 1 );
                 for ( int nn = l_start; nn < l_end; nn++ )
                 {
+                    if ( nn < 0 || nn >= local_nbr_idx_extent )
+                        break;
                     const int n_cidx = local_nbr_idx( nn );
+                    if ( n_cidx < 0 || n_cidx + 1 >= leaf_off_extent )
+                        continue;
                     const int ns = leaf_offsets( n_cidx );
                     const int ne = leaf_offsets( n_cidx + 1 );
                     for ( int pj = ns; pj < ne; pj++ )
@@ -1041,9 +1077,15 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                 const int g_end = ghost_nbr_off( league + 1 );
                 for ( int nn = g_start; nn < g_end; nn++ )
                 {
+                    if ( nn < 0 || nn >= ghost_nbr_idx_extent )
+                        break;
                     const int g_idx = ghost_nbr_idx( nn );
+                    if ( g_idx < 0 || g_idx + 1 >= ghost_leaf_off_extent )
+                        continue;
                     const int gs = ghost_leaf_off( g_idx );
                     const int ge = ghost_leaf_off( g_idx + 1 );
+                    if ( ge > ghost_pos_extent )
+                        continue;
                     for ( int pj = gs; pj < ge; pj++ )
                     {
                         const scalar_type dx = xi - ghost_positions( pj, 0 );
