@@ -784,11 +784,14 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         {
         if ( _diag_rank == 0 )
         {
-            std::printf( "[Canopy Diag] p2p: launching P2P_intra_leaf (num_target_leaves=%d)\n",
-                         num_target_leaves );
+            std::printf( "[Canopy Diag] p2p: launching P2P_intra_leaf (num_target_leaves=%d, leaf_off.extent=%zu, particle_to_league.extent=%zu, n_local=%d)\n",
+                         num_target_leaves,
+                         static_cast<size_t>( _leaf_particle_offsets.extent( 0 ) ),
+                         static_cast<size_t>( _particle_to_league.extent( 0 ) ),
+                         static_cast<int>( positions.size() ) );
             std::fflush( stdout );
         }
-        team_policy policy( num_target_leaves, Kokkos::AUTO );
+        team_policy policy( num_target_leaves, 64 );
 
         Kokkos::parallel_for(
             "P2P_intra_leaf", policy,
@@ -947,13 +950,32 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         if ( n_local > 0 )
         {
         auto particle_to_league_v = _particle_to_league;
+        const int p2l_extent =
+            static_cast<int>( _particle_to_league.extent( 0 ) );
+        const int local_nbr_off_extent =
+            static_cast<int>( _local_nbr_offsets.extent( 0 ) );
+        const int ghost_nbr_off_extent =
+            static_cast<int>( _ghost_nbr_offsets.extent( 0 ) );
+
+        if ( _diag_rank == 0 )
+        {
+            std::printf( "[Canopy Diag] p2p: launching P2P_inter_leaf (n_local=%d, p2l_extent=%d, local_nbr_off_extent=%d, ghost_nbr_off_extent=%d)\n",
+                         n_local, p2l_extent, local_nbr_off_extent,
+                         ghost_nbr_off_extent );
+            std::fflush( stdout );
+        }
 
         Kokkos::parallel_for(
             "P2P_inter_leaf",
             Kokkos::RangePolicy<execution_space>( 0, n_local ),
             KOKKOS_LAMBDA( const int pi ) {
+                if ( pi >= p2l_extent )
+                    return;
                 const int league = particle_to_league_v( pi );
                 if ( league < 0 )
+                    return;
+                if ( league + 1 >= local_nbr_off_extent ||
+                     league + 1 >= ghost_nbr_off_extent )
                     return;
 
                 const scalar_type xi =
