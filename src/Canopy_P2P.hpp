@@ -24,7 +24,6 @@
 #include <mpi.h>
 
 #include <cstdint>
-#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
@@ -814,30 +813,20 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                          static_cast<int>( positions.size() ) );
             std::fflush( stdout );
         }
-        // Device counter for per-team start/end progress so we can detect
-        // whether intra-leaf is genuinely deadlocked vs just slow.
-        Kokkos::View<int*, memory_space> _diag_progress(
-            "intra_progress", 2 );
-        Kokkos::deep_copy( _diag_progress, 0 );
+        Kokkos::fence( "p2p: pre-intra launch" );
 
-        team_policy policy( num_target_leaves, 64 );
+        team_policy policy( num_target_leaves, 256 );
 
         Kokkos::parallel_for(
             "P2P_intra_leaf", policy,
             KOKKOS_LAMBDA( const team_member_type& team ) {
                 const int league = team.league_rank();
-                if ( team.team_rank() == 0 )
-                    Kokkos::atomic_add( &_diag_progress( 0 ), 1 );
                 const int cidx = local_leaf_cells( league );
                 const int pstart = leaf_offsets( cidx );
                 const int pend = leaf_offsets( cidx + 1 );
                 const int ncell = pend - pstart;
                 if ( ncell < 2 )
-                {
-                    if ( team.team_rank() == 0 )
-                        Kokkos::atomic_add( &_diag_progress( 1 ), 1 );
                     return;
-                }
 
                 const int npairs = ncell * ( ncell - 1 ) / 2;
 
@@ -953,29 +942,12 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             }
                         }
                     } );
-                if ( team.team_rank() == 0 )
-                    Kokkos::atomic_add( &_diag_progress( 1 ), 1 );
             } );
 
-        // Poll the device progress counters from the host. Snapshot every
-        // ~2 seconds for 20 seconds; if started < num_target_leaves or
-        // finished < num_target_leaves at the end, the kernel is genuinely
-        // hung (or pathologically slow). Otherwise it just took a while.
-        auto h_progress = Kokkos::create_mirror_view( _diag_progress );
-        for ( int tick = 0; tick < 10; tick++ )
+        if ( _diag_rank == 0 )
         {
-            Kokkos::deep_copy( h_progress, _diag_progress );
-            if ( _diag_rank == 0 )
-            {
-                std::printf( "[Canopy Diag] p2p: intra progress t=%ds "
-                             "started=%d finished=%d (of %d)\n",
-                             tick * 2, h_progress( 0 ), h_progress( 1 ),
-                             num_target_leaves );
-                std::fflush( stdout );
-            }
-            if ( h_progress( 1 ) >= num_target_leaves )
-                break;
-            ::sleep( 2 );
+            std::printf( "[Canopy Diag] p2p: intra parallel_for returned to host (pre-fence)\n" );
+            std::fflush( stdout );
         }
 
         Kokkos::fence();
