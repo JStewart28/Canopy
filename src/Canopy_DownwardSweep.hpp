@@ -1791,6 +1791,18 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
     const gradient_view_type& gradient_out, bool compute_gradient,
     const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
+    int _diag_rank = 0;
+    MPI_Comm_rank( _comm, &_diag_rank );
+    auto _diag = [&]( const char* tag )
+    {
+        Kokkos::fence( tag );
+        if ( _diag_rank == 0 )
+        {
+            std::printf( "[Canopy Diag] downward: %s\n", tag );
+            std::fflush( stdout );
+        }
+    };
+
     CANOPY_RESET_TIMERS();
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_DOWNWARD_TOTAL );
@@ -1801,6 +1813,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
             Kokkos::deep_copy( _locals, complex_type( 0.0, 0.0 ) );
             Kokkos::fence();
         }
+        _diag( "after zero locals" );
 
         // Stash the multipoles for the M2L kernel
         _m2l_multipoles_view = multipoles;
@@ -1813,15 +1826,18 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
                 Canopy::Profiling::TIMER_DN_BUILD_ILIST );
             build_interaction_list_device( comm_plan );
         }
+        _diag( "after build_interaction_list_device" );
 
         // Pre-sweep: exchange remote multipoles needed for M2L
         exchange_multipoles_for_m2l( multipoles, comm_plan );
+        _diag( "after exchange_multipoles_for_m2l" );
 
         // Process all M2L pairs whose target is non-shared in one batch,
         // pooling across depths for maximum GEMM size. Safe because the
         // snapshot/allreduce barrier in the per-depth loop only operates
         // on shared cells, which run_m2l_all does not touch.
         run_m2l_all();
+        _diag( "after run_m2l_all" );
 
         // Layer-by-layer: snapshot shared, M2L (shared targets only),
         // allreduce shared M2L delta, L2L, exchange children.
@@ -1847,12 +1863,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
             }
         }
 
+        _diag( "after per-depth M2L/L2L loop" );
+
         // L2P: evaluate local expansion at each particle. After step 5
         // every multipole/local in the pipeline is in scale-normalized
         // form, so no bridges are needed — l2p_evaluate consumes L̄
         // directly.
         run_l2p( particle_positions, potential_out, gradient_out,
                  compute_gradient );
+        _diag( "after run_l2p" );
     }
     CANOPY_PRINT_DOWNWARD_TIMERS( _comm );
     CANOPY_PRINT_ILIST_TIMERS( _comm );

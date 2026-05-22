@@ -652,22 +652,38 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
     const ChargeView& particle_charges, const PositionType& particle_positions,
     const CommunicationPlan<MemorySpace, ExecutionSpace>& comm_plan )
 {
+    int _diag_rank = 0;
+    MPI_Comm_rank( _comm, &_diag_rank );
+    auto _diag = [&]( const char* tag )
+    {
+        Kokkos::fence( tag );
+        if ( _diag_rank == 0 )
+        {
+            std::printf( "[Canopy Diag] upward: %s\n", tag );
+            std::fflush( stdout );
+        }
+    };
+
     CANOPY_RESET_TIMERS();
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_UPWARD_TOTAL );
         Kokkos::deep_copy( _multipoles, complex_type( 0.0, 0.0 ) );
+        _diag( "after multipoles zero" );
 
         for ( int d = 0; d <= _max_depth; d++ )
             if ( !_leaves_at_depth_local[d].empty() )
                 run_p2m_at_depth( d, particle_charges, particle_positions );
+        _diag( "after P2M loop" );
 
         exchange_multipoles_at_depth( _max_depth, comm_plan );
+        _diag( "after exchange_multipoles(max_depth)" );
 
         for ( int d = _max_depth - 1; d >= 0; d-- )
         {
             run_m2m_at_depth( d );
             exchange_multipoles_at_depth( d, comm_plan );
         }
+        _diag( "after M2M loop" );
     }
     CANOPY_PRINT_UPWARD_TIMERS( _comm );
 }

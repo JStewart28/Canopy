@@ -738,6 +738,18 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     const potential_view_type& potential_out,
     const gradient_view_type& gradient_out, bool compute_gradient )
 {
+    int _diag_rank = 0;
+    MPI_Comm_rank( _comm, &_diag_rank );
+    auto _diag = [&]( const char* tag )
+    {
+        Kokkos::fence( tag );
+        if ( _diag_rank == 0 )
+        {
+            std::printf( "[Canopy Diag] p2p: %s\n", tag );
+            std::fflush( stdout );
+        }
+    };
+
     CANOPY_RESET_TIMERS();
     {
     CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_TOTAL );
@@ -745,7 +757,9 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     // ------------------------------------------------------------------
     // 1. Gather ghost particles
     // ------------------------------------------------------------------
+    _diag( "before gather_ghost_particles" );
     gather_ghost_particles( positions, charges );
+    _diag( "after gather_ghost_particles" );
 
     // ------------------------------------------------------------------
     // 2. Phase 1: intra-leaf pairs with Newton's third law
@@ -900,6 +914,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         Kokkos::fence();
         } // if ( num_target_leaves > 0 )
     } // TIMER_P2P_INTRA_KERNEL
+    _diag( "after P2P_intra_leaf" );
 
     // ------------------------------------------------------------------
     // 3. Phase 2: inter-leaf pairs (one-way, no atomics needed)
@@ -1043,6 +1058,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         Kokkos::fence();
         } // if ( n_local > 0 )
     } // TIMER_P2P_INTER_KERNEL
+    _diag( "after P2P_inter_leaf" );
     } // TIMER_P2P_TOTAL
     CANOPY_PRINT_P2P_TIMERS( _comm );
 }
