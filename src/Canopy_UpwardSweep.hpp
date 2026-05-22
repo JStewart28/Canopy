@@ -680,8 +680,25 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
 
         for ( int d = _max_depth - 1; d >= 0; d-- )
         {
+            if ( _diag_rank == 0 )
+            {
+                std::printf( "[Canopy Diag] upward: M2M iter d=%d enter\n", d );
+                std::fflush( stdout );
+            }
             run_m2m_at_depth( d );
+            Kokkos::fence( "diag:after run_m2m_at_depth" );
+            if ( _diag_rank == 0 )
+            {
+                std::printf( "[Canopy Diag] upward: M2M iter d=%d after run_m2m\n", d );
+                std::fflush( stdout );
+            }
             exchange_multipoles_at_depth( d, comm_plan );
+            Kokkos::fence( "diag:after exchange_multipoles" );
+            if ( _diag_rank == 0 )
+            {
+                std::printf( "[Canopy Diag] upward: M2M iter d=%d after exchange\n", d );
+                std::fflush( stdout );
+            }
         }
         _diag( "after M2M loop" );
     }

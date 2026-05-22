@@ -782,6 +782,12 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_INTRA_KERNEL );
         if ( num_target_leaves > 0 )
         {
+        if ( _diag_rank == 0 )
+        {
+            std::printf( "[Canopy Diag] p2p: launching P2P_intra_leaf (num_target_leaves=%d)\n",
+                         num_target_leaves );
+            std::fflush( stdout );
+        }
         team_policy policy( num_target_leaves, Kokkos::AUTO );
 
         Kokkos::parallel_for(
