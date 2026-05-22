@@ -651,7 +651,6 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     if ( send_by_peer_kv.empty() && recv_by_peer_kv.empty() )
     {
         CANOPY_EXMP_DIAG( "early-return (no p2p peers)" );
-#undef CANOPY_EXMP_DIAG
         return;
     }
 
