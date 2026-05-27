@@ -209,8 +209,6 @@ int main( int argc, char* argv[] )
             integrate_particles( particles, solver.gradient(),
                                  solver.num_local_particles(), dt, G );
 
-            Kokkos::fence();
-
             actions[step] =
                 solver.auto_maintain<Position, Mass>( particles );
 
