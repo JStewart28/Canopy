@@ -50,7 +50,7 @@ void coalesced_view_exchange(
     const CoeffView& view, MPI_Comm comm,
     const std::map<int, std::vector<int>>& send_cells_by_peer_in,
     const std::map<int, std::vector<int>>& recv_cells_by_peer_in,
-    bool accumulate_on_recv )
+    bool accumulate_on_recv, const char* label = "coalesced" )
 {
     using complex_type = typename CoeffView::non_const_value_type;
     using scalar_type = typename complex_type::value_type;
@@ -142,11 +142,11 @@ void coalesced_view_exchange(
             {
                 std::fprintf(
                     stderr,
-                    "[Canopy FATAL] coalesced_view_exchange comm-plan "
+                    "[Canopy FATAL] %s comm-plan "
                     "asymmetry: rank %d expects to RECEIVE %d cells from "
                     "peer %d, but peer %d says it will SEND %d cells "
                     "(this rank will SEND %d cells to peer %d)\n",
-                    self_rank, my_recv_count, peers[i], peers[i],
+                    label, self_rank, my_recv_count, peers[i], peers[i],
                     their_send_counts[i], my_send_counts[i], peers[i] );
                 mismatch = true;
             }
