@@ -148,6 +148,37 @@ void direct_evaluate_global(
     }
 }
 
+void print_usage( const char* prog )
+{
+    std::fprintf(
+        stderr,
+        "Usage: %s [options]\n"
+        "\n"
+        "Full-FMM validation driver: builds an adaptive octree, runs the\n"
+        "complete FMM + near-field P2P once, and compares against a direct\n"
+        "O(N^2) sum.\n"
+        "\n"
+        "Tree / FMM parameters (shared with gravity_solve):\n"
+        "  -p N         particles per MPI rank            "
+        "(default 10000;  rec. 1e4-1e7)\n"
+        "  -n ncrit     max particles per leaf cell       "
+        "(default 32;     rec. 64-512, larger on GPU)\n"
+        "  -d max_depth octree depth cap                  "
+        "(default 15;     rec. 10-20, deep enough to hit ncrit)\n"
+        "  -r repl_depth top tree levels replicated/rank  "
+        "(default 3;      rec. 2-4)\n"
+        "  -i imbal_tol load-imbalance tol for repartition"
+        " (default 0.10;   rec. 0.05-0.10)\n"
+        "  -c ncrit_tol leaf-split tolerance on ncrit     "
+        "(default 0.10;   rec. ~0.10)\n"
+        "  -b bbox_tol  bounding-box padding fraction     "
+        "(default 0.10;   rec. ~0.10)\n"
+        "  -m mac_theta multipole acceptance (opening) angle "
+        "(default 0.5; rec. 0.5; smaller=more accurate, slower)\n"
+        "  -h           show this help and exit\n",
+        prog );
+}
+
 int main( int argc, char* argv[] )
 {
     MPI_Init( &argc, &argv );
@@ -169,7 +200,7 @@ int main( int argc, char* argv[] )
         bool compute_gradient = true;
 
         int opt;
-        while ( ( opt = getopt( argc, argv, "p:d:r:i:n:t:b:m:" ) ) != -1 )
+        while ( ( opt = getopt( argc, argv, "p:d:r:i:n:c:b:m:h" ) ) != -1 )
         {
             switch ( opt )
             {
@@ -181,14 +212,15 @@ int main( int argc, char* argv[] )
             case 'c': ncrit_tol = std::atof( optarg ); break;
             case 'b': bbox_tol = std::atof( optarg ); break;
             case 'm': mac_theta = std::atof( optarg ); break;
+            case 'h':
+                if ( rank == 0 )
+                    print_usage( argv[0] );
+                Kokkos::finalize();
+                MPI_Finalize();
+                return 0;
             default:
                 if ( rank == 0 )
-                    std::fprintf(
-                        stderr,
-                        "Usage: %s [-p N] [-d max_depth] [-r repl_depth] "
-                        "[-i imbal_tol] [-n ncrit] [-t ncrit_tol] "
-                        "[-b bbox_tol] [-m mac_theta]\n",
-                        argv[0] );
+                    print_usage( argv[0] );
                 MPI_Abort( MPI_COMM_WORLD, 1 );
             }
         }

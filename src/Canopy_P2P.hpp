@@ -92,6 +92,18 @@ class P2P
     }
 
     // -----------------------------------------------------------------------
+    // set_softening(): set the Plummer softening length eps used by the
+    // near-field kernel. The pairwise 1/r and 1/r^3 terms are evaluated
+    // with r^2 -> r^2 + eps^2, which bounds the force for close encounters
+    // (eps = 0 reproduces the unsoftened kernel). Stored squared so the
+    // device kernel does no extra work per pair.
+    // -----------------------------------------------------------------------
+    void set_softening( scalar_type eps )
+    {
+        _softening2 = eps * eps;
+    }
+
+    // -----------------------------------------------------------------------
     // setup()
     //
     // Build the exchange plan and allocate ghost buffers. Call once after
@@ -152,6 +164,9 @@ class P2P
     MPI_Comm _comm;
     int _rank;
     int _comm_size;
+
+    // Plummer softening length squared (eps^2). 0 => unsoftened kernel.
+    scalar_type _softening2 = static_cast<scalar_type>( 0 );
 
     // -----------------------------------------------------------------------
     // Borrowed references from the partitioner / tree
@@ -742,6 +757,12 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     {
     CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_TOTAL );
 
+    // Plummer softening: r^2 -> r^2 + eps^2 in every pairwise term. With
+    // eps == 0 this is the unsoftened kernel and the r2 < 1e-24
+    // self-coincidence guard below still fires; with eps > 0 the guard
+    // never trips because r2 + eps2 >= eps2 > 0.
+    const scalar_type eps2 = _softening2;
+
     // ------------------------------------------------------------------
     // 1. Gather ghost particles
     // ------------------------------------------------------------------
@@ -822,7 +843,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                         continue;
                     const scalar_type inv_r =
                         static_cast<scalar_type>( 1.0 ) /
-                        Kokkos::sqrt( r2 );
+                        Kokkos::sqrt( r2 + eps2 );
                     const scalar_type inv_r3 = inv_r * inv_r * inv_r;
                     for ( int c = 0; c < NComps; c++ )
                     {
@@ -930,7 +951,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             continue;
                         const scalar_type inv_r =
                             static_cast<scalar_type>( 1.0 ) /
-                            Kokkos::sqrt( r2 );
+                            Kokkos::sqrt( r2 + eps2 );
                         const scalar_type inv_r3 = inv_r * inv_r * inv_r;
                         for ( int c = 0; c < NComps; c++ )
                         {
@@ -965,7 +986,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                             continue;
                         const scalar_type inv_r =
                             static_cast<scalar_type>( 1.0 ) /
-                            Kokkos::sqrt( r2 );
+                            Kokkos::sqrt( r2 + eps2 );
                         const scalar_type inv_r3 = inv_r * inv_r * inv_r;
                         for ( int c = 0; c < NComps; c++ )
                         {

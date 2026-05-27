@@ -19,7 +19,9 @@
 
 #include <mpi.h>
 
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -332,6 +334,26 @@ TreeBuilder<MemorySpace, ExecutionSpace>::compute_global_bounding_box(
     BoundingBox box;
     MPI_Allreduce( lmin, box.min, 3, MPI_DOUBLE, MPI_MIN, _comm );
     MPI_Allreduce( lmax, box.max, 3, MPI_DOUBLE, MPI_MAX, _comm );
+
+    // Guard against non-finite particle coordinates (e.g. a divergent
+    // gravitational acceleration producing Inf/NaN positions). A non-finite
+    // bounding box silently degenerates the Morton-key / cell geometry and
+    // surfaces later as an opaque out-of-bounds GPU memory fault, so fail
+    // loudly here with an actionable message instead.
+    for ( int d = 0; d < 3; ++d )
+    {
+        if ( !std::isfinite( box.min[d] ) || !std::isfinite( box.max[d] ) )
+        {
+            std::fprintf(
+                stderr,
+                "[Canopy] FATAL: non-finite bounding box on axis %d "
+                "(min=%g, max=%g). A particle coordinate is Inf/NaN — "
+                "check force softening and timestep.\n",
+                d, box.min[d], box.max[d] );
+            std::fflush( stderr );
+            MPI_Abort( _comm, 1 );
+        }
+    }
 
     double pad = 1.0e-10;
     for ( int d = 0; d < 3; ++d )

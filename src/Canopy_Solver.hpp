@@ -88,7 +88,7 @@ class Solver
     // -----------------------------------------------------------------------
     Solver( MPI_Comm comm, int ncrit, int max_depth, std::array<double, 3> bounding_box_tol, double ncrit_tol,
             int replication_depth, double imbalance_tolerance = 0.05,
-            double mac_theta = 0.5 )
+            double mac_theta = 0.5, double softening = 0.0 )
         : _comm( comm )
         , _replication_depth( replication_depth )
         , _builder( comm, ncrit, max_depth, bounding_box_tol, ncrit_tol )
@@ -99,6 +99,10 @@ class Solver
         , _p2p( comm )
         , _num_local( 0 )
     {
+        // Near-field Plummer softening. Bounds the pairwise force for close
+        // encounters so a divergent acceleration cannot fling a particle out
+        // of the domain and degenerate the next tree build.
+        _p2p.set_softening( static_cast<Scalar>( softening ) );
     }
 
     // -----------------------------------------------------------------------
