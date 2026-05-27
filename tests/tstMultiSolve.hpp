@@ -322,7 +322,7 @@ inline void testMultiStepGravity(
     Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth,
                      std::array<double, 3>{tree_tolerance, tree_tolerance, tree_tolerance},
                      tree_tolerance, replication_depth, 0.05,
-                     mac_theta_used );
+                     mac_theta_used, /*softening=*/0.0 );
     solver.template setup<Position, Charge>( particles,
                                              num_particles_per_rank );
 
@@ -724,7 +724,7 @@ inline void run_fmm_and_compare( int num_particles, double mac_theta,
     Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth,
                      std::array<double, 3>{ 0.1, 0.1, 0.1 }, 0.1,
                      /*replication_depth=*/2, /*imbalance_tol=*/0.05,
-                     mac_theta );
+                     mac_theta, /*softening=*/0.0 );
     solver.template setup<0, 1>( particles, num_particles );
     solver.template solve<0, 1>( particles, /*compute_gradient=*/true );
 
@@ -957,7 +957,8 @@ TEST( SolveFusedM2L, multipleSolvesIdempotent )
 
     Solver_t solver( MPI_COMM_WORLD, /*ncrit=*/16, /*max_depth=*/6,
                      std::array<double, 3>{ 0.1, 0.1, 0.1 }, 0.1,
-                     /*replication_depth=*/2, 0.05, /*mac_theta=*/0.5 );
+                     /*replication_depth=*/2, 0.05, /*mac_theta=*/0.5,
+                     /*softening=*/0.0 );
     solver.template setup<0, 1>( particles, N );
 
     auto snapshot = [&]( std::vector<double>& pot,
