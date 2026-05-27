@@ -84,6 +84,77 @@ void coalesced_view_exchange(
     const int n_send_peers = static_cast<int>( send_cells_by_peer.size() );
     const int n_recv_peers = static_cast<int>( recv_cells_by_peer.size() );
 
+    // ---------------------------------------------------------------------
+    // DEBUG count handshake. Before exchanging any cell data, verify that for
+    // every peer P the number of cells THIS rank will receive from P equals
+    // the number P says it will send to this rank. A mismatch is the root
+    // cause of an MPI_ERR_TRUNCATE in the data-phase MPI_Waitall below (recv
+    // buffer smaller than the incoming message) and means the comm plan is
+    // asymmetric across ranks.
+    //
+    // This is intentionally point-to-point over THIS rank's own peer set
+    // (union of send and recv peers), NOT a collective: coalesced_view_exchange
+    // is entered only by ranks that have peers (the M2M / L2L callers early
+    // return otherwise), so a collective here would deadlock. For a symmetric
+    // plan the peer set is reciprocal, so the handshake matches; for the count
+    // mismatch we are hunting both sides still talk, so it is caught and
+    // reported rather than truncating opaquely later.
+    {
+        std::map<int, char> peer_set; // union of send + recv peers
+        for ( const auto& kv : send_cells_by_peer )
+            peer_set[kv.first] = 1;
+        for ( const auto& kv : recv_cells_by_peer )
+            peer_set[kv.first] = 1;
+
+        const int n_peers = static_cast<int>( peer_set.size() );
+        std::vector<int> peers;
+        peers.reserve( n_peers );
+        for ( const auto& kv : peer_set )
+            peers.push_back( kv.first );
+
+        std::vector<int> my_send_counts( n_peers );
+        std::vector<int> their_send_counts( n_peers, -1 );
+        std::vector<MPI_Request> hs_reqs( 2 * n_peers );
+        for ( int i = 0; i < n_peers; i++ )
+        {
+            auto sit = send_cells_by_peer.find( peers[i] );
+            my_send_counts[i] = ( sit != send_cells_by_peer.end() )
+                                    ? static_cast<int>( sit->second.size() )
+                                    : 0;
+            MPI_Irecv( &their_send_counts[i], 1, MPI_INT, peers[i], /*tag=*/7,
+                       comm, &hs_reqs[i] );
+        }
+        for ( int i = 0; i < n_peers; i++ )
+            MPI_Isend( &my_send_counts[i], 1, MPI_INT, peers[i], /*tag=*/7,
+                       comm, &hs_reqs[n_peers + i] );
+        if ( n_peers > 0 )
+            MPI_Waitall( 2 * n_peers, hs_reqs.data(), MPI_STATUSES_IGNORE );
+
+        bool mismatch = false;
+        for ( int i = 0; i < n_peers; i++ )
+        {
+            auto rit = recv_cells_by_peer.find( peers[i] );
+            const int my_recv_count =
+                ( rit != recv_cells_by_peer.end() )
+                    ? static_cast<int>( rit->second.size() )
+                    : 0;
+            if ( my_recv_count != their_send_counts[i] )
+            {
+                std::fprintf(
+                    stderr,
+                    "[Canopy FATAL] coalesced_view_exchange comm-plan "
+                    "asymmetry: rank %d expects to RECEIVE %d cells from "
+                    "peer %d, but peer %d says it will SEND %d cells "
+                    "(this rank will SEND %d cells to peer %d)\n",
+                    self_rank, my_recv_count, peers[i], peers[i],
+                    their_send_counts[i], my_send_counts[i], peers[i] );
+                mismatch = true;
+            }
+        }
+        if ( mismatch )
+            MPI_Abort( comm, 17 );
+    }
+
     // Per-peer device-side index views and pack/unpack buffers.
     std::vector<Kokkos::View<int*, memory_space>> send_idx( n_send_peers );
     std::vector<Kokkos::View<complex_type*, memory_space>> send_bufs(
