@@ -26,6 +26,7 @@
 
 #include <mpi.h>
 
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -247,7 +248,14 @@ class DownwardSweep
     // Range guards (|dd|<=6, |offset|<=32) catch pathological pairs and
     // route them to the per-pair m2l_translate fallback. Healthy MAC
     // traversals never trip these.
-    static constexpr int M2L_KEY_DD_MAX = 6;
+    // FP32 safety valve: with the scale-normalized T̃, the |dd|-dependent
+    // factor reaches 2^{j·|dd|} (worst j = P). For Scalar = double this
+    // is comfortable through |dd| = 6; for Scalar = float a hard cut at
+    // |dd| = 4 keeps the precision loss to ~8 bits, matching Greengard
+    // truncation error at P = 6. Pairs beyond the cut go to the per-pair
+    // fallback path.
+    static constexpr int M2L_KEY_DD_MAX =
+        std::is_same<typename KernelType::scalar_type, float>::value ? 4 : 6;
     static constexpr int M2L_KEY_OFFSET_MAX = 32;
     static constexpr int M2L_OP_COUNT_CAP = 32768;
 
@@ -255,15 +263,13 @@ class DownwardSweep
 
     struct M2LKey
     {
-        int max_d;
         int dd;
         int ii;
         int jj;
         int kk;
         bool operator==( const M2LKey& o ) const noexcept
         {
-            return max_d == o.max_d && dd == o.dd && ii == o.ii &&
-                   jj == o.jj && kk == o.kk;
+            return dd == o.dd && ii == o.ii && jj == o.jj && kk == o.kk;
         }
     };
     struct M2LKeyHash
@@ -276,7 +282,6 @@ class DownwardSweep
                 h ^= static_cast<std::uint32_t>( v );
                 h *= 1099511628211ull;
             };
-            mix( k.max_d );
             mix( k.dd );
             mix( k.ii );
             mix( k.jj );
@@ -418,6 +423,18 @@ class DownwardSweep
                   const potential_view_type& potential_out,
                   const gradient_view_type& gradient_out,
                   bool compute_gradient );
+
+    // Step-2 scaffolding: multiplies every leaf cell's local by
+    // w_self^{n} so the bridged pipeline (L2L produces physical L,
+    // L2P consumes L̄) is numerically identical to the original.
+    void apply_l2p_normalization_bridge();
+
+    // Step-4 scaffolding: scales L at every cell of `depth` by
+    // w_self^{n · exp_sign}. exp_sign=+1 converts physical → L̄,
+    // exp_sign=-1 converts L̄ → physical. Used to bracket
+    // run_l2l_at_depth so the new (L̄ in, L̄ out) kernel can be
+    // tested without disturbing L state outside the call.
+    void scale_locals_at_depth( int depth, int exp_sign );
 
     // Multipole exchange for M2L: receive source multipoles from
     // remote ranks so we can run M2L locally.
@@ -736,7 +753,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                      std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
                      std::abs( kk ) <= M2L_KEY_OFFSET_MAX )
                 {
-                    M2LKey key{ max_d, dd, ii, jj, kk };
+                    M2LKey key{ dd, ii, jj, kk };
                     auto it = key_to_op.find( key );
                     if ( it != key_to_op.end() )
                     {
@@ -773,11 +790,22 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     const int n_unique_ops = static_cast<int>( ops.size() );
 
+    if ( _rank == 0 )
+    {
+        std::fprintf( stderr,
+                      "[Canopy diag] build_interaction_list: "
+                      "n_unique_ops=%d, _max_depth=%d, "
+                      "total_pairs=%d, cap=%d\n",
+                      n_unique_ops, _max_depth, total_pairs,
+                      M2L_OP_COUNT_CAP );
+    }
+
     // -----------------------------------------------------------------------
     // Stage 4: build the (Nt, Ns, n_unique_ops) operator table on host,
-    // then deep_copy to device. Each op key encodes the physical translation
-    // (ii, jj, kk) * unit_w, with unit_w = width_at_depth[max_d]; the
-    // operator only depends on this physical vector.
+    // then deep_copy to device. After scale normalization the operator
+    // depends only on (dd, ii, jj, kk); no physical width enters the
+    // builder. The realized key set under MAC = 0.5 is bounded and
+    // independent of tree depth.
     // -----------------------------------------------------------------------
     {
         const int Nt = KernelType::num_coeffs_per_cell;
@@ -797,14 +825,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
             {
                 const auto& k = ops[op_idx];
-                const double unit_w = half_width_at_depth[k.max_d];
                 auto T_slice = Kokkos::subview( h_op, Kokkos::ALL,
                                                 Kokkos::ALL, op_idx );
-                KernelType::m2l_build_operator(
-                    static_cast<scalar_type>( k.ii * unit_w ),
-                    static_cast<scalar_type>( k.jj * unit_w ),
-                    static_cast<scalar_type>( k.kk * unit_w ), h_A,
-                    T_slice );
+                KernelType::m2l_build_operator( k.dd, k.ii, k.jj, k.kk,
+                                                h_A, T_slice );
             }
         }
         {
@@ -1340,7 +1364,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             auto L_target = Kokkos::subview( locals, target_cell, Kokkos::ALL,
                                              Kokkos::ALL );
             KernelType::m2l_translate( team, multipoles, source_cell, dx, dy,
-                                       dz, A_table, L_target );
+                                       dz, src_ci.half_width,
+                                       target_ci.half_width,
+                                       A_table, L_target );
         } );
 }
 
@@ -1390,7 +1416,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth(
                 auto L_child =
                     Kokkos::subview( locals, ci, Kokkos::ALL, Kokkos::ALL );
                 KernelType::l2l_translate( team, locals, parent_cell, dx, dy,
-                                           dz, A_table, L_child );
+                                           dz, ccell.half_width,
+                                           parent_ci.half_width,
+                                           A_table, L_child );
             }
         } );
 
@@ -1603,6 +1631,90 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
+    scale_locals_at_depth( int depth, int exp_sign )
+{
+    if ( depth < 0 || depth > _max_depth )
+        return;
+    auto& d_all = _d_all_at_depth[depth];
+    const int n_cells = d_all.extent( 0 );
+    if ( n_cells == 0 )
+        return;
+
+    auto locals = _locals;
+    auto device_cells = _device_cells;
+    auto d_all_view = d_all;
+    constexpr int P_local = KernelType::max_order;
+    constexpr int NComps_local = KernelType::num_components;
+    const int sign = exp_sign;
+
+    Kokkos::parallel_for(
+        "scale_locals_at_depth",
+        Kokkos::RangePolicy<execution_space>( 0, n_cells ),
+        KOKKOS_LAMBDA( int i ) {
+            const int cidx = d_all_view( i );
+            const auto& dci = device_cells( cidx );
+            const scalar_type w = dci.half_width;
+            const scalar_type step =
+                ( sign > 0 ) ? w : ( static_cast<scalar_type>( 1 ) / w );
+            // factor = w^{n · sign}; n=0 ⇒ factor=1 (skip).
+            scalar_type factor = step; // for n=1
+            for ( int n = 1; n <= P_local; n++ )
+            {
+                for ( int m = 0; m <= n; m++ )
+                {
+                    const int idx = n * ( n + 1 ) / 2 + m;
+                    for ( int c = 0; c < NComps_local; c++ )
+                    {
+                        auto& L = locals( cidx, idx, c );
+                        L.real() *= factor;
+                        L.imag() *= factor;
+                    }
+                }
+                factor *= step;
+            }
+        } );
+    Kokkos::fence();
+}
+
+template <class MemorySpace, class ExecutionSpace, class KernelType>
+void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
+    apply_l2p_normalization_bridge()
+{
+    auto locals = _locals;
+    auto device_cells = _device_cells;
+    const int num_cells = device_cells.extent( 0 );
+    constexpr int P_local = KernelType::max_order;
+    constexpr int NComps_local = KernelType::num_components;
+
+    Kokkos::parallel_for(
+        "l2p_norm_bridge",
+        Kokkos::RangePolicy<execution_space>( 0, num_cells ),
+        KOKKOS_LAMBDA( int cidx ) {
+            const auto& dci = device_cells( cidx );
+            if ( !dci.is_leaf )
+                return;
+            const scalar_type w = dci.half_width;
+            scalar_type w_pow = static_cast<scalar_type>( 1 ); // w^n at n=0
+            for ( int n = 0; n <= P_local; n++ )
+            {
+                for ( int m = 0; m <= n; m++ )
+                {
+                    const int idx = n * ( n + 1 ) / 2 + m;
+                    for ( int c = 0; c < NComps_local; c++ )
+                    {
+                        auto& L = locals( cidx, idx, c );
+                        L.real() *= w_pow;
+                        L.imag() *= w_pow;
+                    }
+                }
+                w_pow *= w;
+            }
+        } );
+    Kokkos::fence();
+}
+
+template <class MemorySpace, class ExecutionSpace, class KernelType>
 template <class PositionType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
     const PositionType& particle_positions,
@@ -1643,7 +1755,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
             // CUDA can use it inside a device lambda without the
             // "nested extended lambda" restriction firing.
             GradWriter writer{ gradient_out, p };
-            KernelType::l2p_evaluate( locals, cidx, dx, dy, dz, phi, writer,
+            KernelType::l2p_evaluate( locals, cidx, dx, dy, dz,
+                                      dci.half_width, phi, writer,
                                       compute_gradient );
 
             // Accumulate potential (caller has zeroed or initialized)
@@ -1734,7 +1847,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
             }
         }
 
-        // L2P: evaluate local expansion at each particle
+        // L2P: evaluate local expansion at each particle. After step 5
+        // every multipole/local in the pipeline is in scale-normalized
+        // form, so no bridges are needed — l2p_evaluate consumes L̄
+        // directly.
         run_l2p( particle_positions, potential_out, gradient_out,
                  compute_gradient );
     }

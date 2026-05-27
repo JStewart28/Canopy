@@ -106,6 +106,30 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 ##---------------------------------------------------------------------------##
+## DevFast: minimal optimization for fast compile during active development.
+##
+## Targets -O0 to skip nvcc optimization passes (the dominant per-TU cost
+## with nvcc_wrapper) while keeping -g so backtraces remain useful. Not for
+## profiling or performance work — use RelWithDebInfo for that.
+##---------------------------------------------------------------------------##
+set(CMAKE_CXX_FLAGS_DEVFAST "-O0 -g" CACHE STRING
+    "Flags used by the CXX compiler during DevFast builds." FORCE)
+set(CMAKE_C_FLAGS_DEVFAST "-O0 -g" CACHE STRING
+    "Flags used by the C compiler during DevFast builds." FORCE)
+set(CMAKE_EXE_LINKER_FLAGS_DEVFAST "" CACHE STRING
+    "Flags used for linking binaries during DevFast builds." FORCE)
+set(CMAKE_SHARED_LINKER_FLAGS_DEVFAST "" CACHE STRING
+    "Flags used by the shared libraries linker during DevFast builds." FORCE)
+mark_as_advanced(
+  CMAKE_CXX_FLAGS_DEVFAST
+  CMAKE_C_FLAGS_DEVFAST
+  CMAKE_EXE_LINKER_FLAGS_DEVFAST
+  CMAKE_SHARED_LINKER_FLAGS_DEVFAST)
+if(CMAKE_BUILD_TYPE STREQUAL "DevFast")
+  message(STATUS "DevFast CXX flags: ${CMAKE_CXX_FLAGS_DEVFAST}")
+endif()
+
+##---------------------------------------------------------------------------##
 ## RelWithDebInfo: profiling-friendly flags
 ##
 ## Targets -O3 (keep optimized code paths) with host -g (already in the

@@ -678,20 +678,26 @@ TEST( MultiSolve, M2L_BinEdge_Fallback )
 namespace MultiSolveTest
 {
 
-// Single-rank single-solve helper templated on expansion order. Runs FMM
-// + P2P once on a uniform random distribution and returns the max relative
-// error in (potential, gradient) against a brute-force N^2 reference.
-template <int P>
+// Single-rank single-solve helper templated on expansion order and on the
+// kernel Scalar type. Runs FMM + P2P once on a uniform random distribution
+// and returns the max relative error in (potential, gradient) against a
+// brute-force N^2 reference computed in double precision (the reference
+// itself is FP64 regardless of Scalar; that lets the same oracle judge
+// both an FP64 and an FP32 build with the appropriate per-precision
+// tolerance set by the caller).
+template <int P, class Scalar = double>
 inline void run_fmm_and_compare( int num_particles, double mac_theta,
                                  int ncrit, int max_depth,
                                  double& max_pot_rel,
                                  double& max_grad_rel )
 {
-    using DataTypes = Cabana::MemberTypes<double[3], double[1]>;
+    using DataTypes = Cabana::MemberTypes<Scalar[3], Scalar[1]>;
     using AoSoA_t = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
     using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
     using Solver_t =
-        Canopy::Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, P, 1>;
+        Canopy::Solver<TEST_MEMSPACE, TEST_EXECSPACE, Scalar, P, 1>;
+    const MPI_Datatype mpi_scalar =
+        std::is_same<Scalar, float>::value ? MPI_FLOAT : MPI_DOUBLE;
 
     int rank, nprocs;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
@@ -755,8 +761,9 @@ inline void run_fmm_and_compare( int num_particles, double mac_theta,
             displs1[r] = displs1[r - 1] + counts1[r - 1];
         }
     }
-    std::vector<double> lpos( 3 * n_local ), lchg( n_local ), lpot( n_local );
-    std::vector<double> lgrad( 3 * n_local );
+    std::vector<Scalar> lpos( 3 * n_local ), lchg( n_local ),
+        lpot( n_local );
+    std::vector<Scalar> lgrad( 3 * n_local );
     for ( int i = 0; i < n_local; i++ )
     {
         lpos[3 * i + 0] = h_pos( i, 0 );
@@ -768,26 +775,36 @@ inline void run_fmm_and_compare( int num_particles, double mac_theta,
         lgrad[3 * i + 1] = h_grad( i, 0, 1 );
         lgrad[3 * i + 2] = h_grad( i, 0, 2 );
     }
+    std::vector<Scalar> gpos_s, gchg_s, gpot_s, ggrad_s;
+    if ( rank == 0 )
+    {
+        gpos_s.resize( 3 * total );
+        gchg_s.resize( total );
+        gpot_s.resize( total );
+        ggrad_s.resize( 3 * total );
+    }
+    MPI_Gatherv( lpos.data(), 3 * n_local, mpi_scalar, gpos_s.data(),
+                 counts3.data(), displs3.data(), mpi_scalar, 0,
+                 MPI_COMM_WORLD );
+    MPI_Gatherv( lchg.data(), n_local, mpi_scalar, gchg_s.data(),
+                 counts1.data(), displs1.data(), mpi_scalar, 0,
+                 MPI_COMM_WORLD );
+    MPI_Gatherv( lpot.data(), n_local, mpi_scalar, gpot_s.data(),
+                 counts1.data(), displs1.data(), mpi_scalar, 0,
+                 MPI_COMM_WORLD );
+    MPI_Gatherv( lgrad.data(), 3 * n_local, mpi_scalar, ggrad_s.data(),
+                 counts3.data(), displs3.data(), mpi_scalar, 0,
+                 MPI_COMM_WORLD );
+
+    // Promote to double on rank 0 for the brute-force reference.
     std::vector<double> gpos, gchg, gpot, ggrad;
     if ( rank == 0 )
     {
-        gpos.resize( 3 * total );
-        gchg.resize( total );
-        gpot.resize( total );
-        ggrad.resize( 3 * total );
+        gpos.assign( gpos_s.begin(), gpos_s.end() );
+        gchg.assign( gchg_s.begin(), gchg_s.end() );
+        gpot.assign( gpot_s.begin(), gpot_s.end() );
+        ggrad.assign( ggrad_s.begin(), ggrad_s.end() );
     }
-    MPI_Gatherv( lpos.data(), 3 * n_local, MPI_DOUBLE, gpos.data(),
-                 counts3.data(), displs3.data(), MPI_DOUBLE, 0,
-                 MPI_COMM_WORLD );
-    MPI_Gatherv( lchg.data(), n_local, MPI_DOUBLE, gchg.data(),
-                 counts1.data(), displs1.data(), MPI_DOUBLE, 0,
-                 MPI_COMM_WORLD );
-    MPI_Gatherv( lpot.data(), n_local, MPI_DOUBLE, gpot.data(),
-                 counts1.data(), displs1.data(), MPI_DOUBLE, 0,
-                 MPI_COMM_WORLD );
-    MPI_Gatherv( lgrad.data(), 3 * n_local, MPI_DOUBLE, ggrad.data(),
-                 counts3.data(), displs3.data(), MPI_DOUBLE, 0,
-                 MPI_COMM_WORLD );
 
     max_pot_rel = 0.0;
     max_grad_rel = 0.0;
@@ -980,6 +997,49 @@ TEST( SolveFusedM2L, multipleSolvesIdempotent )
     {
         EXPECT_EQ( grad1[i], grad2[i] ) << "gradient drift at i=" << i;
         EXPECT_EQ( grad1[i], grad3[i] ) << "gradient drift at i=" << i;
+    }
+}
+
+//---------------------------------------------------------------------------//
+// SolveFusedM2L.FP32_smokeTest: the kernel templates support Scalar=float.
+// After scale-normalization (M̄ = M/w^{n+1}, L̄ = L·w^j) per-coefficient
+// intermediates are O(q · 2^max_d) — linear in depth, not geometric — so
+// FP32 stays well-conditioned. The |dd|-dependent factor 2^{j·|dd|} in
+// T̃ caps precision loss at ~8 bits when |dd| ≤ 4, which is what the FP32
+// path of M2L_KEY_DD_MAX enforces.
+//
+// At P=4, the Greengard truncation floor is already ~5e-3 for a uniform
+// 400-particle problem; FP32 round-off adds maybe ~1e-4 relative, so a
+// 1e-2 bound on max-rel error is robust.
+//---------------------------------------------------------------------------//
+TEST( SolveFusedM2L, FP32_smokeTest )
+{
+    double max_pot_rel = 0.0, max_grad_rel = 0.0;
+    MultiSolveTest::run_fmm_and_compare<4, float>(
+        /*num_particles=*/400, /*mac_theta=*/0.5, /*ncrit=*/16,
+        /*max_depth=*/6, max_pot_rel, max_grad_rel );
+
+    int rank;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    if ( rank == 0 )
+    {
+        // Both thresholds are deliberately loose. Three error sources
+        // stack on top of the Greengard P=4 truncation floor:
+        //   1. FP32 round-off in M2L/L2L/M2M (~few × 10^{-3} per pair).
+        //   2. Non-deterministic cross-rank summation order (grows with
+        //      nprocs; at np=6 we see ~1e-2 on potential).
+        //   3. Gradient is via finite differences at h=1e-5, which loses
+        //      most of FP32's mantissa.
+        // 5e-2 is the smoke-test budget: tight enough to catch a wrong
+        // scale exponent in any of P2M / M2M / M2L / L2L / L2P, loose
+        // enough to not false-fail on np ∈ [1, 6]. Production FP32
+        // verification belongs in a problem-specific oracle.
+        EXPECT_LT( max_pot_rel, 5.0e-2 )
+            << "FP32 max relative potential error " << max_pot_rel
+            << " exceeds the 5e-2 budget";
+        EXPECT_LT( max_grad_rel, 5.0e-2 )
+            << "FP32 max relative gradient error " << max_grad_rel
+            << " exceeds the 5e-2 budget";
     }
 }
 

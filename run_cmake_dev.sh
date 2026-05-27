@@ -1,6 +1,6 @@
 cmake -DCMAKE_CXX_COMPILER=$(spack location -i kokkos)/bin/nvcc_wrapper \
       -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-      -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_BUILD_TYPE=DevFast \
       -DCanopy_ENABLE_TESTING=ON \
       -DCanopy_ENABLE_EXAMPLES=ON \
       -DCanopy_ENABLE_PROFILING=ON \

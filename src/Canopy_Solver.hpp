@@ -285,6 +285,13 @@ class Solver
     template <int PositionIdx, int ChargeIdx, class AoSoA>
     MaintenanceAction auto_maintain( AoSoA& particles )
     {
+        // Ensure any pending device writes to particle positions
+        // (e.g. from integrate_particles) are visible before we read
+        // them on the host or feed them back into the builder. On
+        // unified-memory APUs (MI300A) this fence is required for
+        // correctness, not just timing.
+        Kokkos::fence( "auto_maintain: pre-positions" );
+
         // 1) Bounding-box escape ⇒ full rebuild.
         {
             auto positions = Cabana::slice<PositionIdx>( particles );
@@ -454,10 +461,12 @@ class Solver
         // Tree topology and comm plan just changed; invalidate the cache.
         _downward.invalidate_interaction_list();
 
+        Kokkos::fence( "_finish_topology_change: pre-setup" );
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
                        _builder.particle_keys(), _num_local );
         _downward.setup( _upward, _num_local );
         _p2p.setup( _builder, _partitioner, _comm_plan );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
     }
 
     // -----------------------------------------------------------------------
@@ -481,10 +490,12 @@ class Solver
           _builder.build( positions, _num_local ); }
 
         // Reuse existing comm_plan (topology unchanged).
+        Kokkos::fence( "_finish_topology_stable: pre-setup" );
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
                        _builder.particle_keys(), _num_local );
         _downward.setup( _upward, _num_local );
         _p2p.setup( _builder, _partitioner, _comm_plan );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
     }
 
     // -----------------------------------------------------------------------

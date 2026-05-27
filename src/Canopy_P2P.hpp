@@ -761,140 +761,94 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
 
     const int num_target_leaves = _local_leaf_cells.extent( 0 );
 
-    using team_policy = Kokkos::TeamPolicy<execution_space>;
-    using team_member_type = typename team_policy::member_type;
-
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_INTRA_KERNEL );
         if ( num_target_leaves > 0 )
         {
-        team_policy policy( num_target_leaves, Kokkos::AUTO );
+        // Particle-centric intra-leaf kernel. Each thread handles one
+        // local particle pi: it iterates all other particles in pi's leaf
+        // and accumulates into pi's own output slot (single-writer, no
+        // atomics). 2x FLOPs vs the Newton-3rd-law pair scheme, but
+        // avoids the unified-memory atomic-contention hang observed on
+        // MI300A APUs under the previous TeamPolicy+atomic_add design.
+        auto particle_to_league_v = _particle_to_league;
+        const int n_local_intra = static_cast<int>( positions.size() );
 
         Kokkos::parallel_for(
-            "P2P_intra_leaf", policy,
-            KOKKOS_LAMBDA( const team_member_type& team ) {
-                const int league = team.league_rank();
+            "P2P_intra_leaf",
+            Kokkos::RangePolicy<execution_space>( 0, n_local_intra ),
+            KOKKOS_LAMBDA( const int pi ) {
+                const int league = particle_to_league_v( pi );
+                if ( league < 0 )
+                    return;
                 const int cidx = local_leaf_cells( league );
                 const int pstart = leaf_offsets( cidx );
                 const int pend = leaf_offsets( cidx + 1 );
-                const int ncell = pend - pstart;
-                if ( ncell < 2 )
+                if ( pend - pstart < 2 )
                     return;
 
-                const int npairs = ncell * ( ncell - 1 ) / 2;
+                const scalar_type xi =
+                    static_cast<scalar_type>( positions( pi, 0 ) );
+                const scalar_type yi =
+                    static_cast<scalar_type>( positions( pi, 1 ) );
+                const scalar_type zi =
+                    static_cast<scalar_type>( positions( pi, 2 ) );
 
-                Kokkos::parallel_for(
-                    Kokkos::TeamThreadRange( team, npairs ),
-                    [&]( const int pair_idx )
+                scalar_type phi[NComps];
+                scalar_type gx[NComps], gy[NComps], gz[NComps];
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    phi[c] = static_cast<scalar_type>( 0 );
+                    gx[c] = static_cast<scalar_type>( 0 );
+                    gy[c] = static_cast<scalar_type>( 0 );
+                    gz[c] = static_cast<scalar_type>( 0 );
+                }
+
+                for ( int pj = pstart; pj < pend; pj++ )
+                {
+                    if ( pj == pi )
+                        continue;
+                    const scalar_type dx =
+                        xi -
+                        static_cast<scalar_type>( positions( pj, 0 ) );
+                    const scalar_type dy =
+                        yi -
+                        static_cast<scalar_type>( positions( pj, 1 ) );
+                    const scalar_type dz =
+                        zi -
+                        static_cast<scalar_type>( positions( pj, 2 ) );
+                    const scalar_type r2 = dx * dx + dy * dy + dz * dz;
+                    if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
+                        continue;
+                    const scalar_type inv_r =
+                        static_cast<scalar_type>( 1.0 ) /
+                        Kokkos::sqrt( r2 );
+                    const scalar_type inv_r3 = inv_r * inv_r * inv_r;
+                    for ( int c = 0; c < NComps; c++ )
                     {
-                        // Convert pair_idx to (i, j) with i < j
-                        // Upper-triangular indexing:
-                        //   row i has (ncell-1-i) entries
-                        //   we invert to find (i, j) for a given flat index.
-                        // Use the formula:
-                        //   i = ncell - 2 - floor(sqrt(-8*pair_idx +
-                        //   4*ncell*(ncell-1) - 7)/2 - 0.5) j = pair_idx + i +
-                        //   1 - ncell*(ncell-1)/2 + (ncell-i)*((ncell-i)-1)/2
-                        const double x =
-                            Kokkos::sqrt( -8.0 * pair_idx +
-                                          4.0 * ncell * ( ncell - 1 ) - 7.0 );
-                        int i = static_cast<int>(
-                            static_cast<double>( ncell ) - 2.0 -
-                            Kokkos::floor( x * 0.5 - 0.5 ) );
-                        // Clamp i
-                        if ( i < 0 )
-                            i = 0;
-                        if ( i > ncell - 2 )
-                            i = ncell - 2;
-                        int row_base = ncell * ( ncell - 1 ) / 2 -
-                                       ( ncell - i ) * ( ncell - i - 1 ) / 2;
-                        int j = pair_idx - row_base + i + 1;
-                        // Correct for any indexing drift from floor rounding
-                        while ( j <= i )
-                        {
-                            i--;
-                            row_base = ncell * ( ncell - 1 ) / 2 -
-                                       ( ncell - i ) * ( ncell - i - 1 ) / 2;
-                            j = pair_idx - row_base + i + 1;
-                        }
-                        while ( j >= ncell )
-                        {
-                            i++;
-                            row_base = ncell * ( ncell - 1 ) / 2 -
-                                       ( ncell - i ) * ( ncell - i - 1 ) / 2;
-                            j = pair_idx - row_base + i + 1;
-                        }
-
-                        const int pi = pstart + i;
-                        const int pj = pstart + j;
-
-                        const scalar_type xi =
-                            static_cast<scalar_type>( positions( pi, 0 ) );
-                        const scalar_type yi =
-                            static_cast<scalar_type>( positions( pi, 1 ) );
-                        const scalar_type zi =
-                            static_cast<scalar_type>( positions( pi, 2 ) );
-
-                        const scalar_type xj =
-                            static_cast<scalar_type>( positions( pj, 0 ) );
-                        const scalar_type yj =
-                            static_cast<scalar_type>( positions( pj, 1 ) );
-                        const scalar_type zj =
-                            static_cast<scalar_type>( positions( pj, 2 ) );
-
-                        const scalar_type dx = xi - xj;
-                        const scalar_type dy = yi - yj;
-                        const scalar_type dz = zi - zj;
-                        const scalar_type r2 = dx * dx + dy * dy + dz * dz;
-                        if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
-                            return;
-                        const scalar_type inv_r =
-                            static_cast<scalar_type>( 1.0 ) /
-                            Kokkos::sqrt( r2 );
-                        const scalar_type inv_r3 = inv_r * inv_r * inv_r;
-
-                        scalar_type qi[NComps];
-                        scalar_type qj[NComps];
-                        for ( int c = 0; c < NComps; c++ )
-                        {
-                            qi[c] =
-                                static_cast<scalar_type>( charges( pi, c ) );
-                            qj[c] =
-                                static_cast<scalar_type>( charges( pj, c ) );
-                        }
-
-                        // Potential (Newton): +q_j/r on i, +q_i/r on j
-                        for ( int c = 0; c < NComps; c++ )
-                        {
-                            Kokkos::atomic_add( &potential_out( pi, c ),
-                                                qj[c] * inv_r );
-                            Kokkos::atomic_add( &potential_out( pj, c ),
-                                                qi[c] * inv_r );
-                        }
-
+                        const scalar_type qj =
+                            static_cast<scalar_type>( charges( pj, c ) );
+                        phi[c] += qj * inv_r;
                         if ( compute_gradient )
                         {
-                            // grad_i(phi) from j: -q_j * (r_i - r_j) / r^3
-                            // grad_j(phi) from i: -q_i * (r_j - r_i) / r^3
-                            //                  = +q_i * (r_i - r_j) / r^3
-                            for ( int c = 0; c < NComps; c++ )
-                            {
-                                Kokkos::atomic_add( &gradient_out( pi, c, 0 ),
-                                                    -qj[c] * dx * inv_r3 );
-                                Kokkos::atomic_add( &gradient_out( pi, c, 1 ),
-                                                    -qj[c] * dy * inv_r3 );
-                                Kokkos::atomic_add( &gradient_out( pi, c, 2 ),
-                                                    -qj[c] * dz * inv_r3 );
-
-                                Kokkos::atomic_add( &gradient_out( pj, c, 0 ),
-                                                    qi[c] * dx * inv_r3 );
-                                Kokkos::atomic_add( &gradient_out( pj, c, 1 ),
-                                                    qi[c] * dy * inv_r3 );
-                                Kokkos::atomic_add( &gradient_out( pj, c, 2 ),
-                                                    qi[c] * dz * inv_r3 );
-                            }
+                            gx[c] -= qj * dx * inv_r3;
+                            gy[c] -= qj * dy * inv_r3;
+                            gz[c] -= qj * dz * inv_r3;
                         }
-                    } );
+                    }
+                }
+
+                // Single-writer: no atomic needed.
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    potential_out( pi, c ) += phi[c];
+                    if ( compute_gradient )
+                    {
+                        gradient_out( pi, c, 0 ) += gx[c];
+                        gradient_out( pi, c, 1 ) += gy[c];
+                        gradient_out( pi, c, 2 ) += gz[c];
+                    }
+                }
             } );
 
         Kokkos::fence();
