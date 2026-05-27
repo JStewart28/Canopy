@@ -468,14 +468,23 @@ inline void print_timing_table( MPI_Comm comm, const char* section_name,
 #  define CANOPY_PRINT_REBALANCE_TIMERS( comm ) \
        ::Canopy::Profiling::print_timing_table( \
            (comm), "rebalance()", ::Canopy::Profiling::rebalance_phase_entries() )
-#  define CANOPY_PRINT_COMMPLAN_TIMERS( comm ) \
-       ::Canopy::Profiling::print_timing_table( \
-           (comm), "CommunicationPlan::build()", \
-           ::Canopy::Profiling::commplan_phase_entries() )
-#  define CANOPY_PRINT_ILIST_TIMERS( comm ) \
-       ::Canopy::Profiling::print_timing_table( \
-           (comm), "DownwardSweep::build_interaction_list_device()", \
-           ::Canopy::Profiling::ilist_phase_entries() )
+// The comm-plan and interaction-list breakdowns are pure level-2 detail:
+// their timers are only populated by CANOPY_SCOPED_TIMER_DETAILED, which is a
+// no-op below level 2. Skip the tables entirely there rather than printing a
+// table full of zeros.
+#  if CANOPY_PROFILING_LEVEL >= 2
+#    define CANOPY_PRINT_COMMPLAN_TIMERS( comm ) \
+         ::Canopy::Profiling::print_timing_table( \
+             (comm), "CommunicationPlan::build()", \
+             ::Canopy::Profiling::commplan_phase_entries() )
+#    define CANOPY_PRINT_ILIST_TIMERS( comm ) \
+         ::Canopy::Profiling::print_timing_table( \
+             (comm), "DownwardSweep::build_interaction_list_device()", \
+             ::Canopy::Profiling::ilist_phase_entries() )
+#  else
+#    define CANOPY_PRINT_COMMPLAN_TIMERS( comm )  do {} while ( 0 )
+#    define CANOPY_PRINT_ILIST_TIMERS( comm )     do {} while ( 0 )
+#  endif
 // Detailed (level 2) and verbose (level 3) timer macros. They compile away
 // to no-ops below the requested level so call sites can be left in place.
 #  if CANOPY_PROFILING_LEVEL >= 2
