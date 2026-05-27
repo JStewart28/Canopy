@@ -75,9 +75,21 @@ void integrate_particles( AoSoA_t& particles, GradView gradient,
         "integrate",
         Kokkos::RangePolicy<ExecutionSpace>( 0, num_local ),
         KOKKOS_LAMBDA( const int i ) {
-            const double ax = G * gradient( i, 0, 0 );
-            const double ay = G * gradient( i, 0, 1 );
-            const double az = G * gradient( i, 0, 2 );
+            double ax = G * gradient( i, 0, 0 );
+            double ay = G * gradient( i, 0, 1 );
+            double az = G * gradient( i, 0, 2 );
+
+            // Defense-in-depth: a non-finite acceleration (e.g. from an
+            // unsoftened close encounter) would propagate Inf/NaN into the
+            // positions and degenerate the next tree build. Coast the
+            // particle this step rather than corrupt its trajectory.
+            if ( !( Kokkos::isfinite( ax ) && Kokkos::isfinite( ay ) &&
+                    Kokkos::isfinite( az ) ) )
+            {
+                ax = 0.0;
+                ay = 0.0;
+                az = 0.0;
+            }
 
             vel( i, 0 ) += ax * dt;
             vel( i, 1 ) += ay * dt;
@@ -98,6 +110,48 @@ const char* action_name( Solver_t::MaintenanceAction a )
     case Solver_t::MaintenanceAction::Rebuild: return "Rebuild";
     }
     return "?";
+}
+
+void print_usage( const char* prog )
+{
+    std::fprintf(
+        stderr,
+        "Usage: %s [options]\n"
+        "\n"
+        "Gravitational N-body FMM miniapp: builds an adaptive octree, runs\n"
+        "FMM + near-field P2P each step, then integrates the particles.\n"
+        "\n"
+        "Tree / FMM parameters (shared with example_fmm):\n"
+        "  -p N         particles per MPI rank            "
+        "(default 10000;  rec. 1e4-1e7)\n"
+        "  -n ncrit     max particles per leaf cell       "
+        "(default 32;     rec. 64-512, larger on GPU)\n"
+        "  -d max_depth octree depth cap                  "
+        "(default 15;     rec. 10-20, deep enough to hit ncrit)\n"
+        "  -r repl_depth top tree levels replicated/rank  "
+        "(default 3;      rec. 2-4)\n"
+        "  -i imbal_tol load-imbalance tol for repartition"
+        " (default 0.10;   rec. 0.05-0.10)\n"
+        "  -c ncrit_tol leaf-split tolerance on ncrit     "
+        "(default 0.10;   rec. ~0.10)\n"
+        "  -b bbox_tol  bounding-box padding fraction     "
+        "(default 0.10;   rec. ~0.10)\n"
+        "  -m mac_theta multipole acceptance (opening) angle "
+        "(default 0.5; rec. 0.5; smaller=more accurate, slower)\n"
+        "\n"
+        "Time-integration parameters (gravity_solve only):\n"
+        "  -t num_steps number of timesteps               "
+        "(default 3;      rec. >=1)\n"
+        "  -s dt        timestep size                     "
+        "(default 1e-4;   rec. small enough for stability)\n"
+        "  -g G         gravitational constant scaling    "
+        "(default 1.0)\n"
+        "  -e softening Plummer softening length eps; force uses r^2+eps^2\n"
+        "               (default 0.0 = unsoftened;  rec. >0, ~0.1-1x the\n"
+        "               mean inter-particle spacing, to bound close-\n"
+        "               encounter forces and avoid runaway/NaN positions)\n"
+        "  -h           show this help and exit\n",
+        prog );
 }
 
 int main( int argc, char* argv[] )
@@ -122,9 +176,10 @@ int main( int argc, char* argv[] )
         int num_steps = 3;
         double dt = 1e-4;
         double G = 1.0;
+        double softening = 0.0;
 
         int opt;
-        while ( ( opt = getopt( argc, argv, "p:d:r:i:n:t:b:m:s:g:c:" ) ) !=
+        while ( ( opt = getopt( argc, argv, "p:d:r:i:n:t:b:m:s:g:c:e:h" ) ) !=
                 -1 )
         {
             switch ( opt )
@@ -140,14 +195,16 @@ int main( int argc, char* argv[] )
             case 'm': mac_theta = std::atof( optarg ); break;
             case 's': dt = std::atof( optarg ); break;
             case 'g': G = std::atof( optarg ); break;
+            case 'e': softening = std::atof( optarg ); break;
+            case 'h':
+                if ( rank == 0 )
+                    print_usage( argv[0] );
+                Kokkos::finalize();
+                MPI_Finalize();
+                return 0;
             default:
                 if ( rank == 0 )
-                    std::fprintf(
-                        stderr,
-                        "Usage: %s [-p N] [-d max_depth] [-r repl_depth] "
-                        "[-i imbal_tol] [-n ncrit] [-t num_steps] "
-                        "[-b bbox_tol] [-m mac_theta] [-s dt] [-g G]\n",
-                        argv[0] );
+                    print_usage( argv[0] );
                 MPI_Abort( MPI_COMM_WORLD, 1 );
             }
         }
@@ -160,11 +217,11 @@ int main( int argc, char* argv[] )
                          "%d ranks, %d particles/rank, ncrit=%d, "
                          "max_depth=%d, repl_depth=%d, imbal_tol=%.3g, "
                          "ncrit_tol=%.3g, bbox_tol=%.3g, mac_theta=%.3g, "
-                         "num_steps=%d, dt=%.3g, G=%.3g\n",
+                         "num_steps=%d, dt=%.3g, G=%.3g, softening=%.3g\n",
                          P_ORDER, N_COMPS, nprocs, num_particles_per_rank,
                          ncrit, max_depth, replication_depth,
                          imbalance_tolerance, ncrit_tol, bbox_tol, mac_theta,
-                         num_steps, dt, G );
+                         num_steps, dt, G, softening );
 
         using clock = std::chrono::steady_clock;
         using sec = std::chrono::duration<double>;
@@ -178,7 +235,8 @@ int main( int argc, char* argv[] )
         std::array<double, 3> bb_tol = { bbox_tol, bbox_tol, bbox_tol };
 
         Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth, bb_tol, ncrit_tol,
-                         replication_depth, imbalance_tolerance, mac_theta );
+                         replication_depth, imbalance_tolerance, mac_theta,
+                         softening );
 
         solver.setup<Position, Mass>( particles, num_particles_per_rank );
 
