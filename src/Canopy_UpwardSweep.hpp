@@ -573,10 +573,23 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
         {
             CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2M_ALLREDUCE );
-            MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
-                           reinterpret_cast<scalar_type*>( recvbuf.data() ),
+            // DEBUG host-staging (see Canopy_MpiCoalescedExchange.hpp): hand
+            // MPI host pointers, not the device send/recv buffers, to avoid
+            // GPU-aware Cray-MPICH faults/hangs on MI300A.
+            Kokkos::View<complex_type*, Kokkos::HostSpace> h_sendbuf(
+                Kokkos::view_alloc( "m2m_allreduce_send_host",
+                                    Kokkos::WithoutInitializing ),
+                total_complex );
+            Kokkos::View<complex_type*, Kokkos::HostSpace> h_recvbuf(
+                Kokkos::view_alloc( "m2m_allreduce_recv_host",
+                                    Kokkos::WithoutInitializing ),
+                total_complex );
+            Kokkos::deep_copy( h_sendbuf, sendbuf );
+            MPI_Allreduce( reinterpret_cast<scalar_type*>( h_sendbuf.data() ),
+                           reinterpret_cast<scalar_type*>( h_recvbuf.data() ),
                            static_cast<int>( 2 * total_complex ), mpi_scalar,
                            MPI_SUM, _comm );
+            Kokkos::deep_copy( recvbuf, h_recvbuf );
         }
 
         Kokkos::parallel_for(

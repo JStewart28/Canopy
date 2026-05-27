@@ -580,6 +580,14 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     std::vector<int> recv_peer_ranks( n_recv_peers );
     std::vector<size_t> recv_peer_nparticles( n_recv_peers );
 
+    // DEBUG host-staging (see Canopy_MpiCoalescedExchange.hpp): never hand a
+    // device pointer to MPI. Stage the packed send buffer through a host
+    // mirror before MPI_Isend and the MPI-received buffer through a host
+    // mirror before copying back to the device buffer the unpack kernel reads.
+    using host_scalar_buf = Kokkos::View<scalar_type*, Kokkos::HostSpace>;
+    std::vector<host_scalar_buf> send_host_bufs( n_send_peers );
+    std::vector<host_scalar_buf> recv_host_bufs( n_recv_peers );
+
     // Build per-peer send index (which local particles to pack) and post
     // recv-side index / buffer allocations.
     {
@@ -655,8 +663,12 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
                 }
                 Kokkos::deep_copy( recv_idx_views[q], h_idx );
 
+                recv_host_bufs[q] = host_scalar_buf(
+                    Kokkos::view_alloc( "p2p_recv_buf_host",
+                                        Kokkos::WithoutInitializing ),
+                    per_particle * total );
                 MPI_Request req;
-                MPI_Irecv( recv_bufs[q].data(),
+                MPI_Irecv( recv_host_bufs[q].data(),
                            static_cast<int>( per_particle * total ),
                            mpi_scalar, kv.first, /*tag=*/1, _comm, &req );
                 recv_data_reqs.push_back( req );
@@ -701,8 +713,13 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         const size_t n = send_peer_nparticles[q];
         if ( n == 0 )
             continue;
+        send_host_bufs[q] = host_scalar_buf(
+            Kokkos::view_alloc( "p2p_send_buf_host",
+                                Kokkos::WithoutInitializing ),
+            per_particle * n );
+        Kokkos::deep_copy( send_host_bufs[q], send_bufs[q] );
         MPI_Request req;
-        MPI_Isend( send_bufs[q].data(),
+        MPI_Isend( send_host_bufs[q].data(),
                    static_cast<int>( per_particle * n ), mpi_scalar,
                    send_peer_ranks[q], /*tag=*/1, _comm, &req );
         send_data_reqs.push_back( req );
@@ -723,6 +740,9 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         const size_t n = recv_peer_nparticles[q];
         if ( n == 0 )
             continue;
+        // Copy the MPI-received host buffer back to the device buffer the
+        // unpack kernel reads (host-staging; see note above).
+        Kokkos::deep_copy( recv_bufs[q], recv_host_bufs[q] );
         auto idx_v = recv_idx_views[q];
         auto buf_v = recv_bufs[q];
         const int pp = per_particle;

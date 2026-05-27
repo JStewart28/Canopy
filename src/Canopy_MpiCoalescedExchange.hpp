@@ -97,6 +97,16 @@ void coalesced_view_exchange(
     std::vector<int> recv_peer_ranks( n_recv_peers );
     std::vector<int> recv_peer_ncells( n_recv_peers );
 
+    // DEBUG host-staging: MI300A GPU-aware Cray-MPICH faults/hangs when the
+    // .data() pointer handed to MPI is a device pointer. Stage every send /
+    // recv buffer through a HostSpace mirror so MPI only ever sees host
+    // pointers; pack/unpack kernels still run on device against the device
+    // buffers. The device<->host copies bracket the MPI calls. If this makes
+    // the failures disappear, GPU-direct transport is the culprit.
+    using host_complex_buf = Kokkos::View<complex_type*, Kokkos::HostSpace>;
+    std::vector<host_complex_buf> send_host_bufs( n_send_peers );
+    std::vector<host_complex_buf> recv_host_bufs( n_recv_peers );
+
     auto upload_idx = [&]( const std::vector<int>& h_idx,
                            Kokkos::View<int*, memory_space>& dst,
                            const char* label )
@@ -127,9 +137,14 @@ void coalesced_view_exchange(
                 Kokkos::view_alloc( "coalesced_recv_buf",
                                     Kokkos::WithoutInitializing ),
                 static_cast<size_t>( n ) * per_cell_complex );
-            MPI_Irecv( reinterpret_cast<scalar_type*>( recv_bufs[p].data() ),
-                       n * per_cell_real, mpi_scalar, kv.first, /*tag=*/0,
-                       comm, &recv_reqs[p] );
+            recv_host_bufs[p] = host_complex_buf(
+                Kokkos::view_alloc( "coalesced_recv_buf_host",
+                                    Kokkos::WithoutInitializing ),
+                static_cast<size_t>( n ) * per_cell_complex );
+            MPI_Irecv(
+                reinterpret_cast<scalar_type*>( recv_host_bufs[p].data() ),
+                n * per_cell_real, mpi_scalar, kv.first, /*tag=*/0, comm,
+                &recv_reqs[p] );
             ++p;
         }
     }
@@ -171,9 +186,17 @@ void coalesced_view_exchange(
         for ( int q = 0; q < n_send_peers; q++ )
         {
             const int n = send_peer_ncells[q];
-            MPI_Isend( reinterpret_cast<scalar_type*>( send_bufs[q].data() ),
-                       n * per_cell_real, mpi_scalar, send_peer_ranks[q],
-                       /*tag=*/0, comm, &send_reqs[q] );
+            // Stage the packed device buffer to host, then hand MPI the host
+            // pointer (see host-staging note above).
+            send_host_bufs[q] = host_complex_buf(
+                Kokkos::view_alloc( "coalesced_send_buf_host",
+                                    Kokkos::WithoutInitializing ),
+                static_cast<size_t>( n ) * per_cell_complex );
+            Kokkos::deep_copy( send_host_bufs[q], send_bufs[q] );
+            MPI_Isend(
+                reinterpret_cast<scalar_type*>( send_host_bufs[q].data() ),
+                n * per_cell_real, mpi_scalar, send_peer_ranks[q],
+                /*tag=*/0, comm, &send_reqs[q] );
         }
     }
 
@@ -188,6 +211,9 @@ void coalesced_view_exchange(
         const int n = recv_peer_ncells[p];
         if ( n == 0 )
             continue;
+        // Bring the MPI-received host buffer back to the device buffer the
+        // unpack kernel reads (see host-staging note above).
+        Kokkos::deep_copy( recv_bufs[p], recv_host_bufs[p] );
         auto idx_v = recv_idx[p];
         auto buf_v = recv_bufs[p];
         auto v = view;
