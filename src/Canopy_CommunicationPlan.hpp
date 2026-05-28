@@ -836,6 +836,77 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     _replication_depth = replication_depth;
     _cells_base = cells.data();
 
+    // DEBUG: one-shot consistency check across ranks. Hash the (cells, owners)
+    // pair in cells-vector order and MPI_Allreduce MIN/MAX. If they differ,
+    // either the cell list or the ownership map diverges across ranks — which
+    // would silently break the symmetry assumed by build_vertical_plans /
+    // emit_m2l_pair and produce mismatched send/recv counts. Aborts loudly
+    // rather than letting the resulting MPI_ERR_TRUNCATE surface later.
+    // Remove once the 4e8 scale bug is identified.
+    {
+        std::uint64_t h_cells = 1469598103934665603ULL; // FNV-1a offset
+        std::uint64_t h_owners = 1469598103934665603ULL;
+        const std::uint64_t fnv_prime = 1099511628211ULL;
+        auto mix = []( std::uint64_t& h, std::uint64_t v, std::uint64_t prime )
+        {
+            const unsigned char* b = reinterpret_cast<const unsigned char*>( &v );
+            for ( int i = 0; i < 8; i++ )
+            {
+                h ^= b[i];
+                h *= prime;
+            }
+        };
+        for ( const auto& c : cells )
+        {
+            mix( h_cells, static_cast<std::uint64_t>( c.key ), fnv_prime );
+            mix( h_cells, static_cast<std::uint64_t>( c.depth ), fnv_prime );
+            mix( h_cells, static_cast<std::uint64_t>(
+                              static_cast<std::uint32_t>( c.is_leaf ? 1 : 0 ) ),
+                 fnv_prime );
+            mix( h_cells, static_cast<std::uint64_t>(
+                              static_cast<std::uint32_t>( c.global_count ) ),
+                 fnv_prime );
+
+            auto it = cell_owner_map.find( c.key );
+            int owner = ( it != cell_owner_map.end() ) ? it->second : -999;
+            mix( h_owners, static_cast<std::uint64_t>( c.key ), fnv_prime );
+            mix( h_owners,
+                 static_cast<std::uint64_t>( static_cast<std::int64_t>( owner ) ),
+                 fnv_prime );
+        }
+        std::uint64_t local_n = static_cast<std::uint64_t>( cells.size() );
+        std::uint64_t local_owner_n =
+            static_cast<std::uint64_t>( cell_owner_map.size() );
+
+        std::uint64_t local[4] = { h_cells, h_owners, local_n, local_owner_n };
+        std::uint64_t hmin[4];
+        std::uint64_t hmax[4];
+        MPI_Allreduce( local, hmin, 4, MPI_UINT64_T, MPI_MIN, _comm );
+        MPI_Allreduce( local, hmax, 4, MPI_UINT64_T, MPI_MAX, _comm );
+
+        if ( hmin[0] != hmax[0] || hmin[1] != hmax[1] || hmin[2] != hmax[2] ||
+             hmin[3] != hmax[3] )
+        {
+            std::fprintf(
+                stderr,
+                "[Canopy FATAL] CommunicationPlan::build consistency check "
+                "FAILED on rank %d: cells_hash=%016llx (min=%016llx max=%016llx) "
+                "owners_hash=%016llx (min=%016llx max=%016llx) "
+                "ncells=%llu (min=%llu max=%llu) "
+                "nowners=%llu (min=%llu max=%llu)\n",
+                _rank,
+                (unsigned long long)h_cells, (unsigned long long)hmin[0],
+                (unsigned long long)hmax[0],
+                (unsigned long long)h_owners, (unsigned long long)hmin[1],
+                (unsigned long long)hmax[1],
+                (unsigned long long)local_n, (unsigned long long)hmin[2],
+                (unsigned long long)hmax[2],
+                (unsigned long long)local_owner_n, (unsigned long long)hmin[3],
+                (unsigned long long)hmax[3] );
+            MPI_Abort( _comm, 18 );
+        }
+    }
+
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_COMMPLAN_CELL_MAP_FILL );

@@ -31,6 +31,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <typeinfo>
 #include <unordered_map>
 #include <vector>
@@ -458,16 +459,27 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::derive_internal_ownership(
             auto vote_it = vote_map.find( c.key );
             if ( vote_it != vote_map.end() )
             {
-                int best_rank = 0;
+                // Iterate unordered_map<int, int64_t> with a deterministic
+                // tiebreaker (lowest rank wins on equal votes). Without the
+                // tiebreaker, two ranks with identical vote_map contents can
+                // still pick different "best_rank" because unordered_map
+                // iteration order is not guaranteed identical across
+                // processes — which silently makes cell ownership disagree
+                // across ranks and causes the comm-plan asymmetry observed
+                // at ~4e8 particles.
+                int best_rank = std::numeric_limits<int>::max();
                 int64_t best_count = -1;
                 for ( const auto& [r, cnt] : vote_it->second )
                 {
-                    if ( cnt > best_count )
+                    if ( cnt > best_count ||
+                         ( cnt == best_count && r < best_rank ) )
                     {
                         best_count = cnt;
                         best_rank = r;
                     }
                 }
+                if ( best_count < 0 )
+                    best_rank = 0;
                 co.owner_rank = best_rank;
             }
             else
