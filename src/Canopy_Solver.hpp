@@ -435,6 +435,37 @@ class Solver
                 _builder.build( positions, _num_local );
             }
 
+            // Step 5b: re-partition against the FINAL tree, then rebuild +
+            // re-sort. At scale (~4e8 particles) the post-migration build can
+            // produce a tree with substantially fewer cells than the
+            // pre-partition build (see MI300A investigation: 4.2M -> 867k).
+            // Without this step, cell_owner_map (populated against the larger
+            // pre-partition tree) is stale relative to the final cells passed
+            // to comm_plan.build, which silently produces a phantom-send M2M
+            // plan and an MPI_ERR_TRUNCATE later in the upward sweep.
+            // The repeat partition is expensive (extra Zoltan2 + migrate);
+            // expected to be optimized once the underlying tree-divergence
+            // bug is fixed.
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_PARTITION );
+                _partitioner.partition( _builder, particles, _num_local );
+            }
+            _num_local = _partitioner.num_local_particles();
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+                auto positions = Cabana::slice<PositionIdx>( particles );
+                _builder.build( positions, _num_local );
+            }
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
+                _partitioner.sort_particles_by_leaf( _builder, particles );
+            }
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+                auto positions = Cabana::slice<PositionIdx>( particles );
+                _builder.build( positions, _num_local );
+            }
+
             // Distribution-based default softening (no-op if the caller passed
             // an explicit softening, or after the first auto computation). The
             // global bounding box and total particle count are available now
@@ -483,6 +514,20 @@ class Solver
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
           _partitioner.sort_particles_by_leaf( _builder, particles ); }
 
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+          auto positions = Cabana::slice<PositionIdx>( particles );
+          _builder.build( positions, _num_local ); }
+
+        // Re-partition against the FINAL tree so cell_owner_map matches the
+        // cells comm_plan will see. See bug 1 note in _full_setup.
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REPARTITION );
+          _partitioner.repartition( _builder, particles, _num_local ); }
+        _num_local = _partitioner.num_local_particles();
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+          auto positions = Cabana::slice<PositionIdx>( particles );
+          _builder.build( positions, _num_local ); }
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
+          _partitioner.sort_particles_by_leaf( _builder, particles ); }
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
           auto positions = Cabana::slice<PositionIdx>( particles );
           _builder.build( positions, _num_local ); }

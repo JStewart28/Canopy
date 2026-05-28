@@ -594,6 +594,24 @@ template <class PositionType>
 void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
                                                       int num_local_particles )
 {
+    // DEBUG: track global particle count per build() call. If global N changes
+    // between successive build() calls within the same setup, particles are
+    // being lost (or duplicated) somewhere in the migrate path — which is
+    // bug 2 of the MI300A investigation, the underlying cause of the
+    // build-1-vs-build-3 tree-size mismatch.
+    {
+        long long local_n = num_local_particles;
+        long long global_n = 0;
+        MPI_Allreduce( &local_n, &global_n, 1, MPI_LONG_LONG, MPI_SUM, _comm );
+        int rank = 0;
+        MPI_Comm_rank( _comm, &rank );
+        if ( rank == 0 )
+            std::fprintf(
+                stderr,
+                "[Canopy DEBUG build] global_n=%lld local_n(rank0)=%lld\n",
+                global_n, local_n );
+    }
+
     // Compute global bounding box
     _root_box = compute_global_bounding_box( positions, num_local_particles );
 
