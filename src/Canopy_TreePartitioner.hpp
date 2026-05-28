@@ -186,6 +186,13 @@ class TreePartitioner
     // Fast lookup: MortonKey -> owner rank
     std::unordered_map<MortonKey, int> _cell_owner_map;
 
+    // Cached leaf assignment from the most recent partition_leaves() call.
+    // Used by refresh_ownership_for_current_tree() to avoid re-running the
+    // non-deterministic Zoltan2 multijagged partitioner (which would emit a
+    // different assignment and trigger a multi-GB second migrate that
+    // overflows MPI's signed int count at scale).
+    std::unordered_map<MortonKey, int> _cached_leaf_owners;
+
     // Post-migration local particle count
     int _num_local_after;
 
@@ -237,6 +244,25 @@ class TreePartitioner
     void
     repartition( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
                  AoSoAType& particles, int num_local_particles_before );
+
+    // -----------------------------------------------------------------------
+    // refresh_ownership_for_current_tree()
+    //
+    // Re-populate _cell_owner_map against tree_builder.cells() WITHOUT
+    // re-running Zoltan2 and WITHOUT migrating particles. Uses the leaf
+    // assignment cached from the most recent partition_leaves() call. For
+    // any leaf in the current tree that wasn't a leaf in the cached
+    // assignment, votes on owner based on which rank holds the most
+    // local particles in that leaf (single Allreduce on a per-leaf vote
+    // table). This keeps cell_owner_map consistent with the final cells
+    // passed to comm_plan.build, fixing the phantom-send M2M plan that
+    // arises when the post-migration build produces a different tree than
+    // the pre-partition build.
+    // -----------------------------------------------------------------------
+    template <class AoSoAType>
+    void refresh_ownership_for_current_tree(
+        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        AoSoAType& particles );
 
     // -----------------------------------------------------------------------
     // sort_particles_by_leaf()
@@ -563,6 +589,9 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::partition(
     // Step 2: Derive internal cell ownership
     derive_internal_ownership( cells, leaf_owners );
 
+    // Cache leaf assignment for refresh_ownership_for_current_tree()
+    _cached_leaf_owners = leaf_owners;
+
     // Step 3: Migrate particles
     migrate_particles( tree_builder, particles, num_local_particles_before );
 }
@@ -603,8 +632,103 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::repartition(
     // Step 2: Re-derive internal cell ownership
     derive_internal_ownership( cells, leaf_owners );
 
+    // Cache leaf assignment for refresh_ownership_for_current_tree()
+    _cached_leaf_owners = leaf_owners;
+
     // Step 3: Migrate particles to new owners
     migrate_particles( tree_builder, particles, num_local_particles_before );
+}
+
+// --------------------------------------------------------------------------
+// refresh_ownership_for_current_tree
+//
+// Re-populate _cell_owner_map against the current tree using the cached
+// leaf assignment from the most recent partition_leaves() call. Particles
+// are NOT migrated; Zoltan2 is NOT re-run.
+//
+// For leaves present in the cached assignment: reuse the cached owner.
+// For leaves NOT in the cached assignment (e.g., a coarsened tree where
+// a former-internal cell is now a leaf): vote based on local particle
+// counts via a single Allgather of per-leaf vote vectors.
+// --------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace>
+template <class AoSoAType>
+void TreePartitioner<MemorySpace, ExecutionSpace>::
+    refresh_ownership_for_current_tree(
+        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        AoSoAType& particles )
+{
+    const auto& cells = tree_builder.cells();
+    (void)particles; // current implementation only needs particle_keys
+
+    // Collect leaves that need a new owner (not in cache).
+    std::vector<MortonKey> new_leaf_keys;
+    std::unordered_map<MortonKey, int> new_leaf_idx;
+    for ( const auto& c : cells )
+    {
+        if ( !c.is_leaf )
+            continue;
+        if ( _cached_leaf_owners.find( c.key ) != _cached_leaf_owners.end() )
+            continue;
+        new_leaf_idx[c.key] = static_cast<int>( new_leaf_keys.size() );
+        new_leaf_keys.push_back( c.key );
+    }
+    const int n_new = static_cast<int>( new_leaf_keys.size() );
+
+    // Build a new leaf_owners that starts from the cache and adds entries
+    // for new leaves. Owner of a new leaf = rank with the most local
+    // particles in that leaf, broken by lowest rank on ties.
+    std::unordered_map<MortonKey, int> leaf_owners = _cached_leaf_owners;
+
+    if ( n_new > 0 )
+    {
+        // Tally local particles per new leaf.
+        auto particle_keys = tree_builder.particle_keys();
+        auto h_keys = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), particle_keys );
+        const int N = static_cast<int>( h_keys.extent( 0 ) );
+
+        std::vector<long long> local_counts( n_new, 0 );
+        for ( int i = 0; i < N; i++ )
+        {
+            auto it = new_leaf_idx.find( h_keys( i ) );
+            if ( it != new_leaf_idx.end() )
+                local_counts[it->second]++;
+        }
+
+        // Allgather every rank's per-leaf counts so each rank can pick
+        // the same owner deterministically.
+        std::vector<long long> all_counts(
+            static_cast<size_t>( n_new ) * _comm_size, 0 );
+        MPI_Allgather( local_counts.data(), n_new, MPI_LONG_LONG,
+                       all_counts.data(), n_new, MPI_LONG_LONG, _comm );
+
+        for ( int i = 0; i < n_new; i++ )
+        {
+            int best_rank = 0;
+            long long best_count = -1;
+            for ( int r = 0; r < _comm_size; r++ )
+            {
+                long long c =
+                    all_counts[static_cast<size_t>( r ) * n_new + i];
+                if ( c > best_count )
+                {
+                    best_count = c;
+                    best_rank = r;
+                }
+            }
+            leaf_owners[new_leaf_keys[i]] = best_rank;
+        }
+
+        // Update the cache so subsequent refreshes are cheap.
+        for ( int i = 0; i < n_new; i++ )
+            _cached_leaf_owners[new_leaf_keys[i]] =
+                leaf_owners[new_leaf_keys[i]];
+    }
+
+    // Re-derive internal ownership for the current cells using the
+    // combined leaf_owners.
+    derive_internal_ownership( cells, leaf_owners );
 }
 
 // --------------------------------------------------------------------------
