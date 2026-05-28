@@ -698,6 +698,47 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build_vertical_plans(
 
             if ( parent_owner != OWNER_SHARED )
             {
+                // DEBUG: invariant check. child=SHARED with parent=unique
+                // would mean a non-leaf cell at depth <= rd is parented by
+                // a cell whose ownership has been assigned to a single rank.
+                // That's only possible if (a) cells vector is inconsistent,
+                // (b) cell_owner_map disagrees with cell flags, or (c) the
+                // replication_depth used here disagrees with the one used by
+                // derive_internal_ownership. Print a handful of violators
+                // and the actual depths/is_leaf for parent and child.
+                if ( child_owner == OWNER_SHARED )
+                {
+                    static thread_local int dbg_n_phantom = 0;
+                    if ( dbg_n_phantom < 8 )
+                    {
+                        auto pit = _cell_map.find( ci.key );
+                        auto cit = _cell_map.find( ck );
+                        const CellInfo* p = ( pit != _cell_map.end() )
+                                                ? pit->second
+                                                : nullptr;
+                        const CellInfo* c = ( cit != _cell_map.end() )
+                                                ? cit->second
+                                                : nullptr;
+                        std::fprintf(
+                            stderr,
+                            "[Canopy DEBUG M2M phantom] rank=%d "
+                            "parent_key=0x%llx parent.depth=%d "
+                            "parent.is_leaf=%d parent_owner=%d "
+                            "child_key=0x%llx child.depth=%d "
+                            "child.is_leaf=%d child_owner=SHARED "
+                            "rd=%d\n",
+                            _rank,
+                            (unsigned long long)ci.key,
+                            p ? p->depth : -1,
+                            p ? (int)p->is_leaf : -1,
+                            parent_owner,
+                            (unsigned long long)ck,
+                            c ? c->depth : -1,
+                            c ? (int)c->is_leaf : -1,
+                            _replication_depth );
+                        ++dbg_n_phantom;
+                    }
+                }
                 if ( child_owner == _rank || child_owner == OWNER_SHARED )
                 {
                     // This rank has the child data — send to parent owner
@@ -836,15 +877,17 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     _replication_depth = replication_depth;
     _cells_base = cells.data();
 
-    // DEBUG: one-shot consistency check across ranks. Hash the (cells, owners)
-    // pair in cells-vector order and MPI_Allreduce MIN/MAX. If they differ,
-    // either the cell list or the ownership map diverges across ranks — which
-    // would silently break the symmetry assumed by build_vertical_plans /
-    // emit_m2l_pair and produce mismatched send/recv counts. Aborts loudly
-    // rather than letting the resulting MPI_ERR_TRUNCATE surface later.
-    // Remove once the 4e8 scale bug is identified.
+    // DEBUG: cross-rank consistency + local coverage check.
+    //   (1) Hash (cells, owners) in cells-vector order; MPI_Allreduce MIN/MAX
+    //       on the hashes catches any *divergence* across ranks.
+    //   (2) Count how many cells are MISSING from cell_owner_map locally. If
+    //       any cell in `cells` has no entry in `cell_owner_map`, `owner_of`
+    //       silently returns OWNER_SHARED for it (fallback in owner_of()),
+    //       which produces phantom M2M sends without matching receives.
+    //       This is *consistent* across ranks (so the hash matches) but
+    //       still a real bug. Print the first few missing cells and abort.
     {
-        std::uint64_t h_cells = 1469598103934665603ULL; // FNV-1a offset
+        std::uint64_t h_cells = 1469598103934665603ULL;
         std::uint64_t h_owners = 1469598103934665603ULL;
         const std::uint64_t fnv_prime = 1099511628211ULL;
         auto mix = []( std::uint64_t& h, std::uint64_t v, std::uint64_t prime )
@@ -856,6 +899,9 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
                 h *= prime;
             }
         };
+
+        std::uint64_t n_missing = 0;
+        int dbg_printed = 0;
         for ( const auto& c : cells )
         {
             mix( h_cells, static_cast<std::uint64_t>( c.key ), fnv_prime );
@@ -868,6 +914,20 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
                  fnv_prime );
 
             auto it = cell_owner_map.find( c.key );
+            if ( it == cell_owner_map.end() )
+            {
+                ++n_missing;
+                if ( dbg_printed < 8 )
+                {
+                    std::fprintf(
+                        stderr,
+                        "[Canopy DEBUG missing owner] rank=%d cell_key=0x%llx "
+                        "depth=%d is_leaf=%d global_count=%d\n",
+                        _rank, (unsigned long long)c.key, c.depth,
+                        (int)c.is_leaf, c.global_count );
+                    ++dbg_printed;
+                }
+            }
             int owner = ( it != cell_owner_map.end() ) ? it->second : -999;
             mix( h_owners, static_cast<std::uint64_t>( c.key ), fnv_prime );
             mix( h_owners,
@@ -878,22 +938,27 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
         std::uint64_t local_owner_n =
             static_cast<std::uint64_t>( cell_owner_map.size() );
 
-        std::uint64_t local[4] = { h_cells, h_owners, local_n, local_owner_n };
-        std::uint64_t hmin[4];
-        std::uint64_t hmax[4];
-        MPI_Allreduce( local, hmin, 4, MPI_UINT64_T, MPI_MIN, _comm );
-        MPI_Allreduce( local, hmax, 4, MPI_UINT64_T, MPI_MAX, _comm );
+        std::uint64_t local[5] = { h_cells, h_owners, local_n, local_owner_n,
+                                   n_missing };
+        std::uint64_t hmin[5];
+        std::uint64_t hmax[5];
+        MPI_Allreduce( local, hmin, 5, MPI_UINT64_T, MPI_MIN, _comm );
+        MPI_Allreduce( local, hmax, 5, MPI_UINT64_T, MPI_MAX, _comm );
 
-        if ( hmin[0] != hmax[0] || hmin[1] != hmax[1] || hmin[2] != hmax[2] ||
-             hmin[3] != hmax[3] )
+        const bool diverged = ( hmin[0] != hmax[0] || hmin[1] != hmax[1] ||
+                                hmin[2] != hmax[2] || hmin[3] != hmax[3] );
+        const bool any_missing = ( hmax[4] > 0 );
+
+        if ( diverged || any_missing )
         {
             std::fprintf(
                 stderr,
-                "[Canopy FATAL] CommunicationPlan::build consistency check "
-                "FAILED on rank %d: cells_hash=%016llx (min=%016llx max=%016llx) "
+                "[Canopy FATAL] CommunicationPlan::build check FAILED "
+                "on rank %d: cells_hash=%016llx (min=%016llx max=%016llx) "
                 "owners_hash=%016llx (min=%016llx max=%016llx) "
                 "ncells=%llu (min=%llu max=%llu) "
-                "nowners=%llu (min=%llu max=%llu)\n",
+                "nowners=%llu (min=%llu max=%llu) "
+                "n_missing_owners_local=%llu (min=%llu max=%llu)\n",
                 _rank,
                 (unsigned long long)h_cells, (unsigned long long)hmin[0],
                 (unsigned long long)hmax[0],
@@ -902,7 +967,9 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
                 (unsigned long long)local_n, (unsigned long long)hmin[2],
                 (unsigned long long)hmax[2],
                 (unsigned long long)local_owner_n, (unsigned long long)hmin[3],
-                (unsigned long long)hmax[3] );
+                (unsigned long long)hmax[3],
+                (unsigned long long)n_missing, (unsigned long long)hmin[4],
+                (unsigned long long)hmax[4] );
             MPI_Abort( _comm, 18 );
         }
     }
