@@ -924,6 +924,59 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
         build_vertical_plans( cells );
     }
 
+    // DEBUG: verify M2M plan symmetry per-peer without any depth filtering.
+    // Each rank counts m2m_plan.sends and m2m_plan.receives bucketed by peer,
+    // does an Allgather, and compares pairwise. If rank A's sends-to-B count
+    // != rank B's receives-from-A count, the plan is broken at construction
+    // (independent of depth filtering / coalesced_view_exchange).
+    {
+        std::vector<int> my_sends_to( _nprocs, 0 );
+        std::vector<int> my_recvs_from( _nprocs, 0 );
+        for ( const auto& ct : _m2m_plan.sends )
+            if ( ct.remote_rank >= 0 && ct.remote_rank < _nprocs )
+                ++my_sends_to[ct.remote_rank];
+        for ( const auto& ct : _m2m_plan.receives )
+            if ( ct.remote_rank >= 0 && ct.remote_rank < _nprocs )
+                ++my_recvs_from[ct.remote_rank];
+
+        std::vector<int> all_sends_to( _nprocs * _nprocs, 0 );
+        std::vector<int> all_recvs_from( _nprocs * _nprocs, 0 );
+        MPI_Allgather( my_sends_to.data(), _nprocs, MPI_INT,
+                       all_sends_to.data(), _nprocs, MPI_INT, _comm );
+        MPI_Allgather( my_recvs_from.data(), _nprocs, MPI_INT,
+                       all_recvs_from.data(), _nprocs, MPI_INT, _comm );
+
+        if ( _rank == 0 )
+        {
+            bool any_mismatch = false;
+            for ( int a = 0; a < _nprocs; a++ )
+                for ( int b = 0; b < _nprocs; b++ )
+                {
+                    const int s_ab = all_sends_to[a * _nprocs + b];
+                    const int r_ba = all_recvs_from[b * _nprocs + a];
+                    if ( s_ab != r_ba )
+                    {
+                        std::fprintf( stderr,
+                                      "[Canopy DEBUG M2M plan] rank %d "
+                                      "sends_to[%d]=%d, rank %d "
+                                      "recvs_from[%d]=%d (mismatch)\n",
+                                      a, b, s_ab, b, a, r_ba );
+                        any_mismatch = true;
+                    }
+                }
+            if ( any_mismatch )
+                std::fprintf( stderr,
+                              "[Canopy DEBUG M2M plan] m2m_plan asymmetric "
+                              "at construction (before depth filtering)\n" );
+            else
+                std::fprintf(
+                    stderr,
+                    "[Canopy DEBUG M2M plan] m2m_plan symmetric at "
+                    "construction — asymmetry must come from depth filter\n" );
+        }
+        MPI_Barrier( _comm );
+    }
+
     // Compute subtree-relevance flags before the DTT so the traversal can
     // skip branches that don't intersect this rank's responsibilities.
     {
