@@ -822,6 +822,25 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     const int num_cells = static_cast<int>( cells.size() );
     const int N = static_cast<int>( particles.size() );
 
+    // DEBUG-ONLY (bug 3 / step-2 seg fault localization): the maintenance flow
+    // faults in sort_particles_by_leaf (build C's print never appears). The
+    // GPU "write to read-only page" fault is an OOB write, most likely a
+    // Cabana::permute byte-count overflow at ~5.6 GB (1e8 part x 56 B) — the
+    // same INT_MAX class as the migrate bug, in a different code path. Bracket
+    // each device op with a fence+flush marker so the next run pinpoints it.
+    auto dbg_mark = [&]( const char* msg )
+    {
+        Kokkos::fence();
+        MPI_Barrier( _comm );
+        if ( _rank == 0 )
+        {
+            std::fprintf( stderr, "[Canopy DEBUG sort] %s (N=%d num_cells=%d)\n",
+                          msg, N, num_cells );
+            std::fflush( stderr );
+        }
+    };
+    dbg_mark( "entry" );
+
     // Build key -> cell_index map on host
     std::unordered_map<MortonKey, int> key_to_idx;
     key_to_idx.reserve( num_cells );
@@ -840,18 +859,34 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
                                                 static_cast<size_t>( N ) );
     {
         auto h = Kokkos::create_mirror_view( sort_keys );
+        int kmin = num_cells, kmax = -1;
         for ( int i = 0; i < N; i++ )
         {
             auto it = key_to_idx.find( h_keys( i ) );
-            h( i ) = ( it != key_to_idx.end() ) ? it->second : 0;
+            const int k = ( it != key_to_idx.end() ) ? it->second : 0;
+            h( i ) = k;
+            if ( k < kmin ) kmin = k;
+            if ( k > kmax ) kmax = k;
         }
         Kokkos::deep_copy( sort_keys, h );
+        // OOB sort key would feed an out-of-range bin to sortByKey/permute.
+        if ( _rank == 0 )
+        {
+            std::fprintf( stderr,
+                "[Canopy DEBUG sort] sort_keys built: min=%d max=%d (valid "
+                "[0,%d)) %s\n",
+                kmin, kmax, num_cells,
+                ( kmin < 0 || kmax >= num_cells ) ? "<<< OOB KEY" : "ok" );
+            std::fflush( stderr );
+        }
     }
+    dbg_mark( "before sortByKey" );
 
     // Sort particles by cell index. sortByKey sorts sort_keys in place and
     // returns a BinningData permutation for use with Cabana::permute.
     auto bin_data =
         Cabana::sortByKey( sort_keys, std::size_t( 0 ), std::size_t( N ) );
+    dbg_mark( "after sortByKey" );
 
     // After sortByKey, sort_keys is sorted in ascending order. Read it now
     // (before permute) to count how many particles belong to each cell.
@@ -864,9 +899,22 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
         for ( int i = 0; i < N; i++ )
             cell_counts[h_sk( i )]++;
     }
+    {
+        long long maxc = 0;
+        for ( int c = 0; c < num_cells; c++ )
+            if ( cell_counts[c] > maxc ) maxc = cell_counts[c];
+        if ( _rank == 0 )
+        {
+            std::fprintf( stderr,
+                "[Canopy DEBUG sort] max_cell_count=%lld\n", maxc );
+            std::fflush( stderr );
+        }
+    }
+    dbg_mark( "before permute" );
 
     // Permute the AoSoA so particles are contiguous within each cell.
     Cabana::permute( bin_data, particles );
+    dbg_mark( "after permute" );
 
     // Build leaf_particle_offsets as a prefix sum of per-cell counts.
     _leaf_particle_offsets = Kokkos::View<int*, memory_space>(
@@ -893,6 +941,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
                 h( k ) = c;
         Kokkos::deep_copy( _particle_leaf_cell_idx, h );
     }
+    dbg_mark( "done (offsets + cell_idx built)" );
 }
 
 } // end namespace Canopy
