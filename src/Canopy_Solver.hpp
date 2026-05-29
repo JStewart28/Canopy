@@ -179,12 +179,30 @@ class Solver
                            _gradient, compute_gradient, _comm_plan );
         double _t_dn = CANOPY_WTIME() - _t0;
 
+        // DEBUG-ONLY (bug 3 hang localization): flush+barrier marker after the
+        // downward sweep returns on every rank. The last marker printed before
+        // a hang pinpoints the call that does not return. Remove once fixed.
+        { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
+          if ( _r == 0 ) { std::fprintf( stderr,
+              "[Canopy DEBUG phase] solve: downward returned on all ranks, "
+              "entering P2P\n" ); std::fflush( stderr ); } }
+
         _t0 = CANOPY_WTIME();
         _p2p.execute( positions, charges, _potential, _gradient,
                       compute_gradient );
         double _t_p2p = CANOPY_WTIME() - _t0;
 
+        { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
+          if ( _r == 0 ) { std::fprintf( stderr,
+              "[Canopy DEBUG phase] solve: P2P returned on all ranks\n" );
+              std::fflush( stderr ); } }
+
         CANOPY_PRINT_SOLVE_BREAKDOWN( _comm, _t_up, _t_dn, _t_p2p );
+
+        { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
+          if ( _r == 0 ) { std::fprintf( stderr,
+              "[Canopy DEBUG phase] solve: returning to caller\n" );
+              std::fflush( stderr ); } }
     }
 
     // -----------------------------------------------------------------------

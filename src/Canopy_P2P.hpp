@@ -24,6 +24,7 @@
 #include <mpi.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <unordered_map>
 #include <vector>
 
@@ -521,6 +522,13 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         MPI_Waitall( send_count_reqs.size(), send_count_reqs.data(),
                      MPI_STATUSES_IGNORE );
 
+    // DEBUG-ONLY (bug 3 hang localization): marker after the per-peer count
+    // handshake completes on every rank, before the bulk data exchange.
+    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
+      if ( _r == 0 ) { std::fprintf( stderr,
+          "[Canopy DEBUG phase] P2P gather: count exchange done on all "
+          "ranks\n" ); std::fflush( stderr ); } }
+
     // Scatter received per-peer counts into per-ghost-leaf array
     std::vector<int> recv_counts( num_ghost_leaves, 0 );
     for ( const auto& kv : recvs_by_peer_kv )
@@ -715,6 +723,15 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         MPI_Waitall( send_data_reqs.size(), send_data_reqs.data(),
                      MPI_STATUSES_IGNORE );
 
+    // DEBUG-ONLY (bug 3 hang localization): marker after the bulk particle
+    // data exchange completes on every rank. A hang between the count marker
+    // above and this one points at the per-peer data MPI_Isend/Irecv (e.g. a
+    // count-int overflow in per_particle*total, or a send/recv asymmetry).
+    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
+      if ( _r == 0 ) { std::fprintf( stderr,
+          "[Canopy DEBUG phase] P2P gather: data exchange done on all "
+          "ranks\n" ); std::fflush( stderr ); } }
+
     // Unpack on device.
     auto ghost_pos_v = _ghost_positions;
     auto ghost_chg_v = _ghost_charges;
@@ -767,6 +784,15 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     // 1. Gather ghost particles
     // ------------------------------------------------------------------
     gather_ghost_particles( positions, charges );
+
+    // DEBUG-ONLY (bug 3 hang localization): flush+barrier marker after the
+    // ghost-particle exchange returns on every rank. gather_ghost_particles
+    // is the prime P2P suspect (per-peer MPI_Isend/Irecv of GB-scale leaf
+    // data). Remove once fixed.
+    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
+      if ( _r == 0 ) { std::fprintf( stderr,
+          "[Canopy DEBUG phase] P2P: gather_ghost_particles returned on all "
+          "ranks\n" ); std::fflush( stderr ); } }
 
     // ------------------------------------------------------------------
     // 2. Phase 1: intra-leaf pairs with Newton's third law
@@ -875,6 +901,12 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         Kokkos::fence();
         } // if ( num_target_leaves > 0 )
     } // TIMER_P2P_INTRA_KERNEL
+
+    // DEBUG-ONLY (bug 3 hang localization): marker after intra-leaf kernel.
+    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
+      if ( _r == 0 ) { std::fprintf( stderr,
+          "[Canopy DEBUG phase] P2P: intra-leaf kernel done on all ranks\n" );
+          std::fflush( stderr ); } }
 
     // ------------------------------------------------------------------
     // 3. Phase 2: inter-leaf pairs (one-way, no atomics needed)
@@ -1019,6 +1051,13 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         } // if ( n_local > 0 )
     } // TIMER_P2P_INTER_KERNEL
     } // TIMER_P2P_TOTAL
+
+    // DEBUG-ONLY (bug 3 hang localization): marker after inter-leaf kernel.
+    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
+      if ( _r == 0 ) { std::fprintf( stderr,
+          "[Canopy DEBUG phase] P2P: inter-leaf kernel done on all ranks\n" );
+          std::fflush( stderr ); } }
+
     CANOPY_PRINT_P2P_TIMERS( _comm );
 }
 
