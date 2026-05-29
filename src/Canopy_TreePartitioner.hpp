@@ -869,7 +869,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
             if ( k > kmax ) kmax = k;
         }
         Kokkos::deep_copy( sort_keys, h );
-        // OOB sort key would feed an out-of-range bin to sortByKey/permute.
+        // OOB sort key would feed an out-of-range bin to binByKey/permute.
         if ( _rank == 0 )
         {
             std::fprintf( stderr,
@@ -880,18 +880,29 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
             std::fflush( stderr );
         }
     }
-    dbg_mark( "before sortByKey" );
+    dbg_mark( "before binByKey" );
 
-    // Sort particles by cell index. sortByKey sorts sort_keys in place and
-    // returns a BinningData permutation for use with Cabana::permute.
-    auto bin_data =
-        Cabana::sortByKey( sort_keys, std::size_t( 0 ), std::size_t( N ) );
-    dbg_mark( "after sortByKey" );
+    // Group particles by cell index. The keys ARE dense cell indices in
+    // [0,num_cells), so bin by cell with exactly num_cells bins (one per cell)
+    // and NO within-bin sort: Cabana::binByKey -> Kokkos BinOp1D with
+    // (max-min) <= num_cells sets mul_=1, so bin == key-min and particles end
+    // up contiguous in ascending cell-index order — exactly the sorted-by-leaf
+    // layout, which is all Cabana::permute and _leaf_particle_offsets need.
+    //
+    // We deliberately do NOT use Cabana::sortByKey here: it hardcodes
+    // nbin = (end-begin)/2 (~5e7 range bins at 1e8 particles) AND
+    // sort_within_bins=true. That pathological config — a ~5e7-entry atomic
+    // bin array pounded by 1e8 atomic increments plus a 5e7-bin within-bin
+    // insertion-sort pass — triggers a GPU "write to read-only page" fault on
+    // the MI300A unified-memory path at 4e8 particles (MI300A investigation
+    // bug 4). binByKey avoids both the giant bin array and the within-bin sort.
+    auto bin_data = Cabana::binByKey( sort_keys, num_cells, std::size_t( 0 ),
+                                      std::size_t( N ) );
+    dbg_mark( "after binByKey" );
 
-    // After sortByKey, sort_keys is sorted in ascending order. Read it now
-    // (before permute) to count how many particles belong to each cell.
-    // This avoids any dependency on sortByKey's internal bin count, which
-    // uses range bins (nbin = N/2) rather than one-per-unique-key bins.
+    // Count particles per cell. binByKey leaves sort_keys unmodified (it only
+    // builds the permutation), so this is a plain histogram of cell indices —
+    // order-independent, so it does not matter that the keys are not sorted.
     std::vector<int> cell_counts( num_cells, 0 );
     {
         auto h_sk = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
