@@ -852,64 +852,33 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        particle_keys );
 
-    // Build a sort-key view: sort_keys(i) = cell index of particle i.
-    // Cabana::sortByKey groups particles with the same integer key into bins,
-    // one bin per cell, which is exactly the sorted-by-leaf layout we need.
-    Kokkos::View<int*, memory_space> sort_keys( "sort_keys",
-                                                static_cast<size_t>( N ) );
+    // Per-particle cell index on host (original AoSoA order).
+    std::vector<int> cell_of( N );
     {
-        auto h = Kokkos::create_mirror_view( sort_keys );
         int kmin = num_cells, kmax = -1;
         for ( int i = 0; i < N; i++ )
         {
             auto it = key_to_idx.find( h_keys( i ) );
             const int k = ( it != key_to_idx.end() ) ? it->second : 0;
-            h( i ) = k;
+            cell_of[i] = k;
             if ( k < kmin ) kmin = k;
             if ( k > kmax ) kmax = k;
         }
-        Kokkos::deep_copy( sort_keys, h );
-        // OOB sort key would feed an out-of-range bin to binByKey/permute.
         if ( _rank == 0 )
         {
             std::fprintf( stderr,
-                "[Canopy DEBUG sort] sort_keys built: min=%d max=%d (valid "
+                "[Canopy DEBUG sort] cell indices built: min=%d max=%d (valid "
                 "[0,%d)) %s\n",
                 kmin, kmax, num_cells,
                 ( kmin < 0 || kmax >= num_cells ) ? "<<< OOB KEY" : "ok" );
             std::fflush( stderr );
         }
     }
-    dbg_mark( "before binByKey" );
 
-    // Group particles by cell index. The keys ARE dense cell indices in
-    // [0,num_cells), so bin by cell with exactly num_cells bins (one per cell)
-    // and NO within-bin sort: Cabana::binByKey -> Kokkos BinOp1D with
-    // (max-min) <= num_cells sets mul_=1, so bin == key-min and particles end
-    // up contiguous in ascending cell-index order — exactly the sorted-by-leaf
-    // layout, which is all Cabana::permute and _leaf_particle_offsets need.
-    //
-    // We deliberately do NOT use Cabana::sortByKey here: it hardcodes
-    // nbin = (end-begin)/2 (~5e7 range bins at 1e8 particles) AND
-    // sort_within_bins=true. That pathological config — a ~5e7-entry atomic
-    // bin array pounded by 1e8 atomic increments plus a 5e7-bin within-bin
-    // insertion-sort pass — triggers a GPU "write to read-only page" fault on
-    // the MI300A unified-memory path at 4e8 particles (MI300A investigation
-    // bug 4). binByKey avoids both the giant bin array and the within-bin sort.
-    auto bin_data = Cabana::binByKey( sort_keys, num_cells, std::size_t( 0 ),
-                                      std::size_t( N ) );
-    dbg_mark( "after binByKey" );
-
-    // Count particles per cell. binByKey leaves sort_keys unmodified (it only
-    // builds the permutation), so this is a plain histogram of cell indices —
-    // order-independent, so it does not matter that the keys are not sorted.
+    // Count particles per cell (plain histogram of cell indices).
     std::vector<int> cell_counts( num_cells, 0 );
-    {
-        auto h_sk = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                         sort_keys );
-        for ( int i = 0; i < N; i++ )
-            cell_counts[h_sk( i )]++;
-    }
+    for ( int i = 0; i < N; i++ )
+        cell_counts[cell_of[i]]++;
     {
         long long maxc = 0;
         for ( int c = 0; c < num_cells; c++ )
@@ -921,11 +890,57 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
             std::fflush( stderr );
         }
     }
-    dbg_mark( "before permute" );
 
-    // Permute the AoSoA so particles are contiguous within each cell.
-    Cabana::permute( bin_data, particles );
-    dbg_mark( "after permute" );
+    // Build the sort permutation with a HOST counting sort, then apply it with
+    // a manual device gather. We deliberately avoid Cabana::sortByKey /
+    // Cabana::binByKey here: both route through Kokkos::BinSort, whose 1e8-wide
+    // atomic bin-count scatter faults ("write to read-only page") on the
+    // MI300A unified-memory path at 4e8 particles (MI300A investigation bug 4),
+    // independent of bin count or within-bin sorting. The counting sort touches
+    // no device atomics; the gather is a single tuple copy per particle —
+    // exactly what Cabana::permute does, minus the BinSort that precedes it.
+    //
+    // perm(new_pos) = old_index, with new positions grouped by ascending cell
+    // index (running offset per cell), i.e. the sorted-by-leaf layout that
+    // _leaf_particle_offsets assumes.
+    Kokkos::View<int*, memory_space> perm(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "sort_perm" ),
+        static_cast<size_t>( N ) );
+    {
+        auto perm_h = Kokkos::create_mirror_view( perm );
+        std::vector<int> running( num_cells, 0 );
+        running[0] = 0;
+        for ( int c = 1; c < num_cells; c++ )
+            running[c] = running[c - 1] + cell_counts[c - 1];
+        for ( int i = 0; i < N; i++ )
+            perm_h( running[cell_of[i]]++ ) = i;
+        Kokkos::deep_copy( perm, perm_h );
+    }
+    dbg_mark( "permutation built (host counting sort)" );
+
+    // Manual device gather: scratch(i) = particles[perm(i)], then copy back.
+    {
+        Kokkos::View<typename AoSoAType::tuple_type*, memory_space> scratch(
+            Kokkos::view_alloc( Kokkos::WithoutInitializing, "sort_scratch" ),
+            static_cast<size_t>( N ) );
+        auto aosoa = particles;
+        auto perm_v = perm;
+        Kokkos::parallel_for(
+            "sort_gather",
+            Kokkos::RangePolicy<execution_space>( 0, N ),
+            KOKKOS_LAMBDA( const int i ) {
+                scratch( i ) = aosoa.getTuple( perm_v( i ) );
+            } );
+        Kokkos::fence();
+        Kokkos::parallel_for(
+            "sort_scatter_back",
+            Kokkos::RangePolicy<execution_space>( 0, N ),
+            KOKKOS_LAMBDA( const int i ) {
+                aosoa.setTuple( i, scratch( i ) );
+            } );
+        Kokkos::fence();
+    }
+    dbg_mark( "after manual permute" );
 
     // Build leaf_particle_offsets as a prefix sum of per-cell counts.
     _leaf_particle_offsets = Kokkos::View<int*, memory_space>(
