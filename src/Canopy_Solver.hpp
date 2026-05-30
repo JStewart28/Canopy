@@ -26,6 +26,8 @@
 
 #include <mpi.h>
 
+#include <cmath>
+#include <cstdio>
 #include <memory>
 #include <unordered_set>
 
@@ -86,9 +88,23 @@ class Solver
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
+    // softening: near-field Plummer softening length. Bounds the pairwise
+    //   force for close encounters so a divergent acceleration cannot fling a
+    //   particle out of the domain and degenerate the next tree build (an
+    //   unsoftened run on a clustering system escapes the bounding box, forces
+    //   a rebuild into a pathological tree, and corrupts the M2L exchange).
+    //
+    //   Pass softening >= 0 to set it explicitly (0 = unsoftened, opt-in).
+    //   Pass softening < 0 (the DEFAULT) to auto-derive it from the particle
+    //   distribution at setup() time as
+    //       eps = SOFTENING_FACTOR * (V / N)^(1/3)
+    //   i.e. a fraction of the mean inter-particle spacing, where V is the
+    //   global bounding-box volume and N the total particle count. Computed
+    //   once at the first setup() and held fixed thereafter (see README for
+    //   the rationale and the future option to recompute per rebuild).
     Solver( MPI_Comm comm, int ncrit, int max_depth, std::array<double, 3> bounding_box_tol, double ncrit_tol,
             int replication_depth, double imbalance_tolerance = 0.05,
-            double mac_theta = 0.5, double softening = 0.0 )
+            double mac_theta = 0.5, double softening = -1.0 )
         : _comm( comm )
         , _replication_depth( replication_depth )
         , _builder( comm, ncrit, max_depth, bounding_box_tol, ncrit_tol )
@@ -98,11 +114,17 @@ class Solver
         , _downward( comm )
         , _p2p( comm )
         , _num_local( 0 )
+        , _softening_input( softening )
+        , _softening_initialized( false )
     {
-        // Near-field Plummer softening. Bounds the pairwise force for close
-        // encounters so a divergent acceleration cannot fling a particle out
-        // of the domain and degenerate the next tree build.
-        _p2p.set_softening( static_cast<Scalar>( softening ) );
+        // Explicit softening (including an explicit 0 for an unsoftened run):
+        // apply it now. A negative value defers to the distribution-based
+        // auto-softening computed in _full_setup().
+        if ( softening >= 0.0 )
+        {
+            _p2p.set_softening( static_cast<Scalar>( softening ) );
+            _softening_initialized = true;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -413,6 +435,35 @@ class Solver
                 _builder.build( positions, _num_local );
             }
 
+            // Step 5b: refresh ownership against the FINAL tree using the
+            // leaf assignment cached from step 2's partition_leaves. At scale
+            // (~4e8 particles) the post-migration build can produce a tree
+            // with substantially fewer cells than the pre-partition build
+            // (see MI300A investigation: 4.2M -> 867k). Without this
+            // refresh, cell_owner_map (populated against the larger
+            // pre-partition tree) is stale relative to the final cells
+            // passed to comm_plan.build, which silently produces a
+            // phantom-send M2M plan and an MPI_ERR_TRUNCATE later in the
+            // upward sweep.
+            //
+            // We DO NOT re-run Zoltan2 here: multijagged is non-deterministic
+            // (per partition_leaves comment) so a second call would emit a
+            // different assignment, triggering a multi-GB Cabana::migrate
+            // that overflows MPI's signed int count. Instead we vote per
+            // leaf using local particle keys for any leaf that wasn't in
+            // step 2's tree.
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_PARTITION );
+                _partitioner.refresh_ownership_for_current_tree(
+                    _builder, particles );
+            }
+
+            // Distribution-based default softening (no-op if the caller passed
+            // an explicit softening, or after the first auto computation). The
+            // global bounding box and total particle count are available now
+            // that the tree is built.
+            _init_auto_softening();
+
             // Step 6: communication plan
             {
                 CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_COMM_PLAN_BUILD );
@@ -458,6 +509,12 @@ class Solver
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
           auto positions = Cabana::slice<PositionIdx>( particles );
           _builder.build( positions, _num_local ); }
+
+        // Refresh ownership against the FINAL tree using cached leaf
+        // assignment. See bug 1 note in _full_setup.
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REPARTITION );
+          _partitioner.refresh_ownership_for_current_tree(
+              _builder, particles ); }
 
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_COMM_PLAN_BUILD );
           _comm_plan.build( _builder.cells(), _partitioner.ownership(),
@@ -516,6 +573,55 @@ class Solver
     p2p_type _p2p;
 
     int _num_local;
+
+    // Softening configuration. _softening_input < 0 selects distribution-based
+    // auto-softening (computed once in _full_setup); >= 0 is an explicit value.
+    // _softening_initialized guards the one-shot auto computation so it is
+    // fixed at the first setup() and not recomputed on later rebuilds.
+    double _softening_input;
+    bool _softening_initialized;
+    // Fraction of the mean inter-particle spacing used as the auto-softening
+    // length. 0.1 is a standard collisionless-N-body choice and matches the
+    // smallest softening empirically observed to keep the clustering test
+    // stable on MI300A.
+    static constexpr double SOFTENING_FACTOR = 0.1;
+
+    // Derive and apply the auto-softening length from the current global
+    // bounding box and total particle count. No-op once softening has been
+    // set (explicit value, or a prior auto computation).
+    void _init_auto_softening()
+    {
+        if ( _softening_initialized )
+            return;
+
+        const auto& box = _builder.root_box();
+        double volume = 1.0;
+        for ( int d = 0; d < 3; d++ )
+            volume *= ( box.max[d] - box.min[d] );
+
+        long long n_total = 0;
+        for ( const auto& c : _builder.cells() )
+            if ( c.key == ROOT_KEY )
+            {
+                n_total = static_cast<long long>( c.global_count );
+                break;
+            }
+
+        double eps = 0.0;
+        if ( n_total > 0 && volume > 0.0 )
+            eps = SOFTENING_FACTOR *
+                  std::cbrt( volume / static_cast<double>( n_total ) );
+
+        _p2p.set_softening( static_cast<Scalar>( eps ) );
+        _softening_initialized = true;
+
+        int rank = 0;
+        MPI_Comm_rank( _comm, &rank );
+        if ( rank == 0 )
+            std::printf( "[Canopy] auto softening eps=%.6g "
+                         "(factor=%.3g, N=%lld, bbox_volume=%.6g)\n",
+                         eps, SOFTENING_FACTOR, n_total, volume );
+    }
 
     potential_view_type _potential;
     gradient_view_type _gradient;

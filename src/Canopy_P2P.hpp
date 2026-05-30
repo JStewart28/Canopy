@@ -1019,6 +1019,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         } // if ( n_local > 0 )
     } // TIMER_P2P_INTER_KERNEL
     } // TIMER_P2P_TOTAL
+
     CANOPY_PRINT_P2P_TIMERS( _comm );
 }
 

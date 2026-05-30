@@ -31,6 +31,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <typeinfo>
 #include <unordered_map>
 #include <vector>
@@ -185,6 +186,13 @@ class TreePartitioner
     // Fast lookup: MortonKey -> owner rank
     std::unordered_map<MortonKey, int> _cell_owner_map;
 
+    // Cached leaf assignment from the most recent partition_leaves() call.
+    // Used by refresh_ownership_for_current_tree() to avoid re-running the
+    // non-deterministic Zoltan2 multijagged partitioner (which would emit a
+    // different assignment and trigger a multi-GB second migrate that
+    // overflows MPI's signed int count at scale).
+    std::unordered_map<MortonKey, int> _cached_leaf_owners;
+
     // Post-migration local particle count
     int _num_local_after;
 
@@ -236,6 +244,25 @@ class TreePartitioner
     void
     repartition( const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
                  AoSoAType& particles, int num_local_particles_before );
+
+    // -----------------------------------------------------------------------
+    // refresh_ownership_for_current_tree()
+    //
+    // Re-populate _cell_owner_map against tree_builder.cells() WITHOUT
+    // re-running Zoltan2 and WITHOUT migrating particles. Uses the leaf
+    // assignment cached from the most recent partition_leaves() call. For
+    // any leaf in the current tree that wasn't a leaf in the cached
+    // assignment, votes on owner based on which rank holds the most
+    // local particles in that leaf (single Allreduce on a per-leaf vote
+    // table). This keeps cell_owner_map consistent with the final cells
+    // passed to comm_plan.build, fixing the phantom-send M2M plan that
+    // arises when the post-migration build produces a different tree than
+    // the pre-partition build.
+    // -----------------------------------------------------------------------
+    template <class AoSoAType>
+    void refresh_ownership_for_current_tree(
+        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        AoSoAType& particles );
 
     // -----------------------------------------------------------------------
     // sort_particles_by_leaf()
@@ -458,16 +485,27 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::derive_internal_ownership(
             auto vote_it = vote_map.find( c.key );
             if ( vote_it != vote_map.end() )
             {
-                int best_rank = 0;
+                // Iterate unordered_map<int, int64_t> with a deterministic
+                // tiebreaker (lowest rank wins on equal votes). Without the
+                // tiebreaker, two ranks with identical vote_map contents can
+                // still pick different "best_rank" because unordered_map
+                // iteration order is not guaranteed identical across
+                // processes — which silently makes cell ownership disagree
+                // across ranks and causes the comm-plan asymmetry observed
+                // at ~4e8 particles.
+                int best_rank = std::numeric_limits<int>::max();
                 int64_t best_count = -1;
                 for ( const auto& [r, cnt] : vote_it->second )
                 {
-                    if ( cnt > best_count )
+                    if ( cnt > best_count ||
+                         ( cnt == best_count && r < best_rank ) )
                     {
                         best_count = cnt;
                         best_rank = r;
                     }
                 }
+                if ( best_count < 0 )
+                    best_rank = 0;
                 co.owner_rank = best_rank;
             }
             else
@@ -528,7 +566,14 @@ int TreePartitioner<MemorySpace, ExecutionSpace>::migrate_particles(
 
     Kokkos::deep_copy( dest_ranks, h_dest );
 
-    // Use Cabana::Distributor to migrate particles
+    // Use Cabana::Distributor to migrate particles.
+    //
+    // NOTE: a single peer's payload can exceed 2 GiB at large per-rank particle
+    // counts (e.g. ~1e8 particles * ~56 B tuple). Upstream Cabana's Distributor
+    // computes the per-peer MPI byte count with a 32-bit int, which overflows
+    // and silently truncates the transfer (the particle count stays correct but
+    // the data is garbage). A patched Cabana with 64-bit byte counts is
+    // required — see README.md "Patched Cabana required".
     Cabana::Distributor<memory_space> distributor( _comm, dest_ranks );
     Cabana::migrate( distributor, particles );
 
@@ -550,6 +595,9 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::partition(
 
     // Step 2: Derive internal cell ownership
     derive_internal_ownership( cells, leaf_owners );
+
+    // Cache leaf assignment for refresh_ownership_for_current_tree()
+    _cached_leaf_owners = leaf_owners;
 
     // Step 3: Migrate particles
     migrate_particles( tree_builder, particles, num_local_particles_before );
@@ -591,8 +639,103 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::repartition(
     // Step 2: Re-derive internal cell ownership
     derive_internal_ownership( cells, leaf_owners );
 
+    // Cache leaf assignment for refresh_ownership_for_current_tree()
+    _cached_leaf_owners = leaf_owners;
+
     // Step 3: Migrate particles to new owners
     migrate_particles( tree_builder, particles, num_local_particles_before );
+}
+
+// --------------------------------------------------------------------------
+// refresh_ownership_for_current_tree
+//
+// Re-populate _cell_owner_map against the current tree using the cached
+// leaf assignment from the most recent partition_leaves() call. Particles
+// are NOT migrated; Zoltan2 is NOT re-run.
+//
+// For leaves present in the cached assignment: reuse the cached owner.
+// For leaves NOT in the cached assignment (e.g., a coarsened tree where
+// a former-internal cell is now a leaf): vote based on local particle
+// counts via a single Allgather of per-leaf vote vectors.
+// --------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace>
+template <class AoSoAType>
+void TreePartitioner<MemorySpace, ExecutionSpace>::
+    refresh_ownership_for_current_tree(
+        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        AoSoAType& particles )
+{
+    const auto& cells = tree_builder.cells();
+    (void)particles; // current implementation only needs particle_keys
+
+    // Collect leaves that need a new owner (not in cache).
+    std::vector<MortonKey> new_leaf_keys;
+    std::unordered_map<MortonKey, int> new_leaf_idx;
+    for ( const auto& c : cells )
+    {
+        if ( !c.is_leaf )
+            continue;
+        if ( _cached_leaf_owners.find( c.key ) != _cached_leaf_owners.end() )
+            continue;
+        new_leaf_idx[c.key] = static_cast<int>( new_leaf_keys.size() );
+        new_leaf_keys.push_back( c.key );
+    }
+    const int n_new = static_cast<int>( new_leaf_keys.size() );
+
+    // Build a new leaf_owners that starts from the cache and adds entries
+    // for new leaves. Owner of a new leaf = rank with the most local
+    // particles in that leaf, broken by lowest rank on ties.
+    std::unordered_map<MortonKey, int> leaf_owners = _cached_leaf_owners;
+
+    if ( n_new > 0 )
+    {
+        // Tally local particles per new leaf.
+        auto particle_keys = tree_builder.particle_keys();
+        auto h_keys = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), particle_keys );
+        const int N = static_cast<int>( h_keys.extent( 0 ) );
+
+        std::vector<long long> local_counts( n_new, 0 );
+        for ( int i = 0; i < N; i++ )
+        {
+            auto it = new_leaf_idx.find( h_keys( i ) );
+            if ( it != new_leaf_idx.end() )
+                local_counts[it->second]++;
+        }
+
+        // Allgather every rank's per-leaf counts so each rank can pick
+        // the same owner deterministically.
+        std::vector<long long> all_counts(
+            static_cast<size_t>( n_new ) * _comm_size, 0 );
+        MPI_Allgather( local_counts.data(), n_new, MPI_LONG_LONG,
+                       all_counts.data(), n_new, MPI_LONG_LONG, _comm );
+
+        for ( int i = 0; i < n_new; i++ )
+        {
+            int best_rank = 0;
+            long long best_count = -1;
+            for ( int r = 0; r < _comm_size; r++ )
+            {
+                long long c =
+                    all_counts[static_cast<size_t>( r ) * n_new + i];
+                if ( c > best_count )
+                {
+                    best_count = c;
+                    best_rank = r;
+                }
+            }
+            leaf_owners[new_leaf_keys[i]] = best_rank;
+        }
+
+        // Update the cache so subsequent refreshes are cheap.
+        for ( int i = 0; i < n_new; i++ )
+            _cached_leaf_owners[new_leaf_keys[i]] =
+                leaf_owners[new_leaf_keys[i]];
+    }
+
+    // Re-derive internal ownership for the current cells using the
+    // combined leaf_owners.
+    derive_internal_ownership( cells, leaf_owners );
 }
 
 // --------------------------------------------------------------------------
@@ -627,40 +770,67 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        particle_keys );
 
-    // Build a sort-key view: sort_keys(i) = cell index of particle i.
-    // Cabana::sortByKey groups particles with the same integer key into bins,
-    // one bin per cell, which is exactly the sorted-by-leaf layout we need.
-    Kokkos::View<int*, memory_space> sort_keys( "sort_keys",
-                                                static_cast<size_t>( N ) );
+    // Per-particle cell index on host (original AoSoA order).
+    std::vector<int> cell_of( N );
+    for ( int i = 0; i < N; i++ )
     {
-        auto h = Kokkos::create_mirror_view( sort_keys );
-        for ( int i = 0; i < N; i++ )
-        {
-            auto it = key_to_idx.find( h_keys( i ) );
-            h( i ) = ( it != key_to_idx.end() ) ? it->second : 0;
-        }
-        Kokkos::deep_copy( sort_keys, h );
+        auto it = key_to_idx.find( h_keys( i ) );
+        cell_of[i] = ( it != key_to_idx.end() ) ? it->second : 0;
     }
 
-    // Sort particles by cell index. sortByKey sorts sort_keys in place and
-    // returns a BinningData permutation for use with Cabana::permute.
-    auto bin_data =
-        Cabana::sortByKey( sort_keys, std::size_t( 0 ), std::size_t( N ) );
-
-    // After sortByKey, sort_keys is sorted in ascending order. Read it now
-    // (before permute) to count how many particles belong to each cell.
-    // This avoids any dependency on sortByKey's internal bin count, which
-    // uses range bins (nbin = N/2) rather than one-per-unique-key bins.
+    // Count particles per cell (plain histogram of cell indices).
     std::vector<int> cell_counts( num_cells, 0 );
+    for ( int i = 0; i < N; i++ )
+        cell_counts[cell_of[i]]++;
+
+    // Build the sort permutation with a HOST counting sort, then apply it with
+    // a manual device gather. We deliberately avoid Cabana::sortByKey /
+    // Cabana::binByKey here: both route through Kokkos::BinSort, whose 1e8-wide
+    // atomic bin-count scatter faults ("write to read-only page") on the
+    // MI300A unified-memory path at 4e8 particles (MI300A investigation bug 4),
+    // independent of bin count or within-bin sorting. The counting sort touches
+    // no device atomics; the gather is a single tuple copy per particle —
+    // exactly what Cabana::permute does, minus the BinSort that precedes it.
+    //
+    // perm(new_pos) = old_index, with new positions grouped by ascending cell
+    // index (running offset per cell), i.e. the sorted-by-leaf layout that
+    // _leaf_particle_offsets assumes.
+    Kokkos::View<int*, memory_space> perm(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "sort_perm" ),
+        static_cast<size_t>( N ) );
     {
-        auto h_sk = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                         sort_keys );
+        auto perm_h = Kokkos::create_mirror_view( perm );
+        std::vector<int> running( num_cells, 0 );
+        running[0] = 0;
+        for ( int c = 1; c < num_cells; c++ )
+            running[c] = running[c - 1] + cell_counts[c - 1];
         for ( int i = 0; i < N; i++ )
-            cell_counts[h_sk( i )]++;
+            perm_h( running[cell_of[i]]++ ) = i;
+        Kokkos::deep_copy( perm, perm_h );
     }
 
-    // Permute the AoSoA so particles are contiguous within each cell.
-    Cabana::permute( bin_data, particles );
+    // Manual device gather: scratch(i) = particles[perm(i)], then copy back.
+    {
+        Kokkos::View<typename AoSoAType::tuple_type*, memory_space> scratch(
+            Kokkos::view_alloc( Kokkos::WithoutInitializing, "sort_scratch" ),
+            static_cast<size_t>( N ) );
+        auto aosoa = particles;
+        auto perm_v = perm;
+        Kokkos::parallel_for(
+            "sort_gather",
+            Kokkos::RangePolicy<execution_space>( 0, N ),
+            KOKKOS_LAMBDA( const int i ) {
+                scratch( i ) = aosoa.getTuple( perm_v( i ) );
+            } );
+        Kokkos::fence();
+        Kokkos::parallel_for(
+            "sort_scatter_back",
+            Kokkos::RangePolicy<execution_space>( 0, N ),
+            KOKKOS_LAMBDA( const int i ) {
+                aosoa.setTuple( i, scratch( i ) );
+            } );
+        Kokkos::fence();
+    }
 
     // Build leaf_particle_offsets as a prefix sum of per-cell counts.
     _leaf_particle_offsets = Kokkos::View<int*, memory_space>(

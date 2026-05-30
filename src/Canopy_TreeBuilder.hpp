@@ -823,6 +823,7 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
 
     // Build the host-side lookup map
     rebuild_cell_lookup();
+
     _tree_valid = true;
 }
 

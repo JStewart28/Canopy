@@ -103,6 +103,46 @@ for (int step = 0; step < nsteps; ++step)
 
 ---
 
+## Dependencies and Build Notes
+
+### Patched Cabana required for large per-rank particle counts
+
+Canopy migrates particles between MPI ranks with `Cabana::migrate` (a
+`Cabana::Distributor` exchange) inside `TreePartitioner::migrate_particles`.
+Upstream Cabana computes the per-peer MPI message size with a signed 32-bit
+`int` byte count. When a single peer's particle payload exceeds **2 GiB**
+(`INT_MAX` bytes) the count silently overflows: the transfer is truncated, the
+receiving ranks keep the correct particle *count* but receive **garbage particle
+data**, and the next tree build collapses (most particles land in one
+max-depth leaf). At ~10⁸ particles/rank a 56–60 byte particle tuple crosses this
+threshold (≈4.6 GB to a single peer), so the bug only appears at large scale —
+small runs and the unit tests never hit it.
+
+**You must build against a patched Cabana that uses 64-bit byte counts (or
+chunks the transfer below `INT_MAX`) in the Distributor.** Use this fork:
+
+> **https://github.com/JStewart28/Cabana**
+
+Point your Spack environment (or CMake `Cabana_DIR`) at this fork rather than
+upstream `cabana@master`. Without the patch, `gravity_solve` and any workload
+that triggers a `Rebuild`/`migrate` at ≳2 GB/peer will corrupt particle
+positions at scale (it will still pass the small-scale serial tests, so verify
+on a large multi-rank case).
+
+### Known limitation: bounding box is not outlier-resistant (low priority)
+
+`TreeBuilder::compute_global_bounding_box` takes a raw global min/max over all
+particle positions. If a handful of particles escape far from the bulk (e.g.
+close encounters under very small softening, or many integration steps), the
+root box inflates and the finest octree cell (`width / 2^max_depth`) can become
+large enough that a dense cluster collapses into a single max-depth leaf. Because
+the near-field P2P kernel is O(N_leaf²) per particle, one oversized leaf makes a
+solve effectively hang. This is not currently triggered at the tested parameters
+(softening `0.001`), but a more robust / outlier-resistant bounding box (or
+explicit handling of escaped particles) would harden the solver against it.
+
+---
+
 ### Resources used:
 1. [Fast multipole info](https://amath.colorado.edu/faculty/martinss/2014_CBMS/Refs/2012_fmm_encyclopedia.pdf)
 
