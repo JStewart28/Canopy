@@ -643,8 +643,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     detail::coalesced_view_exchange( _multipoles, _comm, sends_by_peer,
                                      recvs_by_peer,
-                                     /*accumulate_on_recv=*/false,
-                                     /*label=*/"M2M exchange_multipoles_at_depth" );
+                                     /*accumulate_on_recv=*/false );
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>

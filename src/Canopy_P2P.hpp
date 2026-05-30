@@ -24,7 +24,6 @@
 #include <mpi.h>
 
 #include <cstdint>
-#include <cstdio>
 #include <unordered_map>
 #include <vector>
 
@@ -522,13 +521,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         MPI_Waitall( send_count_reqs.size(), send_count_reqs.data(),
                      MPI_STATUSES_IGNORE );
 
-    // DEBUG-ONLY (bug 3 hang localization): marker after the per-peer count
-    // handshake completes on every rank, before the bulk data exchange.
-    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
-      if ( _r == 0 ) { std::fprintf( stderr,
-          "[Canopy DEBUG phase] P2P gather: count exchange done on all "
-          "ranks\n" ); std::fflush( stderr ); } }
-
     // Scatter received per-peer counts into per-ghost-leaf array
     std::vector<int> recv_counts( num_ghost_leaves, 0 );
     for ( const auto& kv : recvs_by_peer_kv )
@@ -723,15 +715,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         MPI_Waitall( send_data_reqs.size(), send_data_reqs.data(),
                      MPI_STATUSES_IGNORE );
 
-    // DEBUG-ONLY (bug 3 hang localization): marker after the bulk particle
-    // data exchange completes on every rank. A hang between the count marker
-    // above and this one points at the per-peer data MPI_Isend/Irecv (e.g. a
-    // count-int overflow in per_particle*total, or a send/recv asymmetry).
-    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
-      if ( _r == 0 ) { std::fprintf( stderr,
-          "[Canopy DEBUG phase] P2P gather: data exchange done on all "
-          "ranks\n" ); std::fflush( stderr ); } }
-
     // Unpack on device.
     auto ghost_pos_v = _ghost_positions;
     auto ghost_chg_v = _ghost_charges;
@@ -784,70 +767,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     // 1. Gather ghost particles
     // ------------------------------------------------------------------
     gather_ghost_particles( positions, charges );
-
-    // DEBUG-ONLY (bug 3 hang localization): flush+barrier marker after the
-    // ghost-particle exchange returns on every rank. gather_ghost_particles
-    // is the prime P2P suspect (per-peer MPI_Isend/Irecv of GB-scale leaf
-    // data). Remove once fixed.
-    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
-      if ( _r == 0 ) { std::fprintf( stderr,
-          "[Canopy DEBUG phase] P2P: gather_ghost_particles returned on all "
-          "ranks\n" ); std::fflush( stderr ); } }
-
-    // DEBUG-ONLY (bug 3 diagnosis): the hang is in the intra-leaf kernel that
-    // follows. Test the two competing hypotheses BEFORE launching it:
-    //   (a) quadratic blowup — a pathological giant leaf (max_depth exhausted
-    //       before ncrit reached under clustering, i.e. latent bug 2). The
-    //       intra-leaf inner loop is O(N_leaf^2) per particle, so a leaf with
-    //       millions of particles "hangs" for hours with no GPU fault.
-    //   (b) index-range mismatch — positions.size() (the intra kernel's
-    //       RangePolicy upper bound) exceeds _particle_to_league.extent(0),
-    //       so the kernel reads particle_to_league out of bounds -> garbage
-    //       league/cidx -> OOB position read -> GPU fault that stalls.
-    // Both are answered by the per-rank/global leaf-size + extent print below.
-    {
-        auto loff_h = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace(), _leaf_particle_offsets );
-        auto tcells_h = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace(), _local_leaf_cells );
-        const int ntl = static_cast<int>( _local_leaf_cells.extent( 0 ) );
-        long long local_max = 0, local_sum = 0, n_over_100k = 0;
-        int argmax_cidx = -1;
-        for ( int g = 0; g < ntl; g++ )
-        {
-            const int cidx = tcells_h( g );
-            const long long sz =
-                static_cast<long long>( loff_h( cidx + 1 ) ) - loff_h( cidx );
-            local_sum += sz;
-            if ( sz > local_max ) { local_max = sz; argmax_cidx = cidx; }
-            if ( sz > 100000 ) n_over_100k++;
-        }
-        const long long p2l_extent =
-            static_cast<long long>( _particle_to_league.extent( 0 ) );
-        const long long n_local_pos =
-            static_cast<long long>( positions.size() );
-        std::fprintf( stderr,
-            "[Canopy DEBUG leafsize] rank %d: target_leaves=%d local_in_leaves="
-            "%lld max_leaf=%lld(cidx=%d) leaves_over_100k=%lld | "
-            "positions.size()=%lld particle_to_league.extent=%lld%s\n",
-            _rank, ntl, local_sum, local_max, argmax_cidx, n_over_100k,
-            n_local_pos, p2l_extent,
-            ( n_local_pos > p2l_extent ) ? "  <<< RANGE MISMATCH" : "" );
-        std::fflush( stderr );
-        long long g_max = 0, g_sum = 0, g_over = 0;
-        MPI_Reduce( &local_max, &g_max, 1, MPI_LONG_LONG, MPI_MAX, 0, _comm );
-        MPI_Reduce( &local_sum, &g_sum, 1, MPI_LONG_LONG, MPI_SUM, 0, _comm );
-        MPI_Reduce( &n_over_100k, &g_over, 1, MPI_LONG_LONG, MPI_SUM, 0,
-                    _comm );
-        if ( _rank == 0 )
-        {
-            std::fprintf( stderr,
-                "[Canopy DEBUG leafsize] GLOBAL: max_leaf=%lld total_in_leaves="
-                "%lld leaves_over_100k=%lld\n", g_max, g_sum, g_over );
-            std::fflush( stderr );
-        }
-        MPI_Barrier( _comm );
-    }
 
     // ------------------------------------------------------------------
     // 2. Phase 1: intra-leaf pairs with Newton's third law
@@ -956,12 +875,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         Kokkos::fence();
         } // if ( num_target_leaves > 0 )
     } // TIMER_P2P_INTRA_KERNEL
-
-    // DEBUG-ONLY (bug 3 hang localization): marker after intra-leaf kernel.
-    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
-      if ( _r == 0 ) { std::fprintf( stderr,
-          "[Canopy DEBUG phase] P2P: intra-leaf kernel done on all ranks\n" );
-          std::fflush( stderr ); } }
 
     // ------------------------------------------------------------------
     // 3. Phase 2: inter-leaf pairs (one-way, no atomics needed)
@@ -1106,12 +1019,6 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         } // if ( n_local > 0 )
     } // TIMER_P2P_INTER_KERNEL
     } // TIMER_P2P_TOTAL
-
-    // DEBUG-ONLY (bug 3 hang localization): marker after inter-leaf kernel.
-    { MPI_Barrier( _comm ); int _r; MPI_Comm_rank( _comm, &_r );
-      if ( _r == 0 ) { std::fprintf( stderr,
-          "[Canopy DEBUG phase] P2P: inter-leaf kernel done on all ranks\n" );
-          std::fflush( stderr ); } }
 
     CANOPY_PRINT_P2P_TIMERS( _comm );
 }

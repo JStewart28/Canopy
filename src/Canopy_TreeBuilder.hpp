@@ -594,24 +594,6 @@ template <class PositionType>
 void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
                                                       int num_local_particles )
 {
-    // DEBUG: track global particle count per build() call. If global N changes
-    // between successive build() calls within the same setup, particles are
-    // being lost (or duplicated) somewhere in the migrate path — which is
-    // bug 2 of the MI300A investigation, the underlying cause of the
-    // build-1-vs-build-3 tree-size mismatch.
-    {
-        long long local_n = num_local_particles;
-        long long global_n = 0;
-        MPI_Allreduce( &local_n, &global_n, 1, MPI_LONG_LONG, MPI_SUM, _comm );
-        int rank = 0;
-        MPI_Comm_rank( _comm, &rank );
-        if ( rank == 0 )
-            std::fprintf(
-                stderr,
-                "[Canopy DEBUG build] global_n=%lld local_n(rank0)=%lld\n",
-                global_n, local_n );
-    }
-
     // Compute global bounding box
     _root_box = compute_global_bounding_box( positions, num_local_particles );
 
@@ -641,66 +623,6 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
         double hw = 0.5 * ( _root_box.max[d] - _root_box.min[d] );
         if ( hw > root_hw )
             root_hw = hw;
-    }
-
-    // DEBUG-ONLY (bug 3 diagnosis): the P2P intra-leaf hang is caused by a
-    // single max-depth leaf holding ~7.7e7 particles. By the build loop's
-    // leaf rule (global_count<=ncrit || depth==max_depth) such a leaf can
-    // only exist AT max_depth, i.e. the root box is too coarse to separate a
-    // dense cluster — a bounding-box blow-up from a few escaped particles.
-    // Quantify it: per-axis min/max (the box) vs mean/stddev. If a handful of
-    // outliers stretched the box, range >> stddev and the finest cell
-    // (width/2^max_depth) is far larger than the cluster's particle spacing.
-    {
-        double lsum[3] = { 0, 0, 0 }, lsumsq[3] = { 0, 0, 0 };
-        for ( int a = 0; a < 3; ++a )
-        {
-            double s = 0.0, sq = 0.0;
-            auto pos = positions;
-            Kokkos::parallel_reduce(
-                "bbox_spread",
-                Kokkos::RangePolicy<execution_space>( 0, num_local_particles ),
-                KOKKOS_LAMBDA( int i, double& ls, double& lsq ) {
-                    double v = pos( i, a );
-                    ls += v;
-                    lsq += v * v;
-                },
-                s, sq );
-            lsum[a] = s;
-            lsumsq[a] = sq;
-        }
-        Kokkos::fence();
-        double gsum[3] = { 0, 0, 0 }, gsumsq[3] = { 0, 0, 0 };
-        long long ln = num_local_particles, gn = 0;
-        MPI_Allreduce( lsum, gsum, 3, MPI_DOUBLE, MPI_SUM, _comm );
-        MPI_Allreduce( lsumsq, gsumsq, 3, MPI_DOUBLE, MPI_SUM, _comm );
-        MPI_Allreduce( &ln, &gn, 1, MPI_LONG_LONG, MPI_SUM, _comm );
-        int rank = 0;
-        MPI_Comm_rank( _comm, &rank );
-        if ( rank == 0 && gn > 0 )
-        {
-            const char axis[3] = { 'x', 'y', 'z' };
-            const double finest = ( 2.0 * root_hw ) /
-                                  static_cast<double>( 1u << _max_depth );
-            for ( int a = 0; a < 3; ++a )
-            {
-                const double mean = gsum[a] / static_cast<double>( gn );
-                const double var =
-                    gsumsq[a] / static_cast<double>( gn ) - mean * mean;
-                const double sd = ( var > 0.0 ) ? std::sqrt( var ) : 0.0;
-                const double range = _root_box.max[a] - _root_box.min[a];
-                std::fprintf( stderr,
-                    "[Canopy DEBUG bbox] %c: box[%.6g,%.6g] range=%.6g "
-                    "mean=%.6g stddev=%.6g range/stddev=%.3g\n",
-                    axis[a], _root_box.min[a], _root_box.max[a], range, mean,
-                    sd, ( sd > 0.0 ) ? range / sd : 0.0 );
-            }
-            std::fprintf( stderr,
-                "[Canopy DEBUG bbox] root_hw=%.6g finest_cell_width(@d%d)=%.6g "
-                "global_n=%lld\n",
-                root_hw, _max_depth, finest, gn );
-            std::fflush( stderr );
-        }
     }
 
     // Initialize particle-to-cell mapping on device
@@ -901,47 +823,6 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
 
     // Build the host-side lookup map
     rebuild_cell_lookup();
-
-    // DEBUG-ONLY (bug 3 diagnosis): report the largest leaf and its depth.
-    // Confirms the giant P2P leaf sits at max_depth (=> bbox-blow-up, the grid
-    // is too coarse to subdivide it) rather than below it (=> a builder bug).
-    // _cells is globally replicated, so rank 0's view is authoritative.
-    {
-        int rank = 0;
-        MPI_Comm_rank( _comm, &rank );
-        if ( rank == 0 )
-        {
-            long long biggest = -1;
-            int big_idx = -1, n_over_ncrit_leaves = 0;
-            for ( int i = 0; i < static_cast<int>( _cells.size() ); i++ )
-            {
-                if ( !_cells[i].is_leaf )
-                    continue;
-                if ( _cells[i].global_count > _ncrit )
-                    ++n_over_ncrit_leaves;
-                if ( static_cast<long long>( _cells[i].global_count ) >
-                     biggest )
-                {
-                    biggest = _cells[i].global_count;
-                    big_idx = i;
-                }
-            }
-            if ( big_idx >= 0 )
-            {
-                const auto& bc = _cells[big_idx];
-                std::fprintf( stderr,
-                    "[Canopy DEBUG tree] cells=%zu leaves_over_ncrit=%d | "
-                    "largest leaf idx=%d depth=%d/%d global_count=%d "
-                    "half_width=%.6g %s\n",
-                    _cells.size(), n_over_ncrit_leaves, big_idx, bc.depth,
-                    _max_depth, bc.global_count, bc.half_width,
-                    ( bc.depth >= _max_depth )
-                        ? "<<< AT MAX_DEPTH (bbox too coarse; cluster collapse)"
-                        : "<<< BELOW MAX_DEPTH (builder failed to subdivide)" );
-                std::fflush( stderr );
-            }
-        }
-    }
 
     _tree_valid = true;
 }

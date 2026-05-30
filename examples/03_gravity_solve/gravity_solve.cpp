@@ -264,44 +264,18 @@ int main( int argc, char* argv[] )
             const auto t_solve1 = clock::now();
             solve_times[step] = sec( t_solve1 - t_solve0 ).count();
 
-            // DEBUG-ONLY (bug 3 hang localization): markers around the
-            // post-solve integrate + auto_maintain. Remove once fixed.
-            if ( rank == 0 )
-            {
-                std::fprintf( stderr, "[Canopy DEBUG phase] driver: solve() "
-                              "returned, entering integrate (step %d)\n",
-                              step + 1 );
-                std::fflush( stderr );
-            }
-
             integrate_particles( particles, solver.gradient(),
                                  solver.num_local_particles(), dt, G );
 
             Kokkos::fence();
-            MPI_Barrier( MPI_COMM_WORLD );
-            if ( rank == 0 )
-            {
-                std::fprintf( stderr, "[Canopy DEBUG phase] driver: integrate "
-                              "done on all ranks, entering auto_maintain "
-                              "(step %d)\n", step + 1 );
-                std::fflush( stderr );
-            }
 
             actions[step] =
                 solver.auto_maintain<Position, Mass>( particles );
 
-            MPI_Barrier( MPI_COMM_WORLD );
             if ( rank == 0 )
-            {
-                std::fprintf( stderr, "[Canopy DEBUG phase] driver: "
-                              "auto_maintain returned on all ranks (step %d)\n",
-                              step + 1 );
                 std::printf( "  step %3d: action=%-9s  solve=%.4f s\n",
                              step + 1, action_name( actions[step] ),
                              solve_times[step] );
-                std::fflush( stderr );
-                std::fflush( stdout );
-            }
         }
 
         Kokkos::fence();

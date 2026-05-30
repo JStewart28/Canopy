@@ -566,79 +566,16 @@ int TreePartitioner<MemorySpace, ExecutionSpace>::migrate_particles(
 
     Kokkos::deep_copy( dest_ranks, h_dest );
 
-    // DEBUG-ONLY (bug 3 diagnosis): the step-1 Rebuild's pre-migrate build is
-    // healthy (4.2M cells, leaf<=512) but the post-migrate build collapses
-    // (868k cells, one depth-19 leaf with ~3e8 particles) AND the global
-    // position mean/stddev changes — impossible from a correct migrate, which
-    // only redistributes. Hypothesis: Cabana::migrate's data payload byte
-    // count overflows signed int when one peer receives multi-GB of particles,
-    // truncating the transfer and delivering garbage positions (count stays
-    // right). Test: (a) max particles to one peer * sizeof(tuple) vs INT_MAX;
-    // (b) global position checksum immediately before vs after the migrate.
-    auto dbg_pos_sum = [&]( const char* tag )
-    {
-        auto pos = Cabana::slice<0>( particles );
-        const int n = static_cast<int>( particles.size() );
-        double lsum[3] = { 0, 0, 0 };
-        for ( int a = 0; a < 3; ++a )
-        {
-            double s = 0.0;
-            Kokkos::parallel_reduce(
-                "dbg_pos_sum",
-                Kokkos::RangePolicy<execution_space>( 0, n ),
-                KOKKOS_LAMBDA( int i, double& ls ) { ls += pos( i, a ); },
-                s );
-            lsum[a] = s;
-        }
-        Kokkos::fence();
-        long long ln = n, gn = 0;
-        double gsum[3] = { 0, 0, 0 };
-        MPI_Allreduce( lsum, gsum, 3, MPI_DOUBLE, MPI_SUM, _comm );
-        MPI_Allreduce( &ln, &gn, 1, MPI_LONG_LONG, MPI_SUM, _comm );
-        if ( _rank == 0 && gn > 0 )
-        {
-            std::fprintf( stderr,
-                "[Canopy DEBUG migrate] %s global_n=%lld pos_mean=(%.6g,%.6g,"
-                "%.6g)\n",
-                tag, gn, gsum[0] / gn, gsum[1] / gn, gsum[2] / gn );
-            std::fflush( stderr );
-        }
-    };
-    {
-        std::vector<long long> per_peer( _comm_size, 0 );
-        for ( int i = 0; i < num_local_particles_before; i++ )
-            per_peer[h_dest( i )]++;
-        long long local_max_peer = 0;
-        for ( int r = 0; r < _comm_size; r++ )
-            if ( r != _rank && per_peer[r] > local_max_peer )
-                local_max_peer = per_peer[r];
-        long long global_max_peer = 0;
-        MPI_Reduce( &local_max_peer, &global_max_peer, 1, MPI_LONG_LONG,
-                    MPI_MAX, 0, _comm );
-        const long long tuple_bytes =
-            static_cast<long long>( sizeof( typename AoSoAType::tuple_type ) );
-        if ( _rank == 0 )
-        {
-            const long long int_max =
-                static_cast<long long>( std::numeric_limits<int>::max() );
-            const long long max_bytes = global_max_peer * tuple_bytes;
-            std::fprintf( stderr,
-                "[Canopy DEBUG migrate] max_particles_to_one_peer=%lld "
-                "tuple_bytes=%lld => max_payload_bytes=%lld INT_MAX=%lld %s\n",
-                global_max_peer, tuple_bytes, max_bytes, int_max,
-                ( max_bytes > int_max )
-                    ? "<<< EXCEEDS INT_MAX (migrate byte-count overflow)"
-                    : "(within int range)" );
-            std::fflush( stderr );
-        }
-    }
-    dbg_pos_sum( "before migrate:" );
-
-    // Use Cabana::Distributor to migrate particles
+    // Use Cabana::Distributor to migrate particles.
+    //
+    // NOTE: a single peer's payload can exceed 2 GiB at large per-rank particle
+    // counts (e.g. ~1e8 particles * ~56 B tuple). Upstream Cabana's Distributor
+    // computes the per-peer MPI byte count with a 32-bit int, which overflows
+    // and silently truncates the transfer (the particle count stays correct but
+    // the data is garbage). A patched Cabana with 64-bit byte counts is
+    // required — see README.md "Patched Cabana required".
     Cabana::Distributor<memory_space> distributor( _comm, dest_ranks );
     Cabana::migrate( distributor, particles );
-
-    dbg_pos_sum( "after  migrate:" );
 
     _num_local_after = static_cast<int>( particles.size() );
 
@@ -822,25 +759,6 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
     const int num_cells = static_cast<int>( cells.size() );
     const int N = static_cast<int>( particles.size() );
 
-    // DEBUG-ONLY (bug 3 / step-2 seg fault localization): the maintenance flow
-    // faults in sort_particles_by_leaf (build C's print never appears). The
-    // GPU "write to read-only page" fault is an OOB write, most likely a
-    // Cabana::permute byte-count overflow at ~5.6 GB (1e8 part x 56 B) — the
-    // same INT_MAX class as the migrate bug, in a different code path. Bracket
-    // each device op with a fence+flush marker so the next run pinpoints it.
-    auto dbg_mark = [&]( const char* msg )
-    {
-        Kokkos::fence();
-        MPI_Barrier( _comm );
-        if ( _rank == 0 )
-        {
-            std::fprintf( stderr, "[Canopy DEBUG sort] %s (N=%d num_cells=%d)\n",
-                          msg, N, num_cells );
-            std::fflush( stderr );
-        }
-    };
-    dbg_mark( "entry" );
-
     // Build key -> cell_index map on host
     std::unordered_map<MortonKey, int> key_to_idx;
     key_to_idx.reserve( num_cells );
@@ -854,42 +772,16 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
 
     // Per-particle cell index on host (original AoSoA order).
     std::vector<int> cell_of( N );
+    for ( int i = 0; i < N; i++ )
     {
-        int kmin = num_cells, kmax = -1;
-        for ( int i = 0; i < N; i++ )
-        {
-            auto it = key_to_idx.find( h_keys( i ) );
-            const int k = ( it != key_to_idx.end() ) ? it->second : 0;
-            cell_of[i] = k;
-            if ( k < kmin ) kmin = k;
-            if ( k > kmax ) kmax = k;
-        }
-        if ( _rank == 0 )
-        {
-            std::fprintf( stderr,
-                "[Canopy DEBUG sort] cell indices built: min=%d max=%d (valid "
-                "[0,%d)) %s\n",
-                kmin, kmax, num_cells,
-                ( kmin < 0 || kmax >= num_cells ) ? "<<< OOB KEY" : "ok" );
-            std::fflush( stderr );
-        }
+        auto it = key_to_idx.find( h_keys( i ) );
+        cell_of[i] = ( it != key_to_idx.end() ) ? it->second : 0;
     }
 
     // Count particles per cell (plain histogram of cell indices).
     std::vector<int> cell_counts( num_cells, 0 );
     for ( int i = 0; i < N; i++ )
         cell_counts[cell_of[i]]++;
-    {
-        long long maxc = 0;
-        for ( int c = 0; c < num_cells; c++ )
-            if ( cell_counts[c] > maxc ) maxc = cell_counts[c];
-        if ( _rank == 0 )
-        {
-            std::fprintf( stderr,
-                "[Canopy DEBUG sort] max_cell_count=%lld\n", maxc );
-            std::fflush( stderr );
-        }
-    }
 
     // Build the sort permutation with a HOST counting sort, then apply it with
     // a manual device gather. We deliberately avoid Cabana::sortByKey /
@@ -916,7 +808,6 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
             perm_h( running[cell_of[i]]++ ) = i;
         Kokkos::deep_copy( perm, perm_h );
     }
-    dbg_mark( "permutation built (host counting sort)" );
 
     // Manual device gather: scratch(i) = particles[perm(i)], then copy back.
     {
@@ -940,7 +831,6 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
             } );
         Kokkos::fence();
     }
-    dbg_mark( "after manual permute" );
 
     // Build leaf_particle_offsets as a prefix sum of per-cell counts.
     _leaf_particle_offsets = Kokkos::View<int*, memory_space>(
@@ -967,7 +857,6 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
                 h( k ) = c;
         Kokkos::deep_copy( _particle_leaf_cell_idx, h );
     }
-    dbg_mark( "done (offsets + cell_idx built)" );
 }
 
 } // end namespace Canopy

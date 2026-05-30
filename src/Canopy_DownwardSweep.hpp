@@ -1142,8 +1142,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     detail::coalesced_view_exchange( multipoles, _comm, sends_by_peer,
                                      recvs_by_peer,
-                                     /*accumulate_on_recv=*/false,
-                                     /*label=*/"M2L exchange_multipoles_for_m2l" );
+                                     /*accumulate_on_recv=*/false );
 }
 
 // -------------------------------------------------------------------------
@@ -1628,8 +1627,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // already have M2L contributions in place).
     detail::coalesced_view_exchange( _locals, _comm, sends_by_peer,
                                      recvs_by_peer,
-                                     /*accumulate_on_recv=*/true,
-                                     /*label=*/"L2L exchange_locals_after_l2l_at_depth" );
+                                     /*accumulate_on_recv=*/true );
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
