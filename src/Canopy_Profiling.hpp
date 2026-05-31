@@ -113,6 +113,12 @@ static constexpr const char* TIMER_P2P_TOTAL        = "p2p_total";
 static constexpr const char* TIMER_P2P_GHOST_COMM   = "p2p_ghost_comm";
 static constexpr const char* TIMER_P2P_INTRA_KERNEL = "p2p_intra_kernel";
 static constexpr const char* TIMER_P2P_INTER_KERNEL = "p2p_inter_kernel";
+// Level-3 diagnostic only: a warm re-launch of the inter-leaf kernel into a
+// scratch output within the same solve. Used to distinguish a one-time
+// first-touch/allocation cost (rerun fast) from genuinely heavier kernel
+// work at a given step (rerun also slow). Never populated below level 3.
+static constexpr const char* TIMER_P2P_INTER_KERNEL_RERUN =
+    "p2p_inter_kernel_rerun";
 
 // Maintenance phases — migrate() and rebalance()
 static constexpr const char* TIMER_MIGRATE_TOTAL    = "migrate_total";
@@ -233,12 +239,18 @@ inline std::vector<PhaseEntry> downward_phase_entries()
 
 inline std::vector<PhaseEntry> p2p_phase_entries()
 {
-    return {
+    std::vector<PhaseEntry> entries = {
         { "P2P total",             TIMER_P2P_TOTAL,        0 },
         { "P2P ghost comm",        TIMER_P2P_GHOST_COMM,   1 },
         { "P2P intra-leaf kernel", TIMER_P2P_INTRA_KERNEL, 1 },
         { "P2P inter-leaf kernel", TIMER_P2P_INTER_KERNEL, 1 },
     };
+#if CANOPY_PROFILING_LEVEL >= 3
+    // Warm re-launch of the inter-leaf kernel (diagnostic, level 3 only).
+    entries.push_back(
+        { "[detail] inter-leaf RERUN (warm)", TIMER_P2P_INTER_KERNEL_RERUN, 1 } );
+#endif
+    return entries;
 }
 
 inline std::vector<PhaseEntry> commplan_phase_entries()
