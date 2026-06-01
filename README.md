@@ -129,6 +129,43 @@ that triggers a `Rebuild`/`migrate` at ≳2 GB/peer will corrupt particle
 positions at scale (it will still pass the small-scale serial tests, so verify
 on a large multi-rank case).
 
+### P2P intra-leaf kernel: particle-centric, no atomics (MI300A APU)
+
+The intra-leaf phase of P2P (interactions between particles in the same
+leaf) is implemented as a flat, particle-centric kernel: each thread `pi`
+iterates over the other particles in its own leaf and writes its own
+`potential_out(pi, …)` / `gradient_out(pi, …)` slots directly. This costs
+**2× the FLOPs** of a Newton's-3rd-law pair scheme (we compute `(i, j)`
+and `(j, i)` separately) but does **no atomic writes**.
+
+This design is a deliberate workaround for an APU-specific hang
+observed during bring-up on AMD MI300A (CDNA3, unified CPU/GPU memory).
+
+**Symptom.** With the previous TeamPolicy(num_leaves, 256) +
+`Kokkos::atomic_add` pair-based kernel on MI300A:
+- `Kokkos::parallel_for` returned to the host successfully.
+- The trailing `Kokkos::fence()` never returned.
+- I.e., the kernel was launched but some wavefronts on the device were
+  stuck indefinitely, with no progress on the fence.
+
+**Why.** Multiple wavefronts in a team racing `atomic_add` on adjacent
+slots of `potential_out` / `gradient_out` — both managed-memory views
+on a unified CPU/GPU coherence fabric — can fail to make forward
+progress under heavy contention. AMD HSA has documented hangs in this
+pattern; the failure does not reproduce on discrete-memory GPUs
+(verified on an NVIDIA RTX 3500 Ti with the same code).
+
+**Fix.** Restructure the intra-leaf kernel to mirror the inter-leaf
+kernel: one thread per local particle, single-writer per output slot,
+zero atomics. The cost is the 2× FLOP factor noted above; the win is
+that the kernel completes deterministically on MI300A and the device
+fence returns immediately after the kernel.
+
+If you port Canopy to a hardware target where atomic contention on
+unified memory is not a hazard (e.g. any discrete-memory GPU), the
+prior Newton's-3rd-law pair kernel would be ~2× faster for the
+intra-leaf phase and is preserved in the git history for reference.
+
 ### Known limitation: bounding box is not outlier-resistant (low priority)
 
 `TreeBuilder::compute_global_bounding_box` takes a raw global min/max over all
