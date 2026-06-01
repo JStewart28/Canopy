@@ -324,7 +324,7 @@ class Solver
             if ( _builder.needs_rebuild( positions, _num_local ) )
             {
                 _full_setup<PositionIdx, ChargeIdx>( particles, _num_local );
-#if defined( Canopy_ENABLE_PROFILING )
+#if defined( CANOPY_ENABLE_PROFILING )
                 {
                     int _diag_rank = 0;
                     MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
@@ -368,7 +368,7 @@ class Solver
         const size_t matched = n_new - k_in_new_not_old;
         const size_t k_changed = ( n_new - matched ) + ( n_old - matched );
         const bool topology_changed = ( k_changed > 0 );
-#if defined( Canopy_ENABLE_PROFILING )
+#if defined( CANOPY_ENABLE_PROFILING )
         const size_t N_total = ( n_new > n_old ) ? n_new : n_old;
 #endif
 
@@ -377,7 +377,7 @@ class Solver
             // 2) Topology changed ⇒ full rebalance (repartition + comm_plan
             //    rebuild + setups). _builder.build() already happened above.
             _finish_topology_change<PositionIdx>( particles );
-#if defined( Canopy_ENABLE_PROFILING )
+#if defined( CANOPY_ENABLE_PROFILING )
             {
                 int _diag_rank = 0;
                 MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
@@ -399,7 +399,7 @@ class Solver
         (void)rr;
         _num_local = _partitioner.num_local_particles();
         _finish_topology_stable<PositionIdx>( particles );
-#if defined( Canopy_ENABLE_PROFILING )
+#if defined( CANOPY_ENABLE_PROFILING )
         {
             int _diag_rank = 0;
             MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
