@@ -33,6 +33,14 @@
 namespace Canopy
 {
 
+// Tunable: initial bucket reservation for each per-thread M2L key->op map
+// used by the sharded S3 classify-pairs pass in
+// DownwardSweep::build_interaction_list_device. Sized to mostly absorb the
+// expected per-shard distinct-key count (globally ~16 k under MAC=0.5,
+// shared across ~24 threads) without forcing a rehash, while keeping per-
+// thread memory bounded. Promote to a CMake option if tuning becomes needed.
+static constexpr int S3_PER_THREAD_KEYMAP_RESERVE = 4096;
+
 // ============================================================================
 // DownwardSweep
 //
@@ -722,51 +730,136 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                         : 0.0;
         }
 
-        size_t pair_cursor = 0;
-        for ( const auto& e : entries )
-        {
-            const auto& tci = h_dc_for_filter( e.target_idx );
-            const bool tgt_shared =
-                ( tci.owner_rank == OWNER_SHARED );
-            for ( int s : e.sources )
-            {
-                const auto& sci = h_dc_for_filter( s );
-                const int max_d = std::max( e.depth, sci.depth );
-                const double inv_unit_w =
-                    ( max_d >= 0 && max_d <= _max_depth )
-                        ? inv_half_width_at_depth[max_d]
-                        : 0.0;
-                const double dx = sci.center[0] - tci.center[0];
-                const double dy = sci.center[1] - tci.center[1];
-                const double dz = sci.center[2] - tci.center[2];
-                const int ii = static_cast<int>(
-                    std::lround( dx * inv_unit_w ) );
-                const int jj = static_cast<int>(
-                    std::lround( dy * inv_unit_w ) );
-                const int kk = static_cast<int>(
-                    std::lround( dz * inv_unit_w ) );
-                const int dd = sci.depth - e.depth;
+        // Sharded S3: per-thread hashmap dedup (O(N) cache-resident),
+        // then a tiny serial merge over distinct keys (globally bounded by
+        // M2L_OP_COUNT_CAP), then a parallel local->global op-idx remap.
+        // Same algorithm as the original serial body; just sharded.
+        const size_t n_entries = entries.size();
+        std::vector<int> entry_pair_offset( n_entries + 1, 0 );
+        for ( size_t e = 0; e < n_entries; ++e )
+            entry_pair_offset[e + 1] =
+                entry_pair_offset[e] +
+                static_cast<int>( entries[e].sources.size() );
 
-                int op_idx = -1;
-                if ( inv_unit_w > 0.0 && std::abs( dd ) <= M2L_KEY_DD_MAX &&
-                     std::abs( ii ) <= M2L_KEY_OFFSET_MAX &&
-                     std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
-                     std::abs( kk ) <= M2L_KEY_OFFSET_MAX )
+        const int nthreads = std::max(
+            1, Kokkos::DefaultHostExecutionSpace().concurrency() );
+        std::vector<int> entry_begin( nthreads + 1, 0 );
+        for ( int t = 1; t < nthreads; ++t )
+        {
+            const long long target =
+                static_cast<long long>( t ) * total_pairs / nthreads;
+            auto it = std::lower_bound(
+                entry_pair_offset.begin(), entry_pair_offset.end(),
+                static_cast<int>( target ) );
+            entry_begin[t] =
+                static_cast<int>( it - entry_pair_offset.begin() );
+        }
+        entry_begin[nthreads] = static_cast<int>( n_entries );
+
+        std::vector<std::unordered_map<M2LKey, int, M2LKeyHash>>
+            local_k2o( nthreads );
+        std::vector<std::vector<M2LKey>> local_ops( nthreads );
+        for ( int t = 0; t < nthreads; ++t )
+        {
+            local_k2o[t].reserve( S3_PER_THREAD_KEYMAP_RESERVE );
+            local_ops[t].reserve( S3_PER_THREAD_KEYMAP_RESERVE );
+        }
+
+        Kokkos::parallel_for(
+            "ilist_s3_classify_shard",
+            Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
+                0, nthreads ),
+            [&]( const int t ) {
+                auto& kmap = local_k2o[t];
+                auto& ops_t = local_ops[t];
+                const int ebeg = entry_begin[t];
+                const int eend = entry_begin[t + 1];
+                for ( int ei = ebeg; ei < eend; ++ei )
                 {
-                    M2LKey key{ dd, ii, jj, kk };
-                    auto it = key_to_op.find( key );
-                    if ( it != key_to_op.end() )
+                    const auto& e = entries[ei];
+                    const auto& tci = h_dc_for_filter( e.target_idx );
+                    const bool tgt_shared =
+                        ( tci.owner_rank == OWNER_SHARED );
+                    int p = entry_pair_offset[ei];
+                    for ( int s : e.sources )
                     {
-                        op_idx = it->second;
+                        const auto& sci = h_dc_for_filter( s );
+                        const int max_d = std::max( e.depth, sci.depth );
+                        const double inv_unit_w =
+                            ( max_d >= 0 && max_d <= _max_depth )
+                                ? inv_half_width_at_depth[max_d]
+                                : 0.0;
+                        const double dx = sci.center[0] - tci.center[0];
+                        const double dy = sci.center[1] - tci.center[1];
+                        const double dz = sci.center[2] - tci.center[2];
+                        const int ii = static_cast<int>(
+                            std::lround( dx * inv_unit_w ) );
+                        const int jj = static_cast<int>(
+                            std::lround( dy * inv_unit_w ) );
+                        const int kk = static_cast<int>(
+                            std::lround( dz * inv_unit_w ) );
+                        const int dd = sci.depth - e.depth;
+
+                        int local_op = -1;
+                        if ( inv_unit_w > 0.0 &&
+                             std::abs( dd ) <= M2L_KEY_DD_MAX &&
+                             std::abs( ii ) <= M2L_KEY_OFFSET_MAX &&
+                             std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
+                             std::abs( kk ) <= M2L_KEY_OFFSET_MAX )
+                        {
+                            M2LKey key{ dd, ii, jj, kk };
+                            auto it = kmap.find( key );
+                            if ( it != kmap.end() )
+                            {
+                                local_op = it->second;
+                            }
+                            else
+                            {
+                                local_op = static_cast<int>( ops_t.size() );
+                                kmap.emplace( key, local_op );
+                                ops_t.push_back( key );
+                            }
+                        }
+
+                        pair_op_idx[p] = local_op;
+                        pair_target[p] = e.target_idx;
+                        pair_source[p] = s;
+                        pair_target_depth[p] = e.depth;
+                        pair_target_is_shared[p] = tgt_shared ? 1u : 0u;
+                        ++p;
                     }
-                    else if ( static_cast<int>( ops.size() ) <
-                              M2L_OP_COUNT_CAP )
-                    {
-                        op_idx = static_cast<int>( ops.size() );
-                        key_to_op.emplace( key, op_idx );
-                        ops.push_back( key );
-                    }
-                    else if ( !overflow_warned )
+                }
+            } );
+
+        // Serial merge of per-thread local op tables into global ops/key_to_op,
+        // building a local->global remap per thread. Total work is bounded by
+        // sum of distinct keys per thread (in practice ~16 k globally), so
+        // this is tiny relative to the 550 M-pair classify pass.
+        std::vector<std::vector<int>> local_to_global( nthreads );
+        for ( int t = 0; t < nthreads; ++t )
+        {
+            local_to_global[t].resize( local_ops[t].size() );
+            for ( int lo = 0;
+                  lo < static_cast<int>( local_ops[t].size() ); ++lo )
+            {
+                const M2LKey& key = local_ops[t][lo];
+                auto it = key_to_op.find( key );
+                int g;
+                if ( it != key_to_op.end() )
+                {
+                    g = it->second;
+                }
+                else if ( static_cast<int>( ops.size() ) <
+                          M2L_OP_COUNT_CAP )
+                {
+                    g = static_cast<int>( ops.size() );
+                    key_to_op.emplace( key, g );
+                    ops.push_back( key );
+                }
+                else
+                {
+                    g = -1;
+                    if ( !overflow_warned )
                     {
                         std::fprintf(
                             stderr,
@@ -776,16 +869,26 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                         overflow_warned = true;
                     }
                 }
-
-                pair_op_idx[pair_cursor] = op_idx;
-                pair_target[pair_cursor] = e.target_idx;
-                pair_source[pair_cursor] = s;
-                pair_target_depth[pair_cursor] = e.depth;
-                pair_target_is_shared[pair_cursor] =
-                    tgt_shared ? 1u : 0u;
-                ++pair_cursor;
+                local_to_global[t][lo] = g;
             }
         }
+
+        // Parallel local->global op-idx remap over the disjoint pair slices.
+        Kokkos::parallel_for(
+            "ilist_s3_remap",
+            Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
+                0, nthreads ),
+            [&]( const int t ) {
+                const auto& l2g = local_to_global[t];
+                const int pbeg = entry_pair_offset[entry_begin[t]];
+                const int pend = entry_pair_offset[entry_begin[t + 1]];
+                for ( int p = pbeg; p < pend; ++p )
+                {
+                    const int lo = pair_op_idx[p];
+                    pair_op_idx[p] =
+                        ( lo >= 0 ) ? l2g[lo] : -1;
+                }
+            } );
     }
 
     const int n_unique_ops = static_cast<int>( ops.size() );
