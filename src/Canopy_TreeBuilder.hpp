@@ -252,6 +252,14 @@ class TreeBuilder
     // update() — incremental tree adaptation
     template <class PositionType>
     UpdateResult update( PositionType positions, int num_local_particles );
+
+    // Permute _particle_keys by an externally-supplied permutation:
+    //   new_keys(i) = old_keys(perm(i)).
+    // Used by TreePartitioner::sort_particles_by_leaf to keep particle_keys
+    // consistent with the AoSoA reorder without re-running a full build()
+    // (the tree topology is unchanged across the sort).
+    void apply_particle_permutation(
+        Kokkos::View<int*, memory_space> perm );
 };
 
 // ============================================================================
@@ -825,6 +833,24 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
     rebuild_cell_lookup();
 
     _tree_valid = true;
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void TreeBuilder<MemorySpace, ExecutionSpace>::apply_particle_permutation(
+    Kokkos::View<int*, memory_space> perm )
+{
+    const int N = static_cast<int>( _particle_keys.extent( 0 ) );
+    key_view_type new_keys(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "particle_keys_permuted" ),
+        static_cast<size_t>( N ) );
+    auto old_keys = _particle_keys;
+    Kokkos::parallel_for(
+        "apply_particle_permutation",
+        Kokkos::RangePolicy<execution_space>( 0, N ),
+        KOKKOS_LAMBDA( int i ) { new_keys( i ) = old_keys( perm( i ) ); } );
+    Kokkos::fence();
+    _particle_keys = new_keys;
 }
 
 template <class MemorySpace, class ExecutionSpace>

@@ -279,13 +279,13 @@ class TreePartitioner
     //   - The AoSoA has been permuted. Particles are grouped by leaf cell.
     //   - _leaf_particle_offsets is populated.
     //   - _particle_leaf_cell_idx is populated.
-    //   - builder.particle_keys() is now STALE (order does not match AoSoA).
-    //     The caller should call builder.build() again if particle_keys are
-    //     needed in their new order.
+    //   - builder.particle_keys() is permuted in place to match the new AoSoA
+    //     order (tree topology is unchanged across the sort, so re-running a
+    //     full builder.build() just to refresh key order is unnecessary).
     // -----------------------------------------------------------------------
     template <class AoSoAType>
     void sort_particles_by_leaf(
-        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
         AoSoAType& particles );
 };
 
@@ -752,7 +752,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::
 template <class MemorySpace, class ExecutionSpace>
 template <class AoSoAType>
 void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
-    const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+    TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
     AoSoAType& particles )
 {
     const auto& cells = tree_builder.cells();
@@ -831,6 +831,11 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
             } );
         Kokkos::fence();
     }
+
+    // Keep builder.particle_keys() in sync with the new AoSoA order. The
+    // tree topology did not change across the sort, so a full builder.build()
+    // would re-derive the same keys in this new order at a much higher cost.
+    tree_builder.apply_particle_permutation( perm );
 
     // Build leaf_particle_offsets as a prefix sum of per-cell counts.
     _leaf_particle_offsets = Kokkos::View<int*, memory_space>(

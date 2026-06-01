@@ -422,17 +422,12 @@ class Solver
                 _builder.build( positions, _num_local );
             }
 
-            // Step 4: sort AoSoA by leaf (invalidates particle_keys)
+            // Step 4: sort AoSoA by leaf. The partitioner also permutes
+            // builder.particle_keys() in place to match the new AoSoA order,
+            // so no follow-up _builder.build() is needed.
             {
                 CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
                 _partitioner.sort_particles_by_leaf( _builder, particles );
-            }
-
-            // Step 5: rebuild so particle_keys match sorted AoSoA order
-            {
-                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
-                auto positions = Cabana::slice<PositionIdx>( particles );
-                _builder.build( positions, _num_local );
             }
 
             // Step 5b: refresh ownership against the FINAL tree using the
@@ -503,12 +498,10 @@ class Solver
           auto positions = Cabana::slice<PositionIdx>( particles );
           _builder.build( positions, _num_local ); }
 
+        // sort_particles_by_leaf permutes builder.particle_keys() in place,
+        // so a follow-up _builder.build() is unnecessary here.
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
           _partitioner.sort_particles_by_leaf( _builder, particles ); }
-
-        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
-          auto positions = Cabana::slice<PositionIdx>( particles );
-          _builder.build( positions, _num_local ); }
 
         // Refresh ownership against the FINAL tree using cached leaf
         // assignment. See bug 1 note in _full_setup.
@@ -543,12 +536,10 @@ class Solver
           auto positions = Cabana::slice<PositionIdx>( particles );
           _builder.build( positions, _num_local ); }
 
+        // sort_particles_by_leaf permutes builder.particle_keys() in place,
+        // so a follow-up _builder.build() is unnecessary here.
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
           _partitioner.sort_particles_by_leaf( _builder, particles ); }
-
-        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
-          auto positions = Cabana::slice<PositionIdx>( particles );
-          _builder.build( positions, _num_local ); }
 
         // Reuse existing comm_plan (topology unchanged).
         Kokkos::fence( "_finish_topology_stable: pre-setup" );
