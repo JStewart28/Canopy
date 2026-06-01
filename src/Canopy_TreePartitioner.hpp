@@ -279,13 +279,13 @@ class TreePartitioner
     //   - The AoSoA has been permuted. Particles are grouped by leaf cell.
     //   - _leaf_particle_offsets is populated.
     //   - _particle_leaf_cell_idx is populated.
-    //   - builder.particle_keys() is now STALE (order does not match AoSoA).
-    //     The caller should call builder.build() again if particle_keys are
-    //     needed in their new order.
+    //   - builder.particle_keys() is permuted in place to match the new AoSoA
+    //     order (tree topology is unchanged across the sort, so re-running a
+    //     full builder.build() just to refresh key order is unnecessary).
     // -----------------------------------------------------------------------
     template <class AoSoAType>
     void sort_particles_by_leaf(
-        const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+        TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
         AoSoAType& particles );
 };
 
@@ -752,61 +752,136 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::
 template <class MemorySpace, class ExecutionSpace>
 template <class AoSoAType>
 void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
-    const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
+    TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
     AoSoAType& particles )
 {
     const auto& cells = tree_builder.cells();
     const int num_cells = static_cast<int>( cells.size() );
     const int N = static_cast<int>( particles.size() );
 
-    // Build key -> cell_index map on host
-    std::unordered_map<MortonKey, int> key_to_idx;
-    key_to_idx.reserve( num_cells );
-    for ( int i = 0; i < num_cells; i++ )
-        key_to_idx[cells[i].key] = i;
+    // Device counting sort, avoiding Cabana::sortByKey/binByKey (both route
+    // through Kokkos::BinSort, whose 1e8-wide atomic bin-count scatter faults
+    // on the MI300A unified-memory path at 4e8 particles — see MI300A
+    // investigation bug 4). Uses bounded Kokkos::atomic_add into num_cells-wide
+    // counters (same pattern as LaplaceKernel M2M/L2L), NOT BinSort's pattern.
+    //
+    // Steps (all parallel):
+    //   1. Build sorted (key,cell_idx) lookup on host once (num_cells small),
+    //      deep_copy to device. Binary search per particle → cell_of_d.
+    //   2. Atomic per-cell count → cell_counts_d; exclusive scan → offsets_d.
+    //   3. Atomic scatter into perm using offsets_d + per-cell running counter.
+    //   4. Fill _particle_leaf_cell_idx on device from offsets_d.
+    // Within-cell order in perm is unspecified (atomic_fetch_add ordering);
+    // downstream consumers (P2P leaf iteration, P2M sums) only need the
+    // [offsets(c), offsets(c+1)) grouping, not a specific within-cell order.
 
-    // Compute each particle's leaf cell index on host
-    auto particle_keys = tree_builder.particle_keys();
-    auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                       particle_keys );
-
-    // Per-particle cell index on host (original AoSoA order).
-    std::vector<int> cell_of( N );
-    for ( int i = 0; i < N; i++ )
+    Kokkos::View<MortonKey*, memory_space> sorted_keys_d(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "sorted_cell_keys" ),
+        static_cast<size_t>( num_cells ) );
+    Kokkos::View<int*, memory_space> sorted_cell_idx_d(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "sorted_cell_idx" ),
+        static_cast<size_t>( num_cells ) );
     {
-        auto it = key_to_idx.find( h_keys( i ) );
-        cell_of[i] = ( it != key_to_idx.end() ) ? it->second : 0;
+        auto sk_h = Kokkos::create_mirror_view( sorted_keys_d );
+        auto sci_h = Kokkos::create_mirror_view( sorted_cell_idx_d );
+        std::vector<std::pair<MortonKey, int>> pairs( num_cells );
+        for ( int i = 0; i < num_cells; i++ )
+            pairs[i] = { cells[i].key, i };
+        std::sort( pairs.begin(), pairs.end(),
+                   []( const std::pair<MortonKey, int>& a,
+                       const std::pair<MortonKey, int>& b ) {
+                       return a.first < b.first;
+                   } );
+        for ( int i = 0; i < num_cells; i++ )
+        {
+            sk_h( i ) = pairs[i].first;
+            sci_h( i ) = pairs[i].second;
+        }
+        Kokkos::deep_copy( sorted_keys_d, sk_h );
+        Kokkos::deep_copy( sorted_cell_idx_d, sci_h );
     }
 
-    // Count particles per cell (plain histogram of cell indices).
-    std::vector<int> cell_counts( num_cells, 0 );
-    for ( int i = 0; i < N; i++ )
-        cell_counts[cell_of[i]]++;
+    auto particle_keys = tree_builder.particle_keys();
+    Kokkos::View<int*, memory_space> cell_of_d(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "cell_of" ),
+        static_cast<size_t>( N ) );
+    {
+        auto sk = sorted_keys_d;
+        auto sci = sorted_cell_idx_d;
+        auto co = cell_of_d;
+        auto pk = particle_keys;
+        const int nc = num_cells;
+        Kokkos::parallel_for(
+            "sort_classify",
+            Kokkos::RangePolicy<execution_space>( 0, N ),
+            KOKKOS_LAMBDA( const int i ) {
+                MortonKey k = pk( i );
+                int lo = 0;
+                int hi = nc;
+                while ( lo < hi )
+                {
+                    int mid = ( lo + hi ) >> 1;
+                    if ( sk( mid ) < k )
+                        lo = mid + 1;
+                    else
+                        hi = mid;
+                }
+                co( i ) =
+                    ( lo < nc && sk( lo ) == k ) ? sci( lo ) : 0;
+            } );
+    }
 
-    // Build the sort permutation with a HOST counting sort, then apply it with
-    // a manual device gather. We deliberately avoid Cabana::sortByKey /
-    // Cabana::binByKey here: both route through Kokkos::BinSort, whose 1e8-wide
-    // atomic bin-count scatter faults ("write to read-only page") on the
-    // MI300A unified-memory path at 4e8 particles (MI300A investigation bug 4),
-    // independent of bin count or within-bin sorting. The counting sort touches
-    // no device atomics; the gather is a single tuple copy per particle —
-    // exactly what Cabana::permute does, minus the BinSort that precedes it.
-    //
-    // perm(new_pos) = old_index, with new positions grouped by ascending cell
-    // index (running offset per cell), i.e. the sorted-by-leaf layout that
-    // _leaf_particle_offsets assumes.
+    Kokkos::View<int*, memory_space> cell_counts_d(
+        "cell_counts", static_cast<size_t>( num_cells ) );
+    {
+        auto cc = cell_counts_d;
+        auto co = cell_of_d;
+        Kokkos::parallel_for(
+            "sort_count",
+            Kokkos::RangePolicy<execution_space>( 0, N ),
+            KOKKOS_LAMBDA( const int i ) {
+                Kokkos::atomic_add( &cc( co( i ) ), 1 );
+            } );
+    }
+
+    Kokkos::View<int*, memory_space> offsets_d(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "leaf_particle_offsets" ),
+        static_cast<size_t>( num_cells + 1 ) );
+    {
+        auto cc = cell_counts_d;
+        auto off = offsets_d;
+        const int nc = num_cells;
+        Kokkos::parallel_scan(
+            "sort_prefix",
+            Kokkos::RangePolicy<execution_space>( 0, num_cells + 1 ),
+            KOKKOS_LAMBDA( const int c, int& upd, const bool final ) {
+                if ( final )
+                    off( c ) = upd;
+                if ( c < nc )
+                    upd += cc( c );
+            } );
+    }
+
     Kokkos::View<int*, memory_space> perm(
         Kokkos::view_alloc( Kokkos::WithoutInitializing, "sort_perm" ),
         static_cast<size_t>( N ) );
+    Kokkos::View<int*, memory_space> running_d(
+        "sort_running", static_cast<size_t>( num_cells ) );
     {
-        auto perm_h = Kokkos::create_mirror_view( perm );
-        std::vector<int> running( num_cells, 0 );
-        running[0] = 0;
-        for ( int c = 1; c < num_cells; c++ )
-            running[c] = running[c - 1] + cell_counts[c - 1];
-        for ( int i = 0; i < N; i++ )
-            perm_h( running[cell_of[i]]++ ) = i;
-        Kokkos::deep_copy( perm, perm_h );
+        auto pm = perm;
+        auto co = cell_of_d;
+        auto off = offsets_d;
+        auto rn = running_d;
+        Kokkos::parallel_for(
+            "sort_scatter_perm",
+            Kokkos::RangePolicy<execution_space>( 0, N ),
+            KOKKOS_LAMBDA( const int i ) {
+                const int c = co( i );
+                const int pos =
+                    off( c ) + Kokkos::atomic_fetch_add( &rn( c ), 1 );
+                pm( pos ) = i;
+            } );
     }
 
     // Manual device gather: scratch(i) = particles[perm(i)], then copy back.
@@ -832,30 +907,32 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::sort_particles_by_leaf(
         Kokkos::fence();
     }
 
-    // Build leaf_particle_offsets as a prefix sum of per-cell counts.
-    _leaf_particle_offsets = Kokkos::View<int*, memory_space>(
-        std::string( "leaf_particle_offsets" ),
-        static_cast<size_t>( num_cells + 1 ) );
-    {
-        auto h = Kokkos::create_mirror_view( _leaf_particle_offsets );
-        h( 0 ) = 0;
-        for ( int c = 0; c < num_cells; c++ )
-            h( c + 1 ) = h( c ) + cell_counts[c];
-        Kokkos::deep_copy( _leaf_particle_offsets, h );
-    }
+    // Keep builder.particle_keys() in sync with the new AoSoA order. The
+    // tree topology did not change across the sort, so a full builder.build()
+    // would re-derive the same keys in this new order at a much higher cost.
+    tree_builder.apply_particle_permutation( perm );
 
-    // Build per-particle cell index using the offsets.
-    // After permute, particles in [offsets(c), offsets(c+1)) belong to cell c.
+    // _leaf_particle_offsets was already built on device as offsets_d.
+    _leaf_particle_offsets = offsets_d;
+
+    // Fill _particle_leaf_cell_idx on device: thread c writes the constant c
+    // into slots [offsets(c), offsets(c+1)).
     _particle_leaf_cell_idx = Kokkos::View<int*, memory_space>(
-        std::string( "particle_leaf_cell_idx" ), static_cast<size_t>( N ) );
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "particle_leaf_cell_idx" ),
+        static_cast<size_t>( N ) );
     {
-        auto h = Kokkos::create_mirror_view( _particle_leaf_cell_idx );
-        auto h_off = Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace(), _leaf_particle_offsets );
-        for ( int c = 0; c < num_cells; c++ )
-            for ( int k = h_off( c ); k < h_off( c + 1 ); k++ )
-                h( k ) = c;
-        Kokkos::deep_copy( _particle_leaf_cell_idx, h );
+        auto pli = _particle_leaf_cell_idx;
+        auto off = offsets_d;
+        Kokkos::parallel_for(
+            "sort_fill_cell_idx",
+            Kokkos::RangePolicy<execution_space>( 0, num_cells ),
+            KOKKOS_LAMBDA( const int c ) {
+                const int lo = off( c );
+                const int hi = off( c + 1 );
+                for ( int k = lo; k < hi; k++ )
+                    pli( k ) = c;
+            } );
     }
 }
 
