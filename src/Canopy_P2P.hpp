@@ -24,6 +24,7 @@
 #include <mpi.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <unordered_map>
 #include <vector>
 
@@ -1019,6 +1020,213 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         } // if ( n_local > 0 )
     } // TIMER_P2P_INTER_KERNEL
     } // TIMER_P2P_TOTAL
+
+#if CANOPY_PROFILING_LEVEL >= 3
+    // Diagnostic (level 3 only): re-run the inter-leaf kernel into scratch
+    // outputs (warm: identical distribution and already-allocated neighbor /
+    // ghost buffers) and count the inter-leaf trip pairs. Placed OUTSIDE the
+    // TIMER_P2P_TOTAL scope so it never inflates the production totals; the
+    // per-execute locals from that scope are therefore re-derived from members
+    // here. A fast rerun vs the timed kernel implies the first launch paid a
+    // one-time first-touch / allocation cost; an equally slow rerun implies
+    // genuinely heavier kernel work at this step. The real potential_out /
+    // gradient_out are untouched, so the solve results are unchanged.
+    //
+    // The kernel body is duplicated here (rather than shared via a local
+    // lambda) because nvcc forbids defining an extended __device__ lambda
+    // (KOKKOS_LAMBDA) inside another lambda; a direct parallel_for in this
+    // member-function scope is well-formed. It compiles to nothing below
+    // level 3, so production builds carry no duplication.
+    {
+        const int n_local_d = static_cast<int>( positions.size() );
+        if ( n_local_d > 0 )
+        {
+            const scalar_type eps2_d = _softening2;
+            auto particle_to_league_v = _particle_to_league;
+            auto leaf_offsets_d = _leaf_particle_offsets;
+            auto local_nbr_off_d = _local_nbr_offsets;
+            auto local_nbr_idx_d = _local_nbr_cell_idx;
+            auto ghost_nbr_off_d = _ghost_nbr_offsets;
+            auto ghost_nbr_idx_d = _ghost_nbr_leaf_idx;
+            auto ghost_leaf_off_d = _ghost_leaf_offsets;
+            auto ghost_positions_d = _ghost_positions;
+            auto ghost_charges_d = _ghost_charges;
+
+            potential_view_type pot_scratch(
+                Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                    "p2p_pot_scratch" ),
+                n_local_d );
+            gradient_view_type grad_scratch(
+                Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                    "p2p_grad_scratch" ),
+                compute_gradient ? n_local_d : 0 );
+            Kokkos::deep_copy( pot_scratch, static_cast<scalar_type>( 0 ) );
+            if ( compute_gradient )
+                Kokkos::deep_copy( grad_scratch,
+                                   static_cast<scalar_type>( 0 ) );
+
+            {
+                CANOPY_SCOPED_TIMER(
+                    Canopy::Profiling::TIMER_P2P_INTER_KERNEL_RERUN );
+                Kokkos::parallel_for(
+                    "P2P_inter_leaf_rerun",
+                    Kokkos::RangePolicy<execution_space>( 0, n_local_d ),
+                    KOKKOS_LAMBDA( const int pi ) {
+                        const int league = particle_to_league_v( pi );
+                        if ( league < 0 )
+                            return;
+
+                        const scalar_type xi =
+                            static_cast<scalar_type>( positions( pi, 0 ) );
+                        const scalar_type yi =
+                            static_cast<scalar_type>( positions( pi, 1 ) );
+                        const scalar_type zi =
+                            static_cast<scalar_type>( positions( pi, 2 ) );
+
+                        scalar_type phi[NComps];
+                        scalar_type gx[NComps], gy[NComps], gz[NComps];
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            phi[c] = static_cast<scalar_type>( 0 );
+                            gx[c] = static_cast<scalar_type>( 0 );
+                            gy[c] = static_cast<scalar_type>( 0 );
+                            gz[c] = static_cast<scalar_type>( 0 );
+                        }
+
+                        const int l_start = local_nbr_off_d( league );
+                        const int l_end = local_nbr_off_d( league + 1 );
+                        for ( int nn = l_start; nn < l_end; nn++ )
+                        {
+                            const int n_cidx = local_nbr_idx_d( nn );
+                            const int ns = leaf_offsets_d( n_cidx );
+                            const int ne = leaf_offsets_d( n_cidx + 1 );
+                            for ( int pj = ns; pj < ne; pj++ )
+                            {
+                                const scalar_type dx =
+                                    xi - static_cast<scalar_type>(
+                                             positions( pj, 0 ) );
+                                const scalar_type dy =
+                                    yi - static_cast<scalar_type>(
+                                             positions( pj, 1 ) );
+                                const scalar_type dz =
+                                    zi - static_cast<scalar_type>(
+                                             positions( pj, 2 ) );
+                                const scalar_type r2 =
+                                    dx * dx + dy * dy + dz * dz;
+                                if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
+                                    continue;
+                                const scalar_type inv_r =
+                                    static_cast<scalar_type>( 1.0 ) /
+                                    Kokkos::sqrt( r2 + eps2_d );
+                                const scalar_type inv_r3 =
+                                    inv_r * inv_r * inv_r;
+                                for ( int c = 0; c < NComps; c++ )
+                                {
+                                    const scalar_type qj =
+                                        static_cast<scalar_type>(
+                                            charges( pj, c ) );
+                                    phi[c] += qj * inv_r;
+                                    if ( compute_gradient )
+                                    {
+                                        gx[c] -= qj * dx * inv_r3;
+                                        gy[c] -= qj * dy * inv_r3;
+                                        gz[c] -= qj * dz * inv_r3;
+                                    }
+                                }
+                            }
+                        }
+
+                        const int g_start = ghost_nbr_off_d( league );
+                        const int g_end = ghost_nbr_off_d( league + 1 );
+                        for ( int nn = g_start; nn < g_end; nn++ )
+                        {
+                            const int g_idx = ghost_nbr_idx_d( nn );
+                            const int gs = ghost_leaf_off_d( g_idx );
+                            const int ge = ghost_leaf_off_d( g_idx + 1 );
+                            for ( int pj = gs; pj < ge; pj++ )
+                            {
+                                const scalar_type dx =
+                                    xi - ghost_positions_d( pj, 0 );
+                                const scalar_type dy =
+                                    yi - ghost_positions_d( pj, 1 );
+                                const scalar_type dz =
+                                    zi - ghost_positions_d( pj, 2 );
+                                const scalar_type r2 =
+                                    dx * dx + dy * dy + dz * dz;
+                                if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
+                                    continue;
+                                const scalar_type inv_r =
+                                    static_cast<scalar_type>( 1.0 ) /
+                                    Kokkos::sqrt( r2 + eps2_d );
+                                const scalar_type inv_r3 =
+                                    inv_r * inv_r * inv_r;
+                                for ( int c = 0; c < NComps; c++ )
+                                {
+                                    const scalar_type qj =
+                                        ghost_charges_d( pj, c );
+                                    phi[c] += qj * inv_r;
+                                    if ( compute_gradient )
+                                    {
+                                        gx[c] -= qj * dx * inv_r3;
+                                        gy[c] -= qj * dy * inv_r3;
+                                        gz[c] -= qj * dz * inv_r3;
+                                    }
+                                }
+                            }
+                        }
+
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            pot_scratch( pi, c ) += phi[c];
+                            if ( compute_gradient )
+                            {
+                                grad_scratch( pi, c, 0 ) += gx[c];
+                                grad_scratch( pi, c, 1 ) += gy[c];
+                                grad_scratch( pi, c, 2 ) += gz[c];
+                            }
+                        }
+                    } );
+                Kokkos::fence();
+            }
+
+            long long local_pairs = 0;
+            Kokkos::parallel_reduce(
+                "p2p_inter_leaf_pair_count",
+                Kokkos::RangePolicy<execution_space>( 0, n_local_d ),
+                KOKKOS_LAMBDA( const int pi, long long& acc ) {
+                    const int league = particle_to_league_v( pi );
+                    if ( league < 0 )
+                        return;
+                    const int ls = local_nbr_off_d( league );
+                    const int le = local_nbr_off_d( league + 1 );
+                    for ( int nn = ls; nn < le; nn++ )
+                    {
+                        const int c = local_nbr_idx_d( nn );
+                        acc += leaf_offsets_d( c + 1 ) - leaf_offsets_d( c );
+                    }
+                    const int gst = ghost_nbr_off_d( league );
+                    const int gen = ghost_nbr_off_d( league + 1 );
+                    for ( int nn = gst; nn < gen; nn++ )
+                    {
+                        const int g = ghost_nbr_idx_d( nn );
+                        acc += ghost_leaf_off_d( g + 1 ) -
+                               ghost_leaf_off_d( g );
+                    }
+                },
+                local_pairs );
+
+            long long global_pairs = 0;
+            MPI_Reduce( &local_pairs, &global_pairs, 1, MPI_LONG_LONG,
+                        MPI_SUM, 0, _comm );
+            int diag_rank = 0;
+            MPI_Comm_rank( _comm, &diag_rank );
+            if ( diag_rank == 0 )
+                std::fprintf( stderr,
+                              "[Canopy diag] p2p_inter_leaf_pairs=%lld\n",
+                              global_pairs );
+        }
+    }
+#endif
 
     CANOPY_PRINT_P2P_TIMERS( _comm );
 }
