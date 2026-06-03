@@ -406,6 +406,11 @@ class DownwardSweep
     };
     std::unordered_map<MortonKey, ClassifyEntry> _prev_classify;
 
+    // Diagnostic: number of pair slots filled from the cache in the
+    // most recent build_interaction_list_device call. 0 on the full-
+    // rebuild path; nonzero on incremental Rebalance.
+    long long _last_build_cache_hit_pairs = 0;
+
     // Count of actual rebuilds done by build_interaction_list_device (does
     // not increment on the early-return path). Surfaced by
     // interaction_list_build_count() for the caching tests.
@@ -817,6 +822,102 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         }
         entry_begin[nthreads] = static_cast<int>( n_entries );
 
+        // -------------------------------------------------------------
+        // A.1 Stage 5: cache-hit detection and fill.
+        //
+        // The fast path: when this build was kicked off by a Rebalance
+        // (changed_cells non-empty) and the previous build deposited a
+        // _prev_classify snapshot, every entry whose target survives
+        // unchanged AND whose source set matches the previous build's
+        // source set element-for-element can reuse the prior build's
+        // op_idx values directly. M2LPlan.finalize_m2l_plan() already
+        // sorts each per-target source list ascending by MortonKey
+        // (Canopy_CommunicationPlan.hpp:791), so the cache snapshot's
+        // sorted source_keys can be compared in O(n_src).
+        //
+        // If entry e is in the symmetric-difference (target_key is in
+        // changed_cells), or its prev entry's source set differs, the
+        // cache match fails and we fall through to the normal classify
+        // path for that entry only.
+        //
+        // Geometric correctness of cache reuse: op_idx is a deterministic
+        // function of (target_key, source_key) — both encode depth and
+        // quantized position. So if a (T,S) pair appears in both builds
+        // with the same MortonKeys, its op_idx is bit-identical and
+        // safely reusable from the persistent op_table.
+        // -------------------------------------------------------------
+        std::vector<unsigned char> entry_is_hit( n_entries, 0 );
+        const bool can_cache =
+            !_changed_cells_for_next_build.empty() &&
+            !_prev_classify.empty();
+        if ( can_cache )
+        {
+            Kokkos::parallel_for(
+                "ilist_s3_cache_lookup",
+                Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
+                    0, nthreads ),
+                [&]( const int t ) {
+                    const int ebeg = entry_begin[t];
+                    const int eend = entry_begin[t + 1];
+                    for ( int ei = ebeg; ei < eend; ++ei )
+                    {
+                        const auto& e = entries[ei];
+                        auto it = _prev_classify.find( e.target_key );
+                        if ( it == _prev_classify.end() )
+                            continue;
+                        const ClassifyEntry& prev = it->second;
+                        if ( prev.depth != e.depth )
+                            continue;
+                        const auto& tci = h_dc_for_filter( e.target_idx );
+                        const bool new_shared =
+                            ( tci.owner_rank == OWNER_SHARED );
+                        if ( prev.target_is_shared != new_shared )
+                            continue;
+                        const int n_src = static_cast<int>(
+                            e.source_keys.size() );
+                        if ( static_cast<int>(
+                                 prev.source_keys.size() ) != n_src )
+                            continue;
+
+                        // Linear set-equality on already-sorted lists.
+                        bool match = true;
+                        for ( int i = 0; i < n_src; ++i )
+                        {
+                            if ( e.source_keys[i] != prev.source_keys[i] )
+                            {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if ( !match )
+                            continue;
+
+                        // Hit: fill pair_* and pair_op_idx from cache.
+                        const int p0 = entry_pair_offset[ei];
+                        for ( int i = 0; i < n_src; ++i )
+                        {
+                            pair_op_idx[p0 + i] = prev.op_idx[i];
+                            pair_target[p0 + i] = e.target_idx;
+                            pair_source[p0 + i] = e.sources[i];
+                            pair_target_depth[p0 + i] = e.depth;
+                            pair_target_is_shared[p0 + i] =
+                                new_shared ? 1u : 0u;
+                        }
+                        entry_is_hit[ei] = 1u;
+                    }
+                } );
+        }
+
+        // Tally hits (cheap; one pass over entries).
+        _last_build_cache_hit_pairs = 0;
+        for ( size_t ei = 0; ei < n_entries; ++ei )
+        {
+            if ( entry_is_hit[ei] )
+                _last_build_cache_hit_pairs +=
+                    static_cast<long long>(
+                        entries[ei].sources.size() );
+        }
+
         std::vector<std::unordered_map<M2LKey, int, M2LKeyHash>>
             local_k2o( nthreads );
         std::vector<std::vector<M2LKey>> local_ops( nthreads );
@@ -837,6 +938,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 const int eend = entry_begin[t + 1];
                 for ( int ei = ebeg; ei < eend; ++ei )
                 {
+                    // A.1 Stage 5: skip entries pre-filled from the cache.
+                    if ( entry_is_hit[ei] )
+                        continue;
                     const auto& e = entries[ei];
                     const auto& tci = h_dc_for_filter( e.target_idx );
                     const bool tgt_shared =
@@ -934,20 +1038,30 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             }
         }
 
-        // Parallel local->global op-idx remap over the disjoint pair slices.
+        // Parallel local->global op-idx remap over the disjoint pair
+        // slices. Hit entries (pre-filled from _prev_classify) already
+        // hold global op_idx values from the persistent _ops, so we
+        // iterate by entry and skip them.
         Kokkos::parallel_for(
             "ilist_s3_remap",
             Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
                 0, nthreads ),
             [&]( const int t ) {
                 const auto& l2g = local_to_global[t];
-                const int pbeg = entry_pair_offset[entry_begin[t]];
-                const int pend = entry_pair_offset[entry_begin[t + 1]];
-                for ( int p = pbeg; p < pend; ++p )
+                const int ebeg = entry_begin[t];
+                const int eend = entry_begin[t + 1];
+                for ( int ei = ebeg; ei < eend; ++ei )
                 {
-                    const int lo = pair_op_idx[p];
-                    pair_op_idx[p] =
-                        ( lo >= 0 ) ? l2g[lo] : -1;
+                    if ( entry_is_hit[ei] )
+                        continue;
+                    const int pbeg = entry_pair_offset[ei];
+                    const int pend = entry_pair_offset[ei + 1];
+                    for ( int p = pbeg; p < pend; ++p )
+                    {
+                        const int lo = pair_op_idx[p];
+                        pair_op_idx[p] =
+                            ( lo >= 0 ) ? l2g[lo] : -1;
+                    }
                 }
             } );
     }
@@ -959,9 +1073,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         std::fprintf( stderr,
                       "[Canopy diag] build_interaction_list: "
                       "n_unique_ops=%d, _max_depth=%d, "
-                      "total_pairs=%d, cap=%d\n",
+                      "total_pairs=%d, cap=%d, "
+                      "cache_hit_pairs=%lld\n",
                       n_unique_ops, _max_depth, total_pairs,
-                      M2L_OP_COUNT_CAP );
+                      M2L_OP_COUNT_CAP,
+                      _last_build_cache_hit_pairs );
     }
 
     // -----------------------------------------------------------------------
