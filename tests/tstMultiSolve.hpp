@@ -618,6 +618,45 @@ TEST( MultiSolve, AutoMaintain )
 }
 
 //---------------------------------------------------------------------------//
+// Test 4b: Auto-maintain mode forced into the Rebalance branch.
+//
+// The standard AutoMaintain test (above) uses drift_multiplier=5.0, which
+// makes particles routinely escape the initial bounding box; auto_maintain
+// then takes the Rebuild branch on every step. To exercise the Rebalance
+// branch (tree topology changes but bbox holds) we widen the bounding box
+// (tree_tol=0.3 ⇒ 30% padding), keep dt small, drop drift_multiplier to a
+// modest value that lets velocities accumulate enough leaf refine/coarsen
+// to change the cell-key set, and run for more steps so at least one
+// per-step topology change is virtually certain.
+//
+// The assertion is that the Rebalance count is >0. The trajectory
+// tolerance is the same as the other Rebalance/Auto tests (fmm_tol=2e-2),
+// so this also serves as a regression check on the Rebalance physics
+// path itself.
+//---------------------------------------------------------------------------//
+TEST( MultiSolve, AutoRebalance )
+{
+    int counts[3] = { 0, 0, 0 };
+    testMultiStepGravity( MultiSolveTest::Mode::Auto,
+                          /*npp=*/200, /*nsteps=*/8,
+                          /*dt=*/1.0e-3, /*drift_multiplier=*/2.0,
+                          /*ncrit=*/16, /*max_depth=*/6,
+                          /*tree_tol=*/0.3, /*repl_depth=*/2,
+                          /*fmm_tol=*/2.0e-2, counts );
+
+    int rank;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    if ( rank == 0 )
+    {
+        EXPECT_GT( counts[1], 0 )
+            << "auto_maintain never took the Rebalance branch "
+            << "(Migrate=" << counts[0]
+            << " Rebalance=" << counts[1]
+            << " Rebuild=" << counts[2] << ")";
+    }
+}
+
+//---------------------------------------------------------------------------//
 // Test 5: Bin-edge fallback — exercise the per-pair m2l_translate path.
 //
 // The batched-GEMM M2L pipeline assigns each (target, source) pair to a
