@@ -202,24 +202,6 @@ class DownwardSweep
     // -----------------------------------------------------------------------
     void invalidate_interaction_list() { _interaction_list_dirty = true; }
 
-    // -----------------------------------------------------------------------
-    // set_changed_cells(): supply the symmetric-difference cell-key set
-    // (cells added or removed since the previous build) that the next
-    // build_interaction_list_device() may use to skip per-pair classify
-    // for entries whose target and source keys are all unchanged. Called
-    // by Solver::_finish_topology_change just before invalidate. Consumed
-    // (and cleared) on the next build_interaction_list_device() call.
-    //
-    // Passing an empty set, or not calling this at all, causes the next
-    // build to run the original full classify pipeline. This is what
-    // Solver::_full_setup (Rebuild path) wants: no prior cells comparison
-    // exists there, so no hint is provided and the full path runs.
-    // -----------------------------------------------------------------------
-    void set_changed_cells( const std::vector<MortonKey>& changed )
-    {
-        _changed_cells_for_next_build = changed;
-    }
-
     // Number of times build_interaction_list_device has actually performed
     // a rebuild (i.e. did not early-return because dirty was false). Used
     // by tests to verify caching.
@@ -374,42 +356,6 @@ class DownwardSweep
     // false. setup() and invalidate_interaction_list() set it to true; the
     // builder clears it at the end of a successful rebuild.
     bool _interaction_list_dirty = true;
-
-    // Symmetric-difference of cell keys (added ∪ removed) between the
-    // previous tree state and the current one, supplied by Solver before
-    // invalidate. Consumed by the next build_interaction_list_device(): if
-    // non-empty, enables the incremental-classify fast path; if empty,
-    // the builder runs the original full pipeline. Cleared at the end of
-    // the next build call regardless of which path ran.
-    std::vector<MortonKey> _changed_cells_for_next_build;
-
-    // S3 deduplication state, persistent across builds (append-only).
-    // Op_idx values are stable for the lifetime of this DownwardSweep
-    // instance, which lets the incremental-classify path reuse them
-    // from the previous build. _m2l_op_table is grown only when new
-    // keys appear (i.e. when _ops.size() increases between calls).
-    std::vector<M2LKey> _ops;
-    std::unordered_map<M2LKey, int, M2LKeyHash> _key_to_op;
-
-    // Per-target classification cache snapshot, written at the end of
-    // every build_interaction_list_device call and consumed at the
-    // start of the next call (Stage 5). Each entry stores the
-    // target's source-key list (sorted ascending) and the parallel
-    // op_idx list, along with depth and shared-flag. Memory cost is
-    // ~12 bytes per ilist pair (8 B MortonKey + 4 B op_idx).
-    struct ClassifyEntry
-    {
-        std::vector<MortonKey> source_keys;
-        std::vector<int> op_idx;
-        int depth;
-        bool target_is_shared;
-    };
-    std::unordered_map<MortonKey, ClassifyEntry> _prev_classify;
-
-    // Diagnostic: number of pair slots filled from the cache in the
-    // most recent build_interaction_list_device call. 0 on the full-
-    // rebuild path; nonzero on incremental Rebalance.
-    long long _last_build_cache_hit_pairs = 0;
 
     // Count of actual rebuilds done by build_interaction_list_device (does
     // not increment on the early-return path). Surfaced by
@@ -637,14 +583,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     // rebuilds it against the current tree. Without this, a re-setup
     // after a tree-topology change would silently reuse stale cell
     // indices from the previous tree.
-    //
-    // _m2l_op_table is intentionally NOT reset: its entries are indexed
-    // by geometric M2LKey (dd, ii, jj, kk), which is invariant of the
-    // tree's cell layout. The persistent _ops / _key_to_op (A.1) keep
-    // (M2LKey → op_idx) stable across builds, so the table prefix from
-    // the previous build is still correct for those op_idx values and
-    // build_interaction_list_device's S4 path appends to it rather than
-    // re-allocating.
+    _m2l_op_table =
+        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>();
     _m2l_ns_csr_targets = Kokkos::View<int*, memory_space>();
     _m2l_ns_csr_offsets = Kokkos::View<int*, memory_space>();
     _m2l_ns_csr_sources = Kokkos::View<int*, memory_space>();
@@ -690,14 +630,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // [depth_offsets[d], depth_offsets[d+1]) slice — no per-team filter.
     struct TargetEntry
     {
-        MortonKey target_key;
         int target_idx;
         int depth;
         std::vector<int> sources;
-        // Parallel to `sources`; in the same emission order. Carried for
-        // the per-target cache snapshot (and for the cache-hit set
-        // comparison in Stage 5).
-        std::vector<MortonKey> source_keys;
     };
     std::vector<TargetEntry> entries;
     entries.reserve( ilists.size() );
@@ -716,18 +651,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             continue;
 
         TargetEntry e;
-        e.target_key = target_key;
         e.target_idx = target_idx;
         e.depth = tci.depth;
         e.sources.reserve( sources.size() );
-        e.source_keys.reserve( sources.size() );
         // sources is vector<pair<MortonKey, int>> — the second element is
         // the cell index in `cells`, populated by CP when it emitted the
-        // pair. No per-source hash lookup needed. We also retain the
-        // source MortonKey for the per-target cache snapshot.
+        // pair. No per-source hash lookup needed.
         for ( const auto& [src_key, src_idx] : sources )
         {
-            e.source_keys.push_back( src_key );
+            (void)src_key;
             e.sources.push_back( src_idx );
         }
         entries.push_back( std::move( e ) );
@@ -773,12 +705,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     std::vector<int> pair_source( total_pairs );
     std::vector<int> pair_target_depth( total_pairs );
     std::vector<unsigned char> pair_target_is_shared( total_pairs, 0 );
-    // S3 dedup state is persistent and append-only across builds; do NOT
-    // clear here. Track the size at entry so S4 can rebuild only the
-    // newly-appended op slab and skip entirely when no new keys appeared.
-    auto& key_to_op = _key_to_op;
-    auto& ops = _ops;
-    const int prev_n_ops = static_cast<int>( ops.size() );
+    std::unordered_map<M2LKey, int, M2LKeyHash> key_to_op;
+    std::vector<M2LKey> ops;
     bool overflow_warned = false;
 
     {
@@ -828,227 +756,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         }
         entry_begin[nthreads] = static_cast<int>( n_entries );
 
-        // -------------------------------------------------------------
-        // A.1 Stage 5: cache-hit detection and fill.
-        //
-        // The fast path: when this build was kicked off by a Rebalance
-        // (changed_cells non-empty) and the previous build deposited a
-        // _prev_classify snapshot, every entry whose target survives
-        // unchanged AND whose source set matches the previous build's
-        // source set element-for-element can reuse the prior build's
-        // op_idx values directly. M2LPlan.finalize_m2l_plan() already
-        // sorts each per-target source list ascending by MortonKey
-        // (Canopy_CommunicationPlan.hpp:791), so the cache snapshot's
-        // sorted source_keys can be compared in O(n_src).
-        //
-        // If entry e is in the symmetric-difference (target_key is in
-        // changed_cells), or its prev entry's source set differs, the
-        // cache match fails and we fall through to the normal classify
-        // path for that entry only.
-        //
-        // Geometric correctness of cache reuse: op_idx is a deterministic
-        // function of (target_key, source_key) — both encode depth and
-        // quantized position. So if a (T,S) pair appears in both builds
-        // with the same MortonKeys, its op_idx is bit-identical and
-        // safely reusable from the persistent op_table.
-        // -------------------------------------------------------------
-        std::vector<unsigned char> entry_is_hit( n_entries, 0 );
-        const bool can_cache =
-            !_changed_cells_for_next_build.empty() &&
-            !_prev_classify.empty();
-        if ( can_cache )
-        {
-            Kokkos::parallel_for(
-                "ilist_s3_cache_lookup",
-                Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
-                    0, nthreads ),
-                [&]( const int t ) {
-                    const int ebeg = entry_begin[t];
-                    const int eend = entry_begin[t + 1];
-                    for ( int ei = ebeg; ei < eend; ++ei )
-                    {
-                        const auto& e = entries[ei];
-                        auto it = _prev_classify.find( e.target_key );
-                        if ( it == _prev_classify.end() )
-                            continue;
-                        const ClassifyEntry& prev = it->second;
-                        if ( prev.depth != e.depth )
-                            continue;
-                        const auto& tci = h_dc_for_filter( e.target_idx );
-                        const bool new_shared =
-                            ( tci.owner_rank == OWNER_SHARED );
-                        if ( prev.target_is_shared != new_shared )
-                            continue;
-                        const int n_src = static_cast<int>(
-                            e.source_keys.size() );
-                        if ( static_cast<int>(
-                                 prev.source_keys.size() ) != n_src )
-                            continue;
-
-                        // Linear set-equality on already-sorted lists.
-                        bool match = true;
-                        for ( int i = 0; i < n_src; ++i )
-                        {
-                            if ( e.source_keys[i] != prev.source_keys[i] )
-                            {
-                                match = false;
-                                break;
-                            }
-                        }
-                        if ( !match )
-                            continue;
-
-                        // Hit: fill pair_* and pair_op_idx from cache.
-                        const int p0 = entry_pair_offset[ei];
-                        for ( int i = 0; i < n_src; ++i )
-                        {
-                            pair_op_idx[p0 + i] = prev.op_idx[i];
-                            pair_target[p0 + i] = e.target_idx;
-                            pair_source[p0 + i] = e.sources[i];
-                            pair_target_depth[p0 + i] = e.depth;
-                            pair_target_is_shared[p0 + i] =
-                                new_shared ? 1u : 0u;
-                        }
-                        entry_is_hit[ei] = 1u;
-                    }
-                } );
-        }
-
-        // Tally hits (cheap; one pass over entries).
-        _last_build_cache_hit_pairs = 0;
-        for ( size_t ei = 0; ei < n_entries; ++ei )
-        {
-            if ( entry_is_hit[ei] )
-                _last_build_cache_hit_pairs +=
-                    static_cast<long long>(
-                        entries[ei].sources.size() );
-        }
-
-#if defined( CANOPY_ENABLE_DEBUG )
-        // Debug shadow classify: re-derive an M2LKey for every pair
-        // straight from geometry, ignoring the cache, into shadow
-        // arrays. After the main S3 path finishes we verify that the
-        // op_idx assignment maps each pair back to the same M2LKey via
-        // _ops[pair_op_idx[p]]. Doubles S3 wall time when enabled and
-        // is the canonical cross-check that the incremental classify
-        // never deviates from a from-scratch one.
-        std::vector<M2LKey> _dbg_shadow_key( total_pairs,
-                                              M2LKey{ 0, 0, 0, 0 } );
-        std::vector<unsigned char> _dbg_in_range( total_pairs, 0 );
-        Kokkos::parallel_for(
-            "ilist_s3_debug_shadow",
-            Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
-                0, nthreads ),
-            [&]( const int t ) {
-                const int ebeg = entry_begin[t];
-                const int eend = entry_begin[t + 1];
-                for ( int ei = ebeg; ei < eend; ++ei )
-                {
-                    const auto& e = entries[ei];
-                    const auto& tci = h_dc_for_filter( e.target_idx );
-                    int p = entry_pair_offset[ei];
-                    for ( int s : e.sources )
-                    {
-                        const auto& sci = h_dc_for_filter( s );
-                        const int max_d = std::max( e.depth, sci.depth );
-                        const double inv_unit_w =
-                            ( max_d >= 0 && max_d <= _max_depth )
-                                ? inv_half_width_at_depth[max_d]
-                                : 0.0;
-                        const double dx = sci.center[0] - tci.center[0];
-                        const double dy = sci.center[1] - tci.center[1];
-                        const double dz = sci.center[2] - tci.center[2];
-                        const int ii = static_cast<int>(
-                            std::lround( dx * inv_unit_w ) );
-                        const int jj = static_cast<int>(
-                            std::lround( dy * inv_unit_w ) );
-                        const int kk = static_cast<int>(
-                            std::lround( dz * inv_unit_w ) );
-                        const int dd = sci.depth - e.depth;
-                        if ( inv_unit_w > 0.0 &&
-                             std::abs( dd ) <= M2L_KEY_DD_MAX &&
-                             std::abs( ii ) <= M2L_KEY_OFFSET_MAX &&
-                             std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
-                             std::abs( kk ) <= M2L_KEY_OFFSET_MAX )
-                        {
-                            _dbg_shadow_key[p] = M2LKey{ dd, ii, jj, kk };
-                            _dbg_in_range[p] = 1u;
-                        }
-                        ++p;
-                    }
-                }
-            } );
-
-        // Stash these in the outer scope's "static-lifetime within
-        // this build call" vectors via std::swap with class-local
-        // members would require new members. Simpler: do the
-        // verification inline at the end of S3 below before these
-        // vectors go out of scope.
-        // (Verification block is appended after the remap.)
-        auto verify_dbg = [&]() {
-            int n_bad = 0;
-            for ( int p = 0; p < total_pairs; ++p )
-            {
-                const int op = pair_op_idx[p];
-                if ( _dbg_in_range[p] )
-                {
-                    if ( op < 0 ||
-                         op >= static_cast<int>( _ops.size() ) )
-                    {
-                        if ( ++n_bad <= 10 )
-                            std::fprintf(
-                                stderr,
-                                "[Canopy DEBUG] verify FAIL p=%d "
-                                "shadow_in_range=1 op_idx=%d\n",
-                                p, op );
-                        continue;
-                    }
-                    const M2LKey& k = _ops[op];
-                    const M2LKey& sk = _dbg_shadow_key[p];
-                    if ( !( k == sk ) )
-                    {
-                        if ( ++n_bad <= 10 )
-                            std::fprintf(
-                                stderr,
-                                "[Canopy DEBUG] verify FAIL p=%d "
-                                "op=%d ops=(%d,%d,%d,%d) shadow="
-                                "(%d,%d,%d,%d)\n",
-                                p, op, k.dd, k.ii, k.jj, k.kk,
-                                sk.dd, sk.ii, sk.jj, sk.kk );
-                    }
-                }
-                else
-                {
-                    if ( op >= 0 )
-                    {
-                        if ( ++n_bad <= 10 )
-                            std::fprintf(
-                                stderr,
-                                "[Canopy DEBUG] verify FAIL p=%d "
-                                "shadow_in_range=0 op_idx=%d (should be -1)\n",
-                                p, op );
-                    }
-                }
-            }
-            if ( n_bad > 0 )
-            {
-                std::fprintf( stderr,
-                              "[Canopy DEBUG] verify FAILED with "
-                              "%d mismatched pair slots — aborting.\n",
-                              n_bad );
-                MPI_Abort( _comm, 99 );
-            }
-            else if ( _rank == 0 )
-            {
-                std::fprintf(
-                    stderr,
-                    "[Canopy DEBUG] verify OK: %d pairs match "
-                    "(cache_hit_pairs=%lld)\n",
-                    total_pairs, _last_build_cache_hit_pairs );
-            }
-        };
-#endif
-
         std::vector<std::unordered_map<M2LKey, int, M2LKeyHash>>
             local_k2o( nthreads );
         std::vector<std::vector<M2LKey>> local_ops( nthreads );
@@ -1069,9 +776,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 const int eend = entry_begin[t + 1];
                 for ( int ei = ebeg; ei < eend; ++ei )
                 {
-                    // A.1 Stage 5: skip entries pre-filled from the cache.
-                    if ( entry_is_hit[ei] )
-                        continue;
                     const auto& e = entries[ei];
                     const auto& tci = h_dc_for_filter( e.target_idx );
                     const bool tgt_shared =
@@ -1169,36 +873,22 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             }
         }
 
-        // Parallel local->global op-idx remap over the disjoint pair
-        // slices. Hit entries (pre-filled from _prev_classify) already
-        // hold global op_idx values from the persistent _ops, so we
-        // iterate by entry and skip them.
+        // Parallel local->global op-idx remap over the disjoint pair slices.
         Kokkos::parallel_for(
             "ilist_s3_remap",
             Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
                 0, nthreads ),
             [&]( const int t ) {
                 const auto& l2g = local_to_global[t];
-                const int ebeg = entry_begin[t];
-                const int eend = entry_begin[t + 1];
-                for ( int ei = ebeg; ei < eend; ++ei )
+                const int pbeg = entry_pair_offset[entry_begin[t]];
+                const int pend = entry_pair_offset[entry_begin[t + 1]];
+                for ( int p = pbeg; p < pend; ++p )
                 {
-                    if ( entry_is_hit[ei] )
-                        continue;
-                    const int pbeg = entry_pair_offset[ei];
-                    const int pend = entry_pair_offset[ei + 1];
-                    for ( int p = pbeg; p < pend; ++p )
-                    {
-                        const int lo = pair_op_idx[p];
-                        pair_op_idx[p] =
-                            ( lo >= 0 ) ? l2g[lo] : -1;
-                    }
+                    const int lo = pair_op_idx[p];
+                    pair_op_idx[p] =
+                        ( lo >= 0 ) ? l2g[lo] : -1;
                 }
             } );
-
-#if defined( CANOPY_ENABLE_DEBUG )
-        verify_dbg();
-#endif
     }
 
     const int n_unique_ops = static_cast<int>( ops.size() );
@@ -1208,11 +898,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         std::fprintf( stderr,
                       "[Canopy diag] build_interaction_list: "
                       "n_unique_ops=%d, _max_depth=%d, "
-                      "total_pairs=%d, cap=%d, "
-                      "cache_hit_pairs=%lld\n",
+                      "total_pairs=%d, cap=%d\n",
                       n_unique_ops, _max_depth, total_pairs,
-                      M2L_OP_COUNT_CAP,
-                      _last_build_cache_hit_pairs );
+                      M2L_OP_COUNT_CAP );
     }
 
     // -----------------------------------------------------------------------
@@ -1221,82 +909,37 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // depends only on (dd, ii, jj, kk); no physical width enters the
     // builder. The realized key set under MAC = 0.5 is bounded and
     // independent of tree depth.
-    //
-    // Append-only (A.1 Stage 4): when no new ops were appended this build
-    // (n_unique_ops == prev_n_ops) and _m2l_op_table is already sized to
-    // hold them, the persistent op_table from the previous build is
-    // still correct and is reused unchanged. Otherwise we allocate a
-    // wider table, copy the existing prefix (built in prior calls),
-    // build only the newly appended slab on host, and deep_copy the new
-    // slab to device.
     // -----------------------------------------------------------------------
     {
         const int Nt = KernelType::num_coeffs_per_cell;
         const int Ns = KernelType::m2l_num_src_coeffs;
-        const int alloc_n = n_unique_ops > 0 ? n_unique_ops : 1;
-        const int existing_n =
-            static_cast<int>( _m2l_op_table.extent( 2 ) );
-        const bool need_grow =
-            ( existing_n < alloc_n ) || ( _m2l_op_table.extent( 0 ) != size_t( Nt ) )
-            || ( _m2l_op_table.extent( 1 ) != size_t( Ns ) );
+        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
+            op_table( Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                          "m2l_op_table" ),
+                      Nt, Ns, n_unique_ops > 0 ? n_unique_ops : 1 );
+        auto h_op = Kokkos::create_mirror_view( op_table );
 
-        if ( need_grow )
+        if ( n_unique_ops > 0 )
         {
-            Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
-                op_table( Kokkos::view_alloc( Kokkos::WithoutInitializing,
-                                              "m2l_op_table" ),
-                          Nt, Ns, alloc_n );
-
-            // Preserve the previously-built operator slab in [0, prev_n_ops).
-            // For a fresh DownwardSweep instance prev_n_ops == 0 and there's
-            // nothing to copy. The new slab in [prev_n_ops, n_unique_ops) is
-            // built on a host mirror, then deep-copied as a contiguous range
-            // to the corresponding device slab.
-            if ( prev_n_ops > 0 && existing_n >= prev_n_ops )
+            CANOPY_SCOPED_TIMER_DETAILED(
+                Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
+            auto h_A = Kokkos::create_mirror_view_and_copy(
+                Kokkos::HostSpace{}, _A_table );
+            for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
             {
-                auto src = Kokkos::subview(
-                    _m2l_op_table, Kokkos::ALL, Kokkos::ALL,
-                    std::make_pair( 0, prev_n_ops ) );
-                auto dst = Kokkos::subview(
-                    op_table, Kokkos::ALL, Kokkos::ALL,
-                    std::make_pair( 0, prev_n_ops ) );
-                Kokkos::deep_copy( dst, src );
+                const auto& k = ops[op_idx];
+                auto T_slice = Kokkos::subview( h_op, Kokkos::ALL,
+                                                Kokkos::ALL, op_idx );
+                KernelType::m2l_build_operator( k.dd, k.ii, k.jj, k.kk,
+                                                h_A, T_slice );
             }
-
-            if ( n_unique_ops > prev_n_ops )
-            {
-                CANOPY_SCOPED_TIMER_DETAILED(
-                    Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
-                auto h_A = Kokkos::create_mirror_view_and_copy(
-                    Kokkos::HostSpace{}, _A_table );
-                auto h_op = Kokkos::create_mirror_view( op_table );
-                for ( int op_idx = prev_n_ops; op_idx < n_unique_ops;
-                      op_idx++ )
-                {
-                    const auto& k = ops[op_idx];
-                    auto T_slice = Kokkos::subview(
-                        h_op, Kokkos::ALL, Kokkos::ALL, op_idx );
-                    KernelType::m2l_build_operator( k.dd, k.ii, k.jj,
-                                                    k.kk, h_A, T_slice );
-                }
-                {
-                    CANOPY_SCOPED_TIMER_DETAILED(
-                        Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_COPY );
-                    auto new_slab_h = Kokkos::subview(
-                        h_op, Kokkos::ALL, Kokkos::ALL,
-                        std::make_pair( prev_n_ops, n_unique_ops ) );
-                    auto new_slab_d = Kokkos::subview(
-                        op_table, Kokkos::ALL, Kokkos::ALL,
-                        std::make_pair( prev_n_ops, n_unique_ops ) );
-                    Kokkos::deep_copy( new_slab_d, new_slab_h );
-                }
-            }
-
-            _m2l_op_table = op_table;
         }
-        // else: persistent op_table already holds all needed entries — no
-        // S4 work this build (the table is unchanged since the previous
-        // build, which is the cache reuse Stage 4 is designed to enable).
+        {
+            CANOPY_SCOPED_TIMER_DETAILED(
+                Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_COPY );
+            Kokkos::deep_copy( op_table, h_op );
+        }
+        _m2l_op_table = op_table;
     }
 
     // -----------------------------------------------------------------------
@@ -1536,59 +1179,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         upload_int( sh_sources_h, "m2l_sh_csr_sources", _m2l_sh_csr_sources );
         upload_int( sh_op_idx_h,  "m2l_sh_csr_op_idx",  _m2l_sh_csr_op_idx );
     }
-
-    // -----------------------------------------------------------------------
-    // S6 (A.1 Stage 4): snapshot the per-target classification result so
-    // the NEXT build_interaction_list_device() can take the
-    // incremental-classify fast path (Stage 5) for entries whose target
-    // and source keys are all unchanged. Each cache entry holds the
-    // target's source-key list sorted ascending, the parallel op_idx
-    // list, the target depth, and the shared-flag.
-    //
-    // pair_op_idx is laid out flat in entry-emission order; pair index
-    // `p` for entry ei lives at [pair_cursor, pair_cursor + n_src) where
-    // pair_cursor advances by entries[ei].sources.size() per entry —
-    // identical layout to what S5 consumed above.
-    // -----------------------------------------------------------------------
-    {
-        _prev_classify.clear();
-        _prev_classify.reserve( entries.size() );
-
-        int pair_cursor = 0;
-        for ( const auto& e : entries )
-        {
-            const int n_src = static_cast<int>( e.source_keys.size() );
-
-            // Sort source_keys + their op_idx in parallel by source_key
-            // for stable set-equality comparison on the next build.
-            std::vector<int> order( n_src );
-            for ( int i = 0; i < n_src; ++i )
-                order[i] = i;
-            std::sort( order.begin(), order.end(),
-                       [&]( int a, int b ) {
-                           return e.source_keys[a] < e.source_keys[b];
-                       } );
-
-            ClassifyEntry ce;
-            ce.depth = e.depth;
-            ce.target_is_shared =
-                ( pair_target_is_shared[pair_cursor] != 0 );
-            ce.source_keys.resize( n_src );
-            ce.op_idx.resize( n_src );
-            for ( int i = 0; i < n_src; ++i )
-            {
-                const int j = order[i];
-                ce.source_keys[i] = e.source_keys[j];
-                ce.op_idx[i] = pair_op_idx[pair_cursor + j];
-            }
-
-            _prev_classify.emplace( e.target_key, std::move( ce ) );
-            pair_cursor += n_src;
-        }
-    }
-
-    // Consumed: the changed-cells set lives only for one rebuild.
-    _changed_cells_for_next_build.clear();
 
     _interaction_list_dirty = false;
     _interaction_list_build_count++;

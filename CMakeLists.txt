@@ -260,20 +260,6 @@ add_feature_info(Profiling Canopy_ENABLE_PROFILING
     "Enable FMM phase timing via MPI_Wtime (level=${_canopy_profiling_level})")
 
 ##---------------------------------------------------------------------------##
-## Debug-only correctness checks
-##
-## Enables in-code side-by-side verification passes (e.g. the incremental
-## ilist rebuild's full-rebuild cross-check) that double the work in the
-## checked path. Off by default and on production / at-scale builds.
-##---------------------------------------------------------------------------##
-option(Canopy_ENABLE_DEBUG "Debug correctness checks" OFF)
-if(Canopy_ENABLE_DEBUG)
-  add_compile_definitions(CANOPY_ENABLE_DEBUG)
-endif()
-add_feature_info(Debug Canopy_ENABLE_DEBUG
-    "Enable in-code side-by-side correctness checks (significant overhead)")
-
-##---------------------------------------------------------------------------##
 ## Libraries and Examples
 ##---------------------------------------------------------------------------##
 
