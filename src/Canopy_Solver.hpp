@@ -271,10 +271,39 @@ class Solver
         CANOPY_RESET_TIMERS();
         {
             CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REBALANCE_TOTAL );
+
+            // Snapshot the existing cell-key set so we can compute the
+            // symmetric-difference (added ∪ removed) cell list and hand it
+            // to DownwardSweep via _finish_topology_change. This lets the
+            // A.1 incremental classify fast path fire when this explicit
+            // rebalance() is called directly (the test path); on the
+            // auto_maintain() path the same set is computed inside
+            // auto_maintain. Same semantics either way.
+            std::unordered_set<MortonKey> old_keys;
+            old_keys.reserve( _builder.cells().size() );
+            for ( const auto& c : _builder.cells() )
+                old_keys.insert( c.key );
+
             { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
               auto positions = Cabana::slice<PositionIdx>( particles );
               _builder.build( positions, _num_local ); }
-            _finish_topology_change<PositionIdx>( particles );
+
+            std::unordered_set<MortonKey> new_keys;
+            new_keys.reserve( _builder.cells().size() );
+            for ( const auto& c : _builder.cells() )
+                new_keys.insert( c.key );
+
+            std::vector<MortonKey> changed_cells;
+            changed_cells.reserve(
+                ( std::max( old_keys.size(), new_keys.size() ) / 32 ) + 8 );
+            for ( const auto& c : _builder.cells() )
+                if ( old_keys.find( c.key ) == old_keys.end() )
+                    changed_cells.push_back( c.key );
+            for ( const auto& k : old_keys )
+                if ( new_keys.find( k ) == new_keys.end() )
+                    changed_cells.push_back( k );
+
+            _finish_topology_change<PositionIdx>( particles, changed_cells );
         } // TIMER_REBALANCE_TOTAL destructs here
         CANOPY_PRINT_REBALANCE_TIMERS( _comm );
         CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
