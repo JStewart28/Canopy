@@ -28,6 +28,10 @@ if(_canopy_profiling_level GREATER 0)
       CANOPY_PROFILING_LEVEL=${_canopy_profiling_level})
 endif()
 
+if(Canopy_ENABLE_DEBUG)
+  target_compile_definitions(Canopy INTERFACE CANOPY_ENABLE_DEBUG)
+endif()
+
 # Require minimum of C++17
 set_target_properties(Canopy PROPERTIES INTERFACE_COMPILE_FEATURES cxx_std_17)
 

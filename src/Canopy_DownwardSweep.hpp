@@ -637,8 +637,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     // rebuilds it against the current tree. Without this, a re-setup
     // after a tree-topology change would silently reuse stale cell
     // indices from the previous tree.
-    _m2l_op_table =
-        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>();
+    //
+    // _m2l_op_table is intentionally NOT reset: its entries are indexed
+    // by geometric M2LKey (dd, ii, jj, kk), which is invariant of the
+    // tree's cell layout. The persistent _ops / _key_to_op (A.1) keep
+    // (M2LKey → op_idx) stable across builds, so the table prefix from
+    // the previous build is still correct for those op_idx values and
+    // build_interaction_list_device's S4 path appends to it rather than
+    // re-allocating.
     _m2l_ns_csr_targets = Kokkos::View<int*, memory_space>();
     _m2l_ns_csr_offsets = Kokkos::View<int*, memory_space>();
     _m2l_ns_csr_sources = Kokkos::View<int*, memory_space>();
@@ -918,6 +924,131 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                         entries[ei].sources.size() );
         }
 
+#if defined( CANOPY_ENABLE_DEBUG )
+        // Debug shadow classify: re-derive an M2LKey for every pair
+        // straight from geometry, ignoring the cache, into shadow
+        // arrays. After the main S3 path finishes we verify that the
+        // op_idx assignment maps each pair back to the same M2LKey via
+        // _ops[pair_op_idx[p]]. Doubles S3 wall time when enabled and
+        // is the canonical cross-check that the incremental classify
+        // never deviates from a from-scratch one.
+        std::vector<M2LKey> _dbg_shadow_key( total_pairs,
+                                              M2LKey{ 0, 0, 0, 0 } );
+        std::vector<unsigned char> _dbg_in_range( total_pairs, 0 );
+        Kokkos::parallel_for(
+            "ilist_s3_debug_shadow",
+            Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(
+                0, nthreads ),
+            [&]( const int t ) {
+                const int ebeg = entry_begin[t];
+                const int eend = entry_begin[t + 1];
+                for ( int ei = ebeg; ei < eend; ++ei )
+                {
+                    const auto& e = entries[ei];
+                    const auto& tci = h_dc_for_filter( e.target_idx );
+                    int p = entry_pair_offset[ei];
+                    for ( int s : e.sources )
+                    {
+                        const auto& sci = h_dc_for_filter( s );
+                        const int max_d = std::max( e.depth, sci.depth );
+                        const double inv_unit_w =
+                            ( max_d >= 0 && max_d <= _max_depth )
+                                ? inv_half_width_at_depth[max_d]
+                                : 0.0;
+                        const double dx = sci.center[0] - tci.center[0];
+                        const double dy = sci.center[1] - tci.center[1];
+                        const double dz = sci.center[2] - tci.center[2];
+                        const int ii = static_cast<int>(
+                            std::lround( dx * inv_unit_w ) );
+                        const int jj = static_cast<int>(
+                            std::lround( dy * inv_unit_w ) );
+                        const int kk = static_cast<int>(
+                            std::lround( dz * inv_unit_w ) );
+                        const int dd = sci.depth - e.depth;
+                        if ( inv_unit_w > 0.0 &&
+                             std::abs( dd ) <= M2L_KEY_DD_MAX &&
+                             std::abs( ii ) <= M2L_KEY_OFFSET_MAX &&
+                             std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
+                             std::abs( kk ) <= M2L_KEY_OFFSET_MAX )
+                        {
+                            _dbg_shadow_key[p] = M2LKey{ dd, ii, jj, kk };
+                            _dbg_in_range[p] = 1u;
+                        }
+                        ++p;
+                    }
+                }
+            } );
+
+        // Stash these in the outer scope's "static-lifetime within
+        // this build call" vectors via std::swap with class-local
+        // members would require new members. Simpler: do the
+        // verification inline at the end of S3 below before these
+        // vectors go out of scope.
+        // (Verification block is appended after the remap.)
+        auto verify_dbg = [&]() {
+            int n_bad = 0;
+            for ( int p = 0; p < total_pairs; ++p )
+            {
+                const int op = pair_op_idx[p];
+                if ( _dbg_in_range[p] )
+                {
+                    if ( op < 0 ||
+                         op >= static_cast<int>( _ops.size() ) )
+                    {
+                        if ( ++n_bad <= 10 )
+                            std::fprintf(
+                                stderr,
+                                "[Canopy DEBUG] verify FAIL p=%d "
+                                "shadow_in_range=1 op_idx=%d\n",
+                                p, op );
+                        continue;
+                    }
+                    const M2LKey& k = _ops[op];
+                    const M2LKey& sk = _dbg_shadow_key[p];
+                    if ( !( k == sk ) )
+                    {
+                        if ( ++n_bad <= 10 )
+                            std::fprintf(
+                                stderr,
+                                "[Canopy DEBUG] verify FAIL p=%d "
+                                "op=%d ops=(%d,%d,%d,%d) shadow="
+                                "(%d,%d,%d,%d)\n",
+                                p, op, k.dd, k.ii, k.jj, k.kk,
+                                sk.dd, sk.ii, sk.jj, sk.kk );
+                    }
+                }
+                else
+                {
+                    if ( op >= 0 )
+                    {
+                        if ( ++n_bad <= 10 )
+                            std::fprintf(
+                                stderr,
+                                "[Canopy DEBUG] verify FAIL p=%d "
+                                "shadow_in_range=0 op_idx=%d (should be -1)\n",
+                                p, op );
+                    }
+                }
+            }
+            if ( n_bad > 0 )
+            {
+                std::fprintf( stderr,
+                              "[Canopy DEBUG] verify FAILED with "
+                              "%d mismatched pair slots — aborting.\n",
+                              n_bad );
+                MPI_Abort( _comm, 99 );
+            }
+            else if ( _rank == 0 )
+            {
+                std::fprintf(
+                    stderr,
+                    "[Canopy DEBUG] verify OK: %d pairs match "
+                    "(cache_hit_pairs=%lld)\n",
+                    total_pairs, _last_build_cache_hit_pairs );
+            }
+        };
+#endif
+
         std::vector<std::unordered_map<M2LKey, int, M2LKeyHash>>
             local_k2o( nthreads );
         std::vector<std::vector<M2LKey>> local_ops( nthreads );
@@ -1064,6 +1195,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                     }
                 }
             } );
+
+#if defined( CANOPY_ENABLE_DEBUG )
+        verify_dbg();
+#endif
     }
 
     const int n_unique_ops = static_cast<int>( ops.size() );
