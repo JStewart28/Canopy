@@ -383,13 +383,28 @@ class DownwardSweep
     // the next build call regardless of which path ran.
     std::vector<MortonKey> _changed_cells_for_next_build;
 
-    // S3 deduplication state. Promoted from build_interaction_list_device
-    // locals to members so they can be reused across builds (append-only,
-    // for the incremental-classify path). Stage 3 of A.1 just refactors
-    // placement; the data is still cleared at the start of every build.
-    // Later stages will switch to append-only.
+    // S3 deduplication state, persistent across builds (append-only).
+    // Op_idx values are stable for the lifetime of this DownwardSweep
+    // instance, which lets the incremental-classify path reuse them
+    // from the previous build. _m2l_op_table is grown only when new
+    // keys appear (i.e. when _ops.size() increases between calls).
     std::vector<M2LKey> _ops;
     std::unordered_map<M2LKey, int, M2LKeyHash> _key_to_op;
+
+    // Per-target classification cache snapshot, written at the end of
+    // every build_interaction_list_device call and consumed at the
+    // start of the next call (Stage 5). Each entry stores the
+    // target's source-key list (sorted ascending) and the parallel
+    // op_idx list, along with depth and shared-flag. Memory cost is
+    // ~12 bytes per ilist pair (8 B MortonKey + 4 B op_idx).
+    struct ClassifyEntry
+    {
+        std::vector<MortonKey> source_keys;
+        std::vector<int> op_idx;
+        int depth;
+        bool target_is_shared;
+    };
+    std::unordered_map<MortonKey, ClassifyEntry> _prev_classify;
 
     // Count of actual rebuilds done by build_interaction_list_device (does
     // not increment on the early-return path). Surfaced by
@@ -664,9 +679,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // [depth_offsets[d], depth_offsets[d+1]) slice — no per-team filter.
     struct TargetEntry
     {
+        MortonKey target_key;
         int target_idx;
         int depth;
         std::vector<int> sources;
+        // Parallel to `sources`; in the same emission order. Carried for
+        // the per-target cache snapshot (and for the cache-hit set
+        // comparison in Stage 5).
+        std::vector<MortonKey> source_keys;
     };
     std::vector<TargetEntry> entries;
     entries.reserve( ilists.size() );
@@ -685,15 +705,18 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             continue;
 
         TargetEntry e;
+        e.target_key = target_key;
         e.target_idx = target_idx;
         e.depth = tci.depth;
         e.sources.reserve( sources.size() );
+        e.source_keys.reserve( sources.size() );
         // sources is vector<pair<MortonKey, int>> — the second element is
         // the cell index in `cells`, populated by CP when it emitted the
-        // pair. No per-source hash lookup needed.
+        // pair. No per-source hash lookup needed. We also retain the
+        // source MortonKey for the per-target cache snapshot.
         for ( const auto& [src_key, src_idx] : sources )
         {
-            (void)src_key;
+            e.source_keys.push_back( src_key );
             e.sources.push_back( src_idx );
         }
         entries.push_back( std::move( e ) );
@@ -739,12 +762,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     std::vector<int> pair_source( total_pairs );
     std::vector<int> pair_target_depth( total_pairs );
     std::vector<unsigned char> pair_target_is_shared( total_pairs, 0 );
-    // S3 dedup state lives on the class; clear it for this full rebuild.
-    // (Stage 4 of A.1 will switch this to append-only.)
-    _key_to_op.clear();
-    _ops.clear();
+    // S3 dedup state is persistent and append-only across builds; do NOT
+    // clear here. Track the size at entry so S4 can rebuild only the
+    // newly-appended op slab and skip entirely when no new keys appeared.
     auto& key_to_op = _key_to_op;
     auto& ops = _ops;
+    const int prev_n_ops = static_cast<int>( ops.size() );
     bool overflow_warned = false;
 
     {
@@ -947,37 +970,82 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // depends only on (dd, ii, jj, kk); no physical width enters the
     // builder. The realized key set under MAC = 0.5 is bounded and
     // independent of tree depth.
+    //
+    // Append-only (A.1 Stage 4): when no new ops were appended this build
+    // (n_unique_ops == prev_n_ops) and _m2l_op_table is already sized to
+    // hold them, the persistent op_table from the previous build is
+    // still correct and is reused unchanged. Otherwise we allocate a
+    // wider table, copy the existing prefix (built in prior calls),
+    // build only the newly appended slab on host, and deep_copy the new
+    // slab to device.
     // -----------------------------------------------------------------------
     {
         const int Nt = KernelType::num_coeffs_per_cell;
         const int Ns = KernelType::m2l_num_src_coeffs;
-        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
-            op_table( Kokkos::view_alloc( Kokkos::WithoutInitializing,
-                                          "m2l_op_table" ),
-                      Nt, Ns, n_unique_ops > 0 ? n_unique_ops : 1 );
-        auto h_op = Kokkos::create_mirror_view( op_table );
+        const int alloc_n = n_unique_ops > 0 ? n_unique_ops : 1;
+        const int existing_n =
+            static_cast<int>( _m2l_op_table.extent( 2 ) );
+        const bool need_grow =
+            ( existing_n < alloc_n ) || ( _m2l_op_table.extent( 0 ) != size_t( Nt ) )
+            || ( _m2l_op_table.extent( 1 ) != size_t( Ns ) );
 
-        if ( n_unique_ops > 0 )
+        if ( need_grow )
         {
-            CANOPY_SCOPED_TIMER_DETAILED(
-                Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
-            auto h_A = Kokkos::create_mirror_view_and_copy(
-                Kokkos::HostSpace{}, _A_table );
-            for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
+            Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
+                op_table( Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                              "m2l_op_table" ),
+                          Nt, Ns, alloc_n );
+
+            // Preserve the previously-built operator slab in [0, prev_n_ops).
+            // For a fresh DownwardSweep instance prev_n_ops == 0 and there's
+            // nothing to copy. The new slab in [prev_n_ops, n_unique_ops) is
+            // built on a host mirror, then deep-copied as a contiguous range
+            // to the corresponding device slab.
+            if ( prev_n_ops > 0 && existing_n >= prev_n_ops )
             {
-                const auto& k = ops[op_idx];
-                auto T_slice = Kokkos::subview( h_op, Kokkos::ALL,
-                                                Kokkos::ALL, op_idx );
-                KernelType::m2l_build_operator( k.dd, k.ii, k.jj, k.kk,
-                                                h_A, T_slice );
+                auto src = Kokkos::subview(
+                    _m2l_op_table, Kokkos::ALL, Kokkos::ALL,
+                    std::make_pair( 0, prev_n_ops ) );
+                auto dst = Kokkos::subview(
+                    op_table, Kokkos::ALL, Kokkos::ALL,
+                    std::make_pair( 0, prev_n_ops ) );
+                Kokkos::deep_copy( dst, src );
             }
+
+            if ( n_unique_ops > prev_n_ops )
+            {
+                CANOPY_SCOPED_TIMER_DETAILED(
+                    Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
+                auto h_A = Kokkos::create_mirror_view_and_copy(
+                    Kokkos::HostSpace{}, _A_table );
+                auto h_op = Kokkos::create_mirror_view( op_table );
+                for ( int op_idx = prev_n_ops; op_idx < n_unique_ops;
+                      op_idx++ )
+                {
+                    const auto& k = ops[op_idx];
+                    auto T_slice = Kokkos::subview(
+                        h_op, Kokkos::ALL, Kokkos::ALL, op_idx );
+                    KernelType::m2l_build_operator( k.dd, k.ii, k.jj,
+                                                    k.kk, h_A, T_slice );
+                }
+                {
+                    CANOPY_SCOPED_TIMER_DETAILED(
+                        Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_COPY );
+                    auto new_slab_h = Kokkos::subview(
+                        h_op, Kokkos::ALL, Kokkos::ALL,
+                        std::make_pair( prev_n_ops, n_unique_ops ) );
+                    auto new_slab_d = Kokkos::subview(
+                        op_table, Kokkos::ALL, Kokkos::ALL,
+                        std::make_pair( prev_n_ops, n_unique_ops ) );
+                    Kokkos::deep_copy( new_slab_d, new_slab_h );
+                }
+            }
+
+            _m2l_op_table = op_table;
         }
-        {
-            CANOPY_SCOPED_TIMER_DETAILED(
-                Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_COPY );
-            Kokkos::deep_copy( op_table, h_op );
-        }
-        _m2l_op_table = op_table;
+        // else: persistent op_table already holds all needed entries — no
+        // S4 work this build (the table is unchanged since the previous
+        // build, which is the cache reuse Stage 4 is designed to enable).
     }
 
     // -----------------------------------------------------------------------
@@ -1217,6 +1285,59 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         upload_int( sh_sources_h, "m2l_sh_csr_sources", _m2l_sh_csr_sources );
         upload_int( sh_op_idx_h,  "m2l_sh_csr_op_idx",  _m2l_sh_csr_op_idx );
     }
+
+    // -----------------------------------------------------------------------
+    // S6 (A.1 Stage 4): snapshot the per-target classification result so
+    // the NEXT build_interaction_list_device() can take the
+    // incremental-classify fast path (Stage 5) for entries whose target
+    // and source keys are all unchanged. Each cache entry holds the
+    // target's source-key list sorted ascending, the parallel op_idx
+    // list, the target depth, and the shared-flag.
+    //
+    // pair_op_idx is laid out flat in entry-emission order; pair index
+    // `p` for entry ei lives at [pair_cursor, pair_cursor + n_src) where
+    // pair_cursor advances by entries[ei].sources.size() per entry —
+    // identical layout to what S5 consumed above.
+    // -----------------------------------------------------------------------
+    {
+        _prev_classify.clear();
+        _prev_classify.reserve( entries.size() );
+
+        int pair_cursor = 0;
+        for ( const auto& e : entries )
+        {
+            const int n_src = static_cast<int>( e.source_keys.size() );
+
+            // Sort source_keys + their op_idx in parallel by source_key
+            // for stable set-equality comparison on the next build.
+            std::vector<int> order( n_src );
+            for ( int i = 0; i < n_src; ++i )
+                order[i] = i;
+            std::sort( order.begin(), order.end(),
+                       [&]( int a, int b ) {
+                           return e.source_keys[a] < e.source_keys[b];
+                       } );
+
+            ClassifyEntry ce;
+            ce.depth = e.depth;
+            ce.target_is_shared =
+                ( pair_target_is_shared[pair_cursor] != 0 );
+            ce.source_keys.resize( n_src );
+            ce.op_idx.resize( n_src );
+            for ( int i = 0; i < n_src; ++i )
+            {
+                const int j = order[i];
+                ce.source_keys[i] = e.source_keys[j];
+                ce.op_idx[i] = pair_op_idx[pair_cursor + j];
+            }
+
+            _prev_classify.emplace( e.target_key, std::move( ce ) );
+            pair_cursor += n_src;
+        }
+    }
+
+    // Consumed: the changed-cells set lives only for one rebuild.
+    _changed_cells_for_next_build.clear();
 
     _interaction_list_dirty = false;
     _interaction_list_build_count++;
