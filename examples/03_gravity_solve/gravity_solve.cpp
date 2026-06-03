@@ -246,6 +246,7 @@ int main( int argc, char* argv[] )
         const double setup_time = sec( t_setup1 - t_setup0 ).count();
 
         std::vector<double> solve_times( num_steps, 0.0 );
+        std::vector<double> action_times( num_steps, 0.0 );
         std::vector<Solver_t::MaintenanceAction> actions(
             num_steps, Solver_t::MaintenanceAction::Migrate );
 
@@ -269,13 +270,20 @@ int main( int argc, char* argv[] )
 
             Kokkos::fence();
 
+            MPI_Barrier( MPI_COMM_WORLD );
+            const auto t_action0 = clock::now();
+
             actions[step] =
                 solver.auto_maintain<Position, Mass>( particles );
 
+            Kokkos::fence();
+            MPI_Barrier( MPI_COMM_WORLD );
+            action_times[step] = sec( clock::now() - t_action0 ).count();
+
             if ( rank == 0 )
-                std::printf( "  step %3d: action=%-9s  solve=%.4f s\n",
+                std::printf( "  step %3d: action=%-9s  solve=%.4f s  action=%.4f s\n",
                              step + 1, action_name( actions[step] ),
-                             solve_times[step] );
+                             solve_times[step], action_times[step] );
         }
 
         Kokkos::fence();
@@ -305,9 +313,10 @@ int main( int argc, char* argv[] )
                 const double pct = ( sum_solve > 0.0 )
                                        ? 100.0 * solve_times[step] / sum_solve
                                        : 0.0;
-                std::printf( "  step %3d: solve=%.4f s  (%.1f%% of total "
-                             "solve)\n",
-                             step + 1, solve_times[step], pct );
+                std::printf( "  step %3d: action=%-9s  solve=%.4f s  (%.1f%% of total solve)"
+                             "  action=%.4f s\n",
+                             step + 1, action_name( actions[step] ),
+                             solve_times[step], pct, action_times[step] );
             }
         }
     }
