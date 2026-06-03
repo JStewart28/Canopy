@@ -383,6 +383,14 @@ class DownwardSweep
     // the next build call regardless of which path ran.
     std::vector<MortonKey> _changed_cells_for_next_build;
 
+    // S3 deduplication state. Promoted from build_interaction_list_device
+    // locals to members so they can be reused across builds (append-only,
+    // for the incremental-classify path). Stage 3 of A.1 just refactors
+    // placement; the data is still cleared at the start of every build.
+    // Later stages will switch to append-only.
+    std::vector<M2LKey> _ops;
+    std::unordered_map<M2LKey, int, M2LKeyHash> _key_to_op;
+
     // Count of actual rebuilds done by build_interaction_list_device (does
     // not increment on the early-return path). Surfaced by
     // interaction_list_build_count() for the caching tests.
@@ -731,8 +739,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     std::vector<int> pair_source( total_pairs );
     std::vector<int> pair_target_depth( total_pairs );
     std::vector<unsigned char> pair_target_is_shared( total_pairs, 0 );
-    std::unordered_map<M2LKey, int, M2LKeyHash> key_to_op;
-    std::vector<M2LKey> ops;
+    // S3 dedup state lives on the class; clear it for this full rebuild.
+    // (Stage 4 of A.1 will switch this to append-only.)
+    _key_to_op.clear();
+    _ops.clear();
+    auto& key_to_op = _key_to_op;
+    auto& ops = _ops;
     bool overflow_warned = false;
 
     {
