@@ -202,6 +202,24 @@ class DownwardSweep
     // -----------------------------------------------------------------------
     void invalidate_interaction_list() { _interaction_list_dirty = true; }
 
+    // -----------------------------------------------------------------------
+    // set_changed_cells(): supply the symmetric-difference cell-key set
+    // (cells added or removed since the previous build) that the next
+    // build_interaction_list_device() may use to skip per-pair classify
+    // for entries whose target and source keys are all unchanged. Called
+    // by Solver::_finish_topology_change just before invalidate. Consumed
+    // (and cleared) on the next build_interaction_list_device() call.
+    //
+    // Passing an empty set, or not calling this at all, causes the next
+    // build to run the original full classify pipeline. This is what
+    // Solver::_full_setup (Rebuild path) wants: no prior cells comparison
+    // exists there, so no hint is provided and the full path runs.
+    // -----------------------------------------------------------------------
+    void set_changed_cells( const std::vector<MortonKey>& changed )
+    {
+        _changed_cells_for_next_build = changed;
+    }
+
     // Number of times build_interaction_list_device has actually performed
     // a rebuild (i.e. did not early-return because dirty was false). Used
     // by tests to verify caching.
@@ -356,6 +374,14 @@ class DownwardSweep
     // false. setup() and invalidate_interaction_list() set it to true; the
     // builder clears it at the end of a successful rebuild.
     bool _interaction_list_dirty = true;
+
+    // Symmetric-difference of cell keys (added ∪ removed) between the
+    // previous tree state and the current one, supplied by Solver before
+    // invalidate. Consumed by the next build_interaction_list_device(): if
+    // non-empty, enables the incremental-classify fast path; if empty,
+    // the builder runs the original full pipeline. Cleared at the end of
+    // the next build call regardless of which path ran.
+    std::vector<MortonKey> _changed_cells_for_next_build;
 
     // Count of actual rebuilds done by build_interaction_list_device (does
     // not increment on the early-return path). Surfaced by

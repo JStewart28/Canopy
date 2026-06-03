@@ -353,20 +353,30 @@ class Solver
             _builder.build( positions, _num_local );
         }
 
-        // Counting variant of the topology comparison: walk all new cells (no
-        // early break) and tally cells present in new but missing from old.
-        // Derive the symmetric difference and N_total for the diagnostic
-        // [[canopy-auto-maintain-investigation]]. Same big-O as the previous
-        // early-exit loop (one hash lookup per new cell); only the early-out
-        // is removed.
+        // Counting + collection variant of the topology comparison: walk all
+        // new cells, then walk old_keys, collecting the symmetric-difference
+        // key set (added ∪ removed). This list is consumed by
+        // DownwardSweep::build_interaction_list_device on the Rebalance path
+        // to skip per-pair classify for entries whose target and source keys
+        // are all unchanged. Same big-O as the previous counting loop.
         const size_t n_new = _builder.cells().size();
         const size_t n_old = old_keys.size();
-        size_t k_in_new_not_old = 0;
+        std::vector<MortonKey> changed_cells;
+        changed_cells.reserve( ( n_new > n_old ? n_new : n_old ) / 32 + 8 );
+
+        std::unordered_set<MortonKey> new_keys;
+        new_keys.reserve( n_new );
+        for ( const auto& c : _builder.cells() )
+            new_keys.insert( c.key );
+
         for ( const auto& c : _builder.cells() )
             if ( old_keys.find( c.key ) == old_keys.end() )
-                ++k_in_new_not_old;
-        const size_t matched = n_new - k_in_new_not_old;
-        const size_t k_changed = ( n_new - matched ) + ( n_old - matched );
+                changed_cells.push_back( c.key );
+        for ( const auto& k : old_keys )
+            if ( new_keys.find( k ) == new_keys.end() )
+                changed_cells.push_back( k );
+
+        const size_t k_changed = changed_cells.size();
         const bool topology_changed = ( k_changed > 0 );
 #if defined( CANOPY_ENABLE_PROFILING )
         const size_t N_total = ( n_new > n_old ) ? n_new : n_old;
@@ -376,7 +386,7 @@ class Solver
         {
             // 2) Topology changed ⇒ full rebalance (repartition + comm_plan
             //    rebuild + setups). _builder.build() already happened above.
-            _finish_topology_change<PositionIdx>( particles );
+            _finish_topology_change<PositionIdx>( particles, changed_cells );
 #if defined( CANOPY_ENABLE_PROFILING )
             {
                 int _diag_rank = 0;
@@ -530,7 +540,9 @@ class Solver
     // comm_plan build.
     // -----------------------------------------------------------------------
     template <int PositionIdx, class AoSoA>
-    void _finish_topology_change( AoSoA& particles )
+    void _finish_topology_change(
+        AoSoA& particles,
+        const std::vector<MortonKey>& changed_cells = {} )
     {
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REPARTITION );
           _partitioner.repartition( _builder, particles, _num_local ); }
@@ -554,6 +566,12 @@ class Solver
         { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_COMM_PLAN_BUILD );
           _comm_plan.build( _builder.cells(), _partitioner.ownership(),
                             _partitioner.cell_owner_map(), _replication_depth ); }
+        // Hand the symmetric-difference cell-key set to DownwardSweep so
+        // the next build_interaction_list_device() can take the
+        // incremental-classify fast path on this Rebalance step. An empty
+        // set (the default arg, used by _full_setup's Rebuild path) leaves
+        // DownwardSweep on the full-rebuild path.
+        _downward.set_changed_cells( changed_cells );
         // Tree topology and comm plan just changed; invalidate the cache.
         _downward.invalidate_interaction_list();
 
