@@ -23,6 +23,8 @@
 
 #include <mpi.h>
 
+#include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <unordered_map>
@@ -1224,6 +1226,124 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                 std::fprintf( stderr,
                               "[Canopy diag] p2p_inter_leaf_pairs=%lld\n",
                               global_pairs );
+
+            // Leaf-size histogram (rank-0 only): distributions of target-leaf,
+            // local-neighbor source-leaf (with multiplicity as encountered by
+            // the inter-leaf kernel), and ghost-leaf sizes. Informs team_size
+            // and SMEM_SRC_CAP for the team-per-leaf rewrite. Level-3 only.
+            if ( diag_rank == 0 )
+            {
+                auto leaf_off_h = Kokkos::create_mirror_view_and_copy(
+                    Kokkos::HostSpace(), _leaf_particle_offsets );
+                auto local_leaves_h = Kokkos::create_mirror_view_and_copy(
+                    Kokkos::HostSpace(), _local_leaf_cells );
+                auto local_nbr_idx_h = Kokkos::create_mirror_view_and_copy(
+                    Kokkos::HostSpace(), _local_nbr_cell_idx );
+                auto ghost_leaf_off_h = Kokkos::create_mirror_view_and_copy(
+                    Kokkos::HostSpace(), _ghost_leaf_offsets );
+
+                const int edges[] = { 1,   64,  128, 192, 256,    320, 384,
+                                      448, 512, 576, 768, 1024,   INT_MAX };
+                const int n_edges = sizeof( edges ) / sizeof( edges[0] );
+                const int n_buckets = n_edges - 1;
+
+                auto report = [&]( const char* label,
+                                   std::vector<int>& sizes )
+                {
+                    if ( sizes.empty() )
+                    {
+                        std::fprintf(
+                            stderr,
+                            "[Canopy diag] leaf_size_hist %s: (empty)\n",
+                            label );
+                        return;
+                    }
+                    std::sort( sizes.begin(), sizes.end() );
+                    const size_t n = sizes.size();
+                    double mean = 0.0;
+                    for ( int s : sizes )
+                        mean += s;
+                    mean /= static_cast<double>( n );
+                    auto pct = [&]( double q ) -> int
+                    {
+                        size_t idx = static_cast<size_t>( q * n );
+                        if ( idx >= n )
+                            idx = n - 1;
+                        return sizes[idx];
+                    };
+                    std::vector<int> counts( n_buckets, 0 );
+                    for ( int s : sizes )
+                    {
+                        for ( int b = 0; b < n_buckets; b++ )
+                        {
+                            if ( s >= edges[b] && s < edges[b + 1] )
+                            {
+                                counts[b]++;
+                                break;
+                            }
+                        }
+                    }
+                    std::fprintf(
+                        stderr,
+                        "[Canopy diag] leaf_size_hist %s: n=%zu min=%d "
+                        "max=%d mean=%.1f p50=%d p95=%d p99=%d\n",
+                        label, n, sizes.front(), sizes.back(), mean,
+                        pct( 0.50 ), pct( 0.95 ), pct( 0.99 ) );
+                    std::fprintf( stderr,
+                                  "[Canopy diag] leaf_size_hist %s buckets:",
+                                  label );
+                    for ( int b = 0; b < n_buckets; b++ )
+                    {
+                        if ( edges[b + 1] == INT_MAX )
+                            std::fprintf( stderr, " [%d,inf)=%d", edges[b],
+                                          counts[b] );
+                        else
+                            std::fprintf( stderr, " [%d,%d)=%d", edges[b],
+                                          edges[b + 1], counts[b] );
+                    }
+                    std::fprintf( stderr, "\n" );
+                };
+
+                // Target-leaf sizes
+                {
+                    const int nt =
+                        static_cast<int>( local_leaves_h.extent( 0 ) );
+                    std::vector<int> sizes;
+                    sizes.reserve( nt );
+                    for ( int g = 0; g < nt; g++ )
+                    {
+                        const int cidx = local_leaves_h( g );
+                        sizes.push_back( leaf_off_h( cidx + 1 ) -
+                                         leaf_off_h( cidx ) );
+                    }
+                    report( "target", sizes );
+                }
+                // Local-neighbor source-leaf sizes (with multiplicity)
+                {
+                    const int nn =
+                        static_cast<int>( local_nbr_idx_h.extent( 0 ) );
+                    std::vector<int> sizes;
+                    sizes.reserve( nn );
+                    for ( int i = 0; i < nn; i++ )
+                    {
+                        const int c = local_nbr_idx_h( i );
+                        sizes.push_back( leaf_off_h( c + 1 ) -
+                                         leaf_off_h( c ) );
+                    }
+                    report( "local_nbr", sizes );
+                }
+                // Ghost-leaf sizes
+                {
+                    const int ng =
+                        static_cast<int>( ghost_leaf_off_h.extent( 0 ) ) - 1;
+                    std::vector<int> sizes;
+                    sizes.reserve( std::max( 0, ng ) );
+                    for ( int i = 0; i < ng; i++ )
+                        sizes.push_back( ghost_leaf_off_h( i + 1 ) -
+                                         ghost_leaf_off_h( i ) );
+                    report( "ghost", sizes );
+                }
+            }
         }
     }
 #endif
