@@ -41,6 +41,34 @@ namespace Canopy
 // thread memory bounded. Promote to a CMake option if tuning becomes needed.
 static constexpr int S3_PER_THREAD_KEYMAP_RESERVE = 4096;
 
+// Decode a MortonKey into (depth, ix, iy, iz) where (ix, iy, iz) are the
+// per-axis integer cell coordinates at that depth, in [0, 2^depth). The key
+// layout is leading-1 sentinel at bit 3*depth, followed by `depth` 3-bit
+// octant groups (bit 0 = x, bit 1 = y, bit 2 = z). See Canopy_TreeBuilder.hpp.
+//
+// Used by S3 classify to compute (dd, ii, jj, kk) directly from MortonKeys,
+// avoiding the per-pair h_dc_for_filter gather on cell centers.
+static inline void
+decode_morton( MortonKey k, int& d, int& ix, int& iy, int& iz )
+{
+    d = key_depth( k );
+    ix = 0;
+    iy = 0;
+    iz = 0;
+    // Octant for level l (root is l=0; the chosen octant at level l lives in
+    // bits [3*(d-l), 3*(d-l)+2] of k). Iterate from the deepest level (l=d,
+    // bit positions 0..2) upward, accumulating axis bits as the integer index.
+    for ( int l = 1; l <= d; ++l )
+    {
+        const int shift = 3 * ( d - l );
+        const int oct = static_cast<int>( ( k >> shift ) & 0x7 );
+        const int weight = 1 << ( d - l );
+        ix += ( oct & 1 ) ? weight : 0;
+        iy += ( oct & 2 ) ? weight : 0;
+        iz += ( oct & 4 ) ? weight : 0;
+    }
+}
+
 // ============================================================================
 // DownwardSweep
 //
@@ -632,7 +660,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     {
         int target_idx;
         int depth;
+        MortonKey target_key;
         std::vector<int> sources;
+        std::vector<MortonKey> source_keys;
     };
     std::vector<TargetEntry> entries;
     entries.reserve( ilists.size() );
@@ -653,14 +683,17 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         TargetEntry e;
         e.target_idx = target_idx;
         e.depth = tci.depth;
+        e.target_key = target_key;
         e.sources.reserve( sources.size() );
+        e.source_keys.reserve( sources.size() );
         // sources is vector<pair<MortonKey, int>> — the second element is
         // the cell index in `cells`, populated by CP when it emitted the
-        // pair. No per-source hash lookup needed.
+        // pair. No per-source hash lookup needed. Capture src_key in parallel
+        // so S3 can decode (d_s, ix_s, iy_s, iz_s) without gathering sci.
         for ( const auto& [src_key, src_idx] : sources )
         {
-            (void)src_key;
             e.sources.push_back( src_idx );
+            e.source_keys.push_back( src_key );
         }
         entries.push_back( std::move( e ) );
     }
@@ -698,7 +731,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // guards exist purely to defend against pathological tree state; a
     // healthy MAC traversal does not produce out-of-range pairs.
     // -----------------------------------------------------------------------
+#if defined( CANOPY_ENABLE_DEBUG )
     std::vector<double> half_width_at_depth( _max_depth + 1, 0.0 );
+#endif
     const int total_pairs = total_pairs_count;
     std::vector<int> pair_op_idx( total_pairs, -1 );
     std::vector<int> pair_target( total_pairs );
@@ -712,6 +747,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_ILIST_S3_CLASSIFY_PAIRS );
+#if defined( CANOPY_ENABLE_DEBUG )
+        // Debug-only: precompute inv_half_width_at_depth so the
+        // CANOPY_ENABLE_DEBUG side-by-side check below can run the original
+        // FP/gather path for comparison. Stripped in release builds.
         std::vector<double> inv_half_width_at_depth( _max_depth + 1, 0.0 );
         {
             const int num_cells = _device_cells.extent( 0 );
@@ -721,19 +760,27 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 if ( dci.depth >= 0 && dci.depth <= _max_depth )
                     half_width_at_depth[dci.depth] = dci.half_width;
             }
-            // Precompute inverses once so the inner loop is hash-find +
-            // table lookup with no divisions (84M pairs at 4M particles).
             for ( int d = 0; d <= _max_depth; d++ )
                 inv_half_width_at_depth[d] =
                     ( half_width_at_depth[d] > 0.0 )
                         ? ( 1.0 / half_width_at_depth[d] )
                         : 0.0;
         }
-
-        // Sharded S3: per-thread hashmap dedup (O(N) cache-resident),
+#endif
+        // S3 classify: pure-integer pipeline. For each pair (target, source)
+        // we decode (d, ix, iy, iz) from both MortonKeys and compute:
+        //   dd    = d_s - d_t
+        //   max_d = max(d_t, d_s)
+        //   ii    = (2*ix_s+1 - 2^d_s) * 2^(max_d - d_s)
+        //         - (2*ix_t+1 - 2^d_t) * 2^(max_d - d_t)   (jj, kk analogous)
+        // This is what the original FP path
+        //   lround( (sci.center[x] - tci.center[x]) * inv_half_width_at_depth[max_d] )
+        // computes in exact arithmetic, with no per-source h_dc_for_filter
+        // gather and no FP rounding. Bit-identical M2LKey output by construction.
+        //
+        // Sharded: per-thread hashmap dedup (O(N) cache-resident),
         // then a tiny serial merge over distinct keys (globally bounded by
         // M2L_OP_COUNT_CAP), then a parallel local->global op-idx remap.
-        // Same algorithm as the original serial body; just sharded.
         const size_t n_entries = entries.size();
         std::vector<int> entry_pair_offset( n_entries + 1, 0 );
         for ( size_t e = 0; e < n_entries; ++e )
@@ -777,31 +824,73 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 for ( int ei = ebeg; ei < eend; ++ei )
                 {
                     const auto& e = entries[ei];
+                    // Per-target read: still gather tci for the owner_rank /
+                    // shared-flag check. This is once per entry (~1e6), not
+                    // per pair (~3e8), so not the bandwidth bottleneck.
                     const auto& tci = h_dc_for_filter( e.target_idx );
                     const bool tgt_shared =
                         ( tci.owner_rank == OWNER_SHARED );
+
+                    // Decode target geometry from MortonKey (once per entry).
+                    const int d_t = e.depth;
+                    int ix_t, iy_t, iz_t;
+                    int d_t_decoded;
+                    decode_morton( e.target_key, d_t_decoded,
+                                   ix_t, iy_t, iz_t );
+                    // d_t_decoded matches e.depth by construction (both
+                    // derive from the same tree); used only as a debug-mode
+                    // self-check below.
+                    (void)d_t_decoded;
+                    const int pow2_dt = 1 << d_t;
+                    const int two_ix_t_off = 2 * ix_t + 1 - pow2_dt;
+                    const int two_iy_t_off = 2 * iy_t + 1 - pow2_dt;
+                    const int two_iz_t_off = 2 * iz_t + 1 - pow2_dt;
+
                     int p = entry_pair_offset[ei];
-                    for ( int s : e.sources )
+                    const int n_src =
+                        static_cast<int>( e.sources.size() );
+                    for ( int si = 0; si < n_src; ++si )
                     {
-                        const auto& sci = h_dc_for_filter( s );
-                        const int max_d = std::max( e.depth, sci.depth );
-                        const double inv_unit_w =
-                            ( max_d >= 0 && max_d <= _max_depth )
-                                ? inv_half_width_at_depth[max_d]
-                                : 0.0;
-                        const double dx = sci.center[0] - tci.center[0];
-                        const double dy = sci.center[1] - tci.center[1];
-                        const double dz = sci.center[2] - tci.center[2];
-                        const int ii = static_cast<int>(
-                            std::lround( dx * inv_unit_w ) );
-                        const int jj = static_cast<int>(
-                            std::lround( dy * inv_unit_w ) );
-                        const int kk = static_cast<int>(
-                            std::lround( dz * inv_unit_w ) );
-                        const int dd = sci.depth - e.depth;
+                        const int s = e.sources[si];
+                        const MortonKey s_key = e.source_keys[si];
+
+                        // Decode source geometry from MortonKey — no gather.
+                        int d_s, ix_s, iy_s, iz_s;
+                        decode_morton( s_key, d_s, ix_s, iy_s, iz_s );
+
+                        const int dd = d_s - d_t;
+                        const int max_d = ( d_s > d_t ) ? d_s : d_t;
+                        const int shift_s = max_d - d_s;
+                        const int shift_t = max_d - d_t;
+                        const int pow2_ds = 1 << d_s;
+                        const int two_ix_s_off = 2 * ix_s + 1 - pow2_ds;
+                        const int two_iy_s_off = 2 * iy_s + 1 - pow2_ds;
+                        const int two_iz_s_off = 2 * iz_s + 1 - pow2_ds;
+                        // Use 64-bit accumulators to be safe; the magnitudes
+                        // are bounded by 2^(max_d+1) which fits in int32 for
+                        // max_d <= 30, but max_d is bounded by tree depth
+                        // (<= 20) so this is mostly defensive.
+                        const long long ii64 =
+                            static_cast<long long>( two_ix_s_off )
+                                * ( 1LL << shift_s )
+                            - static_cast<long long>( two_ix_t_off )
+                                * ( 1LL << shift_t );
+                        const long long jj64 =
+                            static_cast<long long>( two_iy_s_off )
+                                * ( 1LL << shift_s )
+                            - static_cast<long long>( two_iy_t_off )
+                                * ( 1LL << shift_t );
+                        const long long kk64 =
+                            static_cast<long long>( two_iz_s_off )
+                                * ( 1LL << shift_s )
+                            - static_cast<long long>( two_iz_t_off )
+                                * ( 1LL << shift_t );
+                        const int ii = static_cast<int>( ii64 );
+                        const int jj = static_cast<int>( jj64 );
+                        const int kk = static_cast<int>( kk64 );
 
                         int local_op = -1;
-                        if ( inv_unit_w > 0.0 &&
+                        if ( max_d >= 0 && max_d <= _max_depth &&
                              std::abs( dd ) <= M2L_KEY_DD_MAX &&
                              std::abs( ii ) <= M2L_KEY_OFFSET_MAX &&
                              std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
@@ -820,6 +909,85 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                                 ops_t.push_back( key );
                             }
                         }
+
+#if defined( CANOPY_ENABLE_DEBUG )
+                        // Side-by-side correctness check: run the original
+                        // FP/gather path and assert the M2LKey + fallback
+                        // routing match. Stripped in release builds.
+                        {
+                            const auto& sci_dbg = h_dc_for_filter( s );
+                            const int max_d_dbg =
+                                std::max( e.depth, sci_dbg.depth );
+                            const double inv_unit_w_dbg =
+                                ( max_d_dbg >= 0 &&
+                                  max_d_dbg <= _max_depth )
+                                    ? inv_half_width_at_depth[max_d_dbg]
+                                    : 0.0;
+                            const double dx_dbg =
+                                sci_dbg.center[0] - tci.center[0];
+                            const double dy_dbg =
+                                sci_dbg.center[1] - tci.center[1];
+                            const double dz_dbg =
+                                sci_dbg.center[2] - tci.center[2];
+                            const int ii_dbg = static_cast<int>(
+                                std::lround( dx_dbg * inv_unit_w_dbg ) );
+                            const int jj_dbg = static_cast<int>(
+                                std::lround( dy_dbg * inv_unit_w_dbg ) );
+                            const int kk_dbg = static_cast<int>(
+                                std::lround( dz_dbg * inv_unit_w_dbg ) );
+                            const int dd_dbg =
+                                sci_dbg.depth - e.depth;
+                            const bool in_range_dbg =
+                                ( inv_unit_w_dbg > 0.0 &&
+                                  std::abs( dd_dbg ) <= M2L_KEY_DD_MAX &&
+                                  std::abs( ii_dbg ) <=
+                                      M2L_KEY_OFFSET_MAX &&
+                                  std::abs( jj_dbg ) <=
+                                      M2L_KEY_OFFSET_MAX &&
+                                  std::abs( kk_dbg ) <=
+                                      M2L_KEY_OFFSET_MAX );
+                            const bool in_range_new =
+                                ( max_d >= 0 && max_d <= _max_depth &&
+                                  std::abs( dd ) <= M2L_KEY_DD_MAX &&
+                                  std::abs( ii ) <=
+                                      M2L_KEY_OFFSET_MAX &&
+                                  std::abs( jj ) <=
+                                      M2L_KEY_OFFSET_MAX &&
+                                  std::abs( kk ) <=
+                                      M2L_KEY_OFFSET_MAX );
+                            const bool ok =
+                                ( d_t == d_t_decoded ) &&
+                                ( d_s == sci_dbg.depth ) &&
+                                ( dd == dd_dbg ) &&
+                                ( in_range_dbg == in_range_new ) &&
+                                ( !in_range_new ||
+                                  ( ii == ii_dbg && jj == jj_dbg &&
+                                    kk == kk_dbg ) );
+                            if ( !ok )
+                            {
+                                std::fprintf(
+                                    stderr,
+                                    "[Canopy DEBUG] S3 decode mismatch "
+                                    "ei=%d si=%d p=%d: "
+                                    "new(d_t=%d d_s=%d dd=%d ii=%d jj=%d "
+                                    "kk=%d in=%d) "
+                                    "old(d_t=%d d_s=%d dd=%d ii=%d jj=%d "
+                                    "kk=%d in=%d) "
+                                    "tkey=%llu skey=%llu\n",
+                                    ei, si, p,
+                                    d_t, d_s, dd, ii, jj, kk,
+                                    in_range_new ? 1 : 0,
+                                    e.depth, sci_dbg.depth, dd_dbg,
+                                    ii_dbg, jj_dbg, kk_dbg,
+                                    in_range_dbg ? 1 : 0,
+                                    static_cast<unsigned long long>(
+                                        e.target_key ),
+                                    static_cast<unsigned long long>(
+                                        s_key ) );
+                                std::abort();
+                            }
+                        }
+#endif
 
                         pair_op_idx[p] = local_op;
                         pair_target[p] = e.target_idx;

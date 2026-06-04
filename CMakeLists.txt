@@ -260,6 +260,22 @@ add_feature_info(Profiling Canopy_ENABLE_PROFILING
     "Enable FMM phase timing via MPI_Wtime (level=${_canopy_profiling_level})")
 
 ##---------------------------------------------------------------------------##
+## Debug verification gate
+##
+## When ON, enables compile-time-guarded side-by-side correctness checks in
+## algorithmically-divergent hot loops (currently DownwardSweep S3 classify:
+## new MortonKey-decode path vs old h_dc_for_filter-gather path). Doubles the
+## affected work; intended for MultiSolve correctness runs and local debug,
+## NOT for at-scale measurement. Leave OFF for production / perf builds.
+##---------------------------------------------------------------------------##
+option(Canopy_ENABLE_DEBUG "Enable debug-only side-by-side verification" OFF)
+if(Canopy_ENABLE_DEBUG)
+  add_compile_definitions(CANOPY_ENABLE_DEBUG)
+endif()
+add_feature_info(DebugVerify Canopy_ENABLE_DEBUG
+    "Enable compile-gated side-by-side checks in hot loops (S3 classify)")
+
+##---------------------------------------------------------------------------##
 ## Libraries and Examples
 ##---------------------------------------------------------------------------##
 
