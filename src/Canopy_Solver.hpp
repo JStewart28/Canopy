@@ -324,6 +324,18 @@ class Solver
             if ( _builder.needs_rebuild( positions, _num_local ) )
             {
                 _full_setup<PositionIdx, ChargeIdx>( particles, _num_local );
+#if defined( CANOPY_ENABLE_PROFILING )
+                {
+                    int _diag_rank = 0;
+                    MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
+                    if ( _diag_rank == 0 )
+                        std::fprintf(
+                            stderr,
+                            "[Canopy diag] auto_maintain k_changed=NA "
+                            "N_total=%zu action=Rebuild\n",
+                            _builder.cells().size() );
+                }
+#endif
                 return MaintenanceAction::Rebuild;
             }
         }
@@ -341,24 +353,42 @@ class Solver
             _builder.build( positions, _num_local );
         }
 
-        bool topology_changed = ( _builder.cells().size() != old_keys.size() );
-        if ( !topology_changed )
-        {
-            for ( const auto& c : _builder.cells() )
-            {
-                if ( old_keys.find( c.key ) == old_keys.end() )
-                {
-                    topology_changed = true;
-                    break;
-                }
-            }
-        }
+        // Counting variant of the topology comparison: walk all new cells (no
+        // early break) and tally cells present in new but missing from old.
+        // Derive the symmetric difference and N_total for the diagnostic
+        // [[canopy-auto-maintain-investigation]]. Same big-O as the previous
+        // early-exit loop (one hash lookup per new cell); only the early-out
+        // is removed.
+        const size_t n_new = _builder.cells().size();
+        const size_t n_old = old_keys.size();
+        size_t k_in_new_not_old = 0;
+        for ( const auto& c : _builder.cells() )
+            if ( old_keys.find( c.key ) == old_keys.end() )
+                ++k_in_new_not_old;
+        const size_t matched = n_new - k_in_new_not_old;
+        const size_t k_changed = ( n_new - matched ) + ( n_old - matched );
+        const bool topology_changed = ( k_changed > 0 );
+#if defined( CANOPY_ENABLE_PROFILING )
+        const size_t N_total = ( n_new > n_old ) ? n_new : n_old;
+#endif
 
         if ( topology_changed )
         {
             // 2) Topology changed ⇒ full rebalance (repartition + comm_plan
             //    rebuild + setups). _builder.build() already happened above.
             _finish_topology_change<PositionIdx>( particles );
+#if defined( CANOPY_ENABLE_PROFILING )
+            {
+                int _diag_rank = 0;
+                MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
+                if ( _diag_rank == 0 )
+                    std::fprintf(
+                        stderr,
+                        "[Canopy diag] auto_maintain k_changed=%zu "
+                        "N_total=%zu action=Rebalance\n",
+                        k_changed, N_total );
+            }
+#endif
             return MaintenanceAction::Rebalance;
         }
 
@@ -369,6 +399,18 @@ class Solver
         (void)rr;
         _num_local = _partitioner.num_local_particles();
         _finish_topology_stable<PositionIdx>( particles );
+#if defined( CANOPY_ENABLE_PROFILING )
+        {
+            int _diag_rank = 0;
+            MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
+            if ( _diag_rank == 0 )
+                std::fprintf(
+                    stderr,
+                    "[Canopy diag] auto_maintain k_changed=%zu "
+                    "N_total=%zu action=Migrate\n",
+                    k_changed, N_total );
+        }
+#endif
         return MaintenanceAction::Migrate;
     }
 
