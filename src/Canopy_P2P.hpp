@@ -1067,127 +1067,294 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
 
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_INTER_KERNEL );
-        if ( n_local > 0 )
+        if ( n_local > 0 && num_target_leaves > 0 )
         {
+
+        // Team-per-leaf inter-leaf kernel.
+        //
+        // One team per local target leaf. Team threads are strided
+        // across the leaf's target particles in tiles of TILE_SIZE
+        // targets each -- each thread holds its tile's (x,y,z) positions
+        // and (phi, gx, gy, gz) accumulators in registers. For each
+        // neighbor leaf (local then ghost), the team cooperatively loads
+        // up to SMEM_SRC_CAP source particles' positions/charges into
+        // LDS via TeamThreadRange; barrier; each team thread then loops
+        // over its assigned target tile x all loaded source particles
+        // in LDS, accumulating into its tile's registers. Single-writer
+        // output (no atomics) -- distinct teams own distinct target
+        // leaves, distinct team threads within a team own distinct
+        // target particles. Distinguishes this design from the prior
+        // pair-iteration TeamPolicy that hit the MI300A unified-memory
+        // atomic-contention hang (see intra-leaf kernel comment).
+        //
+        // Team size is Kokkos::AUTO so the kernel ports across backends:
+        // on Serial team_size=1, on HIP/CUDA it picks a wavefront
+        // multiple (typically 64-256). The TILE_SIZE outer loop bounds
+        // the register footprint to the same fixed size regardless of
+        // team_size; on Serial that means a wider leaf takes multiple
+        // tile iterations and walks the neighbor list multiple times --
+        // wasteful on Serial (correctness-only backend) but correct.
+        //
+        // The per-target source-loop order is identical to the OLD
+        // thread-per-particle kernel (target-outer, source-inner, same
+        // CSR walk over neighbors then their particles), so the FP
+        // addition order is bit-identical and the CANOPY_ENABLE_DEBUG
+        // verifier should report zero mismatch on a healthy build.
+        constexpr int TILE_SIZE = 8;      // targets per team thread per tile
+        constexpr int SMEM_SRC_CAP = 512; // matches ncrit; covers p99 at depth 9
+
+        using team_policy_t = Kokkos::TeamPolicy<execution_space>;
+        using team_member_t = typename team_policy_t::member_type;
+        using shmem_space = typename execution_space::scratch_memory_space;
+        using s_array_t = Kokkos::View<scalar_type*, shmem_space,
+                                       Kokkos::MemoryUnmanaged>;
+
+        // LDS footprint per team: (3 + NComps) scalars per source slot.
+        // 8 KB at SMEM_SRC_CAP=512, NComps=1, float (16 KB double) --
+        // well under MI300A's ~64 KB / CU LDS budget.
+        const size_t shmem_bytes =
+            ( 3 + NComps ) * SMEM_SRC_CAP * sizeof( scalar_type );
+
+        team_policy_t policy =
+            team_policy_t( num_target_leaves, Kokkos::AUTO )
+                .set_scratch_size( 0, Kokkos::PerTeam( shmem_bytes ) );
 
         Kokkos::parallel_for(
             "P2P_inter_leaf",
-            Kokkos::RangePolicy<execution_space>( 0, n_local ),
-            KOKKOS_LAMBDA( const int pi ) {
-                const int league = particle_to_league_v( pi );
-                if ( league < 0 )
-                    return;
+            policy,
+            KOKKOS_LAMBDA( const team_member_t& tm ) {
+                const int league = tm.league_rank();
+                const int t = tm.team_rank();
+                const int team_size = tm.team_size();
 
-                const scalar_type xi =
-                    static_cast<scalar_type>( positions( pi, 0 ) );
-                const scalar_type yi =
-                    static_cast<scalar_type>( positions( pi, 1 ) );
-                const scalar_type zi =
-                    static_cast<scalar_type>( positions( pi, 2 ) );
+                const int tgt_cidx = local_leaf_cells( league );
+                const int ts = leaf_offsets( tgt_cidx );
+                const int te = leaf_offsets( tgt_cidx + 1 );
+                const int n_tgt = te - ts;
 
-                scalar_type phi[NComps];
-                scalar_type gx[NComps], gy[NComps], gz[NComps];
-                for ( int c = 0; c < NComps; c++ )
+                // LDS sub-views into the single team-scratch arena.
+                // Each constructor call bump-allocates fresh space.
+                s_array_t s_x( tm.team_scratch( 0 ), SMEM_SRC_CAP );
+                s_array_t s_y( tm.team_scratch( 0 ), SMEM_SRC_CAP );
+                s_array_t s_z( tm.team_scratch( 0 ), SMEM_SRC_CAP );
+                s_array_t s_q( tm.team_scratch( 0 ),
+                               SMEM_SRC_CAP * NComps );
+
+                const int tile_extent = TILE_SIZE * team_size;
+
+                for ( int tile_start = 0; tile_start < n_tgt;
+                      tile_start += tile_extent )
                 {
-                    phi[c] = static_cast<scalar_type>( 0 );
-                    gx[c] = static_cast<scalar_type>( 0 );
-                    gy[c] = static_cast<scalar_type>( 0 );
-                    gz[c] = static_cast<scalar_type>( 0 );
-                }
+                    // Load this team thread's targets for this tile.
+                    scalar_type xi_r[TILE_SIZE];
+                    scalar_type yi_r[TILE_SIZE];
+                    scalar_type zi_r[TILE_SIZE];
+                    scalar_type phi_r[TILE_SIZE][NComps];
+                    scalar_type gx_r[TILE_SIZE][NComps];
+                    scalar_type gy_r[TILE_SIZE][NComps];
+                    scalar_type gz_r[TILE_SIZE][NComps];
 
-                // --- Local neighbors ---
-                const int l_start = local_nbr_off( league );
-                const int l_end = local_nbr_off( league + 1 );
-                for ( int nn = l_start; nn < l_end; nn++ )
-                {
-                    const int n_cidx = local_nbr_idx( nn );
-                    const int ns = leaf_offsets( n_cidx );
-                    const int ne = leaf_offsets( n_cidx + 1 );
-                    for ( int pj = ns; pj < ne; pj++ )
+                    int n_my = 0;
+                    for ( int k = 0; k < TILE_SIZE; k++ )
                     {
-                        const scalar_type dx =
-                            xi -
-                            static_cast<scalar_type>( positions( pj, 0 ) );
-                        const scalar_type dy =
-                            yi -
-                            static_cast<scalar_type>( positions( pj, 1 ) );
-                        const scalar_type dz =
-                            zi -
-                            static_cast<scalar_type>( positions( pj, 2 ) );
-                        const scalar_type r2 = dx * dx + dy * dy + dz * dz;
-                        if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
-                            continue;
-                        const scalar_type inv_r =
-                            static_cast<scalar_type>( 1.0 ) /
-                            Kokkos::sqrt( r2 + eps2 );
-                        const scalar_type inv_r3 = inv_r * inv_r * inv_r;
+                        const int li = tile_start + t + k * team_size;
+                        if ( li >= n_tgt )
+                            break;
+                        const int pi = ts + li;
+                        xi_r[k] =
+                            static_cast<scalar_type>( positions( pi, 0 ) );
+                        yi_r[k] =
+                            static_cast<scalar_type>( positions( pi, 1 ) );
+                        zi_r[k] =
+                            static_cast<scalar_type>( positions( pi, 2 ) );
                         for ( int c = 0; c < NComps; c++ )
                         {
-                            const scalar_type qj =
-                                static_cast<scalar_type>( charges( pj, c ) );
-                            phi[c] += qj * inv_r;
-                            if ( compute_gradient )
+                            phi_r[k][c] = static_cast<scalar_type>( 0 );
+                            gx_r[k][c] = static_cast<scalar_type>( 0 );
+                            gy_r[k][c] = static_cast<scalar_type>( 0 );
+                            gz_r[k][c] = static_cast<scalar_type>( 0 );
+                        }
+                        n_my++;
+                    }
+
+                    // --- Local neighbor leaves ---
+                    {
+                        const int l_start = local_nbr_off( league );
+                        const int l_end = local_nbr_off( league + 1 );
+                        for ( int nn = l_start; nn < l_end; nn++ )
+                        {
+                            const int n_cidx = local_nbr_idx( nn );
+                            const int ns = leaf_offsets( n_cidx );
+                            const int ne = leaf_offsets( n_cidx + 1 );
+                            const int n_src = ne - ns;
+
+                            for ( int cs = 0; cs < n_src;
+                                  cs += SMEM_SRC_CAP )
                             {
-                                gx[c] -= qj * dx * inv_r3;
-                                gy[c] -= qj * dy * inv_r3;
-                                gz[c] -= qj * dz * inv_r3;
+                                const int rem = n_src - cs;
+                                const int cn = ( SMEM_SRC_CAP < rem )
+                                                   ? SMEM_SRC_CAP
+                                                   : rem;
+
+                                Kokkos::parallel_for(
+                                    Kokkos::TeamThreadRange( tm, cn ),
+                                    [&]( const int i ) {
+                                        const int pj = ns + cs + i;
+                                        s_x( i ) = static_cast<scalar_type>(
+                                            positions( pj, 0 ) );
+                                        s_y( i ) = static_cast<scalar_type>(
+                                            positions( pj, 1 ) );
+                                        s_z( i ) = static_cast<scalar_type>(
+                                            positions( pj, 2 ) );
+                                        for ( int c = 0; c < NComps; c++ )
+                                            s_q( i * NComps + c ) =
+                                                static_cast<scalar_type>(
+                                                    charges( pj, c ) );
+                                    } );
+                                tm.team_barrier();
+
+                                for ( int k = 0; k < n_my; k++ )
+                                {
+                                    const scalar_type Xi = xi_r[k];
+                                    const scalar_type Yi = yi_r[k];
+                                    const scalar_type Zi = zi_r[k];
+                                    for ( int j = 0; j < cn; j++ )
+                                    {
+                                        const scalar_type dx = Xi - s_x( j );
+                                        const scalar_type dy = Yi - s_y( j );
+                                        const scalar_type dz = Zi - s_z( j );
+                                        const scalar_type r2 =
+                                            dx * dx + dy * dy + dz * dz;
+                                        if ( r2 < static_cast<scalar_type>(
+                                                      1.0e-24 ) )
+                                            continue;
+                                        const scalar_type inv_r =
+                                            static_cast<scalar_type>(
+                                                1.0 ) /
+                                            Kokkos::sqrt( r2 + eps2 );
+                                        const scalar_type inv_r3 =
+                                            inv_r * inv_r * inv_r;
+                                        for ( int c = 0; c < NComps; c++ )
+                                        {
+                                            const scalar_type qj =
+                                                s_q( j * NComps + c );
+                                            phi_r[k][c] += qj * inv_r;
+                                            if ( compute_gradient )
+                                            {
+                                                gx_r[k][c] -=
+                                                    qj * dx * inv_r3;
+                                                gy_r[k][c] -=
+                                                    qj * dy * inv_r3;
+                                                gz_r[k][c] -=
+                                                    qj * dz * inv_r3;
+                                            }
+                                        }
+                                    }
+                                }
+                                tm.team_barrier(); // before LDS overwrite
                             }
                         }
                     }
-                }
 
-                // --- Ghost neighbors ---
-                const int g_start = ghost_nbr_off( league );
-                const int g_end = ghost_nbr_off( league + 1 );
-                for ( int nn = g_start; nn < g_end; nn++ )
-                {
-                    const int g_idx = ghost_nbr_idx( nn );
-                    const int gs = ghost_leaf_off( g_idx );
-                    const int ge = ghost_leaf_off( g_idx + 1 );
-                    for ( int pj = gs; pj < ge; pj++ )
+                    // --- Ghost neighbor leaves ---
                     {
-                        const scalar_type dx = xi - ghost_positions( pj, 0 );
-                        const scalar_type dy = yi - ghost_positions( pj, 1 );
-                        const scalar_type dz = zi - ghost_positions( pj, 2 );
-                        const scalar_type r2 = dx * dx + dy * dy + dz * dz;
-                        if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
-                            continue;
-                        const scalar_type inv_r =
-                            static_cast<scalar_type>( 1.0 ) /
-                            Kokkos::sqrt( r2 + eps2 );
-                        const scalar_type inv_r3 = inv_r * inv_r * inv_r;
-                        for ( int c = 0; c < NComps; c++ )
+                        const int g_start = ghost_nbr_off( league );
+                        const int g_end = ghost_nbr_off( league + 1 );
+                        for ( int nn = g_start; nn < g_end; nn++ )
                         {
-                            const scalar_type qj = ghost_charges( pj, c );
-                            phi[c] += qj * inv_r;
-                            if ( compute_gradient )
+                            const int g_idx = ghost_nbr_idx( nn );
+                            const int gs = ghost_leaf_off( g_idx );
+                            const int ge = ghost_leaf_off( g_idx + 1 );
+                            const int n_src = ge - gs;
+
+                            for ( int cs = 0; cs < n_src;
+                                  cs += SMEM_SRC_CAP )
                             {
-                                gx[c] -= qj * dx * inv_r3;
-                                gy[c] -= qj * dy * inv_r3;
-                                gz[c] -= qj * dz * inv_r3;
+                                const int rem = n_src - cs;
+                                const int cn = ( SMEM_SRC_CAP < rem )
+                                                   ? SMEM_SRC_CAP
+                                                   : rem;
+
+                                Kokkos::parallel_for(
+                                    Kokkos::TeamThreadRange( tm, cn ),
+                                    [&]( const int i ) {
+                                        const int pj = gs + cs + i;
+                                        s_x( i ) = ghost_positions( pj, 0 );
+                                        s_y( i ) = ghost_positions( pj, 1 );
+                                        s_z( i ) = ghost_positions( pj, 2 );
+                                        for ( int c = 0; c < NComps; c++ )
+                                            s_q( i * NComps + c ) =
+                                                ghost_charges( pj, c );
+                                    } );
+                                tm.team_barrier();
+
+                                for ( int k = 0; k < n_my; k++ )
+                                {
+                                    const scalar_type Xi = xi_r[k];
+                                    const scalar_type Yi = yi_r[k];
+                                    const scalar_type Zi = zi_r[k];
+                                    for ( int j = 0; j < cn; j++ )
+                                    {
+                                        const scalar_type dx = Xi - s_x( j );
+                                        const scalar_type dy = Yi - s_y( j );
+                                        const scalar_type dz = Zi - s_z( j );
+                                        const scalar_type r2 =
+                                            dx * dx + dy * dy + dz * dz;
+                                        if ( r2 < static_cast<scalar_type>(
+                                                      1.0e-24 ) )
+                                            continue;
+                                        const scalar_type inv_r =
+                                            static_cast<scalar_type>(
+                                                1.0 ) /
+                                            Kokkos::sqrt( r2 + eps2 );
+                                        const scalar_type inv_r3 =
+                                            inv_r * inv_r * inv_r;
+                                        for ( int c = 0; c < NComps; c++ )
+                                        {
+                                            const scalar_type qj =
+                                                s_q( j * NComps + c );
+                                            phi_r[k][c] += qj * inv_r;
+                                            if ( compute_gradient )
+                                            {
+                                                gx_r[k][c] -=
+                                                    qj * dx * inv_r3;
+                                                gy_r[k][c] -=
+                                                    qj * dy * inv_r3;
+                                                gz_r[k][c] -=
+                                                    qj * dz * inv_r3;
+                                            }
+                                        }
+                                    }
+                                }
+                                tm.team_barrier();
                             }
                         }
                     }
-                }
 
-                // Single-writer: no atomic needed
-                // In release, pot_out/grad_out alias potential_out/gradient_out
-                // directly. In CANOPY_ENABLE_DEBUG, they alias the new-kernel
-                // scratch (accumulated into potential_out after the verifier).
-                for ( int c = 0; c < NComps; c++ )
-                {
-                    pot_out( pi, c ) += phi[c];
-                    if ( compute_gradient )
+                    // Single-writer output for this tile.
+                    // In release, pot_out/grad_out alias potential_out/
+                    // gradient_out directly. In CANOPY_ENABLE_DEBUG, they
+                    // alias the new-kernel scratch (accumulated into
+                    // potential_out after the verifier).
+                    for ( int k = 0; k < n_my; k++ )
                     {
-                        grad_out( pi, c, 0 ) += gx[c];
-                        grad_out( pi, c, 1 ) += gy[c];
-                        grad_out( pi, c, 2 ) += gz[c];
+                        const int pi = ts + ( tile_start + t + k * team_size );
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            pot_out( pi, c ) += phi_r[k][c];
+                            if ( compute_gradient )
+                            {
+                                grad_out( pi, c, 0 ) += gx_r[k][c];
+                                grad_out( pi, c, 1 ) += gy_r[k][c];
+                                grad_out( pi, c, 2 ) += gz_r[k][c];
+                            }
+                        }
                     }
                 }
             } );
 
         Kokkos::fence();
-        } // if ( n_local > 0 )
+        } // if ( n_local > 0 && num_target_leaves > 0 )
     } // TIMER_P2P_INTER_KERNEL
 
 #if defined( CANOPY_ENABLE_DEBUG )
