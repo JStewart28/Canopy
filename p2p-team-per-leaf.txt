@@ -1,0 +1,148 @@
+Gravitational FMM miniapp (P=6, NComps=1): 4 ranks, 100000000 particles/rank, ncrit=512, max_depth=19, repl_depth=3, imbal_tol=0.1, ncrit_tol=0.5, bbox_tol=0.25, mac_theta=0.5, num_steps=6, dt=0.0001, G=1, softening=0.001
+WARNING: OMPT initialization failed for ompt_start_tool.
+WARNING: OMPT initialization failed for ompt_start_tool.
+WARNING: OMPT initialization failed for ompt_start_tool.
+
+[Canopy Diagnostics] setup() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  Setup total                              85.325     87.669     86.574  1.3%
+    Tree build (all steps)                  5.393      5.458      5.436  0.4%
+    Partition                              13.344     13.498     13.402  0.7%
+    Sort particles by leaf                  0.530      0.595      0.547  8.7%
+    Comm plan build                        56.463     58.575     57.648  1.6%
+
+
+[Canopy Diagnostics] CommunicationPlan::build() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  Comm plan build (total)                  56.463     58.575     57.648  1.6%
+    Cell-map fill                           0.100      0.103      0.102  1.1%
+    Vertical plans (M2M/L2L)                0.117      0.120      0.119  1.3%
+    Subtree relevance                       1.111      1.144      1.122  2.0%
+    DTT traversal                          40.149     42.264     41.311  2.3%
+    Finalize M2L plan                      12.806     12.875     12.840  0.3%
+    Finalize P2P plan                       2.145      2.165      2.154  0.5%
+
+
+[Canopy Diagnostics] UpwardSweep::execute() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  Upward sweep total                        1.481      1.485      1.483  0.1%
+    P2M                                     0.352      0.363      0.359  1.3%
+    M2M (all depths)                        0.170      0.174      0.172  1.4%
+    M2M Allreduce                           0.190      0.819      0.498  64.3%
+
+[Canopy diag] build_interaction_list: n_unique_ops=3246, _max_depth=8, total_pairs=717943243, cap=32768
+
+[Canopy Diagnostics] DownwardSweep::execute() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  Downward sweep total                     49.041     49.117     49.098  0.0%
+    M2L kernel (all depths)                 6.418      6.543      6.471  1.1%
+    [detail] Build ilist                   37.256     37.417     37.351  0.2%
+
+[Canopy diag] p2p_inter_leaf_pairs=6157915319020
+[Canopy diag] leaf_size_hist target: n=1196415 min=25 max=504 mean=83.6 p50=80 p95=96 p99=110
+[Canopy diag] leaf_size_hist local_nbr: n=203962782 min=25 max=504 mean=85.0 p50=80 p95=97 p99=414
+[Canopy diag] leaf_size_hist ghost: n=88123 min=44 max=504 mean=84.5 p50=80 p95=97 p99=405
+
+[Canopy Diagnostics] P2P::execute() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  P2P total                                22.698     23.208     22.949  1.1%
+    P2P ghost comm                          0.080      0.158      0.100  57.5%
+    P2P intra-leaf kernel                   0.041      0.041      0.041  0.5%
+    P2P inter-leaf kernel                  22.575     23.087     22.807  1.2%
+    [detail] inter-leaf RERUN (warm)        5.701      5.787      5.743  0.8%
+
+  step   1: action=Rebuild    solve=85.4176 s  action=51.6631 s
+
+[Canopy diag] p2p_inter_leaf_pairs=14176743340808
+[Canopy diag] leaf_size_hist target: n=540318 min=1 max=512 mean=185.1 p50=182 p95=313 p99=429
+[Canopy diag] leaf_size_hist local_nbr: n=89357046 min=1 max=512 mean=192.9 p50=185 p95=342 p99=459
+[Canopy diag] leaf_size_hist ghost: n=68234 min=1 max=512 mean=189.5 p50=183 p95=291 p99=396
+
+[Canopy Diagnostics] P2P::execute() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  P2P total                                46.418     47.550     46.928  1.3%
+    P2P ghost comm                          0.832      0.833      0.832  0.1%
+    P2P intra-leaf kernel                   0.084      0.089      0.086  3.9%
+    P2P inter-leaf kernel                  45.502     46.634     46.009  1.4%
+    [detail] inter-leaf RERUN (warm)       13.248     13.523     13.364  1.2%
+
+  step   2: action=Rebuild    solve=84.8715 s  action=51.3842 s
+
+[Canopy diag] p2p_inter_leaf_pairs=13843501198678
+[Canopy diag] leaf_size_hist target: n=546644 min=1 max=512 mean=182.9 p50=179 p95=304 p99=420
+[Canopy diag] leaf_size_hist local_nbr: n=90407238 min=1 max=512 mean=190.3 p50=182 p95=331 p99=454
+[Canopy diag] leaf_size_hist ghost: n=70205 min=1 max=512 mean=183.1 p50=177 p95=282 p99=393
+
+[Canopy Diagnostics] P2P::execute() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  P2P total                                45.237     46.438     45.602  1.8%
+    P2P inter-leaf kernel                  44.996     46.205     45.363  1.9%
+    [detail] inter-leaf RERUN (warm)       12.929     13.201     13.052  1.1%
+
+  step   3: action=Rebuild    solve=83.9842 s  action=56.2285 s
+
+[Canopy diag] p2p_inter_leaf_pairs=13834972793742
+[Canopy diag] leaf_size_hist target: n=548330 min=1 max=512 mean=182.4 p50=178 p95=300 p99=420
+[Canopy diag] leaf_size_hist local_nbr: n=91004714 min=1 max=512 mean=189.3 p50=181 p95=327 p99=452
+[Canopy diag] leaf_size_hist ghost: n=65462 min=1 max=512 mean=183.9 p50=177 p95=269 p99=375
+
+[Canopy Diagnostics] P2P::execute() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  P2P total                                45.308     46.091     45.743  0.8%
+    P2P inter-leaf kernel                  45.096     45.865     45.522  0.8%
+    [detail] inter-leaf RERUN (warm)       12.861     13.117     12.988  1.0%
+
+  step   4: action=Rebalance  solve=84.4718 s  action=53.3097 s
+
+[Canopy diag] p2p_inter_leaf_pairs=13676070699022
+
+[Canopy Diagnostics] P2P::execute() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  P2P total                                44.222     45.183     44.772  0.9%
+    P2P inter-leaf kernel                  44.001     44.978     44.554  1.0%
+    [detail] inter-leaf RERUN (warm)       12.755     12.983     12.863  0.9%
+
+  step   5: action=Rebalance  solve=83.7785 s  action=54.3755 s
+
+[Canopy diag] p2p_inter_leaf_pairs=13785417233892
+
+[Canopy Diagnostics] P2P::execute() timing (4 MPI ranks)
+  Phase                                   Min (s)    Max (s)   Mean (s)  Imbalance
+---------------------------------------------------------------------------------
+  P2P total                                44.799     45.750     45.165  1.3%
+    P2P inter-leaf kernel                  44.593     45.527     44.948  1.3%
+    [detail] inter-leaf RERUN (warm)       12.844     13.073     12.965  0.8%
+
+  step   6: action=Rebalance  solve=84.6616 s  action=55.4776 s
+
+Setup time (particles + solver setup):    88.0130 s
+Total solve time (sum over steps):        507.1852 s
+Total end-to-end timestep-loop time:      829.6508 s
+
+Per-step share of total solve time:
+  step   1: action=Rebuild    solve=85.4176 s  (16.8% of total solve)  action=51.6631 s
+  step   2: action=Rebuild    solve=84.8715 s  (16.7% of total solve)  action=51.3842 s
+  step   3: action=Rebuild    solve=83.9842 s  (16.6% of total solve)  action=56.2285 s
+  step   4: action=Rebalance  solve=84.4718 s  (16.7% of total solve)  action=53.3097 s
+  step   5: action=Rebalance  solve=83.7785 s  (16.5% of total solve)  action=54.3755 s
+  step   6: action=Rebalance  solve=84.6616 s  (16.7% of total solve)  action=55.4776 s
+
+# === A/B within run: NEW (production) vs OLD (level-3 warm rerun) ===
+# step | NEW inter-leaf (s) | OLD warm rerun (s) | NEW / OLD
+# setup |          22.81    |          5.74      | 4.0x
+# 1     |          46.01    |         13.36      | 3.4x
+# 2     |          45.36    |         13.05      | 3.5x
+# 3     |          45.52    |         12.99      | 3.5x
+# 4     |          44.55    |         12.86      | 3.5x
+# 5     |          44.95    |         12.97      | 3.5x
+#
+# Closed-negative. See canopy-p2p-rewrite-investigation.md.
