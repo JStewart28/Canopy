@@ -1,3 +1,4 @@
+#include "Canopy_ExampleSpaces.hpp"
 #include "Canopy_Helpers.hpp"
 #include "Canopy_Solver.hpp"
 
@@ -27,8 +28,8 @@ static constexpr int N_COMPS = 1;
 
 using DataTypes = Cabana::MemberTypes<double[3], double[N_COMPS]>;
 
-using MemorySpace = Kokkos::CudaSpace;
-using ExecutionSpace = Kokkos::Cuda;
+using MemorySpace = CanopyExample::MemorySpace;
+using ExecutionSpace = CanopyExample::ExecutionSpace;
 
 using AoSoA_t = Cabana::AoSoA<DataTypes, MemorySpace>;
 using Solver_t =

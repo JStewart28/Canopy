@@ -19,6 +19,7 @@ endif()
 
 add_executable(example_fmm example_full_fmm.cpp)
 target_link_libraries(example_fmm Canopy)
+target_include_directories(example_fmm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 add_test(NAME Canopy_Tutorial_02_full_fmm COMMAND ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG}
 ${MPIEXEC_MAX_NUMPROCS} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:example_fmm> ${MPIEXEC_POSTFLAGS})
 set_tests_properties(Canopy_Tutorial_02_full_fmm PROPERTIES PROCESSORS ${MPIEXEC_MAX_NUMPROCS})

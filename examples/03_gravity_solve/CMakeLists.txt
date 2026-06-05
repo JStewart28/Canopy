@@ -17,6 +17,7 @@ endif()
 
 add_executable(gravity_solve gravity_solve.cpp)
 target_link_libraries(gravity_solve Canopy)
+target_include_directories(gravity_solve PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 add_test(NAME Canopy_Tutorial_03_gravity_solve COMMAND ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG}
 ${MPIEXEC_MAX_NUMPROCS} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gravity_solve> ${MPIEXEC_POSTFLAGS})
 set_tests_properties(Canopy_Tutorial_03_gravity_solve PROPERTIES PROCESSORS ${MPIEXEC_MAX_NUMPROCS})
