@@ -27,6 +27,8 @@
 #include <climits>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -898,12 +900,175 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
     auto ghost_positions = _ghost_positions;
     auto ghost_charges = _ghost_charges;
 
+    // Hoisted so the CANOPY_ENABLE_DEBUG side-by-side verifier blocks below
+    // can see them outside the TIMER_P2P_INTER_KERNEL scope.
+    auto particle_to_league_v = _particle_to_league;
+    const int n_local = static_cast<int>( positions.size() );
+
+    // In release, the production kernel writes directly to potential_out /
+    // gradient_out. In CANOPY_ENABLE_DEBUG builds we rebind pot_out/grad_out
+    // to clean scratch views (pot_new_debug/grad_new_debug) so we can compare
+    // them against an OLD-kernel reference written into a second scratch
+    // (pot_old_debug/grad_old_debug). After the compare, pot_new_debug is
+    // accumulated into potential_out so the rest of the pipeline sees the
+    // correct inter-leaf contribution.
+    auto pot_out = potential_out;
+    auto grad_out = gradient_out;
+
+#if defined( CANOPY_ENABLE_DEBUG )
+    potential_view_type pot_new_debug(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "p2p_pot_new_debug" ),
+        n_local );
+    gradient_view_type grad_new_debug(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "p2p_grad_new_debug" ),
+        compute_gradient ? n_local : 0 );
+    Kokkos::deep_copy( pot_new_debug, static_cast<scalar_type>( 0 ) );
+    if ( compute_gradient )
+        Kokkos::deep_copy( grad_new_debug, static_cast<scalar_type>( 0 ) );
+    pot_out = pot_new_debug;
+    grad_out = grad_new_debug;
+
+    potential_view_type pot_old_debug(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "p2p_pot_old_debug" ),
+        n_local );
+    gradient_view_type grad_old_debug(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                            "p2p_grad_old_debug" ),
+        compute_gradient ? n_local : 0 );
+    Kokkos::deep_copy( pot_old_debug, static_cast<scalar_type>( 0 ) );
+    if ( compute_gradient )
+        Kokkos::deep_copy( grad_old_debug, static_cast<scalar_type>( 0 ) );
+
+    // OLD reference: byte-identical to the production thread-per-particle
+    // inter-leaf kernel below. When the production kernel is also the
+    // thread-per-particle path (commit 2 scaffold), the compare should
+    // report zero mismatch. When the production kernel is the team-per-leaf
+    // rewrite (commit 3), the compare catches divergence beyond FP-reordering
+    // noise. Kernel body is duplicated rather than shared via a local lambda
+    // because nvcc forbids defining an extended __device__ lambda inside
+    // another lambda.
+    if ( n_local > 0 )
+    {
+        Kokkos::parallel_for(
+            "P2P_inter_leaf_debug_old",
+            Kokkos::RangePolicy<execution_space>( 0, n_local ),
+            KOKKOS_LAMBDA( const int pi ) {
+                const int league = particle_to_league_v( pi );
+                if ( league < 0 )
+                    return;
+
+                const scalar_type xi =
+                    static_cast<scalar_type>( positions( pi, 0 ) );
+                const scalar_type yi =
+                    static_cast<scalar_type>( positions( pi, 1 ) );
+                const scalar_type zi =
+                    static_cast<scalar_type>( positions( pi, 2 ) );
+
+                scalar_type phi[NComps];
+                scalar_type gx[NComps], gy[NComps], gz[NComps];
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    phi[c] = static_cast<scalar_type>( 0 );
+                    gx[c] = static_cast<scalar_type>( 0 );
+                    gy[c] = static_cast<scalar_type>( 0 );
+                    gz[c] = static_cast<scalar_type>( 0 );
+                }
+
+                const int l_start = local_nbr_off( league );
+                const int l_end = local_nbr_off( league + 1 );
+                for ( int nn = l_start; nn < l_end; nn++ )
+                {
+                    const int n_cidx = local_nbr_idx( nn );
+                    const int ns = leaf_offsets( n_cidx );
+                    const int ne = leaf_offsets( n_cidx + 1 );
+                    for ( int pj = ns; pj < ne; pj++ )
+                    {
+                        const scalar_type dx =
+                            xi -
+                            static_cast<scalar_type>( positions( pj, 0 ) );
+                        const scalar_type dy =
+                            yi -
+                            static_cast<scalar_type>( positions( pj, 1 ) );
+                        const scalar_type dz =
+                            zi -
+                            static_cast<scalar_type>( positions( pj, 2 ) );
+                        const scalar_type r2 = dx * dx + dy * dy + dz * dz;
+                        if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
+                            continue;
+                        const scalar_type inv_r =
+                            static_cast<scalar_type>( 1.0 ) /
+                            Kokkos::sqrt( r2 + eps2 );
+                        const scalar_type inv_r3 = inv_r * inv_r * inv_r;
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            const scalar_type qj =
+                                static_cast<scalar_type>( charges( pj, c ) );
+                            phi[c] += qj * inv_r;
+                            if ( compute_gradient )
+                            {
+                                gx[c] -= qj * dx * inv_r3;
+                                gy[c] -= qj * dy * inv_r3;
+                                gz[c] -= qj * dz * inv_r3;
+                            }
+                        }
+                    }
+                }
+
+                const int g_start = ghost_nbr_off( league );
+                const int g_end = ghost_nbr_off( league + 1 );
+                for ( int nn = g_start; nn < g_end; nn++ )
+                {
+                    const int g_idx = ghost_nbr_idx( nn );
+                    const int gs = ghost_leaf_off( g_idx );
+                    const int ge = ghost_leaf_off( g_idx + 1 );
+                    for ( int pj = gs; pj < ge; pj++ )
+                    {
+                        const scalar_type dx = xi - ghost_positions( pj, 0 );
+                        const scalar_type dy = yi - ghost_positions( pj, 1 );
+                        const scalar_type dz = zi - ghost_positions( pj, 2 );
+                        const scalar_type r2 = dx * dx + dy * dy + dz * dz;
+                        if ( r2 < static_cast<scalar_type>( 1.0e-24 ) )
+                            continue;
+                        const scalar_type inv_r =
+                            static_cast<scalar_type>( 1.0 ) /
+                            Kokkos::sqrt( r2 + eps2 );
+                        const scalar_type inv_r3 = inv_r * inv_r * inv_r;
+                        for ( int c = 0; c < NComps; c++ )
+                        {
+                            const scalar_type qj = ghost_charges( pj, c );
+                            phi[c] += qj * inv_r;
+                            if ( compute_gradient )
+                            {
+                                gx[c] -= qj * dx * inv_r3;
+                                gy[c] -= qj * dy * inv_r3;
+                                gz[c] -= qj * dz * inv_r3;
+                            }
+                        }
+                    }
+                }
+
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    pot_old_debug( pi, c ) += phi[c];
+                    if ( compute_gradient )
+                    {
+                        grad_old_debug( pi, c, 0 ) += gx[c];
+                        grad_old_debug( pi, c, 1 ) += gy[c];
+                        grad_old_debug( pi, c, 2 ) += gz[c];
+                    }
+                }
+            } );
+        Kokkos::fence();
+    }
+#endif // CANOPY_ENABLE_DEBUG
+
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_P2P_INTER_KERNEL );
-        const int n_local = static_cast<int>( positions.size() );
         if ( n_local > 0 )
         {
-        auto particle_to_league_v = _particle_to_league;
 
         Kokkos::parallel_for(
             "P2P_inter_leaf",
@@ -1006,14 +1171,17 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                 }
 
                 // Single-writer: no atomic needed
+                // In release, pot_out/grad_out alias potential_out/gradient_out
+                // directly. In CANOPY_ENABLE_DEBUG, they alias the new-kernel
+                // scratch (accumulated into potential_out after the verifier).
                 for ( int c = 0; c < NComps; c++ )
                 {
-                    potential_out( pi, c ) += phi[c];
+                    pot_out( pi, c ) += phi[c];
                     if ( compute_gradient )
                     {
-                        gradient_out( pi, c, 0 ) += gx[c];
-                        gradient_out( pi, c, 1 ) += gy[c];
-                        gradient_out( pi, c, 2 ) += gz[c];
+                        grad_out( pi, c, 0 ) += gx[c];
+                        grad_out( pi, c, 1 ) += gy[c];
+                        grad_out( pi, c, 2 ) += gz[c];
                     }
                 }
             } );
@@ -1021,6 +1189,99 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
         Kokkos::fence();
         } // if ( n_local > 0 )
     } // TIMER_P2P_INTER_KERNEL
+
+#if defined( CANOPY_ENABLE_DEBUG )
+    // Side-by-side check: pot_new_debug vs pot_old_debug (and gradient).
+    // FP-reorder tolerance: 1e-10 (double) / 5e-5 (float). Abort on mismatch.
+    // After the compare, accumulate pot_new_debug into potential_out so the
+    // rest of the production pipeline sees the inter-leaf contribution.
+    if ( n_local > 0 )
+    {
+        constexpr double DEBUG_REL_TOL =
+            std::is_same<scalar_type, float>::value ? 5.0e-5 : 1.0e-10;
+        long n_mismatch = 0;
+        double max_rel = 0.0;
+        const bool cg = compute_gradient;
+        Kokkos::parallel_reduce(
+            "P2P_inter_leaf_debug_compare",
+            Kokkos::RangePolicy<execution_space>( 0, n_local ),
+            KOKKOS_LAMBDA( const int pi, long& mis, double& mxr ) {
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    const double nv =
+                        static_cast<double>( pot_new_debug( pi, c ) );
+                    const double ov =
+                        static_cast<double>( pot_old_debug( pi, c ) );
+                    const double an = ( nv < 0.0 ? -nv : nv );
+                    const double ao = ( ov < 0.0 ? -ov : ov );
+                    const double dv = nv - ov;
+                    const double ad = ( dv < 0.0 ? -dv : dv );
+                    const double rel = ad / ( an + ao + 1.0e-30 );
+                    if ( rel > DEBUG_REL_TOL )
+                        mis++;
+                    if ( rel > mxr )
+                        mxr = rel;
+                    if ( cg )
+                    {
+                        for ( int k = 0; k < 3; k++ )
+                        {
+                            const double gn = static_cast<double>(
+                                grad_new_debug( pi, c, k ) );
+                            const double go = static_cast<double>(
+                                grad_old_debug( pi, c, k ) );
+                            const double agn = ( gn < 0.0 ? -gn : gn );
+                            const double ago = ( go < 0.0 ? -go : go );
+                            const double dg = gn - go;
+                            const double adg = ( dg < 0.0 ? -dg : dg );
+                            const double rg =
+                                adg / ( agn + ago + 1.0e-30 );
+                            if ( rg > DEBUG_REL_TOL )
+                                mis++;
+                            if ( rg > mxr )
+                                mxr = rg;
+                        }
+                    }
+                }
+            },
+            Kokkos::Sum<long>( n_mismatch ),
+            Kokkos::Max<double>( max_rel ) );
+        Kokkos::fence();
+
+        if ( n_mismatch > 0 )
+        {
+            int dbg_rank = 0;
+            MPI_Comm_rank( _comm, &dbg_rank );
+            std::fprintf( stderr,
+                          "[CANOPY DEBUG] P2P inter-leaf verifier FAILED "
+                          "(rank=%d): n_mismatch=%ld max_rel=%g tol=%g\n",
+                          dbg_rank, n_mismatch, max_rel, DEBUG_REL_TOL );
+            std::abort();
+        }
+
+        // Accumulate pot_new_debug into the production output views.
+        auto potential_out_acc = potential_out;
+        auto gradient_out_acc = gradient_out;
+        Kokkos::parallel_for(
+            "P2P_inter_leaf_debug_accumulate",
+            Kokkos::RangePolicy<execution_space>( 0, n_local ),
+            KOKKOS_LAMBDA( const int pi ) {
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    potential_out_acc( pi, c ) += pot_new_debug( pi, c );
+                    if ( cg )
+                    {
+                        gradient_out_acc( pi, c, 0 ) +=
+                            grad_new_debug( pi, c, 0 );
+                        gradient_out_acc( pi, c, 1 ) +=
+                            grad_new_debug( pi, c, 1 );
+                        gradient_out_acc( pi, c, 2 ) +=
+                            grad_new_debug( pi, c, 2 );
+                    }
+                }
+            } );
+        Kokkos::fence();
+    }
+#endif // CANOPY_ENABLE_DEBUG
     } // TIMER_P2P_TOTAL
 
 #if CANOPY_PROFILING_LEVEL >= 3
