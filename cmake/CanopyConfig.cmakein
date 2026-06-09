@@ -14,4 +14,9 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}" )
 list(APPEND CMAKE_PREFIX_PATH @CMAKE_PREFIX_PATH@)
 find_dependency(Kokkos REQUIRED)
 find_dependency(MPI REQUIRED CXX)
+# Canopy_Targets.cmake's INTERFACE_LINK_LIBRARIES references Trilinos
+# sub-targets (Zoltan2::all_libs, Tpetra::all_libs, Teuchos*::all_libs,
+# ...). Load Trilinos before including the targets file so those
+# imported targets exist when consumers link Canopy::Canopy.
+find_dependency(Trilinos REQUIRED)
 include("${CMAKE_CURRENT_LIST_DIR}/Canopy_Targets.cmake")
