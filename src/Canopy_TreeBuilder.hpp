@@ -718,7 +718,7 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
                     return;
 
                 int c = key_to_cand_idx.value_at( idx );
-                Kokkos::atomic_increment( &local_counts( c ) );
+                Kokkos::atomic_inc( &local_counts( c ) );
 
                 double cx = cand_centers( c, 0 );
                 double cy = cand_centers( c, 1 );
@@ -729,7 +729,7 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
 
                 int oct = which_octant( px, py, pz, cx, cy, cz );
                 particle_octant( i ) = oct;
-                Kokkos::atomic_increment( &local_octant_counts( c, oct ) );
+                Kokkos::atomic_inc( &local_octant_counts( c, oct ) );
             } );
         Kokkos::fence();
 
