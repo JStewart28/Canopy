@@ -137,8 +137,10 @@ class TreeBuilder
     int _ncrit;
     //! Maximum tree depth
     int _max_depth;
-    //! Tolerance factor on global bounding box
-    std::array<double, 3> _bb_tf;
+    //! Per-face bounding-box padding factors, ordered
+    //! {xmin, xmax, ymin, ymax, zmin, zmax}. Each is a fraction of the
+    //! axis width applied to that face of the root box in build().
+    std::array<double, 6> _bb_tf;
     //! Tolerance factor on gncrit
     double _ncrit_tf;
 
@@ -160,7 +162,7 @@ class TreeBuilder
   public:
     // Constructor
     TreeBuilder( MPI_Comm comm, const int ncrit, const int max_depth,
-                 const std::array<double, 3> bb_tolerance_factor,
+                 const std::array<double, 6> bb_tolerance_factor,
                  const double ncrit_tolerance_factor = 0.1 )
         : _ncrit( ncrit )
         , _max_depth( max_depth )
@@ -605,18 +607,18 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
     // Compute global bounding box
     _root_box = compute_global_bounding_box( positions, num_local_particles );
 
-    // Expand the root box by the tolerance factor so particles have room
-    // to move before leaving the domain.
+    // Expand the root box by per-face tolerance factors so particles have
+    // room to move before leaving the domain. _bb_tf is ordered
+    // {xmin, xmax, ymin, ymax, zmin, zmax}.
     for ( int d = 0; d < 3; ++d )
     {
-        double tol = _bb_tf[d];
-        if ( tol > 0.0 )
-        {
-            double width = _root_box.max[d] - _root_box.min[d];
-            double expansion = tol * width;
-            _root_box.min[d] -= expansion;
-            _root_box.max[d] += expansion;
-        }
+        double width = _root_box.max[d] - _root_box.min[d];
+        double tmin = _bb_tf[2 * d + 0];
+        double tmax = _bb_tf[2 * d + 1];
+        if ( tmin > 0.0 )
+            _root_box.min[d] -= tmin * width;
+        if ( tmax > 0.0 )
+            _root_box.max[d] += tmax * width;
     }
 
     // Coordinates of root box center

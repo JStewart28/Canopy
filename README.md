@@ -20,16 +20,32 @@ Canopy::Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>
 
 ### Constructor
 
+The solver takes an `MPI_Comm` plus an `FmmConfig` struct that holds every
+FMM-pipeline knob. The communicator stays a positional argument because it
+is program context, not FMM behavior.
+
 ```cpp
-Canopy::Solver<...> solver(
-    MPI_Comm comm,           // MPI communicator
-    int      ncrit,          // max particles per leaf cell
-    int      max_depth,      // maximum octree depth
-    double   tree_tolerance, // admissibility criterion for M2L interactions
-    int      replication_depth, // depth to which ghost cells are replicated
-    double   imbalance_tolerance = 0.05 // load-balance threshold
-);
+Canopy::Solver<...> solver( MPI_Comm comm, const Canopy::FmmConfig& cfg );
 ```
+
+`FmmConfig` is defined in `src/Canopy_Solver.hpp`:
+
+| Field | Description | Default |
+|---|---|---|
+| `ncrit` | Max particles per leaf cell | — |
+| `max_depth` | Maximum octree depth | — |
+| `xmin_tol`, `xmax_tol` | Padding fractions on the low / high `x` face of the root bounding box | `0.0` |
+| `ymin_tol`, `ymax_tol` | Padding fractions on the low / high `y` face | `0.0` |
+| `zmin_tol`, `zmax_tol` | Padding fractions on the low / high `z` face | `0.0` |
+| `ncrit_tol` | Admissibility tolerance on `ncrit` during tree adaptation | `0.1` |
+| `replication_depth` | Depth to which ghost cells are replicated | `1` |
+| `imbalance_tolerance` | Load-balance threshold | `0.05` |
+| `mac_theta` | Multipole acceptance criterion | `0.5` |
+| `softening` | Plummer softening length; `< 0` selects auto-softening from the inter-particle spacing | `-1.0` |
+
+The six bounding-box tolerances are per-face and may be set independently,
+e.g. to pad only the outflow boundary of an asymmetric domain. For an
+isotropic domain set all six to the same value.
 
 ### Typical Usage Pattern
 
@@ -81,9 +97,15 @@ auto action = solver.auto_maintain<0, 1>(particles);
 using MemSpace = Kokkos::HostSpace;
 using ExecSpace = Kokkos::Serial;
 
-Canopy::Solver<MemSpace, ExecSpace> solver(MPI_COMM_WORLD,
-    /*ncrit=*/32, /*max_depth=*/10,
-    /*tree_tolerance=*/0.4, /*replication_depth=*/1);
+Canopy::FmmConfig cfg;
+cfg.ncrit = 32;
+cfg.max_depth = 10;
+cfg.xmin_tol = cfg.xmax_tol = 0.4;
+cfg.ymin_tol = cfg.ymax_tol = 0.4;
+cfg.zmin_tol = cfg.zmax_tol = 0.4;
+cfg.replication_depth = 1;
+
+Canopy::Solver<MemSpace, ExecSpace> solver(MPI_COMM_WORLD, cfg);
 
 // ... populate particles AoSoA ...
 

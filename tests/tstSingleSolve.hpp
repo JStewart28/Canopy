@@ -121,7 +121,7 @@ void testFullSolve( bool compute_gradient, int num_particles_per_rank,
     // Pipeline setup
     // -----------------------------------------------------------------------
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tree_tolerance, tree_tolerance, tree_tolerance}, tree_tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tree_tolerance, tree_tolerance, tree_tolerance, tree_tolerance, tree_tolerance, tree_tolerance}, tree_tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(

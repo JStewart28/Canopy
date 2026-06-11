@@ -114,7 +114,7 @@ void testP2PZeroChargesGiveZeroPotential( int num_particles_per_rank, int ncrit,
     Cabana::deep_copy( particles, particles_h );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
@@ -189,7 +189,7 @@ void testP2PPotentialNonzeroAfterExecution( int num_particles_per_rank,
     Cabana::deep_copy( particles, particles_h );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
@@ -261,7 +261,7 @@ void testP2PIdempotentExecution( int num_particles_per_rank, int ncrit,
     Cabana::deep_copy( particles, particles_h );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
@@ -344,7 +344,7 @@ void testP2PDirectSumSingleLeaf( int num_particles, int ncrit, int max_depth,
     Cabana::deep_copy( particles, particles_h );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
@@ -563,7 +563,7 @@ void testP2PGradientSignConsistency( int num_particles, int ncrit,
     Cabana::deep_copy( particles, particles_h );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
@@ -704,7 +704,7 @@ void testP2PMultiComponentDirectSum( int num_particles )
     const int replication_depth = 1;
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
         MPI_COMM_WORLD, replication_depth );
     CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(

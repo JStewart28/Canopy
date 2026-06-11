@@ -233,11 +233,19 @@ int main( int argc, char* argv[] )
         AoSoA_t particles( "particles", num_particles_per_rank );
         generate_particles( particles, num_particles_per_rank, rank );
 
-        std::array<double, 3> bb_tol = { bbox_tol, bbox_tol, bbox_tol };
+        Canopy::FmmConfig cfg;
+        cfg.ncrit = ncrit;
+        cfg.max_depth = max_depth;
+        cfg.xmin_tol = cfg.xmax_tol = bbox_tol;
+        cfg.ymin_tol = cfg.ymax_tol = bbox_tol;
+        cfg.zmin_tol = cfg.zmax_tol = bbox_tol;
+        cfg.ncrit_tol = ncrit_tol;
+        cfg.replication_depth = replication_depth;
+        cfg.imbalance_tolerance = imbalance_tolerance;
+        cfg.mac_theta = mac_theta;
+        cfg.softening = softening;
 
-        Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth, bb_tol, ncrit_tol,
-                         replication_depth, imbalance_tolerance, mac_theta,
-                         softening );
+        Solver_t solver( MPI_COMM_WORLD, cfg );
 
         solver.setup<Position, Mass>( particles, num_particles_per_rank );
 

@@ -35,6 +35,41 @@ namespace Canopy
 {
 
 // ============================================================================
+// FmmConfig
+//
+// All FMM-pipeline configuration knobs in a single struct. The MPI
+// communicator is kept out — it is program context, not FMM behavior — so
+// the Solver constructor reads as `Solver(comm, cfg)`.
+//
+// The six bounding-box tolerances are per-face padding factors applied to
+// the global root box: `*min_tol` pads the low side of each axis, `*max_tol`
+// the high side. Each is a fraction of the axis width. A value of 0.0 means
+// "no padding on this face". Asymmetric values let workloads with different
+// boundary behavior (e.g. fixed wall at -x, free outflow at +x) match the
+// physical layout without inflating the opposite face.
+// ============================================================================
+
+struct FmmConfig
+{
+    int ncrit;
+    int max_depth;
+
+    double xmin_tol = 0.0;
+    double xmax_tol = 0.0;
+    double ymin_tol = 0.0;
+    double ymax_tol = 0.0;
+    double zmin_tol = 0.0;
+    double zmax_tol = 0.0;
+
+    double ncrit_tol = 0.1;
+    int replication_depth = 1;
+    double imbalance_tolerance = 0.05;
+    double mac_theta = 0.5;
+    // Negative selects distribution-based auto-softening at first setup().
+    double softening = -1.0;
+};
+
+// ============================================================================
 // Solver
 //
 // Facade that owns the full FMM pipeline (TreeBuilder, TreePartitioner,
@@ -102,27 +137,29 @@ class Solver
     //   global bounding-box volume and N the total particle count. Computed
     //   once at the first setup() and held fixed thereafter (see README for
     //   the rationale and the future option to recompute per rebuild).
-    Solver( MPI_Comm comm, int ncrit, int max_depth, std::array<double, 3> bounding_box_tol, double ncrit_tol,
-            int replication_depth, double imbalance_tolerance = 0.05,
-            double mac_theta = 0.5, double softening = -1.0 )
+    Solver( MPI_Comm comm, const FmmConfig& cfg )
         : _comm( comm )
-        , _replication_depth( replication_depth )
-        , _builder( comm, ncrit, max_depth, bounding_box_tol, ncrit_tol )
-        , _partitioner( comm, replication_depth, imbalance_tolerance )
-        , _comm_plan( comm, mac_theta )
+        , _replication_depth( cfg.replication_depth )
+        , _builder( comm, cfg.ncrit, cfg.max_depth,
+                    std::array<double, 6>{ cfg.xmin_tol, cfg.xmax_tol,
+                                           cfg.ymin_tol, cfg.ymax_tol,
+                                           cfg.zmin_tol, cfg.zmax_tol },
+                    cfg.ncrit_tol )
+        , _partitioner( comm, cfg.replication_depth, cfg.imbalance_tolerance )
+        , _comm_plan( comm, cfg.mac_theta )
         , _upward( comm )
         , _downward( comm )
         , _p2p( comm )
         , _num_local( 0 )
-        , _softening_input( softening )
+        , _softening_input( cfg.softening )
         , _softening_initialized( false )
     {
         // Explicit softening (including an explicit 0 for an unsoftened run):
         // apply it now. A negative value defers to the distribution-based
         // auto-softening computed in _full_setup().
-        if ( softening >= 0.0 )
+        if ( cfg.softening >= 0.0 )
         {
-            _p2p.set_softening( static_cast<Scalar>( softening ) );
+            _p2p.set_softening( static_cast<Scalar>( cfg.softening ) );
             _softening_initialized = true;
         }
     }
@@ -663,13 +700,11 @@ class Solver
 template <class MemorySpace, class ExecutionSpace, class Scalar = double,
           int P_ORDER = 8, int NComps = 1>
 std::shared_ptr<Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>>
-createSolver( MPI_Comm comm, int ncrit, int max_depth,
-              std::array<double, 3> bounding_box_tol, double ncrit_tol,
-              int replication_depth, double imbalance_tolerance = 0.05 )
+createSolver( MPI_Comm comm, const FmmConfig& cfg )
 {
-    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>>(
-        comm, ncrit, max_depth, bounding_box_tol, ncrit_tol,
-        replication_depth, imbalance_tolerance );
+    return std::make_shared<
+        Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>>( comm,
+                                                                       cfg );
 }
 
 } // namespace Canopy

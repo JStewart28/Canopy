@@ -319,10 +319,18 @@ inline void testMultiStepGravity(
     const double mac_theta_used =
         ( mac_theta_override > 0.0 ) ? mac_theta_override
                                      : get_test_mac_theta();
-    Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth,
-                     std::array<double, 3>{tree_tolerance, tree_tolerance, tree_tolerance},
-                     tree_tolerance, replication_depth, 0.05,
-                     mac_theta_used, /*softening=*/0.0 );
+    Canopy::FmmConfig cfg;
+    cfg.ncrit = ncrit;
+    cfg.max_depth = max_depth;
+    cfg.xmin_tol = cfg.xmax_tol = tree_tolerance;
+    cfg.ymin_tol = cfg.ymax_tol = tree_tolerance;
+    cfg.zmin_tol = cfg.zmax_tol = tree_tolerance;
+    cfg.ncrit_tol = tree_tolerance;
+    cfg.replication_depth = replication_depth;
+    cfg.imbalance_tolerance = 0.05;
+    cfg.mac_theta = mac_theta_used;
+    cfg.softening = 0.0;
+    Solver_t solver( MPI_COMM_WORLD, cfg );
     solver.template setup<Position, Charge>( particles,
                                              num_particles_per_rank );
 
@@ -760,10 +768,18 @@ inline void run_fmm_and_compare( int num_particles, double mac_theta,
     AoSoA_t particles( "particles", num_particles );
     Cabana::deep_copy( particles, particles_h );
 
-    Solver_t solver( MPI_COMM_WORLD, ncrit, max_depth,
-                     std::array<double, 3>{ 0.1, 0.1, 0.1 }, 0.1,
-                     /*replication_depth=*/2, /*imbalance_tol=*/0.05,
-                     mac_theta, /*softening=*/0.0 );
+    Canopy::FmmConfig cfg;
+    cfg.ncrit = ncrit;
+    cfg.max_depth = max_depth;
+    cfg.xmin_tol = cfg.xmax_tol = 0.1;
+    cfg.ymin_tol = cfg.ymax_tol = 0.1;
+    cfg.zmin_tol = cfg.zmax_tol = 0.1;
+    cfg.ncrit_tol = 0.1;
+    cfg.replication_depth = 2;
+    cfg.imbalance_tolerance = 0.05;
+    cfg.mac_theta = mac_theta;
+    cfg.softening = 0.0;
+    Solver_t solver( MPI_COMM_WORLD, cfg );
     solver.template setup<0, 1>( particles, num_particles );
     solver.template solve<0, 1>( particles, /*compute_gradient=*/true );
 
@@ -994,10 +1010,18 @@ TEST( SolveFusedM2L, multipleSolvesIdempotent )
     AoSoA_t particles( "particles", N );
     Cabana::deep_copy( particles, particles_h );
 
-    Solver_t solver( MPI_COMM_WORLD, /*ncrit=*/16, /*max_depth=*/6,
-                     std::array<double, 3>{ 0.1, 0.1, 0.1 }, 0.1,
-                     /*replication_depth=*/2, 0.05, /*mac_theta=*/0.5,
-                     /*softening=*/0.0 );
+    Canopy::FmmConfig cfg;
+    cfg.ncrit = 16;
+    cfg.max_depth = 6;
+    cfg.xmin_tol = cfg.xmax_tol = 0.1;
+    cfg.ymin_tol = cfg.ymax_tol = 0.1;
+    cfg.zmin_tol = cfg.zmax_tol = 0.1;
+    cfg.ncrit_tol = 0.1;
+    cfg.replication_depth = 2;
+    cfg.imbalance_tolerance = 0.05;
+    cfg.mac_theta = 0.5;
+    cfg.softening = 0.0;
+    Solver_t solver( MPI_COMM_WORLD, cfg );
     solver.template setup<0, 1>( particles, N );
 
     auto snapshot = [&]( std::vector<double>& pot,

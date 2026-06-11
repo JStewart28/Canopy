@@ -124,7 +124,7 @@ int count_particles_in_leaves(
  * After every step, every particle must map to a leaf cell of the tree.
  */
 void testTreeBuilder( int num_particles_per_rank, int ncrit, int max_depth,
-                      std::array<double, 3> bb_tol, double ncrit_tol, int num_timesteps )
+                      std::array<double, 6> bb_tol, double ncrit_tol, int num_timesteps )
 {
     using namespace TreeBuilderTest;
 
@@ -206,10 +206,10 @@ void testTreeBuilder( int num_particles_per_rank, int ncrit, int max_depth,
 
 TEST( TreeBuilder, testIncrementalUpdates )
 {
-    testTreeBuilder( 10000, 128, 15, std::array{0.1, 0.1, 0.1}, 0.1, 20 );
+    testTreeBuilder( 10000, 128, 15, std::array<double, 6>{0.1, 0.1, 0.1, 0.1, 0.1, 0.1}, 0.1, 20 );
 }
 
-TEST( TreeBuilder, testSmallTree ) { testTreeBuilder( 500, 32, 10, std::array{0.1, 0.1, 0.1}, 0.1, 10 ); }
+TEST( TreeBuilder, testSmallTree ) { testTreeBuilder( 500, 32, 10, std::array<double, 6>{0.1, 0.1, 0.1, 0.1, 0.1, 0.1}, 0.1, 10 ); }
 
 //---------------------------------------------------------------------------//
 

@@ -136,7 +136,7 @@ void testZeroChargesGiveZeroLocalsAndPotential( int num_particles_per_rank,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -227,7 +227,7 @@ void testLocalsAndPotentialNonzeroAfterExecute( int num_particles_per_rank,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -327,7 +327,7 @@ void testIdempotentExecution( int num_particles_per_rank, int ncrit,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles_per_rank );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -467,7 +467,7 @@ void testL2PApproximatesDirectSumSingleRank( int num_sources, int num_targets,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, N );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -635,7 +635,7 @@ void testL2PApproximatesDirectSumMultiRank( int num_sources, int num_targets,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, N );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -812,7 +812,7 @@ void testM2LListInvariants( int num_particles, int ncrit, int max_depth,
     auto positions = Cabana::slice<Position>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, num_particles );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -986,7 +986,7 @@ void testL2PApproximatesDirectSumAdaptive( int num_dense_sources,
     auto charges = Cabana::slice<Charge>( particles );
 
     TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
-        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 3>{tolerance, tolerance, tolerance}, tolerance );
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
     builder.build( positions, N );
 
     TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
@@ -1184,7 +1184,7 @@ struct CachingFixture
 
     CachingFixture()
         : builder( MPI_COMM_WORLD, ncrit, max_depth,
-                   std::array<double, 3>{ tolerance, tolerance, tolerance },
+                   std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance, tolerance, tolerance },
                    tolerance )
         , partitioner( MPI_COMM_WORLD, replication_depth )
         , comm_plan( MPI_COMM_WORLD, get_test_mac_theta() )
