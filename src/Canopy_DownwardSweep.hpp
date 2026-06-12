@@ -1061,16 +1061,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     const int n_unique_ops = static_cast<int>( ops.size() );
 
-    if ( _rank == 0 )
-    {
-        std::fprintf( stderr,
-                      "[Canopy diag] build_interaction_list: "
-                      "n_unique_ops=%d, _max_depth=%d, "
-                      "total_pairs=%d, cap=%d\n",
-                      n_unique_ops, _max_depth, total_pairs,
-                      M2L_OP_COUNT_CAP );
-    }
-
     // -----------------------------------------------------------------------
     // Stage 4: build the (Nt, Ns, n_unique_ops) operator table on host,
     // then deep_copy to device. After scale normalization the operator
