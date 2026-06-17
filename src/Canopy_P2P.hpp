@@ -15,6 +15,7 @@
 #include "Canopy_CommunicationPlan.hpp"
 #include "Canopy_Profiling.hpp"
 #include "Canopy_Helpers.hpp"
+#include "Canopy_RegisteredBufferPool.hpp"
 #include "Canopy_TreeBuilder.hpp"
 #include "Canopy_TreePartitioner.hpp"
 
@@ -181,6 +182,15 @@ class P2P
     position_view_type _ghost_positions;  // (num_ghost_particles, 3)
     charge_view_type _ghost_charges;      // (num_ghost_particles)
     offset_view_type _ghost_leaf_offsets; // (num_ghost_leaves + 1)
+
+    // Persistent, grow-only staging buffers for the ghost-particle MPI
+    // exchange in gather_ghost_particles(). One stable registered region per
+    // direction (data buffer + pack index), reused every step so the CXI NIC
+    // registration cache does not churn. See Canopy_RegisteredBufferPool.hpp.
+    detail::RegisteredBufferPool<scalar_type, memory_space> _ghost_send_pool;
+    detail::RegisteredBufferPool<scalar_type, memory_space> _ghost_recv_pool;
+    detail::RegisteredBufferPool<int, memory_space> _ghost_send_idx_pool;
+    detail::RegisteredBufferPool<int, memory_space> _ghost_recv_idx_pool;
 
     // -----------------------------------------------------------------------
     // Exchange plan metadata (host-side)
@@ -569,41 +579,58 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
     const int n_send_peers = static_cast<int>( sends_by_peer_kv.size() );
     const int n_recv_peers = static_cast<int>( recvs_by_peer_kv.size() );
 
-    std::vector<Kokkos::View<int*, memory_space>> send_idx_views( n_send_peers );
-    std::vector<Kokkos::View<scalar_type*, memory_space>> send_bufs(
-        n_send_peers );
+    // Per-peer buffers are unmanaged sub-ranges of the persistent grow-only
+    // pools (one registered region per direction) instead of fresh per-peer
+    // allocations — this keeps the CXI NIC registration footprint bounded.
+    using uidx_view_type =
+        Kokkos::View<int*, memory_space, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    using ubuf_view_type = Kokkos::View<scalar_type*, memory_space,
+                                        Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+
+    std::vector<uidx_view_type> send_idx_views( n_send_peers );
+    std::vector<ubuf_view_type> send_bufs( n_send_peers );
     std::vector<int> send_peer_ranks( n_send_peers );
     std::vector<size_t> send_peer_nparticles( n_send_peers );
 
-    std::vector<Kokkos::View<int*, memory_space>> recv_idx_views( n_recv_peers );
-    std::vector<Kokkos::View<scalar_type*, memory_space>> recv_bufs(
-        n_recv_peers );
+    std::vector<uidx_view_type> recv_idx_views( n_recv_peers );
+    std::vector<ubuf_view_type> recv_bufs( n_recv_peers );
     std::vector<int> recv_peer_ranks( n_recv_peers );
     std::vector<size_t> recv_peer_nparticles( n_recv_peers );
 
-    // Build per-peer send index (which local particles to pack) and post
-    // recv-side index / buffer allocations.
+    // --- Send: size the pools first (so the base address is stable for every
+    // subview handed out below), then carve per-peer ranges and pack indices.
     {
+        std::vector<size_t> send_peer_off( n_send_peers ); // particle offset
+        size_t total_send = 0;
+        {
+            int q = 0;
+            for ( const auto& kv : sends_by_peer_kv )
+            {
+                send_peer_ranks[q] = kv.first;
+                size_t total = 0;
+                for ( const auto& pr : kv.second )
+                {
+                    const int cidx = _send_entries[pr.second].cell_idx;
+                    total += static_cast<size_t>( h_offsets( cidx + 1 ) -
+                                                  h_offsets( cidx ) );
+                }
+                send_peer_nparticles[q] = total;
+                send_peer_off[q] = total_send;
+                total_send += total;
+                ++q;
+            }
+        }
+        _ghost_send_idx_pool.reserve( total_send );
+        _ghost_send_pool.reserve( per_particle * total_send );
+
         int q = 0;
         for ( const auto& kv : sends_by_peer_kv )
         {
-            send_peer_ranks[q] = kv.first;
-            size_t total = 0;
-            for ( const auto& pr : kv.second )
-            {
-                const int cidx = _send_entries[pr.second].cell_idx;
-                total += static_cast<size_t>( h_offsets( cidx + 1 ) -
-                                              h_offsets( cidx ) );
-            }
-            send_peer_nparticles[q] = total;
-            send_idx_views[q] = Kokkos::View<int*, memory_space>(
-                Kokkos::view_alloc( "p2p_send_idx",
-                                    Kokkos::WithoutInitializing ),
-                total );
-            send_bufs[q] = Kokkos::View<scalar_type*, memory_space>(
-                Kokkos::view_alloc( "p2p_send_buf",
-                                    Kokkos::WithoutInitializing ),
-                per_particle * total );
+            const size_t total = send_peer_nparticles[q];
+            send_idx_views[q] =
+                _ghost_send_idx_pool.subview( send_peer_off[q], total );
+            send_bufs[q] = _ghost_send_pool.subview(
+                per_particle * send_peer_off[q], per_particle * total );
             if ( total > 0 )
             {
                 auto h_idx = Kokkos::create_mirror_view( send_idx_views[q] );
@@ -622,26 +649,37 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::gather_ghost_particles(
         }
     }
 
-    // Post receives first.
+    // --- Recv: size the pools, carve per-peer ranges, then post receives.
     std::vector<MPI_Request> recv_data_reqs;
     recv_data_reqs.reserve( n_recv_peers );
     {
+        std::vector<size_t> recv_peer_off( n_recv_peers ); // particle offset
+        size_t total_recv = 0;
+        {
+            int q = 0;
+            for ( const auto& kv : recvs_by_peer_kv )
+            {
+                recv_peer_ranks[q] = kv.first;
+                size_t total = 0;
+                for ( const auto& pr : kv.second )
+                    total += static_cast<size_t>( recv_counts[pr.second] );
+                recv_peer_nparticles[q] = total;
+                recv_peer_off[q] = total_recv;
+                total_recv += total;
+                ++q;
+            }
+        }
+        _ghost_recv_idx_pool.reserve( total_recv );
+        _ghost_recv_pool.reserve( per_particle * total_recv );
+
         int q = 0;
         for ( const auto& kv : recvs_by_peer_kv )
         {
-            recv_peer_ranks[q] = kv.first;
-            size_t total = 0;
-            for ( const auto& pr : kv.second )
-                total += static_cast<size_t>( recv_counts[pr.second] );
-            recv_peer_nparticles[q] = total;
-            recv_idx_views[q] = Kokkos::View<int*, memory_space>(
-                Kokkos::view_alloc( "p2p_recv_idx",
-                                    Kokkos::WithoutInitializing ),
-                total );
-            recv_bufs[q] = Kokkos::View<scalar_type*, memory_space>(
-                Kokkos::view_alloc( "p2p_recv_buf",
-                                    Kokkos::WithoutInitializing ),
-                per_particle * total );
+            const size_t total = recv_peer_nparticles[q];
+            recv_idx_views[q] =
+                _ghost_recv_idx_pool.subview( recv_peer_off[q], total );
+            recv_bufs[q] = _ghost_recv_pool.subview(
+                per_particle * recv_peer_off[q], per_particle * total );
             if ( total > 0 )
             {
                 auto h_idx = Kokkos::create_mirror_view( recv_idx_views[q] );

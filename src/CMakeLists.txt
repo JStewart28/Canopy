@@ -8,6 +8,7 @@ set(HEADERS_PUBLIC
   Canopy_MpiCoalescedExchange.hpp
   Canopy_P2P.hpp
   Canopy_Profiling.hpp
+  Canopy_RegisteredBufferPool.hpp
   Canopy_Solver.hpp
   Canopy_SphericalCoefficients.hpp
   Canopy_TreeBuilder.hpp
