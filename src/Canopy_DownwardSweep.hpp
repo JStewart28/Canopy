@@ -245,6 +245,14 @@ class DownwardSweep
 
     coeff_view_type _locals;
 
+    // Persistent staging buffers for the M2L (multipole) and L2L (locals)
+    // exchanges. Reused every solve so the CXI NIC registration cache stays
+    // bounded. Shared between the two calls — they run sequentially within a
+    // solve (each coalesced_view_exchange completes its MPI_Waitall + fence
+    // before returning), so reusing one region is safe.
+    mutable detail::CoalescedExchangeBuffers<complex_type, memory_space>
+        _exch_bufs;
+
     // References borrowed from UpwardSweep — only valid while the
     // upward sweep is alive and setup() has been called.
     cell_view_type _device_cells;
@@ -1403,7 +1411,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     detail::coalesced_view_exchange( multipoles, _comm, sends_by_peer,
                                      recvs_by_peer,
-                                     /*accumulate_on_recv=*/false );
+                                     /*accumulate_on_recv=*/false,
+                                     _exch_bufs );
 }
 
 // -------------------------------------------------------------------------
@@ -1888,7 +1897,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // already have M2L contributions in place).
     detail::coalesced_view_exchange( _locals, _comm, sends_by_peer,
                                      recvs_by_peer,
-                                     /*accumulate_on_recv=*/true );
+                                     /*accumulate_on_recv=*/true,
+                                     _exch_bufs );
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>

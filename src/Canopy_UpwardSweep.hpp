@@ -174,6 +174,11 @@ class UpwardSweep
     cell_view_type _device_cells;
     std::unordered_map<MortonKey, int> _key_to_cell_idx;
 
+    // Persistent staging buffers for the M2M multipole exchange, reused
+    // every solve so the CXI NIC registration cache stays bounded.
+    mutable detail::CoalescedExchangeBuffers<complex_type, memory_space>
+        _m2m_exch_bufs;
+
     std::vector<std::vector<int>> _leaves_at_depth_local;
     std::vector<std::vector<int>> _internals_at_depth_local;
 
@@ -643,7 +648,8 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     detail::coalesced_view_exchange( _multipoles, _comm, sends_by_peer,
                                      recvs_by_peer,
-                                     /*accumulate_on_recv=*/false );
+                                     /*accumulate_on_recv=*/false,
+                                     _m2m_exch_bufs );
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>

@@ -12,6 +12,8 @@
 #ifndef CANOPY_MPI_COALESCED_EXCHANGE_HPP
 #define CANOPY_MPI_COALESCED_EXCHANGE_HPP
 
+#include "Canopy_RegisteredBufferPool.hpp"
+
 #include <Kokkos_Core.hpp>
 
 #include <mpi.h>
@@ -24,6 +26,20 @@ namespace Canopy
 {
 namespace detail
 {
+
+// Persistent, grow-only staging buffers for coalesced_view_exchange(). One
+// stable registered region per direction (complex data buffer + int pack
+// index), reused across solve() calls so the CXI NIC registration cache does
+// not churn. Hold one instance per exchanging object (UpwardSweep,
+// DownwardSweep) and pass it into every coalesced_view_exchange() call.
+template <class ComplexType, class MemorySpace>
+struct CoalescedExchangeBuffers
+{
+    RegisteredBufferPool<ComplexType, MemorySpace> send_pool;
+    RegisteredBufferPool<ComplexType, MemorySpace> recv_pool;
+    RegisteredBufferPool<int, MemorySpace> send_idx_pool;
+    RegisteredBufferPool<int, MemorySpace> recv_idx_pool;
+};
 
 // Coalesced per-(rank,call) point-to-point exchange of (cell, ci, c) data
 // from a Kokkos View of shape (num_cells, coeffs_per_cell, NComps).
@@ -45,12 +61,12 @@ namespace detail
 // If accumulate_on_recv is true, received values are += into the view
 // (used for the L2L-after-L2L exchange where the child owner already has
 // M2L contributions). Otherwise they overwrite.
-template <class CoeffView>
+template <class CoeffView, class ExchBuffers>
 void coalesced_view_exchange(
     const CoeffView& view, MPI_Comm comm,
     const std::map<int, std::vector<int>>& send_cells_by_peer_in,
     const std::map<int, std::vector<int>>& recv_cells_by_peer_in,
-    bool accumulate_on_recv )
+    bool accumulate_on_recv, ExchBuffers& bufs )
 {
     using complex_type = typename CoeffView::non_const_value_type;
     using scalar_type = typename complex_type::value_type;
@@ -84,27 +100,27 @@ void coalesced_view_exchange(
     const int n_send_peers = static_cast<int>( send_cells_by_peer.size() );
     const int n_recv_peers = static_cast<int>( recv_cells_by_peer.size() );
 
-    // Per-peer device-side index views and pack/unpack buffers.
-    std::vector<Kokkos::View<int*, memory_space>> send_idx( n_send_peers );
-    std::vector<Kokkos::View<complex_type*, memory_space>> send_bufs(
-        n_send_peers );
+    // Per-peer index/data buffers are unmanaged sub-ranges of the persistent
+    // grow-only pools (one registered region per direction), reused every
+    // call so the CXI NIC registration footprint stays bounded.
+    using umint_view = Kokkos::View<int*, memory_space,
+                                    Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    using umcplx_view = Kokkos::View<complex_type*, memory_space,
+                                     Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+
+    std::vector<umint_view> send_idx( n_send_peers );
+    std::vector<umcplx_view> send_bufs( n_send_peers );
     std::vector<int> send_peer_ranks( n_send_peers );
     std::vector<int> send_peer_ncells( n_send_peers );
 
-    std::vector<Kokkos::View<int*, memory_space>> recv_idx( n_recv_peers );
-    std::vector<Kokkos::View<complex_type*, memory_space>> recv_bufs(
-        n_recv_peers );
+    std::vector<umint_view> recv_idx( n_recv_peers );
+    std::vector<umcplx_view> recv_bufs( n_recv_peers );
     std::vector<int> recv_peer_ranks( n_recv_peers );
     std::vector<int> recv_peer_ncells( n_recv_peers );
 
-    auto upload_idx = [&]( const std::vector<int>& h_idx,
-                           Kokkos::View<int*, memory_space>& dst,
-                           const char* label )
+    // Host->device upload of a peer's cell-index list into a pool subview.
+    auto upload_idx = [&]( const std::vector<int>& h_idx, umint_view dst )
     {
-        dst = Kokkos::View<int*, memory_space>(
-            Kokkos::view_alloc( std::string( label ),
-                                Kokkos::WithoutInitializing ),
-            h_idx.size() );
         if ( h_idx.empty() )
             return;
         auto h = Kokkos::create_mirror_view( dst );
@@ -113,20 +129,35 @@ void coalesced_view_exchange(
         Kokkos::deep_copy( dst, h );
     };
 
-    // Post receives first.
+    // Post receives first. Size the recv pools up front so every subview
+    // handed out below has a stable base address.
     std::vector<MPI_Request> recv_reqs( n_recv_peers );
     {
+        std::vector<size_t> recv_cell_off( n_recv_peers );
+        size_t total_recv_cells = 0;
+        {
+            int p = 0;
+            for ( const auto& kv : recv_cells_by_peer )
+            {
+                recv_cell_off[p] = total_recv_cells;
+                total_recv_cells += kv.second.size();
+                ++p;
+            }
+        }
+        bufs.recv_idx_pool.reserve( total_recv_cells );
+        bufs.recv_pool.reserve( total_recv_cells * per_cell_complex );
+
         int p = 0;
         for ( const auto& kv : recv_cells_by_peer )
         {
             const int n = static_cast<int>( kv.second.size() );
             recv_peer_ranks[p] = kv.first;
             recv_peer_ncells[p] = n;
-            upload_idx( kv.second, recv_idx[p], "coalesced_recv_idx" );
-            recv_bufs[p] = Kokkos::View<complex_type*, memory_space>(
-                Kokkos::view_alloc( "coalesced_recv_buf",
-                                    Kokkos::WithoutInitializing ),
+            recv_idx[p] = bufs.recv_idx_pool.subview( recv_cell_off[p], n );
+            recv_bufs[p] = bufs.recv_pool.subview(
+                recv_cell_off[p] * per_cell_complex,
                 static_cast<size_t>( n ) * per_cell_complex );
+            upload_idx( kv.second, recv_idx[p] );
             MPI_Irecv( reinterpret_cast<scalar_type*>( recv_bufs[p].data() ),
                        n * per_cell_real, mpi_scalar, kv.first, /*tag=*/0,
                        comm, &recv_reqs[p] );
@@ -137,17 +168,31 @@ void coalesced_view_exchange(
     // Build send buffers and post sends.
     std::vector<MPI_Request> send_reqs( n_send_peers );
     {
+        std::vector<size_t> send_cell_off( n_send_peers );
+        size_t total_send_cells = 0;
+        {
+            int p = 0;
+            for ( const auto& kv : send_cells_by_peer )
+            {
+                send_cell_off[p] = total_send_cells;
+                total_send_cells += kv.second.size();
+                ++p;
+            }
+        }
+        bufs.send_idx_pool.reserve( total_send_cells );
+        bufs.send_pool.reserve( total_send_cells * per_cell_complex );
+
         int p = 0;
         for ( const auto& kv : send_cells_by_peer )
         {
             const int n = static_cast<int>( kv.second.size() );
             send_peer_ranks[p] = kv.first;
             send_peer_ncells[p] = n;
-            upload_idx( kv.second, send_idx[p], "coalesced_send_idx" );
-            send_bufs[p] = Kokkos::View<complex_type*, memory_space>(
-                Kokkos::view_alloc( "coalesced_send_buf",
-                                    Kokkos::WithoutInitializing ),
+            send_idx[p] = bufs.send_idx_pool.subview( send_cell_off[p], n );
+            send_bufs[p] = bufs.send_pool.subview(
+                send_cell_off[p] * per_cell_complex,
                 static_cast<size_t>( n ) * per_cell_complex );
+            upload_idx( kv.second, send_idx[p] );
 
             auto idx_v = send_idx[p];
             auto buf_v = send_bufs[p];
