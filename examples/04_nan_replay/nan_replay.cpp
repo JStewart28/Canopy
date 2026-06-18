@@ -1,0 +1,283 @@
+// ============================================================================
+// TEMPORARY (debug-nan branch) — offline replay harness for the premature
+// full-rollup FMM NaN in Beatnik's FmmBRSolver.
+//
+// Beatnik's FmmBRSolver, built with BEATNIK_FMM_SNAPSHOT_DEBUG, dumps the exact
+// (positions, charges) that each solve() sees for the steps bracketing the
+// crash, as one binary file per rank per (step, substep):
+//
+//     fmm_snapshot_step<NNNN>_sub<B>_rank<RRRR>.bin
+//     layout: int32 num_local, then num_local * {px,py,pz,qx,qy,qz} doubles
+//
+// This harness loads one such (step, sub) snapshot — the union of all rank
+// files — into a single Canopy::Solver with the SAME P_ORDER / NComps / config
+// as the run, and performs ONE solve(..., compute_gradient=true). With
+// CANOPY_NAN_DEBUG compiled in, the solver prints which stage (P2M+M2M /
+// M2L+L2L+L2P / P2P) first goes non-finite, reproducing the blow-up without a
+// 75-minute queued run. The FMM per-particle gradient is partition-independent
+// (a global N-body sum), so distributing the union of particles round-robin
+// across however many replay ranks you launch yields the same result.
+//
+// Remove this example when the premature NaN is resolved.
+// ============================================================================
+
+#include "Canopy_ExampleSpaces.hpp"
+#include "Canopy_Solver.hpp"
+
+#include <Cabana_Core.hpp>
+#include <Kokkos_Core.hpp>
+
+#include <mpi.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <glob.h>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+using namespace Canopy;
+
+enum FieldIdx
+{
+    Position = 0,
+    Charge = 1
+};
+
+// Must match Beatnik::P_ORDER and N_COMPS in src/FmmBRSolver.hpp.
+static constexpr int P_ORDER = 10;
+static constexpr int N_COMPS = 3;
+
+using DataTypes = Cabana::MemberTypes<double[3], double[N_COMPS]>;
+using MemorySpace = CanopyExample::MemorySpace;
+using ExecutionSpace = CanopyExample::ExecutionSpace;
+using AoSoA_t = Cabana::AoSoA<DataTypes, MemorySpace>;
+using Solver_t =
+    Canopy::Solver<MemorySpace, ExecutionSpace, double, P_ORDER, N_COMPS>;
+
+void print_usage( const char* prog )
+{
+    std::fprintf(
+        stderr,
+        "Usage: %s -S <step> [options]\n"
+        "\n"
+        "Replays one Beatnik FMM snapshot (step, sub) through a single\n"
+        "Canopy solve() to reproduce the premature full-rollup NaN.\n"
+        "\n"
+        "  -D dir       snapshot directory (default: .)\n"
+        "  -S step      snapshot step number (REQUIRED, e.g. 1364)\n"
+        "  -B sub       RK substep index 0/1/2 (default 0)\n"
+        "\n"
+        "Config (defaults match single_mode_debug.in):\n"
+        "  -n ncrit     (default 64)\n"
+        "  -d max_depth (default 19)\n"
+        "  -m mac_theta (default 0.4)\n"
+        "  -r repl_depth(default 3)\n"
+        "  -i imbal_tol (default 0.20)\n"
+        "  -c ncrit_tol (default 0.15)\n"
+        "  -e softening (default sqrt(2)=1.41421356; = sqrt(epsilon=2))\n"
+        "  -b bbox_tol  uniform bbox padding for all 6 faces (overrides the\n"
+        "               per-face deck defaults 0.15 / zmax 0.50)\n"
+        "  -h           help\n",
+        prog );
+}
+
+int main( int argc, char* argv[] )
+{
+    MPI_Init( &argc, &argv );
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    Kokkos::initialize( argc, argv );
+    {
+        std::string dir = ".";
+        int step = -1;
+        int sub = 0;
+
+        Canopy::FmmConfig cfg;
+        cfg.ncrit = 64;
+        cfg.max_depth = 19;
+        cfg.mac_theta = 0.4;
+        cfg.replication_depth = 3;
+        cfg.imbalance_tolerance = 0.20;
+        cfg.ncrit_tol = 0.15;
+        cfg.softening = std::sqrt( 2.0 );
+        // Per-face bbox padding from the deck (zmax larger for rollup headroom).
+        cfg.xmin_tol = cfg.xmax_tol = 0.15;
+        cfg.ymin_tol = cfg.ymax_tol = 0.15;
+        cfg.zmin_tol = 0.15;
+        cfg.zmax_tol = 0.50;
+
+        int opt;
+        while ( ( opt = getopt( argc, argv, "D:S:B:n:d:m:r:i:c:e:b:h" ) ) != -1 )
+        {
+            switch ( opt )
+            {
+            case 'D': dir = optarg; break;
+            case 'S': step = std::atoi( optarg ); break;
+            case 'B': sub = std::atoi( optarg ); break;
+            case 'n': cfg.ncrit = std::atoi( optarg ); break;
+            case 'd': cfg.max_depth = std::atoi( optarg ); break;
+            case 'm': cfg.mac_theta = std::atof( optarg ); break;
+            case 'r': cfg.replication_depth = std::atoi( optarg ); break;
+            case 'i': cfg.imbalance_tolerance = std::atof( optarg ); break;
+            case 'c': cfg.ncrit_tol = std::atof( optarg ); break;
+            case 'e': cfg.softening = std::atof( optarg ); break;
+            case 'b':
+            {
+                const double t = std::atof( optarg );
+                cfg.xmin_tol = cfg.xmax_tol = t;
+                cfg.ymin_tol = cfg.ymax_tol = t;
+                cfg.zmin_tol = cfg.zmax_tol = t;
+                break;
+            }
+            case 'h':
+            default:
+                if ( rank == 0 )
+                    print_usage( argv[0] );
+                Kokkos::finalize();
+                MPI_Finalize();
+                return opt == 'h' ? 0 : 1;
+            }
+        }
+
+        if ( step < 0 )
+        {
+            if ( rank == 0 )
+                print_usage( argv[0] );
+            Kokkos::finalize();
+            MPI_Finalize();
+            return 1;
+        }
+
+        // Enumerate all rank files for this (step, sub), round-robin to ranks.
+        char pattern[512];
+        std::snprintf( pattern, sizeof( pattern ),
+                       "%s/fmm_snapshot_step%04d_sub%d_rank*.bin", dir.c_str(),
+                       step, sub );
+        std::vector<std::string> files;
+        {
+            glob_t g;
+            std::memset( &g, 0, sizeof( g ) );
+            if ( glob( pattern, 0, nullptr, &g ) == 0 )
+                for ( size_t i = 0; i < g.gl_pathc; ++i )
+                    files.emplace_back( g.gl_pathv[i] );
+            globfree( &g );
+        }
+        std::sort( files.begin(), files.end() );
+
+        if ( files.empty() )
+        {
+            if ( rank == 0 )
+                std::fprintf( stderr,
+                              "[nan_replay] no snapshot files match %s\n",
+                              pattern );
+            Kokkos::finalize();
+            MPI_Finalize();
+            return 1;
+        }
+
+        // Read this rank's round-robin subset into a host buffer.
+        std::vector<double> host; // flattened, 6 doubles per particle
+        long my_count = 0;
+        for ( size_t fi = static_cast<size_t>( rank ); fi < files.size();
+              fi += static_cast<size_t>( nprocs ) )
+        {
+            std::FILE* f = std::fopen( files[fi].c_str(), "rb" );
+            if ( !f )
+            {
+                std::fprintf( stderr, "[nan_replay] rank %d: cannot open %s\n",
+                              rank, files[fi].c_str() );
+                continue;
+            }
+            std::int32_t n = 0;
+            if ( std::fread( &n, sizeof( std::int32_t ), 1, f ) != 1 || n < 0 )
+            {
+                std::fclose( f );
+                continue;
+            }
+            const size_t base = host.size();
+            host.resize( base + static_cast<size_t>( n ) * 6 );
+            const size_t got =
+                std::fread( host.data() + base, sizeof( double ),
+                            static_cast<size_t>( n ) * 6, f );
+            std::fclose( f );
+            if ( got != static_cast<size_t>( n ) * 6 )
+                host.resize( base + got );
+            my_count += static_cast<long>( got / 6 );
+        }
+
+        long total = 0;
+        MPI_Allreduce( &my_count, &total, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD );
+        if ( rank == 0 )
+            std::printf(
+                "[nan_replay] step=%d sub=%d files=%zu total_particles=%ld "
+                "nprocs=%d | cfg: ncrit=%d max_depth=%d mac_theta=%.3g "
+                "softening=%.6g imbal_tol=%.3g ncrit_tol=%.3g\n",
+                step, sub, files.size(), total, nprocs, cfg.ncrit,
+                cfg.max_depth, cfg.mac_theta, cfg.softening,
+                cfg.imbalance_tolerance, cfg.ncrit_tol );
+
+        const int num_local = static_cast<int>( my_count );
+
+        // Fill a device AoSoA from the host buffer.
+        AoSoA_t particles( "replay_particles", num_local );
+        {
+            auto h_aosoa = Cabana::create_mirror_view_and_copy(
+                Kokkos::HostSpace(), particles );
+            auto pos = Cabana::slice<Position>( h_aosoa );
+            auto chg = Cabana::slice<Charge>( h_aosoa );
+            for ( int p = 0; p < num_local; ++p )
+            {
+                pos( p, 0 ) = host[6 * p + 0];
+                pos( p, 1 ) = host[6 * p + 1];
+                pos( p, 2 ) = host[6 * p + 2];
+                chg( p, 0 ) = host[6 * p + 3];
+                chg( p, 1 ) = host[6 * p + 4];
+                chg( p, 2 ) = host[6 * p + 5];
+            }
+            Cabana::deep_copy( particles, h_aosoa );
+        }
+
+        Solver_t solver( MPI_COMM_WORLD, cfg );
+        solver.setup<Position, Charge>( particles, num_local );
+        Kokkos::fence();
+
+        // One solve — CANOPY_NAN_DEBUG prints the first non-finite stage.
+        solver.solve<Position, Charge>( particles, /*compute_gradient=*/true );
+        Kokkos::fence();
+
+        // Independent post-check on the returned gradient.
+        auto grad = solver.gradient();
+        const int nl = solver.num_local_particles();
+        long bad = 0;
+        Kokkos::parallel_reduce(
+            "replay_check_gradient",
+            Kokkos::RangePolicy<ExecutionSpace>( 0, nl ),
+            KOKKOS_LAMBDA( const int i, long& acc ) {
+                for ( int c = 0; c < N_COMPS; ++c )
+                    for ( int d = 0; d < 3; ++d )
+                        if ( !Kokkos::isfinite( grad( i, c, d ) ) )
+                            acc += 1;
+            },
+            bad );
+        Kokkos::fence();
+        long bad_global = 0;
+        MPI_Allreduce( &bad, &bad_global, 1, MPI_LONG, MPI_SUM,
+                       MPI_COMM_WORLD );
+        if ( rank == 0 )
+            std::printf(
+                "[nan_replay] RESULT step=%d sub=%d non-finite gradient "
+                "entries=%ld  ==> %s\n",
+                step, sub, bad_global,
+                bad_global > 0 ? "REPRODUCED NaN" : "clean (no NaN)" );
+    }
+    Kokkos::finalize();
+    MPI_Finalize();
+    return 0;
+}
