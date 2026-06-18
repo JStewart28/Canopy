@@ -28,6 +28,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <unordered_set>
 
@@ -211,15 +212,38 @@ class Solver
         _upward.execute( charges, positions, _comm_plan );
         double _t_up = CANOPY_WTIME() - _t0;
 
+#if defined( CANOPY_NAN_DEBUG )
+        // TEMPORARY (debug-nan): localize the premature full-rollup NaN by
+        // stage. The upward sweep produces the multipole moments (P2M then
+        // M2M); a non-finite count here means the blow-up is born in the
+        // multipole *formation*, upstream of M2L/L2L/P2P.
+        nan_debug_check_multipoles( _upward.multipoles(), "P2M+M2M (upward)" );
+#endif
+
         _t0 = CANOPY_WTIME();
         _downward.execute( _upward.multipoles(), positions, _potential,
                            _gradient, compute_gradient, _comm_plan );
         double _t_dn = CANOPY_WTIME() - _t0;
 
+#if defined( CANOPY_NAN_DEBUG )
+        // Far-field contribution only (M2L + L2L + L2P) — P2P has not run yet,
+        // so a first non-finite here pins the blow-up to the far-field
+        // translation path (the degenerate-tree hypothesis).
+        nan_debug_check_field( _potential, _gradient, compute_gradient,
+                               "M2L+L2L+L2P (downward, far-field)" );
+#endif
+
         _t0 = CANOPY_WTIME();
         _p2p.execute( positions, charges, _potential, _gradient,
                       compute_gradient );
         double _t_p2p = CANOPY_WTIME() - _t0;
+
+#if defined( CANOPY_NAN_DEBUG )
+        // Final field (far-field + near-field). A first non-finite that
+        // appears only here implicates the near-field P2P kernel.
+        nan_debug_check_field( _potential, _gradient, compute_gradient,
+                               "P2P (final field)" );
+#endif
 
         CANOPY_PRINT_SOLVE_BREAKDOWN( _comm, _t_up, _t_dn, _t_p2p );
     }
@@ -361,6 +385,14 @@ class Solver
             if ( _builder.needs_rebuild( positions, _num_local ) )
             {
                 _full_setup<PositionIdx, ChargeIdx>( particles, _num_local );
+#if defined( CANOPY_NAN_DEBUG )
+                // TEMPORARY (debug-nan): the NaN onset is locked to the first
+                // Rebuild actions. Dump the freshly-rebuilt geometry so we can
+                // test the degenerate-box hypothesis (a runaway particle
+                // inflates one axis, shrinking the smallest leaf half-width
+                // toward zero and blowing up rho/w_c in the far-field kernel).
+                nan_debug_dump_geometry( "Rebuild" );
+#endif
 #if defined( CANOPY_ENABLE_PROFILING )
                 {
                     int _diag_rank = 0;
@@ -450,6 +482,154 @@ class Solver
 #endif
         return MaintenanceAction::Migrate;
     }
+
+#if defined( CANOPY_NAN_DEBUG )
+    // ---------------------------------------------------------------------
+    // TEMPORARY (debug-nan branch): per-stage NaN/Inf localization for the
+    // premature full-rollup blow-up. Gated behind the CANOPY_NAN_DEBUG compile
+    // definition (hard-coded ON in src/CMakeLists.txt for this investigation).
+    // Remove once the issue is resolved.
+    // ---------------------------------------------------------------------
+
+    // Count non-finite multipole coefficients across all local cells and, if
+    // any, report the count + the lowest offending cell row. The multipole
+    // view is (num_cells, coeffs_per_cell, NComps) of complex coefficients.
+    template <class CoeffView>
+    void nan_debug_check_multipoles( const CoeffView& M,
+                                     const char* label ) const
+    {
+        const long e0 = static_cast<long>( M.extent( 0 ) );
+        const long e1 = static_cast<long>( M.extent( 1 ) );
+        const long e2 = static_cast<long>( M.extent( 2 ) );
+        if ( e0 == 0 || e1 == 0 || e2 == 0 )
+            return;
+
+        long bad = 0;
+        int min_bad_cell = static_cast<int>( e0 );
+        Kokkos::parallel_reduce(
+            "canopy_nan_multipoles",
+            Kokkos::RangePolicy<execution_space>( 0, e0 * e1 * e2 ),
+            KOKKOS_LAMBDA( const long idx, long& acc, int& mincell ) {
+                const long c0 = idx / ( e1 * e2 );
+                const long rem = idx % ( e1 * e2 );
+                const auto v = M( c0, rem / e2, rem % e2 );
+                if ( !Kokkos::isfinite( v.real() ) ||
+                     !Kokkos::isfinite( v.imag() ) )
+                {
+                    acc += 1;
+                    if ( static_cast<int>( c0 ) < mincell )
+                        mincell = static_cast<int>( c0 );
+                }
+            },
+            bad, Kokkos::Min<int>( min_bad_cell ) );
+        Kokkos::fence();
+
+        long bad_global = 0;
+        int min_cell_global = 0;
+        MPI_Allreduce( &bad, &bad_global, 1, MPI_LONG, MPI_SUM, _comm );
+        MPI_Allreduce( &min_bad_cell, &min_cell_global, 1, MPI_INT, MPI_MIN,
+                       _comm );
+        if ( bad_global > 0 )
+        {
+            int rank = 0;
+            MPI_Comm_rank( _comm, &rank );
+            if ( rank == 0 )
+                std::fprintf(
+                    stderr,
+                    "[Canopy NaN-debug] stage=%s NON-FINITE multipole "
+                    "coeffs=%ld (global) first_cell_row=%d num_cells=%ld\n",
+                    label, bad_global, min_cell_global, e0 );
+        }
+    }
+
+    // Count non-finite entries in the potential (num_local, NComps) and, if
+    // computed, the gradient (num_local, NComps, 3) output fields.
+    void nan_debug_check_field( const potential_view_type& phi,
+                                const gradient_view_type& grad,
+                                bool compute_gradient,
+                                const char* label ) const
+    {
+        const long n = static_cast<long>( phi.extent( 0 ) );
+        if ( n == 0 )
+            return;
+
+        long bad_phi = 0;
+        Kokkos::parallel_reduce(
+            "canopy_nan_potential",
+            Kokkos::RangePolicy<execution_space>( 0, n ),
+            KOKKOS_LAMBDA( const long i, long& acc ) {
+                for ( int c = 0; c < NComps; ++c )
+                    if ( !Kokkos::isfinite( phi( i, c ) ) )
+                        acc += 1;
+            },
+            bad_phi );
+
+        long bad_grad = 0;
+        if ( compute_gradient && grad.extent( 0 ) == phi.extent( 0 ) )
+        {
+            Kokkos::parallel_reduce(
+                "canopy_nan_gradient",
+                Kokkos::RangePolicy<execution_space>( 0, n ),
+                KOKKOS_LAMBDA( const long i, long& acc ) {
+                    for ( int c = 0; c < NComps; ++c )
+                        for ( int d = 0; d < 3; ++d )
+                            if ( !Kokkos::isfinite( grad( i, c, d ) ) )
+                                acc += 1;
+                },
+                bad_grad );
+        }
+        Kokkos::fence();
+
+        long in[2] = { bad_phi, bad_grad };
+        long out[2] = { 0, 0 };
+        MPI_Allreduce( in, out, 2, MPI_LONG, MPI_SUM, _comm );
+        if ( out[0] > 0 || out[1] > 0 )
+        {
+            int rank = 0;
+            MPI_Comm_rank( _comm, &rank );
+            if ( rank == 0 )
+                std::fprintf(
+                    stderr,
+                    "[Canopy NaN-debug] stage=%s NON-FINITE potential=%ld "
+                    "gradient=%ld (global)\n",
+                    label, out[0], out[1] );
+        }
+    }
+
+    // Dump the freshly-built root bounding box and the smallest / largest leaf
+    // half-width over the global cell list (host-side vector). A leaf
+    // half-width collapsing toward zero (or a wildly anisotropic root box)
+    // would corroborate the degenerate-geometry hypothesis.
+    void nan_debug_dump_geometry( const char* when ) const
+    {
+        int rank = 0;
+        MPI_Comm_rank( _comm, &rank );
+        if ( rank != 0 )
+            return;
+        const auto& box = _builder.root_box();
+        double min_hw = std::numeric_limits<double>::max();
+        double max_hw = 0.0;
+        long n_leaf = 0;
+        for ( const auto& c : _builder.cells() )
+        {
+            if ( !c.is_leaf )
+                continue;
+            ++n_leaf;
+            if ( c.half_width < min_hw )
+                min_hw = c.half_width;
+            if ( c.half_width > max_hw )
+                max_hw = c.half_width;
+        }
+        std::fprintf(
+            stderr,
+            "[Canopy NaN-debug] geometry@%s root_box x[%g,%g] y[%g,%g] "
+            "z[%g,%g] | extent=(%g,%g,%g) | leaves=%ld min_half_width=%g "
+            "max_half_width=%g\n",
+            when, box.min[0], box.max[0], box.min[1], box.max[1], box.min[2],
+            box.max[2], box.max[0] - box.min[0], box.max[1] - box.min[1],
+            box.max[2] - box.min[2], n_leaf, min_hw, max_hw );
+    }
+#endif // CANOPY_NAN_DEBUG
 
     // -----------------------------------------------------------------------
     // Accessors
