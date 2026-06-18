@@ -270,6 +270,179 @@ int main( int argc, char* argv[] )
         long bad_global = 0;
         MPI_Allreduce( &bad, &bad_global, 1, MPI_LONG, MPI_SUM,
                        MPI_COMM_WORLD );
+
+        // Largest |FMM gradient| component and where it is — the spurious node
+        // shows up here as an anomalously large but (at step 1362) still-finite
+        // value, long before the 1364 NaN.
+        {
+            using MaxLoc = Kokkos::MaxLoc<double, int>;
+            MaxLoc::value_type fmm_ml;
+            Kokkos::parallel_reduce(
+                "replay_fmm_maxabs",
+                Kokkos::RangePolicy<ExecutionSpace>( 0, nl ),
+                KOKKOS_LAMBDA( const int i, MaxLoc::value_type& lv ) {
+                    double local = 0.0;
+                    for ( int c = 0; c < N_COMPS; ++c )
+                        for ( int d = 0; d < 3; ++d )
+                        {
+                            const double a = Kokkos::fabs( grad( i, c, d ) );
+                            if ( a > local )
+                                local = a;
+                        }
+                    if ( local > lv.val )
+                    {
+                        lv.val = local;
+                        lv.loc = i;
+                    }
+                },
+                MaxLoc( fmm_ml ) );
+            Kokkos::fence();
+            if ( rank == 0 )
+                std::printf( "[nan_replay] FMM max|grad|=%.6g at local idx %d\n",
+                             fmm_ml.val, fmm_ml.loc );
+        }
+
+        // Brute-force all-pairs exact reference (matches Canopy's softened
+        // kernel: grad(i,c,d) = -sum_{j!=i} q(j,c) (x_i-x_j)_d (r^2+eps^2)^-3/2).
+        // Only when single-rank so every source is local; O(N^2) but feasible
+        // for the ~65k debug mesh. Reports the worst FMM-vs-exact divergence to
+        // localize which node the FMM mis-evaluates.
+        if ( nprocs == 1 )
+        {
+            auto pos = Cabana::slice<Position>( particles );
+            auto chg = Cabana::slice<Charge>( particles );
+            const double eps2 = cfg.softening * cfg.softening;
+
+            Kokkos::View<double* [N_COMPS][3], MemorySpace> exact(
+                Kokkos::ViewAllocateWithoutInitializing( "exact_grad" ), nl );
+            Kokkos::parallel_for(
+                "replay_exact_allpairs",
+                Kokkos::RangePolicy<ExecutionSpace>( 0, nl ),
+                KOKKOS_LAMBDA( const int i ) {
+                    const double xi = pos( i, 0 ), yi = pos( i, 1 ),
+                                 zi = pos( i, 2 );
+                    double g[N_COMPS][3];
+                    for ( int c = 0; c < N_COMPS; ++c )
+                        g[c][0] = g[c][1] = g[c][2] = 0.0;
+                    for ( int j = 0; j < nl; ++j )
+                    {
+                        if ( j == i )
+                            continue;
+                        const double dx = xi - pos( j, 0 );
+                        const double dy = yi - pos( j, 1 );
+                        const double dz = zi - pos( j, 2 );
+                        const double r2 = dx * dx + dy * dy + dz * dz;
+                        if ( r2 < 1.0e-24 )
+                            continue;
+                        const double inv_r =
+                            1.0 / Kokkos::sqrt( r2 + eps2 );
+                        const double inv_r3 = inv_r * inv_r * inv_r;
+                        for ( int c = 0; c < N_COMPS; ++c )
+                        {
+                            const double qj = chg( j, c );
+                            g[c][0] -= qj * dx * inv_r3;
+                            g[c][1] -= qj * dy * inv_r3;
+                            g[c][2] -= qj * dz * inv_r3;
+                        }
+                    }
+                    for ( int c = 0; c < N_COMPS; ++c )
+                        for ( int d = 0; d < 3; ++d )
+                            exact( i, c, d ) = g[c][d];
+                } );
+            Kokkos::fence();
+
+            double ex_max = 0.0;
+            Kokkos::parallel_reduce(
+                "replay_exact_maxabs",
+                Kokkos::RangePolicy<ExecutionSpace>( 0, nl ),
+                KOKKOS_LAMBDA( const int i, double& m ) {
+                    for ( int c = 0; c < N_COMPS; ++c )
+                        for ( int d = 0; d < 3; ++d )
+                        {
+                            const double a = Kokkos::fabs( exact( i, c, d ) );
+                            if ( a > m )
+                                m = a;
+                        }
+                },
+                Kokkos::Max<double>( ex_max ) );
+
+            using MaxLoc = Kokkos::MaxLoc<double, int>;
+            MaxLoc::value_type diff_ml;
+            Kokkos::parallel_reduce(
+                "replay_fmm_vs_exact",
+                Kokkos::RangePolicy<ExecutionSpace>( 0, nl ),
+                KOKKOS_LAMBDA( const int i, MaxLoc::value_type& lv ) {
+                    double local = 0.0;
+                    for ( int c = 0; c < N_COMPS; ++c )
+                        for ( int d = 0; d < 3; ++d )
+                        {
+                            const double a =
+                                Kokkos::fabs( grad( i, c, d ) - exact( i, c, d ) );
+                            if ( a > local )
+                                local = a;
+                        }
+                    if ( local > lv.val )
+                    {
+                        lv.val = local;
+                        lv.loc = i;
+                    }
+                },
+                MaxLoc( diff_ml ) );
+            Kokkos::fence();
+            const double diff_max = diff_ml.val;
+            const int diff_arg = diff_ml.loc;
+
+            // Dump the worst-diverging node's coordinates + both gradients.
+            double wp[3] = { 0, 0, 0 };
+            double wf[N_COMPS][3], we[N_COMPS][3];
+            if ( diff_arg >= 0 )
+            {
+                Kokkos::View<double[3], MemorySpace> dpos( "dpos" );
+                Kokkos::View<double[N_COMPS][3], MemorySpace> dgf( "dgf" );
+                Kokkos::View<double[N_COMPS][3], MemorySpace> dge( "dge" );
+                Kokkos::parallel_for(
+                    "replay_extract_worst",
+                    Kokkos::RangePolicy<ExecutionSpace>( 0, 1 ),
+                    KOKKOS_LAMBDA( const int ) {
+                        for ( int d = 0; d < 3; ++d )
+                            dpos( d ) = pos( diff_arg, d );
+                        for ( int c = 0; c < N_COMPS; ++c )
+                            for ( int d = 0; d < 3; ++d )
+                            {
+                                dgf( c, d ) = grad( diff_arg, c, d );
+                                dge( c, d ) = exact( diff_arg, c, d );
+                            }
+                    } );
+                Kokkos::fence();
+                auto hp = Kokkos::create_mirror_view_and_copy(
+                    Kokkos::HostSpace(), dpos );
+                auto hf = Kokkos::create_mirror_view_and_copy(
+                    Kokkos::HostSpace(), dgf );
+                auto he = Kokkos::create_mirror_view_and_copy(
+                    Kokkos::HostSpace(), dge );
+                for ( int d = 0; d < 3; ++d )
+                    wp[d] = hp( d );
+                for ( int c = 0; c < N_COMPS; ++c )
+                    for ( int d = 0; d < 3; ++d )
+                    {
+                        wf[c][d] = hf( c, d );
+                        we[c][d] = he( c, d );
+                    }
+            }
+            std::printf(
+                "[nan_replay] EXACT max|grad|=%.6g | worst FMM-vs-exact "
+                "diff=%.6g at idx %d pos=(%.6g,%.6g,%.6g)\n",
+                ex_max, diff_max, diff_arg, wp[0], wp[1], wp[2] );
+            std::printf( "[nan_replay]   FMM   grad[worst] = "
+                         "[%.6g %.6g %.6g | %.6g %.6g %.6g | %.6g %.6g %.6g]\n",
+                         wf[0][0], wf[0][1], wf[0][2], wf[1][0], wf[1][1],
+                         wf[1][2], wf[2][0], wf[2][1], wf[2][2] );
+            std::printf( "[nan_replay]   EXACT grad[worst] = "
+                         "[%.6g %.6g %.6g | %.6g %.6g %.6g | %.6g %.6g %.6g]\n",
+                         we[0][0], we[0][1], we[0][2], we[1][0], we[1][1],
+                         we[1][2], we[2][0], we[2][1], we[2][2] );
+        }
+
         if ( rank == 0 )
             std::printf(
                 "[nan_replay] RESULT step=%d sub=%d non-finite gradient "
