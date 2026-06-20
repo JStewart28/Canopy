@@ -185,9 +185,15 @@ class CommunicationPlan
     void set_mac_theta( double mac_theta ) { _theta = mac_theta; }
     double mac_theta() const { return _theta; }
 
-    // Plummer softening length used to widen the near-field so the unsoftened
-    // multipole far-field stays accurate (see mac_satisfied). 0 disables.
-    void set_near_softening( double s ) { _near_softening = s; }
+    // Plummer softening length (eps) and the multiple of it below which pairs
+    // are forced to the softened near-field (P2P) instead of M2L, so the
+    // unsoftened multipole far-field stays accurate (see mac_satisfied). eps=0
+    // disables the floor.
+    void set_near_softening( double eps, double factor )
+    {
+        _near_softening = eps;
+        _near_softening_k = factor;
+    }
     double near_softening() const { return _near_softening; }
 
     // -----------------------------------------------------------------------
@@ -236,8 +242,8 @@ class CommunicationPlan
     // mac_satisfied. 0 disables the floor (pure geometric MAC).
     double _near_softening = 0.0;
     // Multiple of the softening length below which pairs are forced to P2P.
-    // K=4 => far-field relative softening error ~1/(2K^2) ~ 3%.
-    static constexpr double NEAR_SOFTENING_K = 4.0;
+    // factor=4 => far-field relative softening error ~1/(2*factor^2) ~ 3%.
+    double _near_softening_k = 4.0;
 
     // -----------------------------------------------------------------------
     // Cell lookup helpers built during build()
@@ -346,9 +352,9 @@ class CommunicationPlan
         // closer than K*eps. Without this, a rolled-up cluster whose cells
         // shrink below eps gets a spurious unsoftened far field (the premature
         // full-rollup NaN). No-op when _near_softening == 0.
-        if ( _near_softening > 0.0 )
+        if ( _near_softening > 0.0 && _near_softening_k > 0.0 )
         {
-            const double floor = NEAR_SOFTENING_K * _near_softening;
+            const double floor = _near_softening_k * _near_softening;
             if ( R2 <= floor * floor )
                 return false;
         }

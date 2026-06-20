@@ -68,6 +68,14 @@ struct FmmConfig
     double mac_theta = 0.5;
     // Negative selects distribution-based auto-softening at first setup().
     double softening = -1.0;
+    // Near-field softening floor: the multipole far-field uses the UNSOFTENED
+    // 1/r kernel, so it is only accurate where the Plummer softening is
+    // negligible (R >> eps). Any pair closer than near_softening_factor * eps
+    // is forced to the softened near-field (P2P) instead of M2L. A larger value
+    // is more accurate (far-field relative softening error ~ 1/(2*factor^2)) but
+    // widens the near field (more P2P pairs). 0 disables the floor. Only has an
+    // effect when softening > 0.
+    double near_softening_factor = 4.0;
 };
 
 // ============================================================================
@@ -176,6 +184,7 @@ class Solver
         , _p2p( comm )
         , _num_local( 0 )
         , _softening_input( cfg.softening )
+        , _near_softening_factor( cfg.near_softening_factor )
         , _softening_initialized( false )
     {
         // Explicit softening (including an explicit 0 for an unsoftened run):
@@ -185,8 +194,10 @@ class Solver
         {
             _p2p.set_softening( static_cast<Scalar>( cfg.softening ) );
             // Widen the near-field so the unsoftened multipole far-field stays
-            // accurate (M2L only beyond ~K*eps; closer pairs use softened P2P).
-            _comm_plan.set_near_softening( cfg.softening );
+            // accurate (M2L only beyond factor*eps; closer pairs use softened
+            // P2P).
+            _comm_plan.set_near_softening( cfg.softening,
+                                           _near_softening_factor );
             _softening_initialized = true;
         }
     }
@@ -906,6 +917,9 @@ class Solver
     // _softening_initialized guards the one-shot auto computation so it is
     // fixed at the first setup() and not recomputed on later rebuilds.
     double _softening_input;
+    // Multiple of the softening length below which pairs use softened P2P
+    // instead of the unsoftened multipole M2L. From FmmConfig.
+    double _near_softening_factor;
     bool _softening_initialized;
     // Fraction of the mean inter-particle spacing used as the auto-softening
     // length. 0.1 is a standard collisionless-N-body choice and matches the
@@ -940,7 +954,7 @@ class Solver
                   std::cbrt( volume / static_cast<double>( n_total ) );
 
         _p2p.set_softening( static_cast<Scalar>( eps ) );
-        _comm_plan.set_near_softening( eps );
+        _comm_plan.set_near_softening( eps, _near_softening_factor );
         _softening_initialized = true;
 
         int rank = 0;
