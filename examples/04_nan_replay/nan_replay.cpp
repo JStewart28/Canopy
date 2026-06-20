@@ -507,6 +507,19 @@ int main( int argc, char* argv[] )
                         : ( near_only > 10.0 * exact_at )
                               ? "NEAR-FIELD (P2P)"
                               : "inconclusive (no single dominant stage)" );
+
+                // Flag the worst node's leaf cell and re-solve so the M2L
+                // fallback prints each source contributing to it.
+                solver.dbg_skip_far = false;
+                solver.dbg_skip_p2p = false;
+                const int worst_cell = solver.dbg_cell_of_particle( diff_arg );
+                std::printf( "[nan_replay] worst node %d is in leaf cell %d; "
+                             "dumping its M2L sources:\n",
+                             diff_arg, worst_cell );
+                solver.dbg_set_target_cell( worst_cell );
+                solver.solve<Position, Charge>( particles, true );
+                Kokkos::fence();
+                solver.dbg_set_target_cell( -1 );
             }
 #endif
         }

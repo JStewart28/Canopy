@@ -127,6 +127,21 @@ class Solver
     // solves. dbg_skip_far => P2P (near) only; dbg_skip_p2p => far only.
     bool dbg_skip_far = false;
     bool dbg_skip_p2p = false;
+
+    // Flag a target cell so the next M2L (fallback path) prints its sources.
+    void dbg_set_target_cell( int c ) { _downward.dbg_target_cell = c; }
+
+    // Map a local particle index to its leaf cell index (host copy of one
+    // element). Used by the harness to translate the worst particle to a cell.
+    int dbg_cell_of_particle( int p ) const
+    {
+        auto v = _downward.dbg_particle_cell_idx();
+        if ( p < 0 || p >= static_cast<int>( v.extent( 0 ) ) )
+            return -1;
+        auto h = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), Kokkos::subview( v, Kokkos::make_pair( p, p + 1 ) ) );
+        return h( 0 );
+    }
 #endif
 
     // -----------------------------------------------------------------------
@@ -169,6 +184,9 @@ class Solver
         if ( cfg.softening >= 0.0 )
         {
             _p2p.set_softening( static_cast<Scalar>( cfg.softening ) );
+            // Widen the near-field so the unsoftened multipole far-field stays
+            // accurate (M2L only beyond ~K*eps; closer pairs use softened P2P).
+            _comm_plan.set_near_softening( cfg.softening );
             _softening_initialized = true;
         }
     }
@@ -922,6 +940,7 @@ class Solver
                   std::cbrt( volume / static_cast<double>( n_total ) );
 
         _p2p.set_softening( static_cast<Scalar>( eps ) );
+        _comm_plan.set_near_softening( eps );
         _softening_initialized = true;
 
         int rank = 0;

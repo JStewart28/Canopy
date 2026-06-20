@@ -127,6 +127,16 @@ class DownwardSweep
 
     using a_view_type = Kokkos::View<scalar_type*, memory_space>;
 
+#if defined( CANOPY_NAN_DEBUG )
+    // TEMPORARY (debug-nan): when >=0, run_m2l_fallback_at_depth prints each
+    // source contributing to this target cell. Set via Solver::dbg_set_target.
+    int dbg_target_cell = -1;
+    Kokkos::View<int*, memory_space> dbg_particle_cell_idx() const
+    {
+        return _particle_cell_idx;
+    }
+#endif
+
     // Gradient accessor passed to l2p_evaluate — avoids nested device lambdas
     // (CUDA does not allow extended __host__ __device__ lambdas nested inside
     // another extended lambda).
@@ -1620,6 +1630,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     using member_t = typename team_policy::member_type;
     team_policy policy( n_fb, Kokkos::AUTO );
 
+#if defined( CANOPY_NAN_DEBUG )
+    const int dbg_tc = dbg_target_cell;
+#endif
     Kokkos::parallel_for(
         "M2L_fallback", policy, KOKKOS_LAMBDA( const member_t& team ) {
             const int slot = fb_begin + team.league_rank();
@@ -1637,6 +1650,39 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                                        dz, src_ci.half_width,
                                        target_ci.half_width,
                                        A_table, L_target );
+
+#if defined( CANOPY_NAN_DEBUG )
+            // For the flagged target cell, print each source's geometry +
+            // moment norm + the MAC ratio R/(sqrt3*(w_s+w_t)) so we can spot
+            // an inaccurate / mis-admitted source contribution.
+            if ( dbg_tc >= 0 && target_cell == dbg_tc &&
+                 team.team_rank() == 0 )
+            {
+                const double rho =
+                    Kokkos::sqrt( double( dx * dx + dy * dy + dz * dz ) );
+                double mnorm = 0.0;
+                const int ncoef = multipoles.extent( 1 );
+                const int ncmp = multipoles.extent( 2 );
+                for ( int ci = 0; ci < ncoef; ++ci )
+                    for ( int cc = 0; cc < ncmp; ++cc )
+                    {
+                        const auto v = multipoles( source_cell, ci, cc );
+                        const double a = Kokkos::fmax( Kokkos::fabs( v.real() ),
+                                                       Kokkos::fabs( v.imag() ) );
+                        if ( a > mnorm )
+                            mnorm = a;
+                    }
+                const double r_sum =
+                    1.7320508075688772 *
+                    double( src_ci.half_width + target_ci.half_width );
+                Kokkos::printf(
+                    "[M2L-dbg] tgt=%d src=%d s_depth=%d s_hw=%.4g rho=%.4g "
+                    "mac_ratio=%.4g moment=%.6g\n",
+                    target_cell, source_cell, src_ci.depth,
+                    double( src_ci.half_width ), rho,
+                    ( r_sum > 0.0 ) ? rho / r_sum : 0.0, mnorm );
+            }
+#endif
         } );
 }
 
