@@ -2036,6 +2036,104 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
         } );
 
     Kokkos::fence();
+
+#if defined( CANOPY_NAN_DEBUG )
+    // TEMPORARY (debug-nan): the premature-NaN seed is a single node whose
+    // FAR-FIELD gradient is ~46-400x too large. Test the local-expansion
+    // divergence hypothesis: the L2P series in rho/half_width blows up if a
+    // particle sits far outside its leaf cell (rho_norm >> 1). Report the
+    // particle with the largest |far-field grad| and its rho_norm, plus the
+    // global max rho_norm.
+    if ( compute_gradient && N > 0 )
+    {
+        using MaxLoc = Kokkos::MaxLoc<double, int>;
+        MaxLoc::value_type gmax;     // largest |far grad|, and its particle
+        double rho_norm_max = 0.0;   // largest rho/half_width over all parts
+        auto positions = particle_positions;
+        Kokkos::parallel_reduce(
+            "L2P_nan_debug",
+            Kokkos::RangePolicy<execution_space>( 0, N ),
+            KOKKOS_LAMBDA( int p, MaxLoc::value_type& gl, double& rmax ) {
+                const int cidx = particle_cell_idx( p );
+                if ( cidx < 0 )
+                    return;
+                const auto& dci = device_cells( cidx );
+                const scalar_type dx =
+                    static_cast<scalar_type>( positions( p, 0 ) ) - dci.center[0];
+                const scalar_type dy =
+                    static_cast<scalar_type>( positions( p, 1 ) ) - dci.center[1];
+                const scalar_type dz =
+                    static_cast<scalar_type>( positions( p, 2 ) ) - dci.center[2];
+                const double rho = Kokkos::sqrt(
+                    static_cast<double>( dx * dx + dy * dy + dz * dz ) );
+                const double rn =
+                    ( dci.half_width > 0.0 ) ? rho / dci.half_width : 0.0;
+                if ( rn > rmax )
+                    rmax = rn;
+                double g = 0.0;
+                for ( int c = 0; c < NComps; ++c )
+                    for ( int d = 0; d < 3; ++d )
+                    {
+                        const double a =
+                            Kokkos::fabs( gradient_out( p, c, d ) );
+                        if ( a > g )
+                            g = a;
+                    }
+                if ( g > gl.val )
+                {
+                    gl.val = g;
+                    gl.loc = p;
+                }
+            },
+            MaxLoc( gmax ), Kokkos::Max<double>( rho_norm_max ) );
+        Kokkos::fence();
+
+        // rho_norm of the worst-gradient particle.
+        int wp = gmax.loc;
+        double worst_rn = -1.0, worst_hw = -1.0, worst_rho = -1.0;
+        if ( wp >= 0 )
+        {
+            Kokkos::View<double[3], memory_space> out( "l2p_dbg_out" );
+            Kokkos::parallel_for(
+                "L2P_nan_debug_worst",
+                Kokkos::RangePolicy<execution_space>( 0, 1 ),
+                KOKKOS_LAMBDA( int ) {
+                    const int cidx = particle_cell_idx( wp );
+                    const auto& dci = device_cells( cidx );
+                    const scalar_type dx =
+                        static_cast<scalar_type>( positions( wp, 0 ) ) -
+                        dci.center[0];
+                    const scalar_type dy =
+                        static_cast<scalar_type>( positions( wp, 1 ) ) -
+                        dci.center[1];
+                    const scalar_type dz =
+                        static_cast<scalar_type>( positions( wp, 2 ) ) -
+                        dci.center[2];
+                    const double rho = Kokkos::sqrt(
+                        static_cast<double>( dx * dx + dy * dy + dz * dz ) );
+                    out( 0 ) = rho;
+                    out( 1 ) = dci.half_width;
+                    out( 2 ) = ( dci.half_width > 0.0 ) ? rho / dci.half_width
+                                                        : -1.0;
+                } );
+            Kokkos::fence();
+            auto h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                          out );
+            worst_rho = h( 0 );
+            worst_hw = h( 1 );
+            worst_rn = h( 2 );
+        }
+        int rank = 0;
+        MPI_Comm_rank( _comm, &rank );
+        if ( rank == 0 )
+            std::fprintf(
+                stderr,
+                "[Canopy NaN-debug] L2P: max|far grad|=%.6g at local p=%d "
+                "(rho=%.6g half_width=%.6g rho_norm=%.6g) | global "
+                "max rho_norm=%.6g\n",
+                gmax.val, wp, worst_rho, worst_hw, worst_rn, rho_norm_max );
+    }
+#endif
 }
 
 // -------------------------------------------------------------------------

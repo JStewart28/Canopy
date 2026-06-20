@@ -49,7 +49,13 @@ enum FieldIdx
 };
 
 // Must match Beatnik::P_ORDER and N_COMPS in src/FmmBRSolver.hpp.
-static constexpr int P_ORDER = 10;
+// P_ORDER is overridable at compile time (-DREPLAY_P_ORDER=N) so we can sweep
+// the multipole order against a fixed snapshot to test whether raising P cures
+// the far-field cancellation error.
+#ifndef REPLAY_P_ORDER
+#define REPLAY_P_ORDER 10
+#endif
+static constexpr int P_ORDER = REPLAY_P_ORDER;
 static constexpr int N_COMPS = 3;
 
 using DataTypes = Cabana::MemberTypes<double[3], double[N_COMPS]>;
@@ -217,9 +223,9 @@ int main( int argc, char* argv[] )
         if ( rank == 0 )
             std::printf(
                 "[nan_replay] step=%d sub=%d files=%zu total_particles=%ld "
-                "nprocs=%d | cfg: ncrit=%d max_depth=%d mac_theta=%.3g "
-                "softening=%.6g imbal_tol=%.3g ncrit_tol=%.3g\n",
-                step, sub, files.size(), total, nprocs, cfg.ncrit,
+                "nprocs=%d | P_ORDER=%d cfg: ncrit=%d max_depth=%d "
+                "mac_theta=%.3g softening=%.6g imbal_tol=%.3g ncrit_tol=%.3g\n",
+                step, sub, files.size(), total, nprocs, P_ORDER, cfg.ncrit,
                 cfg.max_depth, cfg.mac_theta, cfg.softening,
                 cfg.imbalance_tolerance, cfg.ncrit_tol );
 
@@ -441,6 +447,68 @@ int main( int argc, char* argv[] )
                          "[%.6g %.6g %.6g | %.6g %.6g %.6g | %.6g %.6g %.6g]\n",
                          we[0][0], we[0][1], we[0][2], we[1][0], we[1][1],
                          we[1][2], we[2][0], we[2][1], we[2][2] );
+
+#if defined( CANOPY_NAN_DEBUG )
+            // Far/near split at the spurious node: re-solve with the Canopy
+            // stage mask and read max|grad| at diff_arg. far-only + near-only
+            // == full; whichever stage carries the spurious ~1e5 (vs the exact
+            // ~few-thousand) is the culprit.
+            if ( diff_arg >= 0 )
+            {
+                auto maxabs_at = [&]( int idx ) -> double {
+                    auto g = solver.gradient();
+                    double v = 0.0;
+                    Kokkos::parallel_reduce(
+                        "replay_grad_at",
+                        Kokkos::RangePolicy<ExecutionSpace>( 0, 1 ),
+                        KOKKOS_LAMBDA( const int, double& m ) {
+                            for ( int c = 0; c < N_COMPS; ++c )
+                                for ( int d = 0; d < 3; ++d )
+                                {
+                                    const double a = Kokkos::fabs( g( idx, c, d ) );
+                                    if ( a > m )
+                                        m = a;
+                                }
+                        },
+                        Kokkos::Max<double>( v ) );
+                    Kokkos::fence();
+                    return v;
+                };
+
+                solver.dbg_skip_far = false;
+                solver.dbg_skip_p2p = true; // far-field (M2L+L2L+L2P) only
+                solver.solve<Position, Charge>( particles, true );
+                Kokkos::fence();
+                const double far_only = maxabs_at( diff_arg );
+
+                solver.dbg_skip_far = true; // near-field (P2P) only
+                solver.dbg_skip_p2p = false;
+                solver.solve<Position, Charge>( particles, true );
+                Kokkos::fence();
+                const double near_only = maxabs_at( diff_arg );
+
+                solver.dbg_skip_far = false;
+                solver.dbg_skip_p2p = false;
+
+                double exact_at = 0.0;
+                for ( int c = 0; c < N_COMPS; ++c )
+                    for ( int d = 0; d < 3; ++d )
+                        exact_at = std::max( exact_at, std::fabs( we[c][d] ) );
+
+                std::printf(
+                    "[nan_replay] SPLIT @idx %d: max|grad| far-only=%.6g  "
+                    "near-only=%.6g  far+near=%.6g  EXACT=%.6g\n",
+                    diff_arg, far_only, near_only, far_only + near_only,
+                    exact_at );
+                std::printf(
+                    "[nan_replay] SPLIT => culprit stage: %s\n",
+                    ( far_only > 10.0 * exact_at && far_only > near_only )
+                        ? "FAR-FIELD (M2L/L2L/L2P)"
+                        : ( near_only > 10.0 * exact_at )
+                              ? "NEAR-FIELD (P2P)"
+                              : "inconclusive (no single dominant stage)" );
+            }
+#endif
         }
 
         if ( rank == 0 )

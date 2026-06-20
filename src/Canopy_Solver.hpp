@@ -121,6 +121,14 @@ class Solver
         Rebuild
     };
 
+#if defined( CANOPY_NAN_DEBUG )
+    // TEMPORARY (debug-nan): solve() stage mask for far/near localization of
+    // the spurious single-node gradient. Set by the replay harness between
+    // solves. dbg_skip_far => P2P (near) only; dbg_skip_p2p => far only.
+    bool dbg_skip_far = false;
+    bool dbg_skip_p2p = false;
+#endif
+
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
@@ -221,8 +229,15 @@ class Solver
 #endif
 
         _t0 = CANOPY_WTIME();
-        _downward.execute( _upward.multipoles(), positions, _potential,
-                           _gradient, compute_gradient, _comm_plan );
+#if defined( CANOPY_NAN_DEBUG )
+        // TEMPORARY (debug-nan): stage mask to isolate the spurious single-node
+        // gradient. dbg_skip_far => near-field (P2P) only; dbg_skip_p2p =>
+        // far-field (M2L+L2L+L2P) only. The two stages accumulate additively
+        // into _gradient, so far-only + near-only == full.
+        if ( !dbg_skip_far )
+#endif
+            _downward.execute( _upward.multipoles(), positions, _potential,
+                               _gradient, compute_gradient, _comm_plan );
         double _t_dn = CANOPY_WTIME() - _t0;
 
 #if defined( CANOPY_NAN_DEBUG )
@@ -234,8 +249,11 @@ class Solver
 #endif
 
         _t0 = CANOPY_WTIME();
-        _p2p.execute( positions, charges, _potential, _gradient,
-                      compute_gradient );
+#if defined( CANOPY_NAN_DEBUG )
+        if ( !dbg_skip_p2p )
+#endif
+            _p2p.execute( positions, charges, _potential, _gradient,
+                          compute_gradient );
         double _t_p2p = CANOPY_WTIME() - _t0;
 
 #if defined( CANOPY_NAN_DEBUG )
