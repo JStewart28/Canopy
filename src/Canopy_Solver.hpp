@@ -542,11 +542,52 @@ class Solver
             bad, Kokkos::Min<int>( min_bad_cell ) );
         Kokkos::fence();
 
+        // Also report the largest |moment| component and its cell — a
+        // precision-blown normalized moment (huge magnitude) on a deep cell
+        // would explain a faithful-but-wrong M2L.
+        using MaxLoc = Kokkos::MaxLoc<double, int>;
+        MaxLoc::value_type mmax;
+        Kokkos::parallel_reduce(
+            "canopy_max_multipole",
+            Kokkos::RangePolicy<execution_space>( 0, e0 * e1 * e2 ),
+            KOKKOS_LAMBDA( const long idx, MaxLoc::value_type& lv ) {
+                const long c0 = idx / ( e1 * e2 );
+                const long rem = idx % ( e1 * e2 );
+                const auto v = M( c0, rem / e2, rem % e2 );
+                const double a = Kokkos::fmax( Kokkos::fabs( v.real() ),
+                                               Kokkos::fabs( v.imag() ) );
+                if ( a > lv.val )
+                {
+                    lv.val = a;
+                    lv.loc = static_cast<int>( c0 );
+                }
+            },
+            MaxLoc( mmax ) );
+        Kokkos::fence();
+
         long bad_global = 0;
         int min_cell_global = 0;
         MPI_Allreduce( &bad, &bad_global, 1, MPI_LONG, MPI_SUM, _comm );
         MPI_Allreduce( &min_bad_cell, &min_cell_global, 1, MPI_INT, MPI_MIN,
                        _comm );
+        {
+            int rank = 0;
+            MPI_Comm_rank( _comm, &rank );
+            // Look up the worst-moment cell's depth + half_width on host.
+            int wcell = mmax.loc;
+            int wdepth = -1;
+            double whw = -1.0;
+            if ( wcell >= 0 && wcell < static_cast<int>( _builder.cells().size() ) )
+            {
+                wdepth = _builder.cells()[wcell].depth;
+                whw = _builder.cells()[wcell].half_width;
+            }
+            if ( rank == 0 )
+                std::fprintf( stderr,
+                              "[Canopy NaN-debug] %s max|moment|=%.6g at cell "
+                              "%d (depth=%d half_width=%.6g)\n",
+                              label, mmax.val, mmax.loc, wdepth, whw );
+        }
         if ( bad_global > 0 )
         {
             int rank = 0;
