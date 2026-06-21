@@ -29,12 +29,6 @@ if(_canopy_profiling_level GREATER 0)
       CANOPY_PROFILING_LEVEL=${_canopy_profiling_level})
 endif()
 
-# TEMPORARY (debug-nan branch): hard-code per-stage NaN/Inf localization in
-# Canopy_Solver.hpp::solve() ON so it compiles into every consumer (rocketrig,
-# the offline replay harness) without touching the spack environment. Remove
-# this line when the premature full-rollup NaN is resolved.
-target_compile_definitions(Canopy INTERFACE CANOPY_NAN_DEBUG)
-
 # Require minimum of C++17
 set_target_properties(Canopy PROPERTIES INTERFACE_COMPILE_FEATURES cxx_std_17)
 

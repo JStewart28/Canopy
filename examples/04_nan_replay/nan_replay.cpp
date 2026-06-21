@@ -1,24 +1,24 @@
 // ============================================================================
-// TEMPORARY (debug-nan branch) — offline replay harness for the premature
-// full-rollup FMM NaN in Beatnik's FmmBRSolver.
+// Offline FMM-vs-exact replay harness (originally built to root-cause the
+// premature full-rollup FMM NaN in Beatnik's FmmBRSolver; kept as a reusable
+// debugging tool).
 //
-// Beatnik's FmmBRSolver, built with BEATNIK_FMM_SNAPSHOT_DEBUG, dumps the exact
-// (positions, charges) that each solve() sees for the steps bracketing the
-// crash, as one binary file per rank per (step, substep):
+// Beatnik's FmmBRSolver, built with BEATNIK_FMM_SNAPSHOT_DEBUG (a CMake option,
+// OFF by default), dumps the exact (positions, charges) that each solve() sees
+// for a window of steps, as one binary file per rank per (step, substep):
 //
 //     fmm_snapshot_step<NNNN>_sub<B>_rank<RRRR>.bin
 //     layout: int32 num_local, then num_local * {px,py,pz,qx,qy,qz} doubles
 //
 // This harness loads one such (step, sub) snapshot — the union of all rank
 // files — into a single Canopy::Solver with the SAME P_ORDER / NComps / config
-// as the run, and performs ONE solve(..., compute_gradient=true). With
-// CANOPY_NAN_DEBUG compiled in, the solver prints which stage (P2M+M2M /
-// M2L+L2L+L2P / P2P) first goes non-finite, reproducing the blow-up without a
-// 75-minute queued run. The FMM per-particle gradient is partition-independent
-// (a global N-body sum), so distributing the union of particles round-robin
-// across however many replay ranks you launch yields the same result.
-//
-// Remove this example when the premature NaN is resolved.
+// as the run, performs ONE solve(..., compute_gradient=true), and compares the
+// FMM gradient against a brute-force all-pairs softened-kernel reference,
+// reporting the worst FMM-vs-exact divergence and any non-finite output. The
+// FMM per-particle gradient is partition-independent (a global N-body sum), so
+// distributing the union of particles round-robin across however many replay
+// ranks you launch yields the same result. The exact all-pairs reference is
+// O(N^2) and only computed when run single-rank.
 // ============================================================================
 
 #include "Canopy_ExampleSpaces.hpp"
@@ -254,7 +254,7 @@ int main( int argc, char* argv[] )
         solver.setup<Position, Charge>( particles, num_local );
         Kokkos::fence();
 
-        // One solve — CANOPY_NAN_DEBUG prints the first non-finite stage.
+        // One FMM solve; compared against the all-pairs reference below.
         solver.solve<Position, Charge>( particles, /*compute_gradient=*/true );
         Kokkos::fence();
 
@@ -448,80 +448,6 @@ int main( int argc, char* argv[] )
                          we[0][0], we[0][1], we[0][2], we[1][0], we[1][1],
                          we[1][2], we[2][0], we[2][1], we[2][2] );
 
-#if defined( CANOPY_NAN_DEBUG )
-            // Far/near split at the spurious node: re-solve with the Canopy
-            // stage mask and read max|grad| at diff_arg. far-only + near-only
-            // == full; whichever stage carries the spurious ~1e5 (vs the exact
-            // ~few-thousand) is the culprit.
-            if ( diff_arg >= 0 )
-            {
-                auto maxabs_at = [&]( int idx ) -> double {
-                    auto g = solver.gradient();
-                    double v = 0.0;
-                    Kokkos::parallel_reduce(
-                        "replay_grad_at",
-                        Kokkos::RangePolicy<ExecutionSpace>( 0, 1 ),
-                        KOKKOS_LAMBDA( const int, double& m ) {
-                            for ( int c = 0; c < N_COMPS; ++c )
-                                for ( int d = 0; d < 3; ++d )
-                                {
-                                    const double a = Kokkos::fabs( g( idx, c, d ) );
-                                    if ( a > m )
-                                        m = a;
-                                }
-                        },
-                        Kokkos::Max<double>( v ) );
-                    Kokkos::fence();
-                    return v;
-                };
-
-                solver.dbg_skip_far = false;
-                solver.dbg_skip_p2p = true; // far-field (M2L+L2L+L2P) only
-                solver.solve<Position, Charge>( particles, true );
-                Kokkos::fence();
-                const double far_only = maxabs_at( diff_arg );
-
-                solver.dbg_skip_far = true; // near-field (P2P) only
-                solver.dbg_skip_p2p = false;
-                solver.solve<Position, Charge>( particles, true );
-                Kokkos::fence();
-                const double near_only = maxabs_at( diff_arg );
-
-                solver.dbg_skip_far = false;
-                solver.dbg_skip_p2p = false;
-
-                double exact_at = 0.0;
-                for ( int c = 0; c < N_COMPS; ++c )
-                    for ( int d = 0; d < 3; ++d )
-                        exact_at = std::max( exact_at, std::fabs( we[c][d] ) );
-
-                std::printf(
-                    "[nan_replay] SPLIT @idx %d: max|grad| far-only=%.6g  "
-                    "near-only=%.6g  far+near=%.6g  EXACT=%.6g\n",
-                    diff_arg, far_only, near_only, far_only + near_only,
-                    exact_at );
-                std::printf(
-                    "[nan_replay] SPLIT => culprit stage: %s\n",
-                    ( far_only > 10.0 * exact_at && far_only > near_only )
-                        ? "FAR-FIELD (M2L/L2L/L2P)"
-                        : ( near_only > 10.0 * exact_at )
-                              ? "NEAR-FIELD (P2P)"
-                              : "inconclusive (no single dominant stage)" );
-
-                // Flag the worst node's leaf cell and re-solve so the M2L
-                // fallback prints each source contributing to it.
-                solver.dbg_skip_far = false;
-                solver.dbg_skip_p2p = false;
-                const int worst_cell = solver.dbg_cell_of_particle( diff_arg );
-                std::printf( "[nan_replay] worst node %d is in leaf cell %d; "
-                             "dumping its M2L sources:\n",
-                             diff_arg, worst_cell );
-                solver.dbg_set_target_cell( worst_cell );
-                solver.solve<Position, Charge>( particles, true );
-                Kokkos::fence();
-                solver.dbg_set_target_cell( -1 );
-            }
-#endif
         }
 
         if ( rank == 0 )

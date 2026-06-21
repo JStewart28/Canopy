@@ -24,7 +24,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -664,73 +663,6 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
     // to appear exactly once. All other pairs are visited exactly once,
     // so no list-side dedup is required.
 
-#if defined( CANOPY_NAN_DEBUG )
-    // TEMPORARY (debug-nan): completeness invariant. For each leaf, the union
-    // of (M2L source subtrees of the leaf and ALL its ancestors — those reach
-    // the leaf via L2L) plus its P2P neighbor leaves must cover every particle
-    // exactly once. Sum global_count over that set and compare to N_total. A
-    // sum > N => double-counting (inflated far field); < N => a gap. Reports
-    // the worst-offending leaf. Single-rank only (multi-rank subsets lists).
-    if ( _nprocs == 1 )
-    {
-        auto root_c = _cell_map.find( ROOT_KEY );
-        const long N_total =
-            ( root_c != _cell_map.end() ) ? root_c->second->global_count : 0;
-        long worst_leaf_key = -1;
-        long worst_sum = N_total;
-        long worst_delta = 0;
-        long n_bad = 0;
-        for ( const auto& kv : _cell_map )
-        {
-            const CellInfo* L = kv.second;
-            if ( !L->is_leaf )
-                continue;
-            long sum = 0;
-            // M2L sources along the ancestor chain (self -> ... -> root).
-            MortonKey a = L->key;
-            while ( true )
-            {
-                auto il = _m2l_plan.interaction_lists.find( a );
-                if ( il != _m2l_plan.interaction_lists.end() )
-                    for ( const auto& src : il->second )
-                    {
-                        auto sc = _cell_map.find( src.first );
-                        if ( sc != _cell_map.end() )
-                            sum += sc->second->global_count;
-                    }
-                if ( a == ROOT_KEY )
-                    break;
-                a = parent_key( a );
-            }
-            // P2P neighbor leaves (includes self).
-            auto nl = _p2p_plan.neighbor_lists.find( L->key );
-            if ( nl != _p2p_plan.neighbor_lists.end() )
-                for ( MortonKey nk : nl->second )
-                {
-                    auto nc = _cell_map.find( nk );
-                    if ( nc != _cell_map.end() )
-                        sum += nc->second->global_count;
-                }
-            if ( sum != N_total )
-            {
-                ++n_bad;
-                if ( std::labs( sum - N_total ) > std::labs( worst_delta ) )
-                {
-                    worst_delta = sum - N_total;
-                    worst_sum = sum;
-                    worst_leaf_key = static_cast<long>( L->key );
-                }
-            }
-        }
-        if ( _rank == 0 )
-            std::fprintf(
-                stderr,
-                "[Canopy NaN-debug] M2L/P2P completeness: N_total=%ld "
-                "bad_leaves=%ld worst_leaf_key=%ld worst_sum=%ld (delta=%ld)\n",
-                N_total, n_bad, worst_leaf_key, worst_sum,
-                worst_sum - N_total );
-    }
-#endif
 }
 
 // --------------------------------------------------------------------------

@@ -127,16 +127,6 @@ class DownwardSweep
 
     using a_view_type = Kokkos::View<scalar_type*, memory_space>;
 
-#if defined( CANOPY_NAN_DEBUG )
-    // TEMPORARY (debug-nan): when >=0, run_m2l_fallback_at_depth prints each
-    // source contributing to this target cell. Set via Solver::dbg_set_target.
-    int dbg_target_cell = -1;
-    Kokkos::View<int*, memory_space> dbg_particle_cell_idx() const
-    {
-        return _particle_cell_idx;
-    }
-#endif
-
     // Gradient accessor passed to l2p_evaluate — avoids nested device lambdas
     // (CUDA does not allow extended __host__ __device__ lambdas nested inside
     // another extended lambda).
@@ -1630,9 +1620,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     using member_t = typename team_policy::member_type;
     team_policy policy( n_fb, Kokkos::AUTO );
 
-#if defined( CANOPY_NAN_DEBUG )
-    const int dbg_tc = dbg_target_cell;
-#endif
     Kokkos::parallel_for(
         "M2L_fallback", policy, KOKKOS_LAMBDA( const member_t& team ) {
             const int slot = fb_begin + team.league_rank();
@@ -1650,39 +1637,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                                        dz, src_ci.half_width,
                                        target_ci.half_width,
                                        A_table, L_target );
-
-#if defined( CANOPY_NAN_DEBUG )
-            // For the flagged target cell, print each source's geometry +
-            // moment norm + the MAC ratio R/(sqrt3*(w_s+w_t)) so we can spot
-            // an inaccurate / mis-admitted source contribution.
-            if ( dbg_tc >= 0 && target_cell == dbg_tc &&
-                 team.team_rank() == 0 )
-            {
-                const double rho =
-                    Kokkos::sqrt( double( dx * dx + dy * dy + dz * dz ) );
-                double mnorm = 0.0;
-                const int ncoef = multipoles.extent( 1 );
-                const int ncmp = multipoles.extent( 2 );
-                for ( int ci = 0; ci < ncoef; ++ci )
-                    for ( int cc = 0; cc < ncmp; ++cc )
-                    {
-                        const auto v = multipoles( source_cell, ci, cc );
-                        const double a = Kokkos::fmax( Kokkos::fabs( v.real() ),
-                                                       Kokkos::fabs( v.imag() ) );
-                        if ( a > mnorm )
-                            mnorm = a;
-                    }
-                const double r_sum =
-                    1.7320508075688772 *
-                    double( src_ci.half_width + target_ci.half_width );
-                Kokkos::printf(
-                    "[M2L-dbg] tgt=%d src=%d s_depth=%d s_hw=%.4g rho=%.4g "
-                    "mac_ratio=%.4g moment=%.6g\n",
-                    target_cell, source_cell, src_ci.depth,
-                    double( src_ci.half_width ), rho,
-                    ( r_sum > 0.0 ) ? rho / r_sum : 0.0, mnorm );
-            }
-#endif
         } );
 }
 
@@ -2083,103 +2037,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
 
     Kokkos::fence();
 
-#if defined( CANOPY_NAN_DEBUG )
-    // TEMPORARY (debug-nan): the premature-NaN seed is a single node whose
-    // FAR-FIELD gradient is ~46-400x too large. Test the local-expansion
-    // divergence hypothesis: the L2P series in rho/half_width blows up if a
-    // particle sits far outside its leaf cell (rho_norm >> 1). Report the
-    // particle with the largest |far-field grad| and its rho_norm, plus the
-    // global max rho_norm.
-    if ( compute_gradient && N > 0 )
-    {
-        using MaxLoc = Kokkos::MaxLoc<double, int>;
-        MaxLoc::value_type gmax;     // largest |far grad|, and its particle
-        double rho_norm_max = 0.0;   // largest rho/half_width over all parts
-        auto positions = particle_positions;
-        Kokkos::parallel_reduce(
-            "L2P_nan_debug",
-            Kokkos::RangePolicy<execution_space>( 0, N ),
-            KOKKOS_LAMBDA( int p, MaxLoc::value_type& gl, double& rmax ) {
-                const int cidx = particle_cell_idx( p );
-                if ( cidx < 0 )
-                    return;
-                const auto& dci = device_cells( cidx );
-                const scalar_type dx =
-                    static_cast<scalar_type>( positions( p, 0 ) ) - dci.center[0];
-                const scalar_type dy =
-                    static_cast<scalar_type>( positions( p, 1 ) ) - dci.center[1];
-                const scalar_type dz =
-                    static_cast<scalar_type>( positions( p, 2 ) ) - dci.center[2];
-                const double rho = Kokkos::sqrt(
-                    static_cast<double>( dx * dx + dy * dy + dz * dz ) );
-                const double rn =
-                    ( dci.half_width > 0.0 ) ? rho / dci.half_width : 0.0;
-                if ( rn > rmax )
-                    rmax = rn;
-                double g = 0.0;
-                for ( int c = 0; c < NComps; ++c )
-                    for ( int d = 0; d < 3; ++d )
-                    {
-                        const double a =
-                            Kokkos::fabs( gradient_out( p, c, d ) );
-                        if ( a > g )
-                            g = a;
-                    }
-                if ( g > gl.val )
-                {
-                    gl.val = g;
-                    gl.loc = p;
-                }
-            },
-            MaxLoc( gmax ), Kokkos::Max<double>( rho_norm_max ) );
-        Kokkos::fence();
-
-        // rho_norm of the worst-gradient particle.
-        int wp = gmax.loc;
-        double worst_rn = -1.0, worst_hw = -1.0, worst_rho = -1.0;
-        if ( wp >= 0 )
-        {
-            Kokkos::View<double[3], memory_space> out( "l2p_dbg_out" );
-            Kokkos::parallel_for(
-                "L2P_nan_debug_worst",
-                Kokkos::RangePolicy<execution_space>( 0, 1 ),
-                KOKKOS_LAMBDA( int ) {
-                    const int cidx = particle_cell_idx( wp );
-                    const auto& dci = device_cells( cidx );
-                    const scalar_type dx =
-                        static_cast<scalar_type>( positions( wp, 0 ) ) -
-                        dci.center[0];
-                    const scalar_type dy =
-                        static_cast<scalar_type>( positions( wp, 1 ) ) -
-                        dci.center[1];
-                    const scalar_type dz =
-                        static_cast<scalar_type>( positions( wp, 2 ) ) -
-                        dci.center[2];
-                    const double rho = Kokkos::sqrt(
-                        static_cast<double>( dx * dx + dy * dy + dz * dz ) );
-                    out( 0 ) = rho;
-                    out( 1 ) = dci.half_width;
-                    out( 2 ) = ( dci.half_width > 0.0 ) ? rho / dci.half_width
-                                                        : -1.0;
-                } );
-            Kokkos::fence();
-            auto h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                          out );
-            worst_rho = h( 0 );
-            worst_hw = h( 1 );
-            worst_rn = h( 2 );
-        }
-        int rank = 0;
-        MPI_Comm_rank( _comm, &rank );
-        if ( rank == 0 )
-            std::fprintf(
-                stderr,
-                "[Canopy NaN-debug] L2P: max|far grad|=%.6g at local p=%d "
-                "(rho=%.6g half_width=%.6g rho_norm=%.6g) | global "
-                "max rho_norm=%.6g\n",
-                gmax.val, wp, worst_rho, worst_hw, worst_rn, rho_norm_max );
-    }
-#endif
 }
 
 // -------------------------------------------------------------------------
