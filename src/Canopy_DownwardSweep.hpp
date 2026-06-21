@@ -2036,6 +2036,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
         } );
 
     Kokkos::fence();
+
 }
 
 // -------------------------------------------------------------------------

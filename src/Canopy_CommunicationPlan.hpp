@@ -184,6 +184,17 @@ class CommunicationPlan
     void set_mac_theta( double mac_theta ) { _theta = mac_theta; }
     double mac_theta() const { return _theta; }
 
+    // Plummer softening length (eps) and the multiple of it below which pairs
+    // are forced to the softened near-field (P2P) instead of M2L, so the
+    // unsoftened multipole far-field stays accurate (see mac_satisfied). eps=0
+    // disables the floor.
+    void set_near_softening( double eps, double factor )
+    {
+        _near_softening = eps;
+        _near_softening_k = factor;
+    }
+    double near_softening() const { return _near_softening; }
+
     // -----------------------------------------------------------------------
     // build()
     //
@@ -225,6 +236,13 @@ class CommunicationPlan
 
     // MAC theta used by the dual-tree traversal. See constructor.
     double _theta;
+
+    // Plummer softening length for the near-field-widening floor in
+    // mac_satisfied. 0 disables the floor (pure geometric MAC).
+    double _near_softening = 0.0;
+    // Multiple of the softening length below which pairs are forced to P2P.
+    // factor=4 => far-field relative softening error ~1/(2*factor^2) ~ 3%.
+    double _near_softening_k = 4.0;
 
     // -----------------------------------------------------------------------
     // Cell lookup helpers built during build()
@@ -325,7 +343,21 @@ class CommunicationPlan
         const double R2 = dx * dx + dy * dy + dz * dz;
         constexpr double SQRT3 = 1.7320508075688772;
         const double r_sum = SQRT3 * ( a.half_width + b.half_width );
-        return R2 * _theta * _theta > r_sum * r_sum;
+        if ( !( R2 * _theta * _theta > r_sum * r_sum ) )
+            return false;
+        // Softening floor: the multipole far-field uses the UNSOFTENED 1/r
+        // kernel, so it is only accurate where the Plummer softening is
+        // negligible, i.e. R >> eps. Reject (force to softened P2P) any pair
+        // closer than K*eps. Without this, a rolled-up cluster whose cells
+        // shrink below eps gets a spurious unsoftened far field (the premature
+        // full-rollup NaN). No-op when _near_softening == 0.
+        if ( _near_softening > 0.0 && _near_softening_k > 0.0 )
+        {
+            const double floor = _near_softening_k * _near_softening;
+            if ( R2 <= floor * floor )
+                return false;
+        }
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -630,6 +662,7 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
     // pair only via a self-pair self-emit on a leaf — which is intended
     // to appear exactly once. All other pairs are visited exactly once,
     // so no list-side dedup is required.
+
 }
 
 // --------------------------------------------------------------------------

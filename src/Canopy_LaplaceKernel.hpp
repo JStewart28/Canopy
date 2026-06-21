@@ -850,8 +850,15 @@ struct LaplaceKernel
 
         if ( compute_gradient )
         {
-            // Central finite difference
-            const Scalar h = 1.0e-5;
+            // Central finite difference. The step MUST scale with the cell
+            // size: phi varies on the scale of w_self, so its third derivative
+            // ~ phi/w_self^3 and the FD truncation error ~ h^2/w_self^3 blows up
+            // for deep (tiny) cells if h is fixed. Use h ~ eps^(1/3) * w_self
+            // (the roundoff/truncation optimum) so the relative error is
+            // depth-independent. (Was a fixed 1e-5 — the premature full-rollup
+            // NaN root cause: at w_self~3e-3 the fixed step gave O(1e5) spurious
+            // gradients. TODO: replace with analytical derivatives.)
+            const Scalar h = static_cast<Scalar>( 1.0e-5 ) * w_self;
             Scalar phi_px[NComps], phi_mx[NComps];
             Scalar phi_py[NComps], phi_my[NComps];
             Scalar phi_pz[NComps], phi_mz[NComps];

@@ -42,6 +42,19 @@ Canopy::Solver<...> solver( MPI_Comm comm, const Canopy::FmmConfig& cfg );
 | `imbalance_tolerance` | Load-balance threshold | `0.05` |
 | `mac_theta` | Multipole acceptance criterion | `0.5` |
 | `softening` | Plummer softening length; `< 0` selects auto-softening from the inter-particle spacing | `-1.0` |
+| `near_softening_factor` | Near-field softening floor: pairs closer than `factor · softening` use the softened near-field (P2P) instead of the unsoftened multipole far-field (M2L). `0` disables. | `4.0` |
+
+The multipole far-field is built from the **unsoftened** `1/r` Laplace kernel, so
+it is only accurate where the Plummer `softening` is negligible (separation
+`R ≫ eps`). `near_softening_factor` widens the near field to cover everything
+within `factor · eps`, so any pair where softening matters is handled by the
+softened P2P kernel. Without it, a clustering system whose cells shrink below the
+softening length (e.g. a vortex sheet at full roll-up) gets a spurious, far too
+large far-field and blows up. Larger `factor` is more accurate (far-field
+relative softening error `~ 1/(2·factor²)`, ≈3% at the default `4`) but widens
+the near field, putting more pairs in the (more expensive) P2P path. Set `0` to
+recover the pure geometric MAC (correct only when `softening` is small relative
+to all M2L separations).
 
 The six bounding-box tolerances are per-face and may be set independently,
 e.g. to pad only the outflow boundary of an asymmetric domain. For an
