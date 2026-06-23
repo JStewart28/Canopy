@@ -1,0 +1,6 @@
+spack:
+  specs:
+  - kokkos@4 +openmp +serial %gcc
+  - cabana@master +grid +mpi +arborx %gcc
+  - trilinos +zoltan2 +openmp ~muelu ~ml ~ifpack2 ~ifpack ~fortran ~epetraext ~epetra ~belos ~aztec ~anasazi ~amesos2 ~amesos ^kokkos +openmp +serial %gcc
+  - googletest

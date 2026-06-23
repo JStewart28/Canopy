@@ -7,19 +7,26 @@ run `hostname` and match the result against the table below. Then Read the
 matching system-specific instructions file and follow it for the rest of the
 session.
 
-| Hostname pattern | Instructions file              |
-| ---------------- | ------------------------------ |
-| `tuolumne*`      | `docs/claude-tuolumne.md`      |
+| Hostname pattern | Instructions file          |
+| ---------------- | -------------------------- |
+| `tuolumne*`      | `docs/tuolumne/claude.md`  |
+| `dane*`          | `docs/dane/claude.md`      |
 
 The pattern is the alphabetic prefix of the host (e.g. `dane1234` matches
 `dane*`, `lassen708` matches `lassen*`). To add support for a new system,
-create `docs/claude-<system>.md` and add a row above.
+create `docs/<system>/claude.md` and add a row above.
+
+Each `docs/<system>/` directory also holds a `spack.yaml` snapshot — a copy of
+the project's spack environment file for that system, kept as a record of the
+exact spec set the environment was concretized from. When the live environment
+(`~/spack_envs/<system>_trilinos/spack.yaml`) changes, update the matching
+snapshot in the same change.
 
 If the hostname does not match any row, or the matching file is missing one of
 the required sections below, ask the user to fill in the gap and update (or
 create) the doc before proceeding.
 
-### Required sections in every `docs/claude-<system>.md`
+### Required sections in every `docs/<system>/claude.md`
 
 1. **Spack environment** — the `spack env activate ...` command that must be
    run before compiling or running any binary from this library.
@@ -28,7 +35,7 @@ create) the doc before proceeding.
 3. **Build command** — how to build a target on this system. Default:
    `make [EXECUTABLE]` (the user specifies the target when appropriate). If
    the system installs via spack, the build command is `spack install`
-   instead. Every `docs/claude-<system>.md` must state which of the two
+   instead. Every `docs/<system>/claude.md` must state which of the two
    applies.
 4. **Run command for binaries** — the command template for running a built
    binary. Default starting point:
@@ -52,7 +59,7 @@ machine.
 
 These tests must pass before any code change ships. Each entry lists the
 test name and the MPI rank counts it must be run at. Use the run command and
-batch template from the active system's `docs/claude-<system>.md` to execute
+batch template from the active system's `docs/<system>/claude.md` to execute
 them.
 
 The minimum test set:

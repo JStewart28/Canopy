@@ -39,3 +39,6 @@ data
 *.exe
 *.out
 *.app
+
+# Log files (test/run output)
+*.log

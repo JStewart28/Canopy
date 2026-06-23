@@ -16,8 +16,8 @@ spack env activate ${HOME}/spack_envs/tuolumne_trilinos
 **Note:** this environment is for building Canopy *by hand* on tuolumne
 (out-of-tree cmake + make) — it provides Trilinos and the other build
 dependencies but does not install Canopy itself. When building by hand on
-tuolumne, use [run_cmake_tuolumne.sh](../run_cmake_tuolumne.sh) (not the
-generic [run_cmake.sh](../run_cmake.sh)) as the canonical cmake
+tuolumne, use [run_cmake_tuolumne.sh](../../run_cmake_tuolumne.sh) (not the
+generic [run_cmake.sh](../../run_cmake.sh)) as the canonical cmake
 invocation. If you are instead installing Canopy via
 `spack install`, the environment to activate is different — confirm the
 correct env name with the user before proceeding.
@@ -41,7 +41,7 @@ System-specific args that must be passed to `cmake`:
 -DCanopy_PROFILING_LEVEL=2
 ```
 
-The wrapper script [run_cmake_tuolumne.sh](../run_cmake_tuolumne.sh) is the
+The wrapper script [run_cmake_tuolumne.sh](../../run_cmake_tuolumne.sh) is the
 canonical source — invoke it from inside an out-of-tree build directory
 (e.g. `build-tuolumne/`).
 
@@ -99,7 +99,7 @@ export OMP_WAIT_POLICY=PASSIVE
 When not inside an interactive allocation, submit via `flux batch
 <script>`. Use the template below as a starting point — fill in `JOB_NAME`,
 `NODES`, `TIME_MIN`, `NTASKS`, the executable, and its args. Save concrete
-filled-in scripts under [scripts/tuolumne/](../scripts/tuolumne/).
+filled-in scripts under [scripts/tuolumne/](../../scripts/tuolumne/).
 
 ```bash
 #!/bin/bash
@@ -137,14 +137,14 @@ For the minimum test set (`Canopy_Test_MultiSolve_MPI_SERIAL` at 1–6
 ranks), use the CPU/SERIAL variant of section 4 inside the batch script
 rather than the HIP variant above.
 
-[run_tests.flux](../run_tests.flux) and
-[run_profling.flux](../run_profling.flux) at the repo root are the
+[run_tests.flux](../../run_tests.flux) and
+[run_profling.flux](../../run_profling.flux) at the repo root are the
 working references this template was distilled from.
 
 ## 6. Running non-test binaries
 
 When asked to run something other than a test (e.g. one of the
-[examples/](../examples/) problems), ask the user for the example name and
+[examples/](../../examples/) problems), ask the user for the example name and
 its args, then plug them into the section 4 `flux run` template or the
 section 5 batch template depending on whether an interactive allocation is
 already held.
