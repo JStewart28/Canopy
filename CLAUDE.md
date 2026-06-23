@@ -90,3 +90,8 @@ repository, not the default plan location.
 - **Keep `README.md` in sync.** When a public-facing API changes, or when the
   arguments accepted by an example problem change, update `README.md` in the
   same change so its documentation stays accurate.
+- **Track optimization opportunities.** If, after completing a new
+  implementation, you notice an optimization opportunity (a performance or
+  scalability refinement that is not a correctness issue), ask the user whether
+  they want it recorded in the "Future Optimizations" section of `README.md`
+  for tracking. Only add it if they say yes.

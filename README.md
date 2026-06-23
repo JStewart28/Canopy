@@ -215,6 +215,31 @@ explicit handling of escaped particles) would harden the solver against it.
 
 ---
 
+## Future Optimizations
+
+Tracked optimization opportunities that are not yet implemented. None of these
+are correctness issues — they are performance/scalability refinements.
+
+### Nonblocking-consensus peer discovery in particle migration
+
+`TreePartitioner::migrate_particles` discovers, for each rank, which sources
+will send it particles via a single `MPI_Alltoall` of `comm_size` ints (each
+rank's per-destination send counts). This is simple and bounded, but it is an
+`O(comm_size)` collective on every `Rebalance`. At very high rank counts the
+Alltoall metadata cost grows with the job size even though the actual migration
+is sparse (each rank exchanges with only a handful of peers).
+
+Replace it with a sparse nonblocking-consensus exchange (the standard
+`MPI_Issend` + `MPI_Ibarrier` "NBX" dynamic-sparse-data-exchange algorithm):
+each rank posts non-blocking synchronous sends to only its real destination
+peers, then enters an `MPI_Ibarrier` once all its sends have completed locally,
+probing for incoming count messages until the barrier completes. This makes
+peer discovery cost scale with the number of *actual* peers rather than
+`comm_size`. Not needed at the current target scale (≈256 ranks); revisit if
+Canopy runs at many thousands of ranks.
+
+---
+
 ### Resources used:
 1. [Fast multipole info](https://amath.colorado.edu/faculty/martinss/2014_CBMS/Refs/2012_fmm_encyclopedia.pdf)
 
