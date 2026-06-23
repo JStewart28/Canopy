@@ -12,6 +12,7 @@
 #ifndef CANOPY_TREE_PARTITIONER_HPP
 #define CANOPY_TREE_PARTITIONER_HPP
 
+#include <Canopy_RegisteredBufferPool.hpp>
 #include <Canopy_TreeBuilder.hpp>
 
 #include <Cabana_Core.hpp>
@@ -200,6 +201,20 @@ class TreePartitioner
     Kokkos::View<int*, memory_space> _leaf_particle_offsets;
     Kokkos::View<int*, memory_space> _particle_leaf_cell_idx;
 
+    // Persistent, grow-only staging buffers for the coalesced particle
+    // migration in migrate_particles(). One stable registered device region
+    // per direction (send/recv tuple data), reused across every rebalance so
+    // the CXI NIC registration footprint stays O(1) per direction regardless
+    // of peer count — the same treatment coalesced_view_exchange and the P2P
+    // ghost gather already give the solve() exchanges. The data pools are
+    // byte-typed because the AoSoA tuple type is only known inside the
+    // migrate_particles template method; per call they are reinterpreted to
+    // an unmanaged View of that tuple type. The int pool holds the packed
+    // send-index list. See Canopy_RegisteredBufferPool.hpp.
+    detail::RegisteredBufferPool<char, memory_space> _migrate_send_pool;
+    detail::RegisteredBufferPool<char, memory_space> _migrate_recv_pool;
+    detail::RegisteredBufferPool<int, memory_space> _migrate_send_idx_pool;
+
   public:
     // Internal: partition leaf cells using Zoltan2 RCB
     // Returns a map: leaf MortonKey -> owning rank
@@ -214,7 +229,8 @@ class TreePartitioner
         const std::unordered_map<MortonKey, int>& leaf_owners );
 
     // -----------------------------------------------------------------------
-    // migrate_particles — Cabana::Distributor-based migration
+    // migrate_particles — coalesced, registration-bounded particle migration
+    // (RegisteredBufferPool-backed; one registered region per direction)
     // -----------------------------------------------------------------------
     template <class AoSoAType>
     int migrate_particles(
@@ -526,56 +542,228 @@ int TreePartitioner<MemorySpace, ExecutionSpace>::migrate_particles(
     const TreeBuilder<MemorySpace, ExecutionSpace>& tree_builder,
     AoSoAType& particles, int num_local_particles_before )
 {
-    // Copy particle keys to host to build the destination array
+    // ----------------------------------------------------------------------
+    // Coalesced, registration-bounded particle migration.
+    //
+    // Replaces the former Cabana::Distributor / Cabana::migrate path, whose
+    // send/recv staging buffers lived inside Cabana and handed O(peers)
+    // distinct device pointers to GPU-aware MPI per migrate — exhausting the
+    // CXI NIC registration cache (GTL dreg_evict NO_SPACE) during a many-way
+    // Rebalance at scale.
+    //
+    // Instead we pack outgoing AoSoA tuples into per-peer subviews of ONE
+    // persistent registered send region and post one MPI_Isend per peer; the
+    // matching MPI_Irecv land in ONE persistent registered recv region. Peak
+    // concurrent registrations are therefore O(1) per direction regardless of
+    // peer count or rollup state — the same structure coalesced_view_exchange
+    // and the P2P ghost gather already use.
+    //
+    // The MPI element type is one whole tuple (MPI_Type_contiguous over
+    // sizeof(tuple_type) bytes) and the message count is the tuple count, so a
+    // single peer's payload can exceed 2 GiB without overflowing MPI's signed
+    // int count — this sidesteps the upstream 32-bit Distributor byte-count
+    // overflow and removes the "Patched Cabana required" constraint here.
+    //
+    // Migrate semantics preserved: destinations come from host particle_keys
+    // looked up in _cell_owner_map (kept on this rank for OWNER_SHARED or
+    // unresolved keys); the AoSoA is resized to (kept + received); num_sent is
+    // the count of particles destined for a different rank. The within-AoSoA
+    // order after migration is unspecified — every caller in Canopy_Solver.hpp
+    // immediately rebuilds keys and re-sorts by leaf, so no order is required
+    // downstream.
+    // ----------------------------------------------------------------------
+    using tuple_type = typename AoSoAType::tuple_type;
+    using umtuple_view = Kokkos::View<tuple_type*, memory_space,
+                                      Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+
+    // Copy particle keys to host to compute each particle's destination rank.
     auto particle_keys = tree_builder.particle_keys();
     auto h_keys = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                        particle_keys );
 
-    Kokkos::View<int*, memory_space> dest_ranks( "dest_ranks",
-                                                 num_local_particles_before );
-    auto h_dest = Kokkos::create_mirror_view( dest_ranks );
-
+    // dest[i] = owning rank of particle i (== _rank means keep local).
+    std::vector<int> dest( num_local_particles_before, _rank );
+    std::vector<int> send_counts( _comm_size, 0 );
     int num_sent = 0;
-
     for ( int i = 0; i < num_local_particles_before; i++ )
     {
-        MortonKey key = h_keys( i );
-        auto it = _cell_owner_map.find( key );
-        if ( it != _cell_owner_map.end() )
+        auto it = _cell_owner_map.find( h_keys( i ) );
+        // OWNER_SHARED (-1) or unresolved key -> keep on current rank.
+        if ( it != _cell_owner_map.end() && it->second >= 0 )
         {
-            int owner = it->second;
-            // If the leaf is OWNER_SHARED (-1, shouldn't happen for leaves,
-            // but guard against it), keep particle on current rank
-            if ( owner >= 0 )
+            const int owner = it->second;
+            dest[i] = owner;
+            if ( owner != _rank )
             {
-                h_dest( i ) = owner;
-                if ( owner != _rank )
-                    num_sent++;
+                send_counts[owner]++;
+                num_sent++;
             }
-            else
-            {
-                h_dest( i ) = _rank;
-            }
-        }
-        else
-        {
-            // Key not found — keep on current rank (safety fallback)
-            h_dest( i ) = _rank;
         }
     }
 
-    Kokkos::deep_copy( dest_ranks, h_dest );
+    // Discover incoming counts: every rank learns how many tuples each source
+    // will send it. One Alltoall of comm_size ints — bounded and collective.
+    std::vector<int> recv_counts( _comm_size, 0 );
+    MPI_Alltoall( send_counts.data(), 1, MPI_INT, recv_counts.data(), 1,
+                  MPI_INT, _comm );
 
-    // Use Cabana::Distributor to migrate particles.
-    //
-    // NOTE: a single peer's payload can exceed 2 GiB at large per-rank particle
-    // counts (e.g. ~1e8 particles * ~56 B tuple). Upstream Cabana's Distributor
-    // computes the per-peer MPI byte count with a 32-bit int, which overflows
-    // and silently truncates the transfer (the particle count stays correct but
-    // the data is garbage). A patched Cabana with 64-bit byte counts is
-    // required — see README.md "Patched Cabana required".
-    Cabana::Distributor<memory_space> distributor( _comm, dest_ranks );
-    Cabana::migrate( distributor, particles );
+    // Ordered peer lists (ascending rank) with tuple offsets into the pools.
+    std::vector<int> send_peers, send_peer_off, send_peer_n;
+    std::vector<int> recv_peers, recv_peer_off, recv_peer_n;
+    size_t total_send = 0, total_recv = 0;
+    for ( int r = 0; r < _comm_size; r++ )
+    {
+        if ( r != _rank && send_counts[r] > 0 )
+        {
+            send_peers.push_back( r );
+            send_peer_off.push_back( static_cast<int>( total_send ) );
+            send_peer_n.push_back( send_counts[r] );
+            total_send += static_cast<size_t>( send_counts[r] );
+        }
+        if ( r != _rank && recv_counts[r] > 0 )
+        {
+            recv_peers.push_back( r );
+            recv_peer_off.push_back( static_cast<int>( total_recv ) );
+            recv_peer_n.push_back( recv_counts[r] );
+            total_recv += static_cast<size_t>( recv_counts[r] );
+        }
+    }
+
+    // Fast path: this rank neither sends nor receives. Everything stays in
+    // place in its current order; no rebuild needed.
+    if ( total_send == 0 && total_recv == 0 )
+    {
+        _num_local_after = num_local_particles_before;
+        return num_sent;
+    }
+
+    // ---- Build the packed send-index list (host), grouped by peer in the
+    // same ascending-rank order used for the pool offsets. ----
+    _migrate_send_idx_pool.reserve( total_send );
+    auto send_idx = _migrate_send_idx_pool.subview( 0, total_send );
+    if ( total_send > 0 )
+    {
+        std::unordered_map<int, int> peer_slot; // rank -> index in send_peers
+        for ( int q = 0; q < static_cast<int>( send_peers.size() ); q++ )
+            peer_slot[send_peers[q]] = q;
+        std::vector<int> cursor = send_peer_off; // running write pos per peer
+        auto h_send_idx = Kokkos::create_mirror_view( send_idx );
+        for ( int i = 0; i < num_local_particles_before; i++ )
+        {
+            if ( dest[i] != _rank )
+                h_send_idx( cursor[peer_slot[dest[i]]]++ ) = i;
+        }
+        Kokkos::deep_copy( send_idx, h_send_idx );
+    }
+
+    // ---- Size the registered tuple regions up front so every subview handed
+    // out below has a stable base address. ----
+    _migrate_send_pool.reserve( total_send * sizeof( tuple_type ) );
+    _migrate_recv_pool.reserve( total_recv * sizeof( tuple_type ) );
+    umtuple_view send_buf(
+        reinterpret_cast<tuple_type*>( _migrate_send_pool.data() ),
+        total_send );
+    umtuple_view recv_buf(
+        reinterpret_cast<tuple_type*>( _migrate_recv_pool.data() ),
+        total_recv );
+
+    // ---- Pack outgoing tuples on device into the one send region. ----
+    if ( total_send > 0 )
+    {
+        auto src = particles;
+        auto idx = send_idx;
+        auto out = send_buf;
+        Kokkos::parallel_for(
+            "migrate_pack",
+            Kokkos::RangePolicy<execution_space>(
+                0, static_cast<int>( total_send ) ),
+            KOKKOS_LAMBDA( const int i ) {
+                out( i ) = src.getTuple( idx( i ) );
+            } );
+        Kokkos::fence();
+    }
+
+    // ---- Exchange. One MPI element = one whole tuple; count = tuple count,
+    // so a >2 GiB per-peer payload never overflows the signed int count. ----
+    MPI_Datatype tuple_dtype;
+    MPI_Type_contiguous( static_cast<int>( sizeof( tuple_type ) ), MPI_BYTE,
+                         &tuple_dtype );
+    MPI_Type_commit( &tuple_dtype );
+
+    std::vector<MPI_Request> recv_reqs;
+    recv_reqs.reserve( recv_peers.size() );
+    for ( size_t q = 0; q < recv_peers.size(); q++ )
+    {
+        MPI_Request req;
+        MPI_Irecv( recv_buf.data() + recv_peer_off[q], recv_peer_n[q],
+                   tuple_dtype, recv_peers[q], /*tag=*/0, _comm, &req );
+        recv_reqs.push_back( req );
+    }
+    std::vector<MPI_Request> send_reqs;
+    send_reqs.reserve( send_peers.size() );
+    for ( size_t q = 0; q < send_peers.size(); q++ )
+    {
+        MPI_Request req;
+        MPI_Isend( send_buf.data() + send_peer_off[q], send_peer_n[q],
+                   tuple_dtype, send_peers[q], /*tag=*/0, _comm, &req );
+        send_reqs.push_back( req );
+    }
+    if ( !recv_reqs.empty() )
+        MPI_Waitall( static_cast<int>( recv_reqs.size() ), recv_reqs.data(),
+                     MPI_STATUSES_IGNORE );
+    if ( !send_reqs.empty() )
+        MPI_Waitall( static_cast<int>( send_reqs.size() ), send_reqs.data(),
+                     MPI_STATUSES_IGNORE );
+    MPI_Type_free( &tuple_dtype );
+
+    // ---- Rebuild the AoSoA as (kept particles) ++ (received particles). ----
+    int num_kept = 0;
+    for ( int i = 0; i < num_local_particles_before; i++ )
+        if ( dest[i] == _rank )
+            num_kept++;
+
+    Kokkos::View<int*, memory_space> keep_idx(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "migrate_keep_idx" ),
+        static_cast<size_t>( num_kept ) );
+    {
+        auto h_keep = Kokkos::create_mirror_view( keep_idx );
+        int k = 0;
+        for ( int i = 0; i < num_local_particles_before; i++ )
+            if ( dest[i] == _rank )
+                h_keep( k++ ) = i;
+        Kokkos::deep_copy( keep_idx, h_keep );
+    }
+
+    const size_t new_size = static_cast<size_t>( num_kept ) + total_recv;
+    AoSoAType migrated( "migrated_particles", new_size );
+
+    if ( num_kept > 0 )
+    {
+        auto in = particles;
+        auto out = migrated;
+        auto idx = keep_idx;
+        Kokkos::parallel_for(
+            "migrate_keep", Kokkos::RangePolicy<execution_space>( 0, num_kept ),
+            KOKKOS_LAMBDA( const int i ) {
+                out.setTuple( i, in.getTuple( idx( i ) ) );
+            } );
+    }
+    if ( total_recv > 0 )
+    {
+        auto out = migrated;
+        auto buf = recv_buf;
+        const int base = num_kept;
+        Kokkos::parallel_for(
+            "migrate_unpack",
+            Kokkos::RangePolicy<execution_space>(
+                0, static_cast<int>( total_recv ) ),
+            KOKKOS_LAMBDA( const int j ) {
+                out.setTuple( base + j, buf( j ) );
+            } );
+    }
+    Kokkos::fence();
+
+    particles = migrated;
 
     _num_local_after = static_cast<int>( particles.size() );
 

@@ -126,7 +126,178 @@ int count_particles_in_nonowned_leaves(
     return bad;
 }
 
+// ---------------------------------------------------------------------------
+// Payload-carrying particle type for the coalesced-migration integrity test.
+// Position drives the partition; the payload travels with each particle so we
+// can verify the generic tuple pack/unpack neither loses, duplicates, nor
+// corrupts data (and does not swap fields within a tuple).
+// ---------------------------------------------------------------------------
+enum FieldIdxP
+{
+    PositionP = 0,
+    PayloadP = 1
+};
+
+using DataTypesP = Cabana::MemberTypes<double[3], double[2]>;
+using AoSoAP_t = Cabana::AoSoA<DataTypesP, TEST_MEMSPACE>;
+using AoSoAP_ht = Cabana::AoSoA<DataTypesP, Kokkos::HostSpace>;
+
+// payload(i,1) is a deterministic function of payload(i,0); after migration we
+// re-check this relation to confirm the two payload slots stayed paired with
+// each other and with their particle. Exact in double for the sizes tested.
+inline double payload_check( double gid ) { return gid * 3.0 + 1.0; }
+
+void generate_payload_particles( AoSoAP_t& particles, int num_particles,
+                                 int rank, int global_base )
+{
+    AoSoAP_ht particles_h( "particles_h", num_particles );
+    auto h_pos = Cabana::slice<PositionP>( particles_h );
+    auto h_pay = Cabana::slice<PayloadP>( particles_h );
+
+    // Uniform over the whole domain so that, after an RCB partition into
+    // nprocs parts, each rank scatters particles to many peers (exercises the
+    // multi-peer coalesced exchange).
+    std::mt19937 gen( 1234 + rank );
+    std::uniform_real_distribution<double> uniform( 0.0, 1.0 );
+    for ( int i = 0; i < num_particles; ++i )
+    {
+        h_pos( i, 0 ) = uniform( gen );
+        h_pos( i, 1 ) = uniform( gen );
+        h_pos( i, 2 ) = uniform( gen );
+        const double gid = static_cast<double>( global_base + i );
+        h_pay( i, 0 ) = gid;
+        h_pay( i, 1 ) = payload_check( gid );
+    }
+
+    particles.resize( num_particles );
+    Cabana::deep_copy( particles, particles_h );
+}
+
 } // namespace TreePartitionerTest
+
+//---------------------------------------------------------------------------//
+/**
+ * Coalesced-migration integrity test. Each particle carries a globally-unique
+ * id (payload slot 0) and a derived check value (payload slot 1). After an
+ * initial partition() — which runs the RegisteredBufferPool-backed coalesced
+ * migrate_particles() — verify:
+ *
+ *   1. Total particle count is conserved.
+ *   2. Every global id appears EXACTLY once across all ranks (a true bijection
+ *      check: no loss, no duplication). Uses an all-reduced per-id histogram.
+ *   3. For every migrated particle, payload(1) == f(payload(0)) — the tuple's
+ *      two payload slots stayed paired (no field swap/corruption in the
+ *      generic pack/unpack).
+ *   4. Every local particle resides in a leaf owned by this rank (or shared).
+ *
+ * Runs the migration across many peers when launched at >= 4 ranks.
+ */
+void testCoalescedMigrateIntegrity( int num_particles_per_rank, int ncrit,
+                                    int max_depth, double tolerance,
+                                    int replication_depth )
+{
+    using namespace TreePartitionerTest;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    const int global_n = num_particles_per_rank * nprocs;
+    const int global_base = rank * num_particles_per_rank;
+
+    AoSoAP_t particles( "particles", num_particles_per_rank );
+    generate_payload_particles( particles, num_particles_per_rank, rank,
+                                global_base );
+
+    auto positions = Cabana::slice<PositionP>( particles );
+
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth,
+        std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance,
+                               tolerance, tolerance },
+        tolerance );
+    builder.build( positions, num_particles_per_rank );
+
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+
+    // Runs the coalesced migrate_particles().
+    partitioner.partition( builder, particles, num_particles_per_rank );
+
+    const int new_local = partitioner.num_local_particles();
+
+    // Check 1: total count conserved.
+    int total_after = 0;
+    MPI_Allreduce( &new_local, &total_after, 1, MPI_INT, MPI_SUM,
+                   MPI_COMM_WORLD );
+    EXPECT_EQ( total_after, global_n )
+        << "Total particle count changed during coalesced migration";
+
+    // Pull the migrated particles to host for payload inspection.
+    AoSoAP_ht particles_h( "particles_h", new_local );
+    Cabana::deep_copy( particles_h, particles );
+    auto h_pay = Cabana::slice<PayloadP>( particles_h );
+
+    // Checks 2 & 3: build a local id histogram and verify payload pairing.
+    std::vector<int> local_hist( global_n > 0 ? global_n : 1, 0 );
+    int payload_mismatches = 0;
+    int id_out_of_range = 0;
+    for ( int i = 0; i < new_local; ++i )
+    {
+        const double gid = h_pay( i, 0 );
+        if ( h_pay( i, 1 ) != payload_check( gid ) )
+            payload_mismatches++;
+        const long long id = static_cast<long long>( gid );
+        if ( id < 0 || id >= global_n || static_cast<double>( id ) != gid )
+            id_out_of_range++;
+        else
+            local_hist[id]++;
+    }
+
+    EXPECT_EQ( payload_mismatches, 0 )
+        << "Rank " << rank << ": " << payload_mismatches
+        << " migrated particles have payload(1) != f(payload(0)) — tuple "
+           "pack/unpack corrupted or swapped fields";
+    EXPECT_EQ( id_out_of_range, 0 )
+        << "Rank " << rank << ": " << id_out_of_range
+        << " migrated particles have a corrupted global id";
+
+    std::vector<int> global_hist( global_n > 0 ? global_n : 1, 0 );
+    MPI_Allreduce( local_hist.data(), global_hist.data(), global_n, MPI_INT,
+                   MPI_SUM, MPI_COMM_WORLD );
+
+    if ( rank == 0 )
+    {
+        int missing = 0, duplicated = 0;
+        for ( int id = 0; id < global_n; ++id )
+        {
+            if ( global_hist[id] == 0 )
+                missing++;
+            else if ( global_hist[id] > 1 )
+                duplicated++;
+        }
+        EXPECT_EQ( missing, 0 )
+            << missing << " global ids vanished during migration";
+        EXPECT_EQ( duplicated, 0 )
+            << duplicated << " global ids were duplicated during migration";
+    }
+
+    // Check 4: every local particle sits in a leaf owned by this rank.
+    positions = Cabana::slice<PositionP>( particles );
+    builder.build( positions, new_local );
+    auto h_keys = Kokkos::create_mirror_view_and_copy(
+        Kokkos::HostSpace(), builder.particle_keys() );
+    int bad_count = 0;
+    for ( int i = 0; i < new_local; ++i )
+    {
+        int owner = partitioner.cell_owner( h_keys( i ) );
+        if ( owner != rank && owner != OWNER_SHARED )
+            bad_count++;
+    }
+    EXPECT_EQ( bad_count, 0 )
+        << "Rank " << rank << ": " << bad_count
+        << " particles reside in a leaf not owned by this rank after migration";
+}
 
 //---------------------------------------------------------------------------//
 /**
@@ -659,6 +830,16 @@ TEST( TreePartitioner, testRepartitionBasic )
 TEST( TreePartitioner, testRepartitionSmall )
 {
     testRepartition( 500, 32, 10, 0.1, 2 );
+}
+
+TEST( TreePartitioner, testCoalescedMigrateIntegrityBasic )
+{
+    testCoalescedMigrateIntegrity( 10000, 128, 15, 0.1, 3 );
+}
+
+TEST( TreePartitioner, testCoalescedMigrateIntegritySmall )
+{
+    testCoalescedMigrateIntegrity( 500, 32, 10, 0.1, 2 );
 }
 
 //---------------------------------------------------------------------------//
