@@ -1,6 +1,9 @@
 # IDE directories
 .vscode
 
+# Per-checkout build/run profile override (see CLAUDE.md "Build & run profile")
+scripts/**/profile.local.sh
+
 # Build directory
 build*
 
