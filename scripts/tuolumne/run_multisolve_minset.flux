@@ -15,11 +15,12 @@
 # --gpus-per-task, --cores-per-task=1 (the CPU/SERIAL variant of section 4 in
 # docs/tuolumne/claude.md). The OMP_* vars are harmless for Serial.
 
-source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
-spack env activate ${HOME}/spack_envs/tuolumne_trilinos
-
-CANOPY_BUILD=/g/g20/stewartj/research-bridges/Canopy/build-tuolumne
-TEST=${CANOPY_BUILD}/tests/Canopy_Test_MultiSolve_MPI_SERIAL
+# Build/run profile: env + binary location from the shared resolver
+# (scripts/tuolumne/profile.*.sh). Pin the repo root (the scheduler spools this
+# script, so its own path is unreliable under `flux batch`).
+CANOPY_REPO="${CANOPY_REPO:-/g/g20/stewartj/research-bridges/Canopy}"
+source "${CANOPY_REPO}/scripts/lib/canopy_env.sh" || exit 1
+TEST=$(canopy_exe tests/Canopy_Test_MultiSolve_MPI_SERIAL)
 
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
@@ -31,8 +32,6 @@ export OMP_WAIT_POLICY=PASSIVE
 # exit 127). Enlarging the glibc static-TLS surplus lets the loader place them.
 # Required for every Canopy binary on Tuolumne (CPU and GPU).
 export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2000000
-
-cd ${CANOPY_BUILD}
 
 fail=0
 for N in 1 2 3 4 5 6; do

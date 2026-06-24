@@ -16,12 +16,15 @@
 # Single rank => the per-rank near-field counters are exact global counts and
 # the run is cheapest. SERIAL backend => CPU-only.
 
-source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
-spack env activate ${HOME}/spack_envs/tuolumne_trilinos
+# Build/run profile: env, build dir, and binary location come from the shared
+# resolver (scripts/tuolumne/profile.*.sh). The scheduler copies this batch
+# script to a spool dir, so pin the repo root here (update if the checkout moves).
+CANOPY_REPO="${CANOPY_REPO:-/g/g20/stewartj/research-bridges/Canopy}"
+source "${CANOPY_REPO}/scripts/lib/canopy_env.sh" || exit 1
 
-CANOPY_BUILD=/g/g20/stewartj/research-bridges/Canopy/build-tuolumne
-EXE=${CANOPY_BUILD}/examples/05_rollup_nearfield/rollup_nearfield
-OUTDIR=${CANOPY_BUILD}/rollup_sweep
+EXE=$(canopy_exe examples/05_rollup_nearfield/rollup_nearfield)
+# CSVs land in the build dir in manual mode, or under the repo in spack/path mode.
+OUTDIR=${CANOPY_BUILD_DIR:-${CANOPY_REPO}}/rollup_sweep
 mkdir -p ${OUTDIR}
 
 export OMP_PROC_BIND=close

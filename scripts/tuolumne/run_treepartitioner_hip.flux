@@ -15,11 +15,12 @@
 #
 # HIP/GPU variant (section 4 of docs/tuolumne/claude.md): one APU per rank.
 
-source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
-spack env activate ${HOME}/spack_envs/tuolumne_trilinos
-
-CANOPY_BUILD=/g/g20/stewartj/research-bridges/Canopy/build-tuolumne
-TEST=${CANOPY_BUILD}/tests/Canopy_Test_TreePartitioner_MPI_HIP
+# Build/run profile: env + binary location from the shared resolver
+# (scripts/tuolumne/profile.*.sh). Pin the repo root (the scheduler spools this
+# script, so its own path is unreliable under `flux batch`).
+CANOPY_REPO="${CANOPY_REPO:-/g/g20/stewartj/research-bridges/Canopy}"
+source "${CANOPY_REPO}/scripts/lib/canopy_env.sh" || exit 1
+TEST=$(canopy_exe tests/Canopy_Test_TreePartitioner_MPI_HIP)
 
 # Cray-MPICH GPU-aware comm (required for device pointers in MPI calls).
 export MPICH_GPU_SUPPORT_ENABLED=1
@@ -38,8 +39,6 @@ export OMP_WAIT_POLICY=PASSIVE
 # exit 127). Enlarging the glibc static-TLS surplus lets the loader place them.
 # Required for every Canopy binary on Tuolumne (CPU and GPU).
 export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2000000
-
-cd ${CANOPY_BUILD}
 
 fail=0
 for N in 1 4; do

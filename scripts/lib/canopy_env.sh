@@ -75,7 +75,10 @@ else
   if [ -n "${CANOPY_SPACK_SETUP:-}" ] && [ -f "${CANOPY_SPACK_SETUP}" ]; then
     . "${CANOPY_SPACK_SETUP}"
   fi
-  spack env activate "${_canopy_env}"
+  spack env activate "${_canopy_env}" || {
+    echo "canopy_env: 'spack env activate ${_canopy_env}' failed" >&2
+    return 1 2>/dev/null || exit 1
+  }
 fi
 
 # --- binary locator ---------------------------------------------------------
