@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(spack env activate *)",
+      "Bash(spack env status)",
+      "Bash(spack location *)",
+      "Bash(spack find *)",
+      "Bash(spack find)",
+      "Bash(spack info *)",
+      "Bash(flux jobs *)",
+      "Bash(flux jobs)",
+      "Bash(flux job wait-event *)",
+      "Bash(flux resource list *)",
+      "Bash(flux resource list)",
+      "Bash(gh label *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(cat ~/spack_envs/dane_trilinos/spack.yaml)",
+      "Read(//g/g20/stewartj/spack_envs/dane_trilinos/**)",
+      "Bash(echo \"=== dane spack.yaml ===\"; cat ~/spack_envs/dane_trilinos/spack.yaml; echo; echo \"=== tuolumne spack.yaml ===\"; cat ~/spack_envs/tuolumne_trilinos/spack.yaml)",
+      "Read(//g/g20/stewartj/spack_envs/tuolumne_trilinos/**)",
+      "Bash(git mv *)",
+      "Bash(sinfo -o \"%P %a %l %D\")",
+      "Bash(module avail *)",
+      "Bash(git check-ignore *)",
+      "Bash(module load *)",
+      "Bash(mpicxx --version)",
+      "Bash(module purge *)",
+      "Bash(module list *)",
+      "Bash(chmod +x scripts/tuolumne/run_multisolve_minset.flux scripts/tuolumne/run_treepartitioner_hip.flux)",
+      "Bash(git push *)",
+      "Bash(cd /g/g20/stewartj/research-bridges/Canopy/build-tuolumne *)",
+      "Bash(git fetch *)",
+      "Bash(git merge-base *)",
+      "Bash(git rev-list *)",
+      "Read(//g/g20/stewartj/.claude/projects/**)"
+    ],
+    "additionalDirectories": [
+      "/g/g20/stewartj/research-bridges/Canopy/build-tuolumne"
+    ]
+  }
+}
