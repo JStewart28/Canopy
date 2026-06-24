@@ -95,3 +95,7 @@ repository, not the default plan location.
   scalability refinement that is not a correctness issue), ask the user whether
   they want it recorded in the "Future Optimizations" section of `README.md`
   for tracking. Only add it if they say yes.
+- **Record known issues.** Known defects deferred to a later session are
+  tracked in the "Known Issues" section of `README.md`. When a test failure or
+  bug is confirmed but not fixed this session, note it there (what fails, how it
+  reproduces, and whether it predates the current work).

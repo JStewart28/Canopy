@@ -240,6 +240,36 @@ Canopy runs at many thousands of ranks.
 
 ---
 
+## Known Issues
+
+Tracked defects to be addressed in a later session. These are not introduced by
+current feature work — they reproduce on the pre-existing baseline.
+
+### `SolveFusedM2L.FP32_smokeTest` fails at ≥ 2 ranks
+
+In the `Canopy_Test_MultiSolve_MPI_SERIAL` suite, `SolveFusedM2L.FP32_smokeTest`
+passes at 1 rank but fails at 2–6 ranks: the FP32 max relative gradient error is
+≈ 0.277, well over the test's `5e-2` budget (`tstMultiSolve.hpp:1104`). All
+other tests in the suite pass at 1–6 ranks, including the migrate/rebalance
+paths (`MultiSolve.StableTree_Migrate`, `AutoRebalance`,
+`IntermediateMotion_Rebalance`, `LargeMotion_Rebuild`).
+
+This is a **pre-existing** failure, not a regression from the
+registration-coalesced migration work (issue #22): checking out the parent
+commit and rebuilding reproduces the identical error to FP32 noise on both
+Tuolumne (base `0.27730871` vs current `0.27730911`) and Dane (base/current
+`0.27730867`). It reproduces on both platforms, so it is not machine-specific.
+
+The magnitude (≈0.277, not marginally over budget) and the rank-count
+dependence point at a multi-rank FP32 accuracy problem in the fused-M2L solve
+(e.g. order-dependent reductions or a genuinely too-tight FP32 budget for the
+multi-rank path), independent of particle migration — which is verified
+bit-exact by `TreePartitioner.testCoalescedMigrateIntegrity`. To be triaged in a
+separate session: determine whether the fix is a corrected FP32 accumulation or
+a re-justified error budget for the multi-rank FP32 case.
+
+---
+
 ### Resources used:
 1. [Fast multipole info](https://amath.colorado.edu/faculty/martinss/2014_CBMS/Refs/2012_fmm_encyclopedia.pdf)
 
