@@ -188,6 +188,19 @@ machines the test launcher) are documented per system under
 [`docs/<system>/claude.md`](docs/). Use the matching `run_cmake_<system>.sh`
 wrapper as the canonical configure command.
 
+**Two build modes.** The `cmake`/`make` flow above is **manual mode**: spack
+supplies only Canopy's dependencies and binaries are hand-compiled into
+`build-<system>/`. Canopy can also be built in **spack mode** (`spack develop
+canopy` + `spack install +testing +examples`), which installs the test/example
+binaries onto `PATH` as `Canopy_Test_<name>_<DEVICE>` — used for prod/integration
+runs. The active mode is recorded **per checkout** in the gitignored
+`scripts/<system>/profile.local.sh` (overriding the committed
+`scripts/<system>/profile.defaults.sh`); both are sourced by
+[`scripts/lib/canopy_env.sh`](scripts/lib/canopy_env.sh), the resolver the batch
+wrappers use to activate spack and locate binaries. Absent a `profile.local.sh`,
+the defaults select manual mode. See *Build & run profile* in
+[`CLAUDE.md`](CLAUDE.md).
+
 **Faster iteration: build fewer backend variants.** Each test header is
 recompiled once per enabled Kokkos backend, so on a multi-backend build (e.g.
 SERIAL + OpenMP + HIP) every test compiles three times. While iterating on a

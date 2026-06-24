@@ -24,16 +24,26 @@ module load gcc/13.3.1 openmpi/4.1.2
 
 ## 1. Spack environment
 
-After the modules above, activate the project's spack environment:
+After the modules above, the build/run profile (CLAUDE.md "Build & run profile")
+records the env; the resolver
+[scripts/lib/canopy_env.sh](../../scripts/lib/canopy_env.sh) activates it. The
+committed manual-mode default (`CANOPY_SPACK_ENV` in
+[scripts/dane/profile.defaults.sh](../../scripts/dane/profile.defaults.sh)) is:
 
 ```bash
 source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
 spack env activate ${HOME}/spack_envs/dane_trilinos
 ```
 
-This environment builds Canopy *by hand* (out-of-tree cmake + make); it
-provides Trilinos and the other build dependencies but does not install Canopy
-itself. A snapshot of its `spack.yaml` is kept at [spack.yaml](spack.yaml).
+Run that by hand for interactive work; the batch scripts activate through the
+resolver (after `module load`, which must precede activation — see §0).
+
+**Manual mode** builds Canopy *by hand* (out-of-tree cmake + make) with this
+env; it provides Trilinos and the other build dependencies but does not install
+Canopy itself. A snapshot of its `spack.yaml` is kept at [spack.yaml](spack.yaml).
+**Spack mode** (`spack develop canopy` + `spack install`) uses a dev/prod env
+instead; set `CANOPY_SPACK_ENV` (dev) and optionally `CANOPY_SPACK_PROD_ENV`
+(prod) in the gitignored `scripts/dane/profile.local.sh`.
 
 **Trilinos must be built `+openmp`.** Kokkos here is `+openmp +serial`, so
 Kokkos' default execution space is OpenMP and Tpetra's default `Node` is the
@@ -72,22 +82,37 @@ If you change MPI or compiler modules, wipe and reconfigure the build dir
 
 ## 3. Build command
 
-Dane builds in-tree with `make`, not via `spack install`. After cmake
-configuration:
+**Manual mode** (default) builds out-of-tree with `make`. From the build dir
+(e.g. `build-dane/`) after configuring with
+[run_cmake_dane.sh](../../run_cmake_dane.sh):
 
 ```bash
 make -j [TARGET]
 ```
 
 The user specifies the target when appropriate (e.g.
-`make -j Canopy_Test_MultiSolve_MPI_SERIAL`). For a full build, plain
-`make -j` is fine.
+`make -j Canopy_Test_MultiSolve_MPI_SERIAL`); plain `make -j` builds everything.
+Binaries land in `$CANOPY_BUILD_DIR` (`build-dane/tests/…`).
+
+**Spack mode** builds and installs via spack — binaries onto `PATH` as
+`Canopy_Test_<name>_<DEVICE>`:
+
+```bash
+spack install canopy +openmp +testing +examples
+```
+
+`+openmp` matches the CPU OpenMP/Serial backend spec (see the Trilinos
+`+openmp` note above). The spack recipe drives cmake; `run_cmake_dane.sh` is
+manual-mode only.
 
 ## 4. Run command for binaries
 
-Dane uses Slurm (`srun`). A Dane node has **112 physical cores** (2 sockets ×
-56). The OpenMP settings below fill the node without oversubscribing — threads
-per rank = `112 / ranks_per_node` — and bind threads to cores:
+Dane uses Slurm (`srun`). Binary location depends on the profile's
+`CANOPY_BIN_MODE`: `$CANOPY_BUILD_DIR/tests/<exe>` (manual) or the bare on-PATH
+name (spack); `canopy_exe <relpath|name>` from the resolver resolves either. A
+Dane node has **112 physical cores** (2 sockets × 56). The OpenMP settings below
+fill the node without oversubscribing — threads per rank = `112 / ranks_per_node`
+— and bind threads to cores:
 
 ```bash
 export OMP_NUM_THREADS=$(( 112 / N ))   # N = ranks on the node
@@ -129,8 +154,10 @@ the directory if it does not exist).
 #SBATCH --output=%x.%j.log
 
 module load gcc/13.3.1 openmpi/4.1.2
-source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
-spack env activate ${HOME}/spack_envs/dane_trilinos
+# Profile (env + build dir + binary location) via the resolver. Pin the repo
+# root since the scheduler spools this script. Modules load first (§0).
+CANOPY_REPO="${CANOPY_REPO:-/g/g20/stewartj/research-bridges/Canopy}"
+source "${CANOPY_REPO}/scripts/lib/canopy_env.sh" || exit 1
 
 # Fill the node: 112 cores / ranks-per-node, bound to cores.
 RANKS_PER_NODE=$(( SLURM_NTASKS / SLURM_NNODES ))
@@ -139,9 +166,7 @@ export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export OMP_WAIT_POLICY=PASSIVE
 
-CANOPY_BUILD=/g/g20/stewartj/research-bridges/Canopy/build-dane
-cd ${CANOPY_BUILD}
-
+# [EXECUTABLE] = $(canopy_exe tests/<name>)  (absolute in manual mode, on PATH in spack mode)
 srun --cpus-per-task=${OMP_NUM_THREADS} [EXECUTABLE] [EXTRA_ARGS]
 ```
 
@@ -159,9 +184,14 @@ ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'
 ```
 
 [scripts/dane/run_ctest_minset.slurm](../../scripts/dane/run_ctest_minset.slurm)
-is the batch wrapper — submit with `sbatch run_ctest_minset.slurm`. Change the
-`-R` regex to select a different suite or drop it to run everything; `ctest -N`
-lists what is registered without running anything.
+is the batch wrapper — it loads the modules, sources the resolver
+([scripts/lib/canopy_env.sh](../../scripts/lib/canopy_env.sh): env + profile),
+and branches on `CANOPY_BIN_MODE`: in manual mode it runs the `ctest` line above;
+in spack mode (no build tree) it launches the on-PATH
+`Canopy_Test_MultiSolve_MPI_SERIAL` via `srun` at ranks 1–6. Submit with `sbatch
+run_ctest_minset.slurm`. In manual mode, change the `-R` regex to select a
+different suite or drop it to run everything; `ctest -N` lists what is registered
+without running anything.
 
 Unlike Tuolumne, Dane needs **no** `MPIEXEC_*` overrides: CMake auto-detects
 `srun`, which is the native Slurm launcher and nests correctly inside an

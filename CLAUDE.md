@@ -38,26 +38,80 @@ If the hostname does not match any row, or the matching file is missing one of
 the required sections below, ask the user to fill in the gap and update (or
 create) the doc before proceeding.
 
+## Build & run profile
+
+Orthogonal to *which system* you are on is *how the work is being done* this
+session, which changes the spack env to activate, where binaries land, and how
+the test gate runs:
+
+- **manual** — spack provides only Canopy's *dependencies*; binaries are
+  hand-compiled out-of-tree into `build-<system>/` and live there. The fast dev
+  loop (`run_cmake_<system>.sh`, ccache, incremental `make -j <target>`). The
+  gate is `ctest` in the build dir.
+- **spack** — `spack develop canopy` + `spack install +testing`; binaries are
+  installed onto `PATH` as `Canopy_Test_<name>_<DEVICE>`. Prod/integration runs
+  always build this way; there is a **dev** env and, optionally, a **prod** env.
+  No build tree survives, so the gate runs the installed binaries via the
+  scheduler at ranks 1–6 (not `ctest`).
+
+The choice is recorded **per checkout** in `scripts/<system>/profile.local.sh`
+(gitignored), which overrides the committed defaults in
+`scripts/<system>/profile.defaults.sh`. Both are sourced by
+[`scripts/lib/canopy_env.sh`](scripts/lib/canopy_env.sh) — the resolver every
+batch script sources first to activate spack and locate binaries. A missing
+`profile.local.sh` ⇒ the committed defaults (manual mode, the historical env and
+`build-<system>/`), so existing checkouts keep working zero-config.
+
+### Determining the profile at session start
+
+Before the first build or run action in a session:
+
+1. If `scripts/<system>/profile.local.sh` exists, read it and use it — **do not
+   re-ask**.
+2. Otherwise (or if the user says the mode changed) ask with **AskUserQuestion**:
+   - **Build mode** — spack (spack develop + spack install) or manual
+     (cmake + make)?
+   - **spack** ⇒ the **dev** spack env (required) and **prod** spack env
+     (optional).
+   - **manual** ⇒ the dependency spack env to activate (default
+     `${HOME}/spack_envs/<system>_trilinos`) and the build dir (default
+     `build-<system>`).
+3. Write/update `scripts/<system>/profile.local.sh` from
+   `scripts/<system>/profile.defaults.sh` as the template, setting
+   `CANOPY_BUILD_MODE`, `CANOPY_BIN_MODE` (`build-dir` for manual, `path` for
+   spack), `CANOPY_SPACK_ENV` (dev env), `CANOPY_SPACK_PROD_ENV` (prod, spack
+   only), and `CANOPY_BUILD_DIR` (manual). Leave the file absent to stay on the
+   defaults.
+
+The resolver exposes `canopy_exe <relpath|name>` (a build-dir path in manual
+mode, a bare on-PATH name in spack mode) and honors `CANOPY_USE_PROD=1` to
+select the prod env. Set `CANOPY_NO_SPACK_ACTIVATE=1` to preview what a script
+would activate/run without touching spack (useful for dry-run validation).
+
 ### Required sections in every `docs/<system>/claude.md`
 
-1. **Spack environment** — the `spack env activate ...` command that must be
-   run before compiling or running any binary from this library.
+1. **Spack environment** — the concrete spack env path(s) for this system: the
+   dependency/dev env baked into `scripts/<system>/profile.defaults.sh` as
+   `CANOPY_SPACK_ENV`, and (if used) the prod env. Both build modes activate
+   through the resolver (see [Build & run profile](#build--run-profile)); the
+   doc records the concrete paths so `profile.local.sh` is fillable.
 2. **CMake args** — system-specific args that must be passed to `cmake` (or to
    any helper bash script that wraps `cmake`).
-3. **Build command** — how to build a target on this system. Default:
-   `make [EXECUTABLE]` (the user specifies the target when appropriate). If
-   the system installs via spack, the build command is `spack install`
-   instead. Every `docs/<system>/claude.md` must state which of the two
-   applies.
-4. **Run command for binaries** — the command template for running a built
-   binary. Default starting point:
-   `mpirun --oversubscribe -n [num_procs] [EXECUTABLE] [EXTRA_ARGS]`. Replace
-   `mpirun` with `flux run`, `srun`, or whatever the system uses.
+3. **Build command** — document **both** modes: manual
+   (`run_cmake_<system>.sh` + `make -j [TARGET]`, binaries in
+   `$CANOPY_BUILD_DIR`) and spack (`spack install +testing +examples …`,
+   binaries on `PATH`). The user specifies the target when appropriate.
+4. **Run command for binaries** — the scheduler launch template (`flux run`,
+   `srun`, or whatever the system uses). Binary location follows
+   `CANOPY_BIN_MODE`: `$CANOPY_BUILD_DIR/…` in manual mode, the bare on-PATH
+   name in spack mode — resolve either with `canopy_exe` from the resolver.
 5. **Job-scheduler batch template** — if the system has a scheduler (flux,
    slurm, …), include a template batch script that can be filled in and
    submitted (e.g. `flux batch <script>`) to run binaries when the user is
-   not inside an interactive allocation. Save concrete scripts to
-   `scripts/<hostname>/` (create the directory if it does not exist).
+   not inside an interactive allocation. Concrete scripts live in
+   `scripts/<system>/` and `source scripts/lib/canopy_env.sh` first, then
+   branch on `CANOPY_BIN_MODE` for the gate (ctest in the build dir vs the
+   scheduler rank-loop on the installed binary).
 6. **Running non-test binaries** — when asked to run something other than a
    test (e.g. an `examples/` problem), ask the user for the example name and
    args, then plug them into sections 4 and 5.

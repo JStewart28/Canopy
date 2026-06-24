@@ -6,24 +6,31 @@ job scheduler. Compile and link via the Cray wrappers (`CC`/`cc`) plus
 
 ## 1. Spack environment
 
-Before any build or run command, activate the project's spack environment:
+The build/run profile (CLAUDE.md "Build & run profile") records the env for this
+checkout; the resolver
+[scripts/lib/canopy_env.sh](../../scripts/lib/canopy_env.sh) activates it. The
+committed manual-mode default (`CANOPY_SPACK_ENV` in
+[scripts/tuolumne/profile.defaults.sh](../../scripts/tuolumne/profile.defaults.sh))
+is:
 
 ```bash
 source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
 spack env activate ${HOME}/spack_envs/tuolumne_trilinos
 ```
 
-**Note:** this environment is for building Canopy *by hand* on tuolumne
-(out-of-tree cmake + make) — it provides Trilinos and the other build
-dependencies but does not install Canopy itself. When building by hand on
-tuolumne, use [run_cmake_tuolumne.sh](../../run_cmake_tuolumne.sh) (not the
-generic [run_cmake.sh](../../run_cmake.sh)) as the canonical cmake
-invocation. If you are instead installing Canopy via
-`spack install`, the environment to activate is different — confirm the
-correct env name with the user before proceeding.
+Run that by hand for interactive work; the batch scripts activate through the
+resolver.
 
-(The flux batch scripts in the repo root keep these as `SPACK_INSTALL` and
-`CANOPY_ENV` variables — keep them in sync if those paths move.)
+**Manual mode** uses this env to build Canopy *by hand* (out-of-tree cmake +
+make) — it provides Trilinos and the other build dependencies but does not
+install Canopy itself; use [run_cmake_tuolumne.sh](../../run_cmake_tuolumne.sh)
+(not the generic [run_cmake.sh](../../run_cmake.sh)) as the canonical cmake
+invocation.
+
+**Spack mode** (`spack develop canopy` + `spack install`) uses a different
+dev/prod env. Set `CANOPY_SPACK_ENV` (dev) and optionally `CANOPY_SPACK_PROD_ENV`
+(prod) in the gitignored `scripts/tuolumne/profile.local.sh`; confirm the env
+names with the user.
 
 ## 2. CMake args
 
@@ -47,21 +54,35 @@ canonical source — invoke it from inside an out-of-tree build directory
 
 ## 3. Build command
 
-Tuolumne builds in-tree with `make`, not via `spack install`. After cmake
-configuration:
+**Manual mode** (default) builds out-of-tree with `make`. From the build dir
+(e.g. `build-tuolumne/`) after configuring with
+[run_cmake_tuolumne.sh](../../run_cmake_tuolumne.sh):
 
 ```bash
 make -j [TARGET]
 ```
 
 The user specifies the target when appropriate (e.g.
-`make -j Canopy_Test_MultiSolve_MPI_SERIAL`). For a full build, plain
-`make -j` is fine.
+`make -j Canopy_Test_MultiSolve_MPI_SERIAL`); plain `make -j` builds everything.
+Binaries land in `$CANOPY_BUILD_DIR` (`build-tuolumne/tests/…`, `…/examples/…`).
+
+**Spack mode** builds and installs via spack — binaries onto `PATH` as
+`Canopy_Test_<name>_<DEVICE>`:
+
+```bash
+spack install canopy +rocm +testing +examples +profiling
+```
+
+Match the variants to the dev/prod env's spec (`+rocm` for the MI300A device
+build). The spack recipe drives cmake; the `run_cmake_*` wrappers are
+manual-mode only.
 
 ## 4. Run command for binaries
 
-Tuolumne uses flux (not mpirun/srun). The basic template for an
-interactive allocation:
+Tuolumne uses flux (not mpirun/srun). Binary location depends on the profile's
+`CANOPY_BIN_MODE`: `$CANOPY_BUILD_DIR/tests/<exe>` (manual) or the bare on-PATH
+name (spack); `canopy_exe <relpath|name>` from the resolver resolves either. The
+basic template for an interactive allocation:
 
 ```bash
 flux run --ntasks=[N] --nodes=1 --exclusive \
@@ -130,10 +151,10 @@ filled-in scripts under [scripts/tuolumne/](../../scripts/tuolumne/).
 # flux: --output={{name}}.{{jobid}}.log
 # flux: -q pdebug
 
-source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
-spack env activate ${HOME}/spack_envs/tuolumne_trilinos
-
-CANOPY_BUILD=/g/g20/stewartj/research-bridges/Canopy/build-tuolumne
+# Profile (env + build dir + binary location) via the resolver. Pin the repo
+# root since the scheduler spools this script (its own path is unreliable).
+CANOPY_REPO="${CANOPY_REPO:-/g/g20/stewartj/research-bridges/Canopy}"
+source "${CANOPY_REPO}/scripts/lib/canopy_env.sh" || exit 1
 
 export MPICH_GPU_SUPPORT_ENABLED=1
 export GTL_HSA_VSMSG_CUTOFF_SIZE=4096
@@ -145,8 +166,7 @@ export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export OMP_WAIT_POLICY=PASSIVE
 
-cd ${CANOPY_BUILD}
-
+# [EXECUTABLE] = $(canopy_exe tests/<name>) or $(canopy_exe examples/<dir>/<name>)
 flux run --ntasks=[NTASKS] --nodes=[NODES] --exclusive \
   --gpus-per-task=1 --cores-per-task=8 \
   --setopt=mpibind=verbose:1 \
@@ -170,11 +190,14 @@ ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'
 ```
 
 [scripts/tuolumne/run_ctest_minset.flux](../../scripts/tuolumne/run_ctest_minset.flux)
-is the batch wrapper for this — it activates the env, exports the static-TLS
-workaround, and runs the `ctest` line above. Submit with `flux batch
-run_ctest_minset.flux`. Change the `-R` regex to select a different suite
-(e.g. `TreePartitioner`) or drop it to run everything. `ctest -N` lists what is
-registered without running anything.
+is the batch wrapper for this — it sources the resolver
+([scripts/lib/canopy_env.sh](../../scripts/lib/canopy_env.sh): env + profile),
+exports the static-TLS workaround, and branches on `CANOPY_BIN_MODE`: in manual
+mode it runs the `ctest` line above; in spack mode (no build tree) it launches
+the on-PATH `Canopy_Test_MultiSolve_MPI_SERIAL` via `flux run` at ranks 1–6.
+Submit with `flux batch run_ctest_minset.flux`. In manual mode, change the `-R`
+regex to select a different suite (e.g. `TreePartitioner`) or drop it to run
+everything; `ctest -N` lists what is registered without running anything.
 
 **Important:** the `MPIEXEC_*` overrides are what make this work. If CTest is
 left to auto-detect the launcher it picks the flux_wrappers `srun`, which runs
