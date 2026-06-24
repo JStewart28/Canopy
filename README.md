@@ -162,6 +162,22 @@ machines the test launcher) are documented per system under
 [`docs/<system>/claude.md`](docs/). Use the matching `run_cmake_<system>.sh`
 wrapper as the canonical configure command.
 
+**Faster iteration: build fewer backend variants.** Each test header is
+recompiled once per enabled Kokkos backend, so on a multi-backend build (e.g.
+SERIAL + OpenMP + HIP) every test compiles three times. While iterating on a
+single backend, restrict the test build with `Canopy_TEST_DEVICES`:
+
+```bash
+cmake -DCanopy_ENABLE_TESTING=ON -DCanopy_TEST_DEVICES=SERIAL [other args] ..
+```
+
+This builds only the SERIAL test variants (the minimum test set is SERIAL), a
+roughly N-fold reduction in test-compile time for N enabled backends. Leave it
+empty (the default) to build every enabled backend for a full pre-ship run.
+Incremental rebuilds are already accelerated by `ccache` (enabled via
+`-DCMAKE_CXX_COMPILER_LAUNCHER=ccache` in the `run_cmake_<system>.sh` wrappers),
+which caches unchanged translation units across rebuilds.
+
 ### Run with CTest
 
 From the build directory:

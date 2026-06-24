@@ -32,7 +32,9 @@
       "Bash(cd /g/g20/stewartj/research-bridges/Canopy/build-tuolumne *)",
       "Bash(git fetch *)",
       "Bash(git merge-base *)",
-      "Bash(git rev-list *)"
+      "Bash(git rev-list *)",
+      "Bash(grep -nE \"^#{1,3} \" README.md)",
+      "Bash(python3 -c ' *)"
     ],
     "additionalDirectories": [
       "/g/g20/stewartj/research-bridges/Canopy/build-tuolumne"

@@ -44,12 +44,22 @@ endmacro()
 set(CANOPY_TEST_DEVICES)
 foreach(_device ${CANOPY_SUPPORTED_DEVICES})
   if(Kokkos_ENABLE_${_device})
+    # Honor the optional Canopy_TEST_DEVICES filter: when non-empty, only build
+    # test variants for the backends it names (intersected with enabled ones).
+    if(Canopy_TEST_DEVICES AND NOT (${_device} IN_LIST Canopy_TEST_DEVICES))
+      continue()
+    endif()
     list(APPEND CANOPY_TEST_DEVICES ${_device})
     if(_device STREQUAL CUDA)
       list(APPEND CANOPY_TEST_DEVICES CUDA_UVM)
     endif()
   endif()
 endforeach()
+if(NOT CANOPY_TEST_DEVICES)
+  message(WARNING
+    "Canopy: no test backends selected (Canopy_TEST_DEVICES=${Canopy_TEST_DEVICES} "
+    "matched none of the enabled Kokkos backends); no device tests will be built.")
+endif()
 
 # Resolve the MPI rank counts to register each MPI unit test at. Driven by the
 # Canopy_TEST_MPI_RANKS cache variable (default: the minimum test set, 1-6).

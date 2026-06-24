@@ -208,6 +208,15 @@ option(Canopy_INSTALL_TEST_EXECUTABLES "Install Canopy test executables" OFF)
 set(Canopy_TEST_MPI_RANKS "1;2;3;4;5;6" CACHE STRING
     "Semicolon-separated MPI rank counts to register each MPI unit test at")
 
+# Optional filter restricting which Kokkos backends tests are built for. Empty
+# (default) builds a test variant for every enabled backend. Each test header
+# is recompiled once per backend, so restricting this (e.g. to SERIAL) is the
+# cheapest way to cut test-compile time while iterating — the costly device
+# (HIP/CUDA) variants are skipped. Entries are intersected with the backends
+# Kokkos actually enables, so an over-broad list is harmless.
+set(Canopy_TEST_DEVICES "" CACHE STRING
+    "Semicolon-separated Kokkos backends to build tests for (empty = all enabled)")
+
 if(Canopy_ENABLE_TESTING)
   find_package(GTest 1.10 REQUIRED)
   # Workaround for FindGTest module in CMake older than 3.20
