@@ -32,8 +32,7 @@
       "Bash(cd /g/g20/stewartj/research-bridges/Canopy/build-tuolumne *)",
       "Bash(git fetch *)",
       "Bash(git merge-base *)",
-      "Bash(git rev-list *)",
-      "Read(//g/g20/stewartj/.claude/projects/**)"
+      "Bash(git rev-list *)"
     ],
     "additionalDirectories": [
       "/g/g20/stewartj/research-bridges/Canopy/build-tuolumne"
