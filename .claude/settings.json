@@ -44,7 +44,9 @@
       "Bash(ctest -N -L regression -R \"P2P|UpwardSweep|DownwardSweep|CommunicationPlan|TreeBuilder|TreePartitioner|Helpers|Laplace\")",
       "Bash(rm -f /g/g20/stewartj/research-bridges/Canopy/diag.log /tmp/fluxnest.sh; echo \"cleaned up\"; git status --short | grep -i diag || echo \"no diag.log tracked\")",
       "Bash(sed -n '/Known Issues/,/Future Optim/p')",
-      "Bash(grep -n \"FP32_smokeTest\\\\` fails\" README.md)"
+      "Bash(grep -n \"FP32_smokeTest\\\\` fails\" README.md)",
+      "Bash(git checkout *)",
+      "Bash(git merge *)"
     ],
     "additionalDirectories": [
       "/g/g20/stewartj/research-bridges/Canopy/build-tuolumne",
