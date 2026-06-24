@@ -35,6 +35,7 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 set(UNIT_SERIAL_TESTS
   Helpers
   Laplace
+  SofteningCorrection
   )
 
 # MPI unit tests: individual FMM-phase / component tests. Run at 1-6 ranks.

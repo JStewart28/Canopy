@@ -78,6 +78,45 @@ the fallback — deferred to keep diagnosis in a toy problem.
 
 ## Progress log
 
+- 2026-06-24 — **Phase 2 (B1) Stage A complete: validate-first accuracy harness.**
+  New host-side test `tests/tstSofteningCorrection.hpp` (unit suite, SERIAL)
+  measures the far-field softening error after correction vs `k = R/eps`, using
+  the exact unsoftened direct sum as the multipole-far-field stand-in (isolates
+  softening error from FMM truncation). Correction orders from the source
+  Cartesian moments: monopole `Q g(R)`, +dipole `-∇g·P`, +quadrupole
+  `½ Σ H_ab T_ab`, with `g(s)=1/√(s²+eps²)−1/s`. Geometry is MAC-realistic
+  (`h_s = R·θ/(2√3)`). Two source shapes: isotropic and **SHEET** (thin,
+  off-center slab — a vortex sheet through a cell, large dipole).
+
+  Results (mean rel. error, θ=0.5):
+
+  | k | uncorrected | +mono | +mono+dip | +mono+dip+quad |
+  | --- | --- | --- | --- | --- |
+  | isotropic 1.0 | 0.42 | 5.9e-3 | 2.8e-3 | 1.3e-4 |
+  | isotropic 4.0 | 3.1e-2 | 6.4e-4 | 6.0e-4 | 3.2e-5 |
+  | **sheet 1.0** | 0.42 | **3.9e-2** | 2.2e-3 | 5.6e-4 |
+  | **sheet 4.0** | 3.0e-2 | 3.3e-3 | 5.3e-4 | 1.1e-4 |
+
+  Findings:
+  - Uncorrected error reproduces the analytic `1/(2k²)` (3.1% at k=4) — harness
+    validated.
+  - **The dipole term is required.** For the isotropic cloud the dipole ≈ 0 so
+    monopole-only already gives ~0.6% at k=1; but for the **sheet** (the real
+    downstream geometry) monopole-only leaves **3.9%** at k=1 (≈ today's k=4
+    status quo) because the sheet's centroid offset is a large uncorrected
+    dipole. Adding the dipole drops it to 0.22%.
+  - **Recommendation: implement mono+dip+quad (full second-order).** It gives
+    softening error **< 0.06% at k=1** for both shapes — 50×+ better than the
+    current k=4 (3.1%). The quadrupole is cheap insurance (uses `M_{2,m}`,
+    already in the multipole for P≥2).
+  - **Achievable `k`: ~1.0–1.5.** Dropping the default `near_softening_factor`
+    from 4 to ~1.0–1.5 cuts near-field *volume* `(k·eps)³` by ~19–64× while
+    *improving* far-field accuracy. Hard floor remains at `k ≳ 1` (R<eps breaks
+    the premise); B2 still needed only if `k → 0` is ever required.
+
+  **Checkpoint: Stage A committed. STOP — awaiting go-ahead to start Stage B**
+  (production integration) with the mono+dip+quad correction order.
+
 - 2026-06-24 — Phase 1 started. Prior design discussion captured above. Plan
   approved (see `plans/twinkling-exploring-wave.md`). Beginning implementation:
   task log + CLAUDE.md pointer, then `NearFieldStats` instrumentation, the
