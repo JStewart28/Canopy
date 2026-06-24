@@ -26,13 +26,8 @@ EXE=$(canopy_exe examples/05_rollup_nearfield/rollup_nearfield)
 # CSVs land in the build dir in manual mode, or under the repo in spack/path mode.
 OUTDIR=${CANOPY_BUILD_DIR:-${CANOPY_REPO}}/rollup_sweep
 mkdir -p ${OUTDIR}
-
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-export OMP_WAIT_POLICY=PASSIVE
-
-# Cray static-TLS workaround (see docs/tuolumne/claude.md); must reach the task.
-export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2000000
+# Runtime env (OMP_*, Cray-MPICH/HIP, static-TLS workaround) is exported by the
+# resolver from scripts/tuolumne/runtime_env.sh.
 
 # Shared IC / integration parameters (identical across the sweep). Tune -t/-g/-s
 # to reach deeper collapse; keep them the same for every k so the curves are

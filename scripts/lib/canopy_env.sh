@@ -81,6 +81,16 @@ else
   }
 fi
 
+# --- per-system runtime environment (optional) ------------------------------
+# Launch-time env vars (Cray-MPICH/HIP/OpenMP/static-TLS, etc.) that must reach
+# scheduler-launched tasks, kept in scripts/<system>/runtime_env.sh so every
+# batch script gets the full set by sourcing this resolver. Skipped during
+# dry-run validation (no task is launched then).
+if [ "${CANOPY_NO_SPACK_ACTIVATE:-0}" != 1 ] && \
+   [ -f "${_canopy_profile_dir}/runtime_env.sh" ]; then
+  . "${_canopy_profile_dir}/runtime_env.sh"
+fi
+
 # --- binary locator ---------------------------------------------------------
 # canopy_exe <relpath-from-build-dir | binary-name>
 #   build-dir mode -> $CANOPY_BUILD_DIR/<relpath>   (manual build)

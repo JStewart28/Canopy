@@ -27,15 +27,8 @@
 # activate spack + load the profile.
 CANOPY_REPO="${CANOPY_REPO:-/g/g20/stewartj/research-bridges/Canopy}"
 source "${CANOPY_REPO}/scripts/lib/canopy_env.sh" || exit 1
-
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-export OMP_WAIT_POLICY=PASSIVE
-
-# Cray static-TLS workaround (see docs/tuolumne/claude.md). Required for every
-# Canopy binary on Tuolumne; must reach the launched task, so export it in this
-# batch environment before launching.
-export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2000000
+# Runtime env (OMP_*, Cray-MPICH/HIP, static-TLS workaround) is exported by the
+# resolver from scripts/tuolumne/runtime_env.sh.
 
 if [ "${CANOPY_BIN_MODE}" = build-dir ]; then
   # --output-on-failure: dump a failing test's stdout/stderr inline.

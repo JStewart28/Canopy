@@ -88,6 +88,20 @@ mode, a bare on-PATH name in spack mode) and honors `CANOPY_USE_PROD=1` to
 select the prod env. Set `CANOPY_NO_SPACK_ACTIVATE=1` to preview what a script
 would activate/run without touching spack (useful for dry-run validation).
 
+### Per-system runtime environment
+
+Launch-time environment variables that must reach scheduler-launched tasks
+(e.g. Cray-MPICH GPU-aware comm, HIP/HMM, OpenMP placement, the Cray static-TLS
+workaround) live in **one** file per system,
+`scripts/<system>/runtime_env.sh`, which the resolver sources automatically (so
+every batch script gets the full, identical set just by sourcing
+`canopy_env.sh` — batch scripts must **not** re-export these inline, to avoid
+drift). It is skipped under `CANOPY_NO_SPACK_ACTIVATE=1` (dry runs launch no
+task). When adding support for a new system, create
+`scripts/<system>/runtime_env.sh` with that machine's required launch-time
+exports (the per-system `docs/<system>/claude.md` §4 documents what they are);
+if the machine needs none, the file may be omitted.
+
 ### Required sections in every `docs/<system>/claude.md`
 
 1. **Spack environment** — the concrete spack env path(s) for this system: the

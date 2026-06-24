@@ -21,17 +21,8 @@
 CANOPY_REPO="${CANOPY_REPO:-/g/g20/stewartj/research-bridges/Canopy}"
 source "${CANOPY_REPO}/scripts/lib/canopy_env.sh" || exit 1
 TEST=$(canopy_exe tests/Canopy_Test_MultiSolve_MPI_SERIAL)
-
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-export OMP_WAIT_POLICY=PASSIVE
-
-# Cray static-TLS workaround. Canopy binaries link multiple cray-libsci
-# libraries whose static TLS blocks exhaust the default loader surplus at
-# startup ("libsci_cray_mp.so.6: cannot allocate memory in static TLS block",
-# exit 127). Enlarging the glibc static-TLS surplus lets the loader place them.
-# Required for every Canopy binary on Tuolumne (CPU and GPU).
-export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2000000
+# Runtime env (OMP_*, Cray-MPICH/HIP, static-TLS workaround) is exported by the
+# resolver from scripts/tuolumne/runtime_env.sh.
 
 fail=0
 for N in 1 2 3 4 5 6; do
