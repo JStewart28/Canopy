@@ -94,6 +94,26 @@ export OMP_PLACES=cores
 export OMP_WAIT_POLICY=PASSIVE
 ```
 
+**Required for every Canopy binary (CPU *and* GPU): the Cray static-TLS
+workaround.** Canopy binaries link several `cray-libsci` libraries whose static
+TLS blocks exhaust the dynamic loader's default surplus at startup, so the
+binary aborts before `main` with:
+
+```
+libsci_cray_mp.so.6: cannot allocate memory in static TLS block
+error while loading shared libraries: ... (exit 127)
+```
+
+Enlarge the glibc static-TLS surplus so the loader can place them:
+
+```bash
+export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2000000
+```
+
+Set this in the same environment as the `flux run` (it must reach the launched
+task). Do **not** use `LD_PRELOAD` of the libsci `.so` instead — it leaks into
+child processes (e.g. `tail`, which then fails to find `libcraymp.so.1`).
+
 ## 5. Job-scheduler batch template
 
 When not inside an interactive allocation, submit via `flux batch
