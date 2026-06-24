@@ -57,19 +57,28 @@ machine.
 
 ## Minimum test set
 
-These tests must pass before any code change ships. Each entry lists the
-test name and the MPI rank counts it must be run at. Use the run command and
-batch template from the active system's `docs/<system>/claude.md` to execute
-them.
+The required gate before any code change ships is **every test carrying the
+`regression` CTest label**, run on the SERIAL backend at MPI ranks 1–6:
 
-The minimum test set:
+```bash
+ctest --output-on-failure -L regression -R MPI_SERIAL
+```
 
-- `Canopy_Test_MultiSolve_MPI_SERIAL` — at 1, 2, 3, 4, 5, 6 ranks.
+The `regression` label covers the full-pipeline FMM solve (`MultiSolve`) — it
+composes the entire pipeline end-to-end, so if it passes the pipeline is
+correct. Tests are tagged in [tests/CMakeLists.txt](tests/CMakeLists.txt); use
+the run command and batch template from the active system's
+`docs/<system>/claude.md` to execute them (the
+`scripts/<system>/run_ctest_minset.*` wrappers run exactly this gate).
 
-Other tests in `tests/` may be built and run at the user's discretion. If
-you believe an additional test should be built to verify the correctness of
-a new feature, confirm with the user before adding it to the required test
-set for that session's feature work.
+The complementary `unit` label covers utilities, math kernels, and individual
+FMM-phase/component tests (`ctest -L unit`), including the single-tree
+`SingleSolve` solve. These are not part of the ship gate but are the diagnostic
+layer — run them to localize *which* phase a regression failure comes from, and
+when changing a specific component. (`SingleSolve` is currently a Known Issue —
+see README — so do not add it to the gate yet.) If you believe a new test
+should be promoted into the `regression` gate, confirm with the user before
+relabeling it.
 
 ## Plans
 

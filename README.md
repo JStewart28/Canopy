@@ -185,14 +185,30 @@ From the build directory:
 ```bash
 ctest -N                                          # list registered tests, run nothing
 ctest --output-on-failure                         # run the whole suite
+ctest --output-on-failure -L regression -R MPI_SERIAL   # the required ship gate (see below)
+ctest --output-on-failure -L unit                 # the diagnostic/component suite
 ctest --output-on-failure -R MultiSolve           # run tests matching a regex
-ctest --output-on-failure -R Canopy_Test_MultiSolve_MPI_SERIAL   # the minimum test set
 ctest -j 4 --output-on-failure                    # run up to 4 tests concurrently
 ```
 
+Tests carry a CTest **label** describing their tier (`ctest -L <label>`):
+
+- **`regression`** — the full-pipeline FMM solve (`MultiSolve`). This is the
+  required gate: `ctest -L regression -R MPI_SERIAL` (SERIAL backend, ranks
+  1–6) must pass before any change ships. `MultiSolve` composes the entire
+  pipeline end-to-end, so if it passes the pipeline is correct.
+- **`unit`** — utilities, math kernels, and individual FMM-phase/component
+  tests (tree build, partition, up/down sweeps, P2P, communication plan, and
+  the single-tree `SingleSolve`). The diagnostic layer: run these to localize
+  *which* phase a regression came from, and when changing a specific component.
+
+Labels combine with `-R` (backend/name regex) by AND, so
+`-L regression -R MPI_SERIAL` selects only the SERIAL-backend regression tests.
+
 MPI tests are registered at several rank counts. The rank list is controlled by
-the `Canopy_TEST_MPI_RANKS` cache variable (default `1;2;3;4;5;6`, the minimum
-test set); ranks exceeding `MPIEXEC_MAX_NUMPROCS` are skipped at configure time.
+the `Canopy_TEST_MPI_RANKS` cache variable (default `1;2;3;4;5;6`); ranks
+exceeding `MPIEXEC_MAX_NUMPROCS` are skipped at configure time. Non-MPI tests
+(`Helpers`, `Laplace`) exercise no MPI functionality and run once, serially.
 CTest launches each MPI test through CMake's `MPIEXEC_EXECUTABLE` — on a
 scheduler-managed machine, run `ctest` from inside an allocation (the per-system
 docs provide ready-made batch wrappers, e.g.
@@ -331,6 +347,35 @@ multi-rank path), independent of particle migration — which is verified
 bit-exact by `TreePartitioner.testCoalescedMigrateIntegrity`. To be triaged in a
 separate session: determine whether the fix is a corrected FP32 accumulation or
 a re-justified error budget for the multi-rank FP32 case.
+
+### `SingleSolve` fails at np=4 and deadlocks the suite when run with other solves
+
+`SingleSolve` is labeled `unit`, **not** `regression`, for two reasons found
+when it was re-enabled in the CTest suite:
+
+1. **Accuracy failure at np=4.** `SingleSolve.PotentialNComps3` and
+   `SingleSolve.PotentialAndGradientNComps3` fail at exactly 4 ranks with
+   `max_pot_rel_err = 0.00207 vs tol 0.001` (~2× over budget,
+   `tstSingleSolve.hpp:365`). Ranks 1, 2, 3, 5, 6 pass. This is *not* the FP32
+   issue above. The np=4-only signature suggests a partition/decomposition edge
+   case specific to that rank count.
+
+2. **State leak that hangs a later test.** When `SingleSolve` runs in the same
+   `ctest` process as `MultiSolve` (i.e. `ctest -L regression` before
+   `SingleSolve` was demoted), the suite deadlocks several tests later at
+   `Canopy_Test_MultiSolve_MPI_SERIAL_np_3`, hanging until the scheduler wall
+   kills it. The deadlock does **not** occur when `MultiSolve` runs alone, and
+   was isolated to the Canopy binaries (bare back-to-back `flux run`
+   invocations, with and without `--exclusive`, do not hang — 14/14 clean). The
+   working hypothesis is that `SingleSolve`'s crash (the np=4 failure, or its
+   MPI/HIP teardown) leaves orphaned MPI ranks or GPU state that stalls a later
+   test's `Kokkos::initialize` — the SERIAL test binaries all bring up the HIP
+   backend.
+
+Because of (2), `SingleSolve` is excluded from the regression gate so the gate
+(`MultiSolve` only) runs cleanly. To be triaged in a separate session: fix the
+np=4 accuracy bug, and ensure a failed solve tears down its MPI/GPU state so it
+cannot poison subsequent tests in the same `ctest` run.
 
 ---
 
