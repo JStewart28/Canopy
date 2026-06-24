@@ -51,17 +51,26 @@ foreach(_device ${CANOPY_SUPPORTED_DEVICES})
   endif()
 endforeach()
 
+# Resolve the MPI rank counts to register each MPI unit test at. Driven by the
+# Canopy_TEST_MPI_RANKS cache variable (default: the minimum test set, 1-6).
+# Drop any rank that exceeds what the launcher can run, with a single warning.
+set(CANOPY_TEST_MPI_RANKS_EFFECTIVE)
+foreach(_np ${Canopy_TEST_MPI_RANKS})
+  if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL ${_np})
+    list(APPEND CANOPY_TEST_MPI_RANKS_EFFECTIVE ${_np})
+  else()
+    list(APPEND _canopy_skipped_ranks ${_np})
+  endif()
+endforeach()
+if(_canopy_skipped_ranks)
+  message(WARNING
+    "Canopy: MPI test ranks ${_canopy_skipped_ranks} exceed "
+    "MPIEXEC_MAX_NUMPROCS=${MPIEXEC_MAX_NUMPROCS} and will not be registered.")
+endif()
+
 macro(Canopy_add_tests)
   cmake_parse_arguments(CANOPY_UNIT_TEST "MPI" "PACKAGE" "NAMES" ${ARGN})
-  set(CANOPY_UNIT_TEST_MPIEXEC_NUMPROCS 1)
-  foreach( _np 2 4 )
-    if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL ${_np})
-      list(APPEND CANOPY_UNIT_TEST_MPIEXEC_NUMPROCS ${_np})
-    endif()
-  endforeach()
-  if(MPIEXEC_MAX_NUMPROCS GREATER 4)
-    list(APPEND CANOPY_UNIT_TEST_MPIEXEC_NUMPROCS ${MPIEXEC_MAX_NUMPROCS})
-  endif()
+  set(CANOPY_UNIT_TEST_MPIEXEC_NUMPROCS ${CANOPY_TEST_MPI_RANKS_EFFECTIVE})
   set(CANOPY_UNIT_TEST_NUMTHREADS 1)
   foreach( _nt 2 4 )
     if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL ${_nt})

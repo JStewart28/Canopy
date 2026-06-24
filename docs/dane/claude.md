@@ -149,6 +149,27 @@ For the minimum test set (`Canopy_Test_MultiSolve_MPI_SERIAL` at 1–6 ranks),
 loop the `srun` line over `-n 1 … 6` (those tests use the Serial backend, so
 `OMP_NUM_THREADS` is ignored — the affinity vars are still harmless to set).
 
+### Preferred: drive the suite with CTest
+
+Every unit test is registered with CTest at the required rank counts (1–6),
+so the minimum test set is a single command inside an allocation:
+
+```bash
+ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'
+```
+
+[scripts/dane/run_ctest_minset.slurm](../../scripts/dane/run_ctest_minset.slurm)
+is the batch wrapper — submit with `sbatch run_ctest_minset.slurm`. Change the
+`-R` regex to select a different suite or drop it to run everything; `ctest -N`
+lists what is registered without running anything.
+
+Unlike Tuolumne, Dane needs **no** `MPIEXEC_*` overrides: CMake auto-detects
+`srun`, which is the native Slurm launcher and nests correctly inside an
+`sbatch` allocation. CTest runs each test as `srun -n N <exe>`. (Tuolumne has
+to override the launcher to `flux run` because its detected `srun` is a wrapper
+that deadlocks unbound at ≥3 ranks; that does not apply here.) The CTest path
+on Dane has not yet been validated by a run — confirm it before relying on it.
+
 ## 6. Running non-test binaries
 
 When asked to run something other than a test (e.g. one of the

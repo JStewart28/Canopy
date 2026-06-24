@@ -202,6 +202,12 @@ add_feature_info(Tests Canopy_ENABLE_TESTING "Build unit tests (requires GTest)"
 # Set installing tests to off by default
 option(Canopy_INSTALL_TEST_EXECUTABLES "Install Canopy test executables" OFF)
 
+# MPI rank counts at which each MPI unit test is registered with CTest. The
+# default matches the project-wide minimum test set (see CLAUDE.md). Ranks that
+# exceed MPIEXEC_MAX_NUMPROCS are skipped at configure time.
+set(Canopy_TEST_MPI_RANKS "1;2;3;4;5;6" CACHE STRING
+    "Semicolon-separated MPI rank counts to register each MPI unit test at")
+
 if(Canopy_ENABLE_TESTING)
   find_package(GTest 1.10 REQUIRED)
   # Workaround for FindGTest module in CMake older than 3.20
@@ -214,8 +220,13 @@ if(Canopy_ENABLE_TESTING)
   endif()
   set(TEST_HARNESS_DIR ${CMAKE_SOURCE_DIR}/cmake/test_harness)
   include(cmake/test_harness/test_harness.cmake)
-  add_subdirectory(tests)
+  # enable_testing() must run BEFORE add_subdirectory(tests): CTest only
+  # generates a CTestTestfile.cmake for subdirectories processed after testing
+  # is enabled. With the call below add_subdirectory(tests), none of the unit
+  # tests' add_test() registrations were emitted and `ctest` saw zero unit
+  # tests (only the examples, which are added later in this file).
   enable_testing()
+  add_subdirectory(tests)
 endif()
 
 # enable doxygen

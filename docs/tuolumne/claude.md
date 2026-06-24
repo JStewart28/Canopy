@@ -157,6 +157,31 @@ For the minimum test set (`Canopy_Test_MultiSolve_MPI_SERIAL` at 1–6
 ranks), use the CPU/SERIAL variant of section 4 inside the batch script
 rather than the HIP variant above.
 
+### Preferred: drive the suite with CTest
+
+When the build is configured with [run_cmake_tuolumne.sh](../../run_cmake_tuolumne.sh),
+every unit test is registered with CTest at the required rank counts, and
+`ctest` launches each one via `flux run --ntasks N --nodes=1 --exclusive
+--cores-per-task=1` (the `MPIEXEC_*` overrides in that script). So the whole
+minimum test set is one command inside an allocation:
+
+```bash
+ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'
+```
+
+[scripts/tuolumne/run_ctest_minset.flux](../../scripts/tuolumne/run_ctest_minset.flux)
+is the batch wrapper for this — it activates the env, exports the static-TLS
+workaround, and runs the `ctest` line above. Submit with `flux batch
+run_ctest_minset.flux`. Change the `-R` regex to select a different suite
+(e.g. `TreePartitioner`) or drop it to run everything. `ctest -N` lists what is
+registered without running anything.
+
+**Important:** the `MPIEXEC_*` overrides are what make this work. If CTest is
+left to auto-detect the launcher it picks the flux_wrappers `srun`, which runs
+with no core binding and deadlocks at ≥3 ranks (the binaries bring up the HIP
+backend at `Kokkos::initialize` even for SERIAL tests, and unbound ranks
+contend on the single MI300A APU). Keep the overrides in the configure command.
+
 [run_tests.flux](../../run_tests.flux) and
 [run_profling.flux](../../run_profling.flux) at the repo root are the
 working references this template was distilled from.
