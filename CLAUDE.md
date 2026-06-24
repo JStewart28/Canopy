@@ -1,5 +1,17 @@
 # Canopy
 
+## Background / task logs
+
+Ongoing multi-phase problems are documented in [`tasks/`](tasks/). Each file
+records *why* a problem is being worked and *how* it is being attacked, with a
+dated progress log, so a later session can pick up the thread. At the start of a
+session that touches one of these areas, read the relevant `tasks/<topic>.md`
+first for context, and append progress there as work lands. Current logs:
+
+- [`tasks/near-field-softening.md`](tasks/near-field-softening.md) — the
+  near-field/P2P cost blowup under roll-up caused by the unsoftened FMM far field
+  (the `near_softening_factor` floor); multi-phase diagnose → fix effort.
+
 ## System detection
 
 Build and run commands differ by system. Before building or running anything,

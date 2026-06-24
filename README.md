@@ -56,6 +56,32 @@ the near field, putting more pairs in the (more expensive) P2P path. Set `0` to
 recover the pure geometric MAC (correct only when `softening` is small relative
 to all M2L separations).
 
+#### Near-field cost diagnostic (`examples/05_rollup_nearfield`)
+
+Because the `factor · eps` floor is a *fixed physical radius*, a clustering
+system pays a near-field cost that grows with local density — as a region rolls
+up, the number of P2P pairs per point scales like `density · (factor · eps)³`,
+even though an adaptive tree keeps leaf occupancy bounded. The
+`05_rollup_nearfield` miniapp measures this directly with a gravitational cold
+collapse (a cold ball contracting under the library's own `1/r` kernel — a
+geometry-independent surrogate for sheet roll-up). It prints one CSV row per
+timestep from `Solver::near_field_stats()`:
+
+| CSV column | meaning |
+| --- | --- |
+| `eps_over_min_hw`, `max_leaf_count` | clustering proxies (x-axis) |
+| `n_p2p_particle_pairs` | Σ `n_T·n_S` over P2P pairs — the near-field FLOP driver (headline y-axis) |
+| `n_m2l_pairs` | accepted far-field (M2L) pairs |
+| `n_softening_blocked_pairs` | pairs the geometric MAC accepted but the floor demoted to P2P |
+| `solve_time_s` | wall time of the FMM solve that step |
+
+Sweep the floor with `-k 0`, `-k 2`, `-k 4` (identical IC and fixed `-e eps`):
+the gap between the `n_p2p_particle_pairs` curves is the near-field cost the
+softening floor adds as clustering develops. `n_softening_blocked_pairs` is `0`
+at `-k 0` and grows with `-k`. `scripts/tuolumne/rollup_sweep.flux` runs the
+three-point sweep and writes one CSV per `k`. Background and the multi-phase plan
+to remove the floor live in [`tasks/near-field-softening.md`](tasks/near-field-softening.md).
+
 The six bounding-box tolerances are per-face and may be set independently,
 e.g. to pad only the outflow boundary of an asymmetric domain. For an
 isotropic domain set all six to the same value.

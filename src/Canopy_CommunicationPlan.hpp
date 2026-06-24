@@ -134,6 +134,43 @@ struct P2PPlan
 };
 
 // ============================================================================
+// NearFieldStats — diagnostic counters for the near-field / far-field split
+//
+// Populated by build_all_interaction_lists every time the interaction lists
+// are (re)built. Used to measure how the softened near-field cost grows as a
+// system clusters (e.g. a rolled-up vortex sheet): the near_softening_factor
+// floor forces any cell pair within factor*eps onto the P2P path, so as local
+// density rises n_p2p_particle_pairs grows like density*(factor*eps)^3. See
+// tasks/near-field-softening.md.
+//
+// Counts are per-rank: with nprocs>1 the dual-tree traversal prunes by subtree
+// relevance, so each rank's counters reflect its local near-field work. On a
+// single rank they are exact global counts. Reduce across ranks for a total.
+// ============================================================================
+struct NearFieldStats
+{
+    // P2P (near-field, softened kernel) work
+    long long n_p2p_leaf_pairs = 0;     // emitted leaf-leaf P2P pairs (incl self)
+    long long n_p2p_particle_pairs = 0; // sum of n_T*n_S over P2P pairs (self n^2);
+                                        // the near-field FLOP driver
+    // M2L (far-field) work
+    long long n_m2l_pairs = 0; // accepted M2L unordered pairs
+
+    // Pairs the geometric MAC accepted but the softening floor overrode (forced
+    // to the near field). Isolates the floor's contribution within one run; a
+    // count of cell-pair visits, not particle-pairs.
+    long long n_softening_blocked_pairs = 0;
+
+    // Tree / clustering proxies (from the cell list)
+    int n_leaves = 0;
+    int max_leaf_count = 0;            // max global_count over leaf cells
+    int max_depth = 0;                 // deepest cell depth
+    double min_leaf_halfwidth = 0.0;   // smallest leaf half_width (0 if no leaves)
+
+    void reset() { *this = NearFieldStats{}; }
+};
+
+// ============================================================================
 // CommunicationPlan
 //
 // Precomputes and stores persistent communication plans for all four
@@ -220,6 +257,10 @@ class CommunicationPlan
     const P2PPlan& p2p_plan() const { return _p2p_plan; }
     bool valid() const { return _valid; }
 
+    // Near-field / far-field diagnostic counters from the last interaction-list
+    // build. See NearFieldStats. Per-rank counts (reduce for a global total).
+    const NearFieldStats& near_field_stats() const { return _near_field_stats; }
+
     // Invalidate — call when tree changes
     void invalidate() { _valid = false; }
 
@@ -233,6 +274,9 @@ class CommunicationPlan
     VerticalPlan _l2l_plan;
     M2LPlan _m2l_plan;
     P2PPlan _p2p_plan;
+
+    // Diagnostic counters, refreshed by build_all_interaction_lists.
+    NearFieldStats _near_field_stats;
 
     // MAC theta used by the dual-tree traversal. See constructor.
     double _theta;
@@ -335,7 +379,12 @@ class CommunicationPlan
     // default is 0.4; Canopy's default 0.5 is the closest single-knob
     // match to the legacy 4*max(hw) Chebyshev rule for same-depth pairs.
     // -----------------------------------------------------------------------
-    bool mac_satisfied( const CellInfo& a, const CellInfo& b ) const
+    // Geometric part of the MAC only: the exafmm spherical test
+    // R*theta > r_A + r_B (squared form). No softening floor. Split out from
+    // mac_satisfied so the dual-tree traversal can tell a geometric accept that
+    // the softening floor overrode (a near_softening_blocked pair) apart from a
+    // genuine geometric reject — see NearFieldStats.
+    bool geometric_mac_satisfied( const CellInfo& a, const CellInfo& b ) const
     {
         const double dx = a.center[0] - b.center[0];
         const double dy = a.center[1] - b.center[1];
@@ -343,21 +392,35 @@ class CommunicationPlan
         const double R2 = dx * dx + dy * dy + dz * dz;
         constexpr double SQRT3 = 1.7320508075688772;
         const double r_sum = SQRT3 * ( a.half_width + b.half_width );
-        if ( !( R2 * _theta * _theta > r_sum * r_sum ) )
-            return false;
-        // Softening floor: the multipole far-field uses the UNSOFTENED 1/r
-        // kernel, so it is only accurate where the Plummer softening is
-        // negligible, i.e. R >> eps. Reject (force to softened P2P) any pair
-        // closer than K*eps. Without this, a rolled-up cluster whose cells
-        // shrink below eps gets a spurious unsoftened far field (the premature
-        // full-rollup NaN). No-op when _near_softening == 0.
-        if ( _near_softening > 0.0 && _near_softening_k > 0.0 )
-        {
-            const double floor = _near_softening_k * _near_softening;
-            if ( R2 <= floor * floor )
-                return false;
-        }
-        return true;
+        return R2 * _theta * _theta > r_sum * r_sum;
+    }
+
+    // Softening floor: the multipole far-field uses the UNSOFTENED 1/r kernel,
+    // so it is only accurate where the Plummer softening is negligible, i.e.
+    // R >> eps. Returns false (force the pair to the softened P2P near field)
+    // when the center separation is within K*eps. Without this, a rolled-up
+    // cluster whose cells shrink below eps gets a spurious unsoftened far field
+    // (the premature full-rollup NaN). Always true when the floor is disabled
+    // (_near_softening == 0 or K == 0).
+    bool softening_floor_satisfied( const CellInfo& a, const CellInfo& b ) const
+    {
+        if ( !( _near_softening > 0.0 && _near_softening_k > 0.0 ) )
+            return true;
+        const double dx = a.center[0] - b.center[0];
+        const double dy = a.center[1] - b.center[1];
+        const double dz = a.center[2] - b.center[2];
+        const double R2 = dx * dx + dy * dy + dz * dz;
+        const double floor = _near_softening_k * _near_softening;
+        return R2 > floor * floor;
+    }
+
+    // Full MAC: a pair is accepted for M2L iff it is both geometrically
+    // well-separated AND outside the softening floor. Behavior is identical to
+    // the pre-split predicate; kept for callers that only need the verdict.
+    bool mac_satisfied( const CellInfo& a, const CellInfo& b ) const
+    {
+        return geometric_mac_satisfied( a, b ) &&
+               softening_floor_satisfied( a, b );
     }
 
     // -----------------------------------------------------------------------
@@ -550,13 +613,32 @@ template <class MemorySpace, class ExecutionSpace>
 void CommunicationPlan<MemorySpace, ExecutionSpace>::
     build_all_interaction_lists( const std::vector<CellInfo>& cells )
 {
-    (void)cells;
     _m2l_plan.interaction_lists.clear();
     _p2p_plan.neighbor_lists.clear();
     _m2l_receives_set.clear();
     _m2l_sends_set.clear();
     _p2p_ghost_set.clear();
     _p2p_send_set.clear();
+
+    // Reset diagnostic counters and compute global tree/clustering proxies from
+    // the cell list (these are the same on every rank; the pair counters below
+    // are per-rank). See NearFieldStats.
+    _near_field_stats.reset();
+    NearFieldStats& nf = _near_field_stats;
+    for ( const auto& c : cells )
+    {
+        if ( c.depth > nf.max_depth )
+            nf.max_depth = c.depth;
+        if ( c.is_leaf )
+        {
+            ++nf.n_leaves;
+            if ( c.global_count > nf.max_leaf_count )
+                nf.max_leaf_count = c.global_count;
+            if ( nf.min_leaf_halfwidth == 0.0 ||
+                 c.half_width < nf.min_leaf_halfwidth )
+                nf.min_leaf_halfwidth = c.half_width;
+        }
+    }
 
     auto root_it = _cell_map.find( ROOT_KEY );
     if ( root_it == _cell_map.end() )
@@ -597,6 +679,9 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
             if ( T->is_leaf )
             {
                 emit_p2p_pair( T->key, T->key );
+                ++nf.n_p2p_leaf_pairs;
+                nf.n_p2p_particle_pairs +=
+                    static_cast<long long>( T->global_count ) * T->global_count;
                 continue;
             }
             const CellInfo* children[8] = { nullptr };
@@ -620,17 +705,28 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
             continue;
         }
 
-        // MAC satisfied → M2L (one unordered pair, both directed M2Ls).
-        if ( mac_satisfied( *T, *S ) )
+        // MAC: accept for M2L only if geometrically well-separated AND outside
+        // the softening floor. Splitting the predicate lets us count pairs the
+        // floor demoted (geometric accept, softening reject) — the cost the
+        // near_softening_factor adds. Verdict is identical to mac_satisfied().
+        const bool geo = geometric_mac_satisfied( *T, *S );
+        const bool soft_ok = softening_floor_satisfied( *T, *S );
+        if ( geo && soft_ok )
         {
             emit_m2l_pair( T, S );
+            ++nf.n_m2l_pairs;
             continue;
         }
+        if ( geo && !soft_ok )
+            ++nf.n_softening_blocked_pairs; // floor overrode a geometric accept
 
         // Both leaves, not well-separated → P2P.
         if ( T->is_leaf && S->is_leaf )
         {
             emit_p2p_pair( T->key, S->key );
+            ++nf.n_p2p_leaf_pairs;
+            nf.n_p2p_particle_pairs +=
+                static_cast<long long>( T->global_count ) * S->global_count;
             continue;
         }
 

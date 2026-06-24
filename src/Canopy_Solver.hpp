@@ -471,6 +471,15 @@ class Solver
     // -----------------------------------------------------------------------
     int num_local_particles() const { return _num_local; }
 
+    // Near-field / far-field diagnostic counters from the interaction-list build
+    // used by the most recent solve(). Per-rank counts; reduce across ranks for
+    // a global total. See Canopy::NearFieldStats and
+    // tasks/near-field-softening.md.
+    const NearFieldStats& near_field_stats() const
+    {
+        return _comm_plan.near_field_stats();
+    }
+
     const potential_view_type& potential() const { return _potential; }
     const gradient_view_type& gradient() const { return _gradient; }
 
