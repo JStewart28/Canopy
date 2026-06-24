@@ -34,10 +34,15 @@
       "Bash(git merge-base *)",
       "Bash(git rev-list *)",
       "Bash(grep -nE \"^#{1,3} \" README.md)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Read(//usr/WS2/stewartj/spack/**)",
+      "Bash(spack)",
+      "Read(//g/g20/stewartj/spack-packages/unm/spack-packages/spack_pkgs/spack_repo/compass/**)",
+      "Read(//g/g20/stewartj/spack-packages/unm/spack-packages/spack_pkgs/spack_repo/compass/packages/**)"
     ],
     "additionalDirectories": [
-      "/g/g20/stewartj/research-bridges/Canopy/build-tuolumne"
+      "/g/g20/stewartj/research-bridges/Canopy/build-tuolumne",
+      "/g/g20/stewartj/spack-packages/unm/spack-packages/spack_pkgs/spack_repo/compass/packages/canopy"
     ]
   }
 }
