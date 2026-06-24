@@ -138,6 +138,54 @@ for (int step = 0; step < nsteps; ++step)
 
 ---
 
+## Building and Running Tests
+
+The unit tests live in [`tests/`](tests/) and are driven entirely by **CTest** —
+there is no need to launch individual test binaries by hand.
+
+### Configure and build
+
+Enable the test build at configure time:
+
+```bash
+cmake -DCanopy_ENABLE_TESTING=ON [other args] ..
+make -j                      # build everything, or
+make -j Canopy_Test_MultiSolve_MPI_SERIAL   # build one target
+```
+
+Each test source is a header (`tests/tst<Name>.hpp`) compiled once per enabled
+Kokkos backend, producing targets named `Canopy_Test_<Name>_[MPI_]<DEVICE>`
+(e.g. `Canopy_Test_MultiSolve_MPI_SERIAL`, `Canopy_Test_Helpers_OPENMP`).
+
+System-specific configure flags (compilers, the spack environment, and on some
+machines the test launcher) are documented per system under
+[`docs/<system>/claude.md`](docs/). Use the matching `run_cmake_<system>.sh`
+wrapper as the canonical configure command.
+
+### Run with CTest
+
+From the build directory:
+
+```bash
+ctest -N                                          # list registered tests, run nothing
+ctest --output-on-failure                         # run the whole suite
+ctest --output-on-failure -R MultiSolve           # run tests matching a regex
+ctest --output-on-failure -R Canopy_Test_MultiSolve_MPI_SERIAL   # the minimum test set
+ctest -j 4 --output-on-failure                    # run up to 4 tests concurrently
+```
+
+MPI tests are registered at several rank counts. The rank list is controlled by
+the `Canopy_TEST_MPI_RANKS` cache variable (default `1;2;3;4;5;6`, the minimum
+test set); ranks exceeding `MPIEXEC_MAX_NUMPROCS` are skipped at configure time.
+CTest launches each MPI test through CMake's `MPIEXEC_EXECUTABLE` — on a
+scheduler-managed machine, run `ctest` from inside an allocation (the per-system
+docs provide ready-made batch wrappers, e.g.
+[`scripts/tuolumne/run_ctest_minset.flux`](scripts/tuolumne/run_ctest_minset.flux)
+and [`scripts/dane/run_ctest_minset.slurm`](scripts/dane/run_ctest_minset.slurm)).
+
+The project-wide minimum test set that must pass before any change ships is
+defined in [`CLAUDE.md`](CLAUDE.md).
+
 ## Dependencies and Build Notes
 
 ### Particle migration is 64-bit-safe (patched Cabana no longer required)
