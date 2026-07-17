@@ -157,10 +157,10 @@ same value.
 
 1. Build:
    `cd build-tuolumne && make -j Canopy_Test_MultiSolve_MPI_SERIAL` after
-   activating the spack env per [docs/claude-tuolumne.md](docs/claude-tuolumne.md).
+   activating the spack env per [systems/claude-tuolumne.md](systems/claude-tuolumne.md).
 2. Run the minimum test set
    (`Canopy_Test_MultiSolve_MPI_SERIAL` at 1, 2, 3, 4, 5, 6 ranks) via
-   `flux run` per `docs/claude-tuolumne.md` §4. All must pass.
+   `flux run` per `systems/claude-tuolumne.md` §4. All must pass.
 3. Compile-build `make -j example_full_fmm gravity_solve` to confirm the
    examples still build. (Running them is optional — they have no
    pass/fail oracle in this refactor.)

@@ -28,7 +28,7 @@ export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export OMP_WAIT_POLICY=PASSIVE
 
-# Cray static-TLS workaround (see docs/tuolumne/claude.md). Required for every
+# Cray static-TLS workaround (see systems/tuolumne/claude.md). Required for every
 # Canopy binary on Tuolumne; must reach the launched task, so export it in this
 # batch environment before invoking ctest.
 export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=2000000

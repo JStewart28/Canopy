@@ -4,6 +4,10 @@
 
 Canopy provides a parallel Fast Multipole Method (FMM) solver built on top of Kokkos and Cabana. The primary entry point is `Canopy::Solver`, defined in `src/Canopy_Solver.hpp`.
 
+For detailed descriptions of the algorithms used in Canopy — including the
+load-balancing approach and its interface with Zoltan 2 — see the [Algorithm
+and Design Documentation](#algorithm-and-design-documentation) section below.
+
 ### Template Parameters
 
 ```cpp
@@ -159,7 +163,7 @@ Kokkos backend, producing targets named `Canopy_Test_<Name>_[MPI_]<DEVICE>`
 
 System-specific configure flags (compilers, the spack environment, and on some
 machines the test launcher) are documented per system under
-[`docs/<system>/claude.md`](docs/). Use the matching `run_cmake_<system>.sh`
+[`systems/<system>/claude.md`](systems/). Use the matching `run_cmake_<system>.sh`
 wrapper as the canonical configure command.
 
 **Faster iteration: build fewer backend variants.** Each test header is
@@ -217,6 +221,14 @@ and [`scripts/dane/run_ctest_minset.slurm`](scripts/dane/run_ctest_minset.slurm)
 
 The project-wide minimum test set that must pass before any change ships is
 defined in [`CLAUDE.md`](CLAUDE.md).
+
+## Algorithm and Design Documentation
+
+The algorithms used in Canopy — for example the load-balancing approach and how
+it interfaces with the Zoltan 2 partitioner — are described in detail in
+[`docs/design.md`](docs/design.md). That document is the authoritative record of
+the library's algorithmic design decisions; consult it when you need to
+understand *why* a component works the way it does rather than just its API.
 
 ## Dependencies and Build Notes
 

@@ -13,7 +13,7 @@
 #
 # These tests use the Kokkos SERIAL backend, so they run CPU-only — no
 # --gpus-per-task, --cores-per-task=1 (the CPU/SERIAL variant of section 4 in
-# docs/tuolumne/claude.md). The OMP_* vars are harmless for Serial.
+# systems/tuolumne/claude.md). The OMP_* vars are harmless for Serial.
 
 source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
 spack env activate ${HOME}/spack_envs/tuolumne_trilinos

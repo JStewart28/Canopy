@@ -347,9 +347,14 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     // Build Zoltan2 adapter
     //
     // Every rank has the identical set of leaves (the tree structure is
-    // replciated globally), so run Zoltan2 with the full leaf set on every
-    // rank. Zoltan2 RCB is deterministic given the same input, so all ranks
-    // will produce the same assignment.
+    // replicated globally), so each rank can build the full-leaf-set adapter
+    // locally. The partition itself is NOT recomputed redundantly per rank:
+    // the "multijagged" algorithm used below is non-deterministic, so only
+    // rank 0 solves and then broadcasts the assignment (see the solve step
+    // further down). The adapter is still constructed everywhere because it
+    // is cheap and keeps the leaf ordering / global-ID indexing identical
+    // across ranks, which is what makes the broadcast assignment meaningful
+    // on every rank.
     //
     // Use global IDs = leaf index (0..num_leaves-1), which are the
     // same on every rank since _cells from TreeBuilder is identical on all
@@ -376,10 +381,11 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
 
     // Build a Teuchos communicator for Zoltan2.
     // Use SerialComm (not MpiComm(MPI_COMM_SELF)) so Zoltan2's internal
-    // sends/receives never enter MPICH. Every rank runs the same
-    // deterministic partition on identical data, so no real MPI is needed;
-    // routing self-sends through Cray MPICH's CMA single-copy path was
-    // triggering process_vm_readv: Bad address on AMD/HIP builds.
+    // sends/receives never enter MPICH. Only rank 0 actually solves the
+    // partitioning problem (below), and it does so serially over this
+    // SerialComm, so no real MPI is needed inside Zoltan2; routing
+    // self-sends through Cray MPICH's CMA single-copy path was triggering
+    // process_vm_readv: Bad address on AMD/HIP builds.
     auto teuchos_comm =
         Teuchos::rcp( new Teuchos::SerialComm<int>() );
 

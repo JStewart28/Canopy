@@ -9,14 +9,14 @@ session.
 
 | Hostname pattern | Instructions file          |
 | ---------------- | -------------------------- |
-| `tuolumne*`      | `docs/tuolumne/claude.md`  |
-| `dane*`          | `docs/dane/claude.md`      |
+| `tuolumne*`      | `systems/tuolumne/claude.md`  |
+| `dane*`          | `systems/dane/claude.md`      |
 
 The pattern is the alphabetic prefix of the host (e.g. `dane1234` matches
 `dane*`, `lassen708` matches `lassen*`). To add support for a new system,
-create `docs/<system>/claude.md` and add a row above.
+create `systems/<system>/claude.md` and add a row above.
 
-Each `docs/<system>/` directory also holds a `spack.yaml` snapshot — a copy of
+Each `systems/<system>/` directory also holds a `spack.yaml` snapshot — a copy of
 the project's spack environment file for that system, kept as a record of the
 exact spec set the environment was concretized from. When the live environment
 (`~/spack_envs/<system>_trilinos/spack.yaml`) changes, update the matching
@@ -26,7 +26,7 @@ If the hostname does not match any row, or the matching file is missing one of
 the required sections below, ask the user to fill in the gap and update (or
 create) the doc before proceeding.
 
-### Required sections in every `docs/<system>/claude.md`
+### Required sections in every `systems/<system>/claude.md`
 
 1. **Spack environment** — the `spack env activate ...` command that must be
    run before compiling or running any binary from this library.
@@ -35,7 +35,7 @@ create) the doc before proceeding.
 3. **Build command** — how to build a target on this system. Default:
    `make [EXECUTABLE]` (the user specifies the target when appropriate). If
    the system installs via spack, the build command is `spack install`
-   instead. Every `docs/<system>/claude.md` must state which of the two
+   instead. Every `systems/<system>/claude.md` must state which of the two
    applies.
 4. **Run command for binaries** — the command template for running a built
    binary. Default starting point:
@@ -68,7 +68,7 @@ The `regression` label covers the full-pipeline FMM solve (`MultiSolve`) — it
 composes the entire pipeline end-to-end, so if it passes the pipeline is
 correct. Tests are tagged in [tests/CMakeLists.txt](tests/CMakeLists.txt); use
 the run command and batch template from the active system's
-`docs/<system>/claude.md` to execute them (the
+`systems/<system>/claude.md` to execute them (the
 `scripts/<system>/run_ctest_minset.*` wrappers run exactly this gate).
 
 The complementary `unit` label covers utilities, math kernels, and individual

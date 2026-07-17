@@ -46,7 +46,10 @@
       "Bash(sed -n '/Known Issues/,/Future Optim/p')",
       "Bash(grep -n \"FP32_smokeTest\\\\` fails\" README.md)",
       "Bash(git checkout *)",
-      "Bash(git merge *)"
+      "Bash(git merge *)",
+      "Bash(awk -F, 'NR==1{next} /^#/{next} {printf \"%s t=%-6s N=%-5s d=%-2s maxleaf=%-4s eps/hw=%-7s P2Ppairs=%-10s M2L=%-7s blocked=%-7s solve=%s\\\\n\",$1,$2,$3,$5,$6,$9,$11,$12,$13,$15}' /g/g20/stewartj/research-bridges/Canopy/build-tuolumne/rollup_sweep/rk4.csv)",
+      "Bash(awk -F, 'NR==1{next} /^#/{next} {printf \"%s t=%-6s N=%-5s d=%-2s maxleaf=%-4s eps/hw=%-7s P2Ppairs=%-10s M2L=%-7s blocked=%-7s solve=%s\\\\n\",$1,$2,$3,$5,$6,$9,$11,$12,$13,$15}' /g/g20/stewartj/research-bridges/Canopy/build-tuolumne/rollup_sweep/rk0.csv)",
+      "Bash(CANOPY_NO_SPACK_ACTIVATE=1 bash -c 'source scripts/lib/canopy_env.sh; echo \"mode=$CANOPY_BUILD_MODE bin=$CANOPY_BIN_MODE env=$CANOPY_SPACK_ENV\"; echo \"gate exe -> $\\(canopy_exe tests/Canopy_Test_MultiSolve_MPI_SERIAL\\)\"')"
     ],
     "additionalDirectories": [
       "/g/g20/stewartj/research-bridges/Canopy/build-tuolumne",

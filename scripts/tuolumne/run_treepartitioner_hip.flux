@@ -13,7 +13,7 @@
 # GPU-aware-MPI path that Dane (CPU-only) cannot exercise. Submit with:
 #   flux batch run_treepartitioner_hip.flux
 #
-# HIP/GPU variant (section 4 of docs/tuolumne/claude.md): one APU per rank.
+# HIP/GPU variant (section 4 of systems/tuolumne/claude.md): one APU per rank.
 
 source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
 spack env activate ${HOME}/spack_envs/tuolumne_trilinos

@@ -24,7 +24,7 @@ source /usr/workspace/stewartj/spack/share/spack/setup-env.sh
 spack env activate ${HOME}/spack_envs/dane_trilinos
 
 # MultiSolve uses the Kokkos Serial backend, so OMP_NUM_THREADS is ignored; the
-# affinity vars are harmless to set unconditionally (see docs/dane/claude.md).
+# affinity vars are harmless to set unconditionally (see systems/dane/claude.md).
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export OMP_WAIT_POLICY=PASSIVE
