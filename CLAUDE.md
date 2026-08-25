@@ -108,3 +108,19 @@ repository, not the default plan location.
   tracked in the "Known Issues" section of `README.md`. When a test failure or
   bug is confirmed but not fixed this session, note it there (what fails, how it
   reproduces, and whether it predates the current work).
+
+## Math in markdown
+Write math with KaTeX delimiters, not Doxygen ones:
+- Inline: `$ ... $`  — NOT `\f$ ... \f$`
+- Display: `$$ ... $$` on their own lines, blank line above and below — NOT `\f[ ... \f]`
+
+`\f[`/`\f$` are Doxygen-only. In a plain markdown reader (VSCode preview,
+GitHub, mdBook) they don't open a math region, so the body is parsed as prose
+and CommonMark strips the backslash from every escaped punctuation character —
+`\;` becomes `;`, `\,` becomes `,`, `\_` disappears — leaving unreadable output.
+
+KaTeX delimiter rules worth respecting:
+- No space just inside the delimiters: `$x + y$`, not `$ x + y $`.
+- Don't put a digit immediately after a closing `$`.
+- Keep inline math on one line.
+- For a literal dollar sign in prose, escape it: `\$`.
