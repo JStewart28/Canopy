@@ -341,6 +341,12 @@ class DownwardSweep
     Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
         _m2l_op_table;
 
+    // The realized key set, in operator-table column order: entry i is the
+    // key of _m2l_op_table(:, :, i). Retained past the end of
+    // build_interaction_list_device purely as a read-only diagnostic
+    // surface (see m2l_realized_keys()); nothing in the solve reads it.
+    std::vector<M2LKey> _m2l_realized_keys;
+
     // Tier 2 fused-kernel layout: target-major CSRs partitioned by target
     // sharedness. One Kokkos team per target walks its source slice and
     // accumulates T(:, :, op_idx) @ M(source) into a scratch local, then
@@ -442,6 +448,50 @@ class DownwardSweep
                    _m2l_ns_csr_sources.extent( 0 ) ) +
                static_cast<long long>( _m2l_sh_csr_sources.extent( 0 ) );
     }
+
+    // -----------------------------------------------------------------------
+    // Golden-harness diagnostic surface.
+    //
+    // Read-only views of internal state, exposed so a bit-for-bit test can
+    // compare the artifacts of a solve across a refactor. Additive and
+    // side-effect free. Like Solver::downward(), this is a diagnostic
+    // surface and not part of the supported runtime API.
+    // -----------------------------------------------------------------------
+
+    // Type of the hashed M2L operator table: (Nt, Ns, n_unique_ops),
+    // LayoutLeft (see the _m2l_op_table declaration for why).
+    using m2l_op_table_view_type =
+        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>;
+
+    // The canonicalized M2L key, {dd, ii, jj, kk} — a signed depth
+    // difference and an integer offset in units of the smaller cell width.
+    using m2l_key_type = M2LKey;
+
+    // The hashed M2L operator table built by the last
+    // build_interaction_list_device(). Column op_idx holds the operator for
+    // m2l_realized_keys()[op_idx]. Default-constructed (rank-0 extents)
+    // before the first build.
+    const m2l_op_table_view_type& m2l_op_table() const { return _m2l_op_table; }
+
+    // The realized M2L key set from the last build_interaction_list_device(),
+    // in operator-table column order. Empty before the first build.
+    const std::vector<m2l_key_type>& m2l_realized_keys() const
+    {
+        return _m2l_realized_keys;
+    }
+
+    // Number of unique M2L operators realized by the last
+    // build_interaction_list_device(); equals m2l_realized_keys().size(), and
+    // equals m2l_op_table().extent( 2 ) whenever that count is non-zero.
+    int m2l_n_unique_ops() const
+    {
+        return static_cast<int>( _m2l_realized_keys.size() );
+    }
+
+    // The A_{n,m} normalization table borrowed from the UpwardSweep at
+    // setup(). Flat, indexed by a_index(n, m) = n*n + n + m, covering
+    // degrees up to 2*P. Empty before setup().
+    const a_view_type& A_table() const { return _A_table; }
 
     // Per-pair fallback for out-of-range pairs at depth `depth`.
     void run_m2l_fallback_at_depth( int depth );
@@ -1068,6 +1118,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     const int n_unique_ops = static_cast<int>( ops.size() );
+
+    // Retain the realized key list past the end of this function as a
+    // read-only diagnostic surface (see m2l_realized_keys()). Copy rather
+    // than move: `ops` is still consumed by the stage-4 table build below.
+    _m2l_realized_keys = ops;
 
     // -----------------------------------------------------------------------
     // Stage 4: build the (Nt, Ns, n_unique_ops) operator table on host,

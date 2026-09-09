@@ -47,6 +47,7 @@ set(UNIT_SERIAL_TESTS
 set(UNIT_MPI_TESTS
   CommunicationPlan
   DownwardSweep
+  Golden
   P2P
   SingleSolve
   TreeBuilder
@@ -68,3 +69,14 @@ Canopy_add_tests(PACKAGE Canopy NAMES ${UNIT_SERIAL_TESTS} LABELS unit)
 Canopy_add_tests(MPI PACKAGE Canopy NAMES ${UNIT_MPI_TESTS} LABELS unit)
 
 Canopy_add_tests(MPI PACKAGE Canopy NAMES ${REGRESSION_MPI_TESTS} LABELS regression)
+
+# Golden is the only test that reads a data file: it compares hashes of
+# internal FMM artifacts against committed reference data under tests/data.
+# Point it there. Applied here, per generated target, rather than inside
+# Canopy_add_tests -- that macro is shared by every test and no other test
+# opens a file. The target name is the one Canopy_add_tests builds for an MPI
+# test: <PACKAGE>_Test_<NAME>_MPI_<DEVICE>.
+foreach(_device ${CANOPY_TEST_DEVICES})
+  target_compile_definitions(Canopy_Test_Golden_MPI_${_device}
+    PRIVATE CANOPY_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+endforeach()
