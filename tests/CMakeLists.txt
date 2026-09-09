@@ -25,7 +25,8 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 #
 # Serial-vs-MPI is orthogonal to the label: tests added with the MPI flag run
 # at every rank in Canopy_TEST_MPI_RANKS (default 1-6); non-MPI tests
-# (e.g. Laplace, Helpers) exercise no MPI functionality and run once, serially.
+# (e.g. LaplaceKernel, Helpers) exercise no MPI functionality and run once,
+# serially.
 
 # set(NOBACKEND_TESTS
 #   Kernels
@@ -34,7 +35,7 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 # Non-MPI unit tests: utilities and on-node math kernels. Run serially.
 set(UNIT_SERIAL_TESTS
   Helpers
-  Laplace
+  LaplaceKernel
   )
 
 # MPI unit tests: individual FMM-phase / component tests. Run at 1-6 ranks.
@@ -47,7 +48,7 @@ set(UNIT_SERIAL_TESTS
 set(UNIT_MPI_TESTS
   CommunicationPlan
   DownwardSweep
-  Golden
+  LaplaceSolve
   P2P
   SingleSolve
   TreeBuilder
@@ -70,13 +71,13 @@ Canopy_add_tests(MPI PACKAGE Canopy NAMES ${UNIT_MPI_TESTS} LABELS unit)
 
 Canopy_add_tests(MPI PACKAGE Canopy NAMES ${REGRESSION_MPI_TESTS} LABELS regression)
 
-# Golden is the only test that reads a data file: it compares hashes of
-# internal FMM artifacts against committed reference data under tests/data.
-# Point it there. Applied here, per generated target, rather than inside
-# Canopy_add_tests -- that macro is shared by every test and no other test
-# opens a file. The target name is the one Canopy_add_tests builds for an MPI
-# test: <PACKAGE>_Test_<NAME>_MPI_<DEVICE>.
+# LaplaceSolve is the only test that reads a data file: it compares hashes of
+# internal FMM artifacts, and the np=1 field, against committed reference data
+# under tests/data. Point it there. Applied here, per generated target, rather
+# than inside Canopy_add_tests -- that macro is shared by every test and no
+# other test opens a file. The target name is the one Canopy_add_tests builds
+# for an MPI test: <PACKAGE>_Test_<NAME>_MPI_<DEVICE>.
 foreach(_device ${CANOPY_TEST_DEVICES})
-  target_compile_definitions(Canopy_Test_Golden_MPI_${_device}
+  target_compile_definitions(Canopy_Test_LaplaceSolve_MPI_${_device}
     PRIVATE CANOPY_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 endforeach()

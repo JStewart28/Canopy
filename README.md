@@ -349,7 +349,7 @@ leaf-to-rank assignments at every rank count from 3 to 6.
 Reproduce with the golden harness, which measures it directly:
 
 ```bash
-ctest -V -R Canopy_Test_Golden_MPI_SERIAL      # run twice, diff the "[golden]" lines
+ctest -V -R Canopy_Test_LaplaceSolve_MPI_SERIAL   # run twice, diff "[laplace-solve]"
 ```
 
 `n_unique_ops` for one `(nprocs, rank)` moves by tens between runs — e.g.

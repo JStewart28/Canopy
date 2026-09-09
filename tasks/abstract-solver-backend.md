@@ -553,7 +553,7 @@ count, confirming it.
      `run_ctest_laplace_solve.flux`, `run_golden_regenerate.flux` to
      `run_laplace_solve_regenerate.flux` — and update the target name at
      `run_ctest_golden.flux:54` and `run_golden_regenerate.flux:63`, and the
-     regeneration comment at `run_golden_regenerate.flux:10`. Leaving them named
+     regeneration comment at `run_golden_regenerate.flux:12`. Leaving them named
      for a test that no longer exists is the cheapest way for the next session to
      run the wrong thing.
    - Rename the regeneration environment variable `CANOPY_GOLDEN_REGENERATE` to
