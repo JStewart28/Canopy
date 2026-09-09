@@ -7,6 +7,10 @@ build*
 # Data directory
 data
 
+# ...except the golden reference data, which is a committed test input, not
+# generated output (tests/tstGolden.hpp reads it via CANOPY_TEST_DATA_DIR).
+!tests/data/
+
 # Prerequisites
 *.d
 
