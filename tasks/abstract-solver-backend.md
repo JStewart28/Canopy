@@ -1,6 +1,6 @@
 # An abstract far-field backend for Canopy
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 
 ## Problem
 
@@ -156,34 +156,61 @@ so neither pays for this beyond the declaration.
 ### The bit-for-bit gate
 
 The solid-harmonic path must come through this refactor with **identical bit
-patterns**, and today nothing in the suite could detect a break: the tightest
-full-pipeline assertion is a $5\times10^{-2}$ relative bound on the potential and
-$1\times10^{-1}$ on the gradient (`tests/tstMultiSolve.hpp:929-930`), whose own
-comment says it exists to catch "a complete-regression bug" (`:925-928`). The
-per-operator tests in `tests/tstLaplace.hpp` are the right granularity but
+patterns**, and nothing else in the suite can detect a break: the tightest
+full-pipeline assertion elsewhere is a $5\times10^{-2}$ relative bound on the
+potential and $1\times10^{-1}$ on the gradient (`tests/tstMultiSolve.hpp:929-930`),
+whose own comment says it exists to catch "a complete-regression bug" (`:925-928`).
+The
+per-operator tests in `tests/tstLaplaceKernel.hpp` are the right granularity but
 compare against analytic references with tolerances, not stored bytes.
 
-So **T1 builds a golden bit-for-bit harness before anything is refactored**, and
+So **T1 builds this harness before anything is refactored**, and
 **T3 performs the M2L move alone, against nothing else**, so that a bitwise
 difference is attributable to one change. T3 is the gate for the entire
 document: if the solid-harmonic M2L cannot move into the basis bit-identically,
 the design falls back to the narrow abstraction of **R1**.
 
-Bit-for-bit identity is achievable at fixed rank count, and that is not obvious:
-`M2LPlan::interaction_lists` is a `std::unordered_map`
-(`src/Canopy_CommunicationPlan.hpp:95-96`) whose iteration order is not
-guaranteed. But `entries` is subsequently `std::sort`ed by `(depth, target_idx)`
-(`src/Canopy_DownwardSweep.hpp:713-719`), a total order over distinct targets,
-and within-entry source order is the traversal's deterministic push order
-(`src/Canopy_CommunicationPlan.hpp:481`). The CSR — and therefore the summation
-order — is deterministic at fixed rank count. Cross-*rank-count* reproducibility
-is a separate and still-open question and is not assumed anywhere here.
+Bit-for-bit identity holds at one and two ranks, and **not above them**. The
+M2L summation order itself is deterministic: `M2LPlan::interaction_lists` is a
+`std::unordered_map` (`src/Canopy_CommunicationPlan.hpp:95-96`) whose iteration
+order is not guaranteed, but `entries` is subsequently `std::sort`ed by
+`(depth, target_idx)`, a total order over distinct targets, and within-entry
+source order is the traversal's deterministic push order
+(`src/Canopy_CommunicationPlan.hpp:481`). That argument settles the CSR given a
+partition. It says nothing about the partition, which decides the CSR's *input*:
+`TreePartitioner::partition_leaves` uses the Zoltan2 `multijagged` algorithm,
+documented as non-deterministic at `src/Canopy_TreePartitioner.hpp:417-419`, and
+computing it on rank 0 and broadcasting makes the assignment consistent within a
+run but not across runs. Determinism of the sweep given a partition is not
+determinism of the solve.
+
+So the gate is three checks — **the Laplace-solve gate** — and every task below
+is verified against all three:
+
+| Ranks | What is asserted | Why it is the strongest thing available |
+| --- | --- | --- |
+| 1-2 | bitwise identity of `locals()`, the M2L operator table, the $A_{n,m}$ table and the realized key list | the multijagged cut over one or two parts is trivial and reproducible, so bit patterns are stable |
+| 2-6 | the np=$k$ field reproduces the np=1 field to floating-point reassociation | the FMM answer is partition-independent as mathematics; only the summation order moves, so the bound is ~$10^{-13}$ rather than the truncation error |
+| 1-6 | the field matches a direct sum at the accuracy the method delivers | the only check that the far field is the *right* field and not merely a self-consistent one |
+
+**np ≤ 2 is sufficient for T3 specifically**, which is what keeps the document's
+own gate intact. R1 — the scratch-layout regression that is the likely way the
+M2L move fails — is per-target-cell arithmetic and presents at np=1. R6's shared
+cells exist at np=2, since `replication_depth = 2` and shared cells are those at
+depth ≤ `replication_depth` (`src/Canopy_CommunicationPlan.hpp:698`). What np ≥ 3
+uniquely adds is rank-*count*-dependent indexing in the MPI packing loops, and
+the cross-rank check of T1 covers that at a tolerance far tighter than any
+accuracy bound.
+
+Making the partitioner reproducible run-to-run is a recorded limitation under
+`README.md` "Known Issues", **not** a prerequisite for any task here. It is not
+a task in this document.
 
 ### Conventions
 
 | Choice | Value | Why |
 | --- | --- | --- |
-| Sweep template parameter name | stays `KernelType` | Renaming it touches nearly every line of three headers and would bury the diff that T1's golden test must attribute. The concept is documented in the class comments instead. |
+| Sweep template parameter name | stays `KernelType` | Renaming it touches nearly every line of three headers and would bury the diff that T1's harness must attribute. The concept is documented in the class comments instead. |
 | New `Solver` parameter name | `FarField` | It selects a basis-plus-kernel composition, not a bare kernel. |
 | Basis header naming | `src/Canopy_<Name>Basis.hpp` | Distinguishes a basis from `Canopy_LaplaceKernel.hpp`, which keeps its name (R-C: it is named in six call sites and in test fixtures). |
 | Trait naming | `snake_case`, `static constexpr` or typedef | Matches `num_coeffs_per_cell` (`:157`), `m2l_num_src_coeffs` (`:488`). |
@@ -194,8 +221,9 @@ is a separate and still-open question and is not assumed anywhere here.
 | Failure on operator-table overflow | keep today's loud path | One `fprintf` warning (`:1038-1046`) plus routing to the per-pair fallback. Extended by T8 with a per-basis policy. |
 | Test tier for new tests | `unit` | The `regression` tier is the ship gate and holds only `MultiSolve` (`tests/CMakeLists.txt:60-62`). Promoting anything into it requires confirming with the user first, per the repository's own rule. |
 | New test registration | add the name to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:47-55`) or `UNIT_SERIAL_TESTS` (`:35-38`) | Target becomes `Canopy_Test_<Name>_MPI_<DEVICE>`, tests `..._np_<N>` for `N` in 1-6. |
-| Golden reference data | one committed file under `tests/data/`, keyed by `(nprocs, rank)` | The particle seed is `1234 + rank * 31 + P` (`tests/tstMultiSolve.hpp:757`), so the particle set — and every artifact derived from it — is a function of the rank count and the rank. Ranks 1-6 means 21 sets. |
-| Golden artifact form | 64-bit hash plus extents for `locals()` and the operator table; full bit patterns for the $A_{n,m}$ table and `n_unique_ops` | The operator table costs $N_t N_s \cdot 16 = 28\cdot49\cdot16$, 21.4 KB per key at $P=6$; committing it in full for 21 sets is not affordable. A hash over the raw bytes is exactly as sensitive to a bitwise change and still attributes a failure to one artifact, which is all any exit criterion here asks. |
+| Reference data | one committed file, `tests/data/laplace_solve_P6.txt` | Three bit-for-bit records — `(nprocs, rank)` of `(1,0)`, `(2,0)`, `(2,1)` — plus one np=1 field record in canonical `GlobalId` order and a hash of the initial global particle set. The particle set is a fixed global set of $N_{\rm total} = 600$ from seed `1234 + P`, identical at every rank count, which is what makes the np=$k$-versus-np=1 comparison definable at all. The committed drift check hashes that *initial* set and not the state the field record is taken at: the solve drives the particles, so their positions at the last step are not bit-identical across rank counts. |
+| Test naming | `tests/tstLaplaceSolve.hpp` for the solve-level gate, `tests/tstLaplaceKernel.hpp` for the per-operator kernel tests | `Canopy_add_tests` maps a name to `tst<NAME>.hpp` and to `Canopy_Test_<NAME>_MPI_<DEVICE>` (`cmake/test_harness/test_harness.cmake:104-112`), so the file name, the `tests/CMakeLists.txt` entry and every exit criterion below move together. |
+| Bit-for-bit artifact form | 64-bit hash plus extents for `locals()` and the operator table; full bit patterns for the $A_{n,m}$ table and `n_unique_ops` | The operator table costs $N_t N_s \cdot 16 = 28\cdot49\cdot16$, 21.4 KB per key at $P=6$; committing it in full is not affordable. A hash over the raw bytes is exactly as sensitive to a bitwise change and still attributes a failure to one artifact, which is all any exit criterion here asks. Hashes are computed with the in-repo FNV-1a so a committed value depends on no library version. |
 | Provenance comments | required on any operator derived from a paper, spec or reference implementation | Name the source and the exact theorem/section on the routine, as `:265` and `:676` already do. |
 | Units and conventions on declarations | required | Every width parameter states whether it is a half-width or a full width; every offset states its sign convention (`source − target` or the reverse); every operator states which normalized quantity it consumes and produces. These are not recoverable from the code. |
 
@@ -219,15 +247,22 @@ is a separate and still-open question and is not assumed anywhere here.
   `get_coeff_3d` has six live callers inside the kernel (`:338`, `:464`, `:662`,
   `:762`, `:828`, `:840`) and becomes private implementation of the
   solid-harmonic basis. `get_coeff` is exercised by
-  `tests/tstLaplace.hpp:441-470`.
+  `tests/tstLaplaceKernel.hpp:441-470`.
 - **The conformance basis lives in `tests/`, not `src/`.** It is a fixture that
   proves the contract, not a method anyone should solve with. Shipping it in
   `src/` would invite exactly that.
 
 ## Current state
 
-Nothing in this document has been built. What follows is what is true of the
-repository now.
+Nothing in this document has been built except the diagnostic surface and the
+harness skeleton T1 needs; those are described below where they are relevant.
+What follows is what is true of the repository now.
+
+**Line numbers in this document that fall after
+`src/Canopy_DownwardSweep.hpp:408` are low by roughly 55**, because T1's
+accessors were inserted there. Where a citation and the code disagree, the code
+is authoritative — search for the named symbol rather than trusting the number.
+T1's own citations are current.
 
 **Twelve sites in shared code encode the solid-harmonic basis.** Grouped by what
 fixes each:
@@ -327,22 +362,28 @@ Only `:1518` is shape-committing. `LayoutLeft` is deliberate: a
 `subview(_m2l_op_table, ALL, ALL, op_idx)` is a contiguous column-major
 $(N_t, N_s)$ matrix consumable by a BLAS `gemm` without transpose (`:337-340`).
 
-**The golden artifacts are not all reachable from a test.** `DownwardSweep`'s
-read-only surface is `locals()` (`:217`), `interaction_list_build_count()`
-(`:236-239`), `total_fallback_pair_count()` (`:424-430`) and
-`total_m2l_pair_count()` (`:439`). `_m2l_op_table` (`:341-342`) and `_A_table`
-(`:264`) are private with no accessor, and the realized key list is not retained
-at all — `ops` (`:752`) and `n_unique_ops` (`:1070`) are function-locals in
-`build_interaction_list_device`, discarded when it returns. `Solver` exposes
-`downward()` (`src/Canopy_Solver.hpp:480`) but no `upward()`, so
-`UpwardSweep::A_table()` (`src/Canopy_UpwardSweep.hpp:139`) is unreachable
-through the solver. T1 adds the accessors and the retained key list; T7 and T9
-read them.
+**The artifacts a bit-for-bit gate needs are reachable.** Alongside `locals()`,
+`interaction_list_build_count()`, `total_fallback_pair_count()` and
+`total_m2l_pair_count()`, `DownwardSweep` exposes `m2l_op_table()`,
+`m2l_realized_keys()`, `m2l_n_unique_ops()` and `A_table()`, plus the public
+aliases `m2l_op_table_view_type` and `m2l_key_type`. The realized key list is
+retained in a private `std::vector<M2LKey> _m2l_realized_keys`, copied from the
+function-local `ops` in `build_interaction_list_device` immediately after
+`n_unique_ops` is computed; `ops` is copied rather than moved because the
+table build still consumes it. The accessor is `m2l_n_unique_ops()` rather than
+`n_unique_ops()` so it cannot be shadowed by that function-local. All of it is
+additive and read-only and changes no arithmetic. `A_table()` was chosen over
+adding `Solver::upward()`: `_A_table` is borrowed from the upward sweep in
+`setup()`, so it is the same view, and the whole diagnostic surface stays on one
+class. This surface is a diagnostic, not part of the supported runtime API —
+the qualification already carried on `downward()` (`src/Canopy_Solver.hpp:477-479`)
+applies to all of it. T7 and T9 read these.
 
-**Tests have no way to locate a data file.** `Canopy_add_tests`
-(`cmake/test_harness/test_harness.cmake:87`) sets no `WORKING_DIRECTORY` on any
-`add_test`, and no data-directory compile definition exists anywhere in the
-harness. No test under `tests/` opens a file today.
+**One test can locate a data file.** `Canopy_add_tests`
+(`cmake/test_harness/test_harness.cmake:104-112`) sets no `WORKING_DIRECTORY` on
+any `add_test` and defines no data directory, so the definition is applied per
+generated target from `tests/CMakeLists.txt:79-82` instead. Only the solve-level
+Laplace test reads a file; no other test under `tests/` opens one.
 
 **The key, the cap and the overflow path.** The key struct is `{dd, ii, jj, kk}`
 (`:308-318`) with an FNV-style hash (`:319-335`). The class comment at
@@ -402,119 +443,295 @@ reopening a question this document treats as settled. Each entry ends with an
 
 ## Task sequence
 
-### T1 — A golden bit-for-bit harness exists and passes against unrefactored code — **BLOCKED**
+### T1 — The Laplace-solve harness gates the solid-harmonic path at every rank count — **IN PROGRESS**
 
 **Depends on:** none.
 
-**Fill in:** new `tests/tstGolden.hpp`; `tests/CMakeLists.txt` `UNIT_MPI_TESTS`
-(`:47-55`) plus a `CANOPY_TEST_DATA_DIR` compile definition; new committed
-reference data under `tests/data/`; additive read-only accessors in
-`src/Canopy_DownwardSweep.hpp` (public blocks at `:103-240` and from `:408`) and
-`src/Canopy_Solver.hpp:480`.
+**Fill in:** new `tests/tstLaplaceSolve.hpp`, built from the existing
+`tests/tstGolden.hpp`, which is deleted; `tests/tstLaplace.hpp` renamed to
+`tests/tstLaplaceKernel.hpp`; `tests/CMakeLists.txt` `UNIT_SERIAL_TESTS`
+(`:35-38`), `UNIT_MPI_TESTS` (`:47-56`), the comment at `:28`, and the
+`CANOPY_TEST_DATA_DIR` loop (`:73-82`); regenerated reference data under
+`tests/data/`; `README.md:352`; `scripts/tuolumne/run_ctest_golden.flux:54`
+and `scripts/tuolumne/run_golden_regenerate.flux:10`, `:63`.
 
-**Reference:** `tests/tstMultiSolve.hpp:915-931` for how a full-pipeline solve is
-driven and compared; `tests/tstDownwardSweep.hpp:1314-1332` for the model of a
-compile-time layout assertion; the reachability facts in
+**Reference:** `tests/tstMultiSolve.hpp:866-901` for the brute-force $N^2$
+reference and `:798-852` for the MPI gather that feeds it; `:915-931` for how a
+full-pipeline solve is driven and compared; `tests/tstDownwardSweep.hpp:1314-1332` for the
+model of a compile-time layout assertion; the reachability facts in
 [Current state](#current-state).
+
+#### What already exists
+
+`tests/tstGolden.hpp` is built, committed and demonstrably sensitive. It fixes
+the frozen configuration below, compares four artifacts on their bit patterns,
+carries the layout `static_assert`s, and reads committed data through a
+`CANOPY_TEST_DATA_DIR` compile definition applied per generated target from
+`tests/CMakeLists.txt:79-82`. Its diagnostic accessors — `m2l_op_table()`,
+`m2l_realized_keys()`, `m2l_n_unique_ops()`, `A_table()` and the retained
+`_m2l_realized_keys` member — are in place, additive, read-only, and change no
+arithmetic. `total_fallback_pair_count()` is 0 at every rank and every rank
+count. This task moves that file to `tests/tstLaplaceSolve.hpp`, changes the
+particle generator, wraps the solve in a time loop, and adds two tests beside
+it; it does not rebuild what is already there. The time loop is the one
+structural addition: `with_golden_solve` (`tests/tstGolden.hpp:467-553`) calls
+`setup()` and then exactly one `solve()`, and the file carries no integrator
+and no maintenance call at all.
+
+#### Why the gate is split by rank count
+
+The partition is not reproducible run-to-run above two ranks.
+`TreePartitioner::partition_leaves` uses the Zoltan2 `multijagged` algorithm,
+which `src/Canopy_TreePartitioner.hpp:417-419` documents as non-deterministic;
+computing on rank 0 and broadcasting makes the assignment consistent *within* a
+run but not *across* runs. `num_cells` is identical across runs at every rank
+count, so the tree build is deterministic and it is cell *ownership* that moves
+— which moves each rank's interaction list, its realized key set, its operator
+table and its `locals()`. With one or two parts the cut is trivial and comes out
+the same every time; at three and above it does not. Measurements are in
+[the progress log](abstract-solver-backend-progress-log.md#t1--the-golden-bit-for-bit-harness).
+
+Making the partitioner deterministic is **not** a prerequisite for any task
+here. It is a recorded limitation, documented under `README.md` "Known Issues",
+and the gate is built around it instead:
+
+- **np 1-2 — bit-for-bit.** Bitwise identity of the four internal artifacts.
+- **np 2-6 — cross-rank agreement.** The solve at $k$ ranks must reproduce the
+  np=1 solve to floating-point reassociation.
+- **np 1-6 — direct-sum accuracy.** The field must be the right field.
+
+#### Why the far field is not checked to $10^{-10}$
+
+The solid-harmonic far-field error is a truncation controlled by
+$\theta^{P+1}$. At the frozen configuration ($\theta = 0.5$, $P = 6$) that is
+$0.5^7 \approx 8\times10^{-3}$, and the repository's own bound on this exact
+configuration is $5\times10^{-2}$ on the potential
+(`tests/tstMultiSolve.hpp:929-930`), whose comment records $\approx3\times10^{-6}$
+at the well-conditioned $N=200\mathrm{k}$ production scale. Reaching
+$10^{-10}$ against a direct sum requires one of two things, and neither is
+available:
+
+- **Raise $P$ at $\theta = 0.5$.** $P+1 \approx \log(10^{-10})/\log(0.5) \approx 33$,
+  so $P \approx 32$. There $N_t = 561$ and $N_s = 1089$, so
+  $561\cdot1089\cdot16 \approx 9.3$ MiB per key — roughly 15 GB of operator
+  table per rank at the ~1600 realized keys measured at $P=6$. It would also
+  exercise a code path nothing ships.
+- **Lower $\theta$ at $P = 6$.** $\theta = 10^{-10/7} \approx 0.037$, at which
+  no pair is MAC-admissible and every interaction degenerates to P2P — so the
+  far field the test exists to protect is never evaluated.
+
+"Reaches $10^{-10}$ against a direct sum" and "M2L is actually exercised" are
+one constraint read in two directions, and no initial condition threads them.
+The direct-sum check is therefore carried at the accuracy the method delivers,
+measured rather than asserted, and the *tight* gate is cross-rank agreement,
+which is bounded by reassociation and not by truncation.
+
+Softening does not enter. The frozen configuration sets `softening = 0.0`, and
+`FmmConfig::near_softening_factor` "Only has an effect when softening > 0"
+(`src/Canopy_Solver.hpp:69-78`), so the MAC softening floor is inert and no pair
+is forced to P2P by it. `total_fallback_pair_count()` measures 0 at every rank
+count, confirming it.
 
 **Do:**
 
-1. Expose the artifacts. All of this is additive and none of it changes
-   behavior:
-   - an accessor for `_m2l_op_table` (`src/Canopy_DownwardSweep.hpp:341-342`);
-   - a member retaining the realized key list and `n_unique_ops` past the end of
-     `build_interaction_list_device` — `ops` (`:752`) and `n_unique_ops`
-     (`:1070`) are locals there today — plus an accessor for it;
-   - `Solver::upward()` (`src/Canopy_Solver.hpp:480`, matching `downward()`), or
-     a `DownwardSweep::A_table()` accessor for the table it already borrows at
-     `:529`.
-   Carry the qualification already on `downward()` (`src/Canopy_Solver.hpp:477-479`):
-   this is a diagnostic surface, not part of the supported runtime API.
-2. Fix one configuration and hold it forever: `P = 6`, `NComps = 1`,
-   `Scalar = double`, `mac_theta = 0.5`, `ncrit = 16`, `max_depth = 6`, 400
-   particles **per rank**, `replication_depth = 2`, `imbalance_tolerance = 0.05`,
-   and the six box tolerances plus `ncrit_tol` at `0.1`, `softening = 0.0`
-   (`tests/tstMultiSolve.hpp:770-782`). Copy the particle generator from
-   `tests/tstMultiSolve.hpp:753-767` verbatim — seed `1234 + rank * 31 + P`,
-   positions uniform on `[0.05, 0.95]`, charges uniform on `[-1, 1]`. It is
-   inlined inside `run_fmm_and_compare` and cannot be called on its own.
-3. After `execute()`, dump four artifacts to host and compare each on the **bit
-   pattern** — as `uint64_t` via `memcpy`, never as `double`, since
-   `EXPECT_DOUBLE_EQ` has a tolerance and `NaN != NaN`:
+1. **Rename, and update every reference.**
+   - `git mv tests/tstGolden.hpp tests/tstLaplaceSolve.hpp`. The harness macro
+     maps a name to `tst<NAME>.hpp` and to the target
+     `Canopy_Test_<NAME>_MPI_<DEVICE>` (`cmake/test_harness/test_harness.cmake:104-112`),
+     so the `UNIT_MPI_TESTS` entry `Golden` (`tests/CMakeLists.txt:50`) becomes
+     `LaplaceSolve` and the target becomes `Canopy_Test_LaplaceSolve_MPI_<DEVICE>`.
+     Delete `tstGolden.hpp` outright; do not leave a forwarding header.
+   - `git mv tests/tstLaplace.hpp tests/tstLaplaceKernel.hpp` — the per-operator
+     kernel tests, renamed for specificity now that a solve-level Laplace test
+     exists — and change `UNIT_SERIAL_TESTS` `Laplace` (`:37`) to
+     `LaplaceKernel`. Fix the example in the comment at `:28`.
+   - Update the `target_compile_definitions` loop (`:79-82`) and its comment
+     (`:73-78`) to the new target name.
+   - Update `README.md:352`, which names the old target in the reproducer for
+     the partitioner Known Issue.
+   - Rename the two flux scripts to match — `run_ctest_golden.flux` to
+     `run_ctest_laplace_solve.flux`, `run_golden_regenerate.flux` to
+     `run_laplace_solve_regenerate.flux` — and update the target name at
+     `run_ctest_golden.flux:54` and `run_golden_regenerate.flux:63`, and the
+     regeneration comment at `run_golden_regenerate.flux:10`. Leaving them named
+     for a test that no longer exists is the cheapest way for the next session to
+     run the wrong thing.
+   - Rename the regeneration environment variable `CANOPY_GOLDEN_REGENERATE` to
+     `CANOPY_LAPLACE_SOLVE_REGENERATE`, in the test and in the script.
+   - `tasks/todo_0.md:483` also names `tests/tstLaplace.hpp`. It is a different
+     document and is **out of scope**; do not edit it.
+
+2. **Replace the particle generator with a rank-count-independent global set.**
+   Today's generator seeds `1234 + rank * 31 + P` and makes 400 particles *per
+   rank*, so both the global particle set and the total $N$ are functions of the
+   rank count: np=1 and np=6 are different physics problems and cannot be
+   compared to one another at all. Instead: fix $N_{\rm total} = 600$, seed
+   `1234 + P` once, generate the identical global set on every rank, and have
+   each rank keep the contiguous slice
+   `[rank * N_total / nprocs, (rank+1) * N_total / nprocs)`. Positions stay
+   uniform on `[0.05, 0.95]` and charges uniform on `[-1, 1]`. `setup()`
+   redistributes particles, so the initial slicing does not affect the answer;
+   every rank count from 1 to 6 divides 600 exactly, giving 100 per rank at
+   np=6, and the $N^2$ reference is 360 k pairs, which is milliseconds. This is
+   a deliberate departure from reusing `tests/tstMultiSolve.hpp:753-767`
+   verbatim: that generator makes the cross-rank comparison in step 6
+   impossible to define.
+
+   The AoSoA gains a `GlobalId` member, `first_id_on_this_rank + i`, the same
+   device `tests/tstMultiSolve.hpp:110-113` uses. It is what pairs a particle
+   across rank counts. Position cannot serve as that key: migration scrambles
+   the local ordering, and the solve moves the particles (step 4), so the
+   positions the last step is evaluated at differ in their last bits between one
+   rank count and another.
+
+3. **Hold the rest of the configuration fixed forever:** `P = 6`, `NComps = 1`,
+   `Scalar = double`, `mac_theta = 0.5`, `ncrit = 16`, `max_depth = 6`,
+   `replication_depth = 2`, `imbalance_tolerance = 0.05`, the six box tolerances
+   and `ncrit_tol` at `0.1`, `softening = 0.0`, `num_steps = 50`,
+   `dt = 1.0e-4`, `drift_multiplier = 1.0`, and `migrate` as the between-step
+   maintenance call.
+
+4. **Drive 50 timesteps, and evaluate all three checks on the state after the
+   last solve.** Each step is: `solve<Position, Charge>(particles,
+   /*compute_gradient=*/true)`; then the symplectic-Euler update
+   `v += dt * g; r += dt * drift_multiplier * v`, on device against the AoSoA
+   slices, exactly as `tests/tstMultiSolve.hpp:365-392` writes it; then
+   `solver.migrate<Position>(particles)`. The 50th solve's artifacts and field
+   are what every check below reads.
+
+   **`migrate`, and not `rebalance`, `rebuild` or `auto_maintain`.** Migrate
+   moves particles to the ranks that already own their cells and never
+   repartitions, so the np 1-2 bitwise gate faces one partition rather than
+   fifty. The partitioner is not reproducible run-to-run above two ranks
+   (`src/Canopy_TreePartitioner.hpp:417-419`), and every further invocation is
+   another opportunity for the np=2 cut to stop coming out the same way.
+
+   **`dt` is small deliberately.** The np=$k$ field differs from the np=1 field
+   by reassociation at each step, that difference enters the velocity update,
+   and the perturbed positions feed the next step. A large `dt` compounds it
+   until the cross-rank deviation measures trajectory divergence instead of
+   summation order, which is the one quantity step 6 exists to bound.
+
+5. **`LaplaceSolve.bitForBitArtifacts` — np 1-2.** `GTEST_SKIP` at np ≥ 3 with a
+   message naming the partitioner non-determinism and pointing at `README.md`
+   "Known Issues", so `ctest` output shows the gate was skipped rather than
+   passed. The body is today's `tstGolden.hpp` test moved across essentially
+   unchanged: the same four artifacts, taken from the 50th solve, dumped to host
+   and compared on their bit patterns — as `uint64_t` via `memcpy`, never as
+   `double`, since `EXPECT_DOUBLE_EQ` has a tolerance and `NaN != NaN`:
    - `DownwardSweep::locals()` — hash and extents;
-   - the M2L operator table for the realized key set — hash and extents;
+   - the M2L operator table over the realized key columns — hash and extents;
    - the $A_{n,m}$ table and its extent — full bit patterns;
    - the sorted realized key list — hash — and `n_unique_ops` — full.
-   Hash the raw bytes with a fixed in-repo 64-bit function (the FNV-1a at
-   `src/Canopy_DownwardSweep.hpp:319-335` is the model) so the committed values
-   do not depend on a library version. On any mismatch, write the full arrays to
-   the build directory and name the paths in the failure message: R2's procedure
-   is to compare the sorted key lists directly, which a hash alone does not
-   permit.
-4. Assert `total_fallback_pair_count() == 0` (`:424-430`) for this
-   configuration, so a later change that silently moves pairs onto the per-pair
-   path is caught rather than absorbed. If it is non-zero at any rank count,
-   **stop, record the measured counts in the log, and report.** R4's
-   discriminator and T8's exit criterion both rest on it being zero at $P=6$;
-   pinning a non-zero value instead would retire that discriminator silently.
-5. Add a `static_assert` that `DownwardSweep::coeff_view_type` is `LayoutRight`
-   and that the operator table is `LayoutLeft`.
-6. Plumb the data directory: `target_compile_definitions` setting
-   `CANOPY_TEST_DATA_DIR` to `${CMAKE_CURRENT_SOURCE_DIR}/data`, applied from
-   `tests/CMakeLists.txt` by looping `CANOPY_TEST_DEVICES` over the generated
-   target name `Canopy_Test_Golden_MPI_<DEVICE>`. Do **not** put it in
-   `Canopy_add_tests` (`cmake/test_harness/test_harness.cmake:87`) — that macro
-   is shared by every test and no other test reads a data file.
-7. Generate the reference data once from the current unmodified tree at each
-   rank count 1-6, commit it as one file keyed by `(nprocs, rank)`, and record in
-   the log the commit it was generated at.
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes at ranks 1-6
-on unmodified code; and, with the `m` loop at
-`src/Canopy_DownwardSweep.hpp:1504` reversed by hand
-(`for ( int m = n; m >= -n; m-- )` — a change that is mathematically identical
-and bitwise different), the same command **fails on the `locals()` comparison
-specifically**, not merely somewhere. Revert the perturbation before finishing.
+   Only the last solve's artifacts are compared, and that is sufficient: the
+   state at step 50 is cumulative — the locals, the operator table and the
+   realized key set there all descend from the positions the preceding 49 solves
+   produced — so a bitwise difference introduced at any earlier step is already
+   carried into it.
 
-**Not met.** The harness is built, committed and demonstrably sensitive, but the
-exit criterion cannot be met as written and T1 is **BLOCKED** on a defect it
-found rather than on anything in its own scope. Details and measurements in
-[the progress log](abstract-solver-backend-progress-log.md#t1--the-golden-bit-for-bit-harness).
+   Keep the in-repo FNV-1a, the mismatch dumps that write full arrays to the
+   build directory and name the paths in the failure message, and the layout
+   `static_assert`s that `coeff_view_type` is `LayoutRight` and the operator
+   table is `LayoutLeft`.
 
-*Built and verified.* `tests/tstGolden.hpp` fixes the configuration of **Do**
-step 2, compares the four artifacts of **Do** step 3 on bit patterns, carries
-the **Do** step 5 layout `static_assert`s, and reads its data through a
-`CANOPY_TEST_DATA_DIR` compile definition applied per generated target from
-`tests/CMakeLists.txt` (**Do** step 6). It is registered in `UNIT_MPI_TESTS`, so
-it runs at ranks 1-6 under the `unit` label; nothing was promoted into
-`regression`. The accessors of **Do** step 1 are additive and read-only and
-change no arithmetic — independently confirmed, since the pre-existing
-`MultiSolve` failures reproduce to every digit against the pre-T1 source.
-`total_fallback_pair_count()` (**Do** step 4) is **0** at every rank count and
-every rank, so R4's discriminator and T8's exit criterion stand. Reference data
-for all 21 `(nprocs, rank)` sets is committed, generated at commit `6f79075`
-(**Do** step 7). The harness **passes at ranks 1 and 2** against that committed
-data on unmodified code, and with the `m` loop reversed by hand it **fails on
-the `locals()` comparison and on nothing else** at both rank counts — the exact
-discrimination the criterion asks for. The perturbation was reverted.
+6. **`LaplaceSolve.crossRankAgreement` — np 2-6.** `GTEST_SKIP` at np=1, which
+   is the reference. The FMM answer is partition-independent *as mathematics*,
+   and that holds at every step: the interaction set is a function of the tree
+   and not of ownership; cells at depth ≤ `replication_depth` are shared and
+   their M2L runs on rank 0 alone, with the Allreduce summing rank 0's
+   contribution against zeros (`src/Canopy_DownwardSweep.hpp:701-708`); every
+   non-shared target is owned by exactly one rank; and `num_cells` is identical
+   across runs at every rank count. Only the summation order moves when the
+   partition moves, so a *single* np=$k$ solve reproduces a single np=1 solve to
+   floating-point reassociation, order $10^{-13}$ relative.
 
-*Why it is blocked.* At ranks 3-6 the solve is **not reproducible run-to-run**:
-`n_unique_ops` alone varies by tens between consecutive runs of the same binary
-at the same commit. `num_cells` is identical across runs at every rank count, so
-the tree build is deterministic and it is cell *ownership* that moves.
-`TreePartitioner::partition_leaves` uses the Zoltan2 `multijagged` algorithm,
-which `src/Canopy_TreePartitioner.hpp:417-419` already documents as
-non-deterministic; computing on rank 0 and broadcasting makes the partition
-consistent *within* a run but not *across* runs. This contradicts
-[The bit-for-bit gate](#the-bit-for-bit-gate) above, whose determinism argument
-covers the M2L CSR ordering but never examined the partitioner that decides the
-CSR's input. No rank count was dropped and no comparison was loosened to get
-around it.
+   What that argument does not settle on its own is the size of the deviation
+   after 50 steps. Each step's $O(10^{-13})$ field difference enters the
+   velocity update and is carried into the next step's positions, so the
+   integrator amplifies it by a factor this document does not derive. The
+   tolerance is therefore **measured, not derived**. It remains far tighter than
+   any direct-sum bound can be, and it remains pointed squarely at what np ≥ 3
+   uniquely risks: the MPI packing T4 rewrites and the shared-cell Allreduce T10
+   rewrites.
+   - Gather per-particle `GlobalId`, potential and gradient to rank 0, as
+     `tests/tstMultiSolve.hpp:798-852` already does, and pair particles by
+     `GlobalId`.
+   - Compare against the committed np=1 record, normalizing by a **global**
+     scale: $\max|\varphi|$ for the potential and $\max|\nabla\varphi|$ for the
+     gradient over the gathered set. Never a per-particle relative error:
+     charges are uniform on $[-1,1]$, so per-particle $|\varphi|$ passes through
+     zero and a per-particle ratio measures cancellation rather than accuracy.
+   - **Measure the tolerance before pinning it.** Record the maximum normalized
+     deviation at every rank count in the progress log, then pin the assertion
+     at 100× the worst measured value. If the measured deviation exceeds
+     $10^{-9}$ at any rank count, **stop, record the measurements in the log,
+     and report** — pinning a tolerance above that would bury a real defect in
+     the parallel dataflow.
+   - **Before attributing such a deviation to the dataflow, re-measure the same
+     configuration at `num_steps = 1`.** A one-step deviation at reassociation
+     level with a 50-step deviation above the threshold is the integrator
+     amplifying reassociation; a one-step deviation already above the threshold
+     is R8. Record both numbers either way.
+   - Assert `total_fallback_pair_count() == 0` here too, so R4's discriminator
+     is still covered at 3-6 where `bitForBitArtifacts` no longer runs.
 
-*What has to happen first.* A new task ahead of T3: make `partition_leaves`
-reproducible run-to-run — a deterministic partitioner, a seeded or host-serial
-MJ, or committing and reusing the assignment. Until then T3, the gate for this
-entire document, has no stable baseline above two ranks.
+7. **`LaplaceSolve.matchesDirectSum` — np 1-6.** A brute-force $O(N^2)$
+   reference on rank 0 in double precision, over the gathered step-50 positions
+   and charges, structured as `tests/tstMultiSolve.hpp:866-901`, with the same
+   global-scale normalization as step 6 rather than that function's per-particle
+   ratio, for the same cancellation reason. **Measure first at every rank count,
+   record in the log, and pin at 3× the worst measured value.** This test
+   overlaps `SolveFusedM2L.matchesPriorReference`
+   (`tests/tstMultiSolve.hpp:915-931`) and is carried anyway: it is the only
+   check in this harness that the far field is the *right* field.
+   `crossRankAgreement` compares the solve against itself and would pass a
+   uniformly wrong answer at every rank count.
+
+8. **Regenerate and commit one reference-data file**, `tests/data/laplace_solve_P6.txt`,
+   replacing `golden_solid_harmonic_P6.txt`. Keep the existing provenance header
+   and record format. It holds:
+   - three bit-for-bit records — `(nprocs, rank)` of `(1,0)`, `(2,0)`, `(2,1)` —
+     each from that configuration's 50th solve, rather than the 21 that a 1-6
+     bit-for-bit gate required;
+   - one np=1 field record: 600 potentials and $3\times600$ gradient components
+     as bit patterns in canonical `GlobalId` order (~41 KB). The np=1 run is
+     bit-reproducible, which is what makes committing its output meaningful;
+   - a hash of the initial global particle set — 600 positions and 600 charges,
+     as bit patterns. That set is generated identically on every rank at every
+     rank count, so the hash is exact by construction, which the step-50
+     positions are not. It is checked first, so a generator drift fails with one
+     legible message instead of 600 value mismatches.
+
+   Record the commit the data was generated at, in the log, in the file's
+   provenance header, and in the commit message.
+
+9. Keep the data-directory plumbing as it is: `target_compile_definitions`
+   setting `CANOPY_TEST_DATA_DIR` from `tests/CMakeLists.txt`, per generated
+   target, **not** inside `Canopy_add_tests`
+   (`cmake/test_harness/test_harness.cmake:104-112`) — that macro is shared by
+   every test and no other test reads a data file.
+
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes at
+ranks 1-6 on unmodified code, and both sensitivity perturbations behave as
+stated:
+
+- With the `m` loop at `src/Canopy_DownwardSweep.hpp:1559` reversed by hand
+  (`for ( int m = n; m >= -n; m-- )` — mathematically identical and bitwise
+  different; it is the only `for ( int m = -n; m <= n; m++ )` in the file),
+  `bitForBitArtifacts` **fails on the `locals()` comparison specifically**, not
+  merely somewhere, at np 1 and 2. `crossRankAgreement` and `matchesDirectSum`
+  must **pass** under this perturbation: a reassociation-level difference is
+  below their tolerances by construction. That is the expected outcome, not a
+  coverage gap — it is what distinguishes the two regimes.
+- With the shared-cell Allreduce pack/unpack perturbed — offset the running
+  counter by one slot at `src/Canopy_DownwardSweep.hpp:1825-1835` and
+  `:1847-1857` — `crossRankAgreement` **fails at np ≥ 2** while np=1 is
+  unaffected. Without this check, the claim that this test protects T4 and T10
+  is unverified.
+
+Revert both perturbations and rebuild before finishing.
+
 
 ---
 
@@ -541,7 +758,9 @@ re-verified by search before deleting.
    `Canopy_SphericalCoefficients.hpp:70-91`. Both are live — see
    [Deliberate deviations](#deliberate-deviations).
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes bit-for-bit;
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
+[Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
+`crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6;
 `ctest --output-on-failure -L regression -R MPI_SERIAL` passes; and a search for
 each deleted symbol across `src/`, `tests/` and `examples/` returns no hits.
 
@@ -585,11 +804,15 @@ the scratch-split rationale is `:1458-1462`; the write-back is `:1533-1542`.
    (`:1481-1487`) and the scratch allocation. It must carry nothing but
    `int op_idx` and the CSR.
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes with
-**identical bit patterns** on all four artifacts at ranks 1-6, and
-`ctest --output-on-failure -L regression -R MPI_SERIAL` passes. If the bit
-patterns differ, **stop and record the difference in the log before changing
-anything else** — that is R1's trigger and it changes the rest of the document.
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes with
+**identical bit patterns** on all four artifacts at ranks 1-2, and with
+`crossRankAgreement` at 2-6 and `matchesDirectSum` at 1-6 passing at their pinned
+tolerances; and `ctest --output-on-failure -L regression -R MPI_SERIAL` passes. If
+the bit patterns differ, **stop and record the difference in the log before
+changing anything else** — that is R1's trigger and it changes the rest of the
+document. Ranks 1-2 are the whole bitwise gate for this task and that is
+sufficient: the contraction being moved is per-target-cell arithmetic, so R1
+presents at np=1 (see [The bit-for-bit gate](#the-bit-for-bit-gate)).
 Additionally, `grep -n "complex_type" src/Canopy_DownwardSweep.hpp` must show no
 hit inside `run_m2l_fused`'s body.
 
@@ -628,8 +851,12 @@ changes. `CoalescedExchangeBuffers<complex_type, …>` becomes
 `src/Canopy_DownwardSweep.hpp:253-254` and `src/Canopy_UpwardSweep.hpp:179-180`
 — and has no other users.
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes bit-for-bit
-at ranks 1-6 (`scalars_per_coeff == 2` must reproduce today's packing exactly);
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
+[Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
+`crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6
+(`scalars_per_coeff == 2` must reproduce today's packing exactly — bit-for-bit at
+1-2 pins the layout, and `crossRankAgreement` at 3-6 is what pins the
+rank-count-dependent indexing this task rewrites);
 `ctest --output-on-failure -L regression -R MPI_SERIAL` passes; and a
 `static_assert` that `sizeof(coeff_type) == scalars_per_coeff * sizeof(component_scalar_type)`
 holds for the solid-harmonic basis.
@@ -666,9 +893,11 @@ degree $n+j$.
 called at `src/Canopy_DownwardSweep.hpp:1099-1100`. `p2m_contribution` and
 `l2p_evaluate` never took it.
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes bit-for-bit
-at ranks 1-6 — including the $A_{n,m}$ artifact and its extent, which pins the
-`2*P` argument; and `grep -n "_A_table" src/Canopy_DownwardSweep.hpp` returns no
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
+[Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
+`crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6 — the
+$A_{n,m}$ artifact and its extent, compared at ranks 1-2, pin the `2*P` argument;
+and `grep -n "_A_table" src/Canopy_DownwardSweep.hpp` returns no
 hits.
 
 ---
@@ -710,8 +939,9 @@ the sweeps directly, without going through `Solver`.
    how to run it by hand, since CTest cannot assert a compile failure here.
 
 **Exit criterion:** `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` passes at
-ranks 1-6; `ctest -R Canopy_Test_Golden_MPI_SERIAL` still passes bit-for-bit;
-and deliberately breaking one trait on `MonopoleBasis` — set
+ranks 1-6; the Laplace-solve gate still passes all three checks
+(`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`); and deliberately breaking one
+trait on `MonopoleBasis` — set
 `scalars_per_coeff = 2` while leaving `coeff_type = Scalar` — makes the
 conformance test fail rather than pass with wrong numbers. Restore it before
 finishing.
@@ -747,12 +977,20 @@ finishing.
 6. Raise `MonopoleBasis` to `key_needs_level = true` and identity
    `canonicalize_key`, so both branches are exercised.
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes bit-for-bit
-at ranks 1-6 — the sorted-key-list and `n_unique_ops` artifacts pin that the
-solid-harmonic key set is unchanged; `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL`
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
+[Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
+`crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6.
+The sorted-key-list and `n_unique_ops` artifacts pin that the solid-harmonic key
+set is unchanged, and they are compared **only at ranks 1-2** — above two ranks
+the realized key set moves with the partition, so there is nothing stable to
+compare it against. That is the one place this split costs real coverage: a
+`canonicalize_key` bug that only manifests at a depth reached at higher rank
+counts would be caught by `crossRankAgreement` as a field difference, not
+attributed to the key set. Also `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL`
 passes and its assertion that `MonopoleBasis` realizes **strictly more** distinct
 keys than a `max_d`-zeroing basis on the same tree holds — proving the level
-actually reaches the key rather than being silently dropped.
+actually reaches the key rather than being silently dropped. Run that assertion
+at np=1, where the key set is reproducible.
 
 ---
 
@@ -789,8 +1027,12 @@ once); the fallback tables are built at `:1231-1315` and run at `:1599-1641`;
    `CANOPY_ENABLE_PROFILING`, so the realized key count stops being a claim in a
    comment. Record the measured number in the progress log.
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes bit-for-bit
-at ranks 1-6 with `total_fallback_pair_count() == 0`; a test that sets the byte
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
+[Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
+`crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6,
+with `total_fallback_pair_count() == 0` asserted at every rank count — both
+`bitForBitArtifacts` and `crossRankAgreement` check it, so the discriminator
+survives at 3-6; a test that sets the byte
 budget low enough to bind before the count cap drives
 `total_fallback_pair_count() > 0` and **still produces the same potential to
 $5\times10^{-2}$** (the fallback path is different arithmetic, not wrong
@@ -840,8 +1082,10 @@ solid-harmonic basis's `m2l_build_operator` body
 (`src/Canopy_LaplaceKernel.hpp:516-630`) moves inside the new method's per-key
 loop unchanged.
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes bit-for-bit
-at ranks 1-6; and a test that calls `invalidate_interaction_list()` and re-solves
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
+[Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
+`crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6;
+and a test that calls `invalidate_interaction_list()` and re-solves
 shows `interaction_list_build_count()` (`:236-239`) incremented while a new
 counter on the operator cache shows **zero** keys rebuilt — proving the split is
 real. A cache that silently rebuilds everything would pass the bit-for-bit test
@@ -875,8 +1119,12 @@ and the two hand-rolled Allreduce loops change.
 4. Extend the conformance test to check both sets independently across the
    shared-cell Allreduce, at ranks 2-6 where shared cells actually exist.
 
-**Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes bit-for-bit
-at ranks 1-6 (`sets_per_component == 1` reproduces today's shapes exactly); and
+**Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
+[Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
+`crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6
+(`sets_per_component == 1` reproduces today's shapes exactly; `crossRankAgreement`
+at 3-6 is what covers R6's rank-count-dependent packing, since the bitwise
+comparison no longer runs there); and
 `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` passes at ranks 1-6 with both
 sets checked, failing if set 1 is replaced by a copy of set 0.
 
@@ -908,8 +1156,9 @@ sets checked, failing if set 1 is replaced by a copy of set 0.
    which is T12's business.
 
 **Exit criterion:** all six existing instantiations compile **unmodified** — do
-not touch `tests/tstMultiSolve.hpp` or the three examples; `ctest -R Canopy_Test_Golden_MPI_SERIAL`
-passes bit-for-bit; `ctest --output-on-failure -L regression -R MPI_SERIAL` passes;
+not touch `tests/tstMultiSolve.hpp` or the three examples; the Laplace-solve gate
+passes all three checks (`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`);
+`ctest --output-on-failure -L regression -R MPI_SERIAL` passes;
 and a new compile-only test instantiates
 `Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, 1, 1, MonopoleBasis>` successfully.
 
@@ -975,8 +1224,9 @@ fine-grained design is possible, and none is answerable from the code:
 include: a per-operator unit test against the reference treecode's order-2
 tensors; a full-pipeline solve with `near_softening_factor = 0` matching a direct
 softened sum to the tolerance answered in question 1; and
-`ctest -R Canopy_Test_Golden_MPI_SERIAL` still passing bit-for-bit, since this
-task adds a basis and changes no shared code.
+the Laplace-solve gate still passing all three checks
+(`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`), since this task adds a basis and
+changes no shared code.
 
 ## Known risks
 
@@ -985,7 +1235,7 @@ most likely cause is the scratch: the real/imag split accumulator
 (`src/Canopy_DownwardSweep.hpp:1454-1462`, `:1522-1524`) is a sweep-owned
 optimization, and any scratch abstraction that hands the basis a `complex_type`
 view produces a mathematically identical, bitwise different sum. **Presents as:**
-T3's golden test failing on `locals()` while the operator table, $A_{n,m}$ table
+`bitForBitArtifacts` failing on `locals()` at ranks 1-2 while the operator table, $A_{n,m}$ table
 and key list all match. **Distinguished from R2** by exactly that: if the
 operator table also differs, the cause is the table build, not the contraction.
 **Do:** fall back to the narrow abstraction — keep T2, T4, T5, T7, T9, T10, T11
@@ -997,11 +1247,16 @@ scratch and write-back.
 
 **R2 — `canonicalize_key` does not reproduce today's key set.** Zeroing `max_d`
 should be exactly today's key, but a hash change or a classify-pass reordering
-would multiply the solid-harmonic table by occupied depth. **Presents as:** T7's
-golden test failing on the sorted-key-list and `n_unique_ops` artifacts, with
-`locals()` also wrong. **Do:** compare the sorted key lists directly; if the sets
-differ only in `max_d` being non-zero, the canonicalization is not being applied
-before hashing.
+would multiply the solid-harmonic table by occupied depth. **Presents as:**
+`bitForBitArtifacts` failing on the sorted-key-list and `n_unique_ops` artifacts,
+with `locals()` also wrong. **Diagnosable only at ranks 1-2**: above two ranks the
+realized key set moves with the partition, so a key-set difference there is
+indistinguishable from partitioner drift and the artifacts are not compared. At
+3-6 the same bug presents instead as a `crossRankAgreement` failure, which says
+the field is wrong but not which artifact caused it. **Do:** reproduce at np=1 or
+np=2 and compare the sorted key lists directly from the mismatch dump the test
+writes; if the sets differ only in `max_d` being non-zero, the canonicalization is
+not being applied before hashing.
 
 **R3 — a trait indirection deoptimizes the fused M2L kernel.**
 `num_coeffs_per_cell`, `Nt` and `NComps` are `constexpr` and drive unrolling
@@ -1014,16 +1269,16 @@ exit criterion depends on it.
 
 **R4 — the byte budget changes which pairs overflow.** The overflow set decides
 which pairs take the per-pair path, which is *different arithmetic* from the
-operator path. **Presents as:** T8's golden test failing while
+operator path. **Presents as:** the Laplace-solve gate failing while
 `total_fallback_pair_count()` has become non-zero. **Do:** that counter is the
-discriminator — assert it is 0 for the golden configuration, which the retained
+discriminator — assert it is 0 for the frozen configuration, which the retained
 count cap guarantees at $P=8$.
 
 **R5 — the operator cache holds stale operators across a topology change.** T9's
 cache persists deliberately; if a basis's operator depends on anything beyond the
 canonicalized key and `kernel_params`, persistence is a correctness bug rather
 than an optimization. **Presents as:** correct results on the first solve and
-drifting results after a `rebalance` — which the golden test, a single solve,
+drifting results after a `rebalance` — which the Laplace-solve gate, a single solve,
 would not catch. **Do:** T9's exit criterion requires a re-solve after
 `invalidate_interaction_list()`; extend it to assert the potential is unchanged
 across that re-solve. Any basis whose operator depends on particle positions must
@@ -1047,3 +1302,26 @@ compression at every usable order cannot fit in available memory, the black-box
 basis is not buildable here, and the correct response is to build T12 standalone
 — which this task sequence already supports, since T12 depends on nothing that a
 black-box basis uniquely needs.
+
+**R8 — the FMM answer is not partition-independent, and `crossRankAgreement` has
+no valid reference.** The cross-rank half of the gate rests on the claim that
+only the summation order moves when the partition moves: the interaction set is a
+function of the tree, shared cells run their M2L on rank 0 alone
+(`src/Canopy_DownwardSweep.hpp:701-708`), and every non-shared target has exactly
+one owner. If some quantity in the pipeline is in fact a function of ownership —
+a per-rank truncation, a locally-derived bound, an accumulation over locally-held
+cells only — then the np=$k$ field differs from the np=1 field by far more than
+reassociation and the test has no stable reference at all. **Presents as:** T1's
+measurement step finding a deviation above $10^{-9}$ at some rank count on
+unmodified code, before any refactor has happened, **and that deviation still
+being present at `num_steps = 1`**. Crossing the threshold at 50 steps but not
+at one is the integrator amplifying reassociation, not an answer that depends on
+the partition. **Distinguished from a genuine packing bug** by exactly that
+timing: this fires on the current tree, a packing bug fires only after T4 or
+T10. **Do:** T1's stop-and-report clause exists for
+this. Do not raise the tolerance to accommodate it — a partition-dependent answer
+is a defect in the parallel FMM, and it must be found and recorded before the
+cross-rank gate is relied on. If it proves real and unfixable within T1, the
+np 3-6 regime falls back to `matchesDirectSum` alone, and T4 and T10 lose their
+tight multi-rank gate — which is a material weakening of this document's
+verification strategy and belongs in the log.
