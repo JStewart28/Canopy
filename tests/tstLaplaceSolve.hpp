@@ -132,22 +132,26 @@ enum FieldIdx
 };
 
 // ---------------------------------------------------------------------------
-// Measured tolerances, not derived ones. Both are recorded in
-// tasks/abstract-solver-backend-progress-log.md, section T1, together with
-// the per-rank-count measurements they were pinned from.
+// NOT YET PINNED. T1 requires these to be measured on unmodified code and
+// then pinned at 100x (cross-rank) and 3x (direct-sum) the worst measured
+// value. They are still placeholders because the frozen configuration above
+// does not currently produce a state worth measuring at: at LS_NUM_STEPS = 50
+// the closest opposite-charge pair has collapsed, the bounding box has grown
+// to roughly [-20, 11], and the 50th solve realizes ZERO M2L operators, so
+// the far field this harness exists to protect is never evaluated. The
+// measurements taken at LS_NUM_STEPS = 1, where the tree is healthy (95
+// cells, 604 realized operators at np=1), and the ones taken at 50 are both
+// recorded in tasks/abstract-solver-backend-progress-log.md, section T1.
+// Do not pin these until that is resolved.
 //
-// LS_CROSS_RANK_TOL is 100x the worst normalized cross-rank deviation
-// measured at np 2-6 on unmodified code. It bounds floating-point
-// reassociation amplified by 50 integrator steps, and nothing else: a
-// deviation above 1e-9 would be R8 (an answer that depends on the partition)
-// and is a stop-and-report condition, not something to pin a tolerance above.
+// For reference, the values the 1-step measurements would pin are
+// 4.0e-11 (cross-rank) and 9.8e-06 (direct-sum).
 //
-// LS_DIRECT_SUM_TOL is 3x the worst normalized deviation from the brute-force
-// N^2 sum measured at np 1-6. It is a truncation bound: the solid-harmonic
+// The direct-sum check is a truncation bound in any case: the solid-harmonic
 // far-field error goes as theta^(P+1) = 0.5^7 ~ 8e-3 at this configuration,
-// so this check cannot be tightened toward 1e-10 without either raising P
-// (~15 GB of operator table per rank) or lowering theta until no pair is
-// MAC-admissible and the far field is never evaluated.
+// so it cannot be tightened toward 1e-10 without either raising P (~15 GB of
+// operator table per rank) or lowering theta until no pair is MAC-admissible
+// and the far field is never evaluated.
 // ---------------------------------------------------------------------------
 static constexpr double LS_CROSS_RANK_TOL = 1.0e-9;
 static constexpr double LS_DIRECT_SUM_TOL = 1.0e-1;

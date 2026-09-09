@@ -279,3 +279,281 @@ task is needed before T3**: make `TreePartitioner::partition_leaves`
 reproducible run-to-run (a deterministic partitioner, a seeded/serial MJ, or
 caching-and-committing the assignment), since the entire bit-for-bit strategy
 rests on it.
+
+## T1 — the Laplace-solve gate (50-step harness)
+
+`tests/tstGolden.hpp` became `tests/tstLaplaceSolve.hpp`, the single solve
+became a 50-timestep loop over a fixed *global* particle set, and the one
+bit-for-bit test became three gates split by rank count. All of that is built,
+formatted, committed and demonstrably working. **The exit criterion is not
+met** and T1 stays **IN PROGRESS**, because running it revealed that the frozen
+configuration the design specifies destroys the very thing the harness exists
+to protect: at the 50th solve the far field is not evaluated at all.
+Everything below is what was decided, what was measured, and what the blocker
+is.
+
+### Decisions
+
+- **The particle set is a global 600 from seed `1234 + P`, sliced
+  contiguously.** Confirmed working: `initial_hash` measured
+  `0xd9e3c66ef5718015` at every rank and every rank count from 1 to 6, so the
+  set really is rank-count-independent and the np=$k$-versus-np=1 comparison is
+  well defined.
+- **Velocities start at zero.** The task's generator specifies positions and
+  charges only, and the time loop needs a velocity. Zero is the only choice
+  that adds no new frozen constant. It is not a free choice for the next
+  session to revisit casually: it is part of what the initial-set hash and
+  every committed record would mean.
+- **The trailing update and `migrate` after the last solve are omitted.** The
+  loop is 50 solves with 49 intervening maintenance steps, not 50 of each.
+  `migrate()` re-runs `downward.setup()`, which would overwrite `locals()` and
+  the operator table before the gate reads them, and the update would move the
+  particles away from the positions the field was evaluated at. Reading "the
+  50th solve's artifacts and field" and running a maintenance step after that
+  solve are mutually exclusive.
+- **All three tests parse the reference file on every rank**, so the
+  initial-particle-set hash is checked everywhere before anything else, but
+  only rank 0 performs the field comparisons. There are no collectives after
+  the gather, so a rank-0-only `ASSERT_` cannot desynchronize the ranks.
+- **`crossRankAgreement` and `matchesDirectSum` skip outright in regeneration
+  mode.** Only `bitForBitArtifacts` writes, and only it can: it runs at np 1-2,
+  which is exactly the set of records the file holds. The np=1 rank-0 part
+  additionally carries the `initial` hash and the np=1 `field` record. One
+  `ctest` pass over ranks 1-6 therefore produces exactly three parts.
+- **`total_fallback_pair_count()` is asserted to be 0**, in both
+  `bitForBitArtifacts` and `crossRankAgreement`, never pinned to a measurement.
+  It measured **0 at every rank, every rank count, and both step counts**, so
+  R4's discriminator is intact.
+
+### File format
+
+The committed file gained two record kinds beside the `set`/`end` bit-for-bit
+records, which are unchanged: `initial <hash>`, and a `field <n>` block of
+`f <pot> <gx> <gy> <gz>` lines in canonical `GlobalId` order terminated by
+`endfield`. The parser dispatches on the leading token, so the three kinds may
+appear in any order.
+
+### The blocker: the frozen configuration collapses, and the far field stops being evaluated
+
+At `num_steps = 50`, `dt = 1.0e-4`, `drift_multiplier = 1.0`, `softening = 0.0`
+and charges uniform on $[-1, 1]$, the closest opposite-charge pair in the
+600-particle set free-falls to contact well inside the simulated interval. A
+per-step trace (flux job `f3XK5b4VcCNT`, temporary instrumentation since
+reverted) shows it precisely:
+
+| step | cells | n_unique_ops | position range | max abs gradient |
+| --- | --- | --- | --- | --- |
+| 0 | 95 | 604 | [0.0502, 0.9498] | 4.53e+03 |
+| 9 | 95 | 604 | [0.0502, 0.9497] | 8.13e+03 |
+| 13 | 95 | 604 | [0.0498, 0.9497] | 2.91e+04 |
+| 14 | 95 | 604 | [0.0497, 0.9498] | 7.69e+04 |
+| **15** | 95 | 604 | [0.0496, 0.9498] | **6.28e+07** |
+| 16 | 155 | 1416 | [0.0495, 1.147] | 1.67e+03 |
+| 19 | 147 | 1176 | [-1.659, 2.049] | 1.41e+03 |
+| 29 | 105 | 322 | [-7.923, 5.057] | 1.93e+03 |
+| 39 | 45 | 4 | [-14.19, 8.064] | 4.13e+03 |
+| **49** | **29** | **0** | **[-20.45, 11.07]** | 1.74e+06 |
+
+The pair collides at step 15, the participants are ejected at high velocity,
+the bounding box grows about thirtyfold, and with `max_depth = 6` the tree
+cannot refine into the residual cloud. By step 50 there are 29 cells, **no pair
+is MAC-admissible, and `n_unique_ops` is 0 at every rank and every rank count**
+(np 1-6, jobs `f3XK1SHwZ5NF` and `f3XK879Eqj4T`).
+
+The estimate agrees: for 600 points uniform on $[0.05, 0.95]^3$ the expected
+closest-pair distance is $\approx 0.0099$, giving an acceleration of
+$\approx 1.0\times10^{4}$ and a free-fall time of $\approx 1.4\times10^{-3}$,
+against a simulated interval of $50 \times 10^{-4} = 5\times10^{-3}$. The
+collapse is not marginal; there is roughly a factor of 3.5 of headroom.
+
+This is not a defect in the sweep, in the harness, or in the accessors. It is
+the specified configuration. `tests/tstMultiSolve.hpp:562-567` runs the same
+`dt` and `drift_multiplier` but only **5** steps, and draws charges from
+$[0.5, 1.5]$ — all one sign. T1 pairs a 50-step integration with the golden
+harness's $\pm 1$ charges, and the two had never been run together.
+
+**Why this defeats the gate rather than merely degrading it.** The direct-sum
+deviation at step 50 measures **1e-15 to 2e-15** — machine precision, not the
+$\approx 8\times10^{-3}$ truncation a working far field carries. The solve has
+silently become pure P2P. Consequently:
+
+- `bitForBitArtifacts` would compare an operator table with zero realized
+  columns. Both its `optab` and `keys` hashes come back as
+  `0x14650fb0739d0383`, which is simply the FNV-1a seed over an empty input.
+- `matchesDirectSum` passes trivially, because P2P is exact.
+- The exit criterion's **first sensitivity perturbation cannot fire.** The `m`
+  loop at `src/Canopy_DownwardSweep.hpp:1559` sits inside the fused M2L apply,
+  reached only through a CSR entry with a valid `op_idx`. With zero realized
+  operators the loop body never executes, so reversing it changes no bits and
+  `bitForBitArtifacts` would *pass* under a perturbation it is required to
+  fail. The perturbations were therefore **not run**: at this configuration the
+  criterion is not merely unmet, it is unmeetable.
+
+No workaround was applied. The particle count, the step count, `dt`,
+`drift_multiplier`, the tolerances and the rank counts are all exactly as the
+design specifies, and no reference data was committed from the degenerate
+state.
+
+### Measurements
+
+Both step counts, on unmodified code, SERIAL backend. `fallback_pairs` is 0
+throughout. Deviations are normalized by a global scale — $\max|\varphi|$ and
+$\max|\nabla\varphi|$ over the reference set — never per-particle.
+
+**`num_steps = 1` (job `f3XKLVSa9diw`) — the tree is healthy and M2L is fully
+exercised: 95 cells, `n_unique_ops` 604 at np=1 and 348/316 at np=2.**
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (reference) | (reference) | 3.2507385349279139e-06 | 2.3644684347284734e-06 |
+| 2 | 1.1775774170600731e-15 | 2.8346336198383183e-13 | 3.2507385351802518e-06 | 2.3644685309655667e-06 |
+| 3 | 1.3458027623543694e-15 | 2.8343581811170314e-13 | 3.2507385350961393e-06 | 2.3644685309467664e-06 |
+| 4 | 1.0303802399275642e-15 | 2.8347559461330696e-13 | 3.2507385350120264e-06 | 2.3644684347373647e-06 |
+| 5 | 9.2523939911862892e-16 | 4.0083877814098415e-13 | 3.2507385349279139e-06 | 2.3644684347321203e-06 |
+| 6 | 1.5140281076486656e-15 | 2.8347559690854843e-13 | 3.2507385345073502e-06 | 2.3644685309769457e-06 |
+
+Worst cross-rank deviation **4.0083877814098415e-13** (np=5, gradient); 100x is
+**4.0e-11**. Worst direct-sum deviation **3.2507385351802518e-06** (np=2,
+potential); 3x is **9.8e-06**. These are the values the tolerances would be
+pinned at *if one step were the frozen configuration*. It is not, so they are
+recorded here and `LS_CROSS_RANK_TOL` / `LS_DIRECT_SUM_TOL` are left
+deliberately unpinned, with a comment in the header saying so.
+
+**`num_steps = 50` (job `f3XK879Eqj4T`) — the degenerate state described
+above; `n_unique_ops` is 0 everywhere.**
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (reference) | (reference) | 5.9019702405243413e-16 | 6.8994946976919231e-16 |
+| 2 | 3.1119400878717255e-07 | 6.3084034822540923e-07 | 3.934648051455127e-16 | 5.8736844457938883e-16 |
+| 3 | 7.9851024544389753e-07 | 1.5986976962365076e-06 | 1.5738599875498137e-15 | 5.6118219870778517e-16 |
+| 4 | 5.6146327358761271e-07 | 9.6987566395904367e-07 | 1.5738594988117639e-15 | 4.9355545064264574e-16 |
+| 5 | 9.1329590373755531e-08 | 1.5322878490201487e-07 | 1.9673232624470761e-15 | 5.5633213998306189e-16 |
+| 6 | hung (see below) | | | |
+
+`n_unique_ops` at `num_steps = 1`: np=1 → 604; np=2 → 348, 316. At
+`num_steps = 50`: 0 at every rank and rank count. Compare the earlier
+single-solve harness, whose np=1 value was 340 at 400 particles; 604 at 600
+particles on the same tree parameters is the expected scaling.
+
+### R8 does not fire
+
+The 50-step cross-rank deviation reaches 1.6e-06, three orders of magnitude
+above the 1e-9 threshold, which read alone looks exactly like R8 — an FMM
+answer that depends on the partition. **It is not.** The design's own
+discriminator settles it: at `num_steps = 1`, on the same configuration and the
+same code, the cross-rank deviation is **1e-15 on the potential and 3e-13 on
+the gradient at every rank count from 2 to 6**. A single np=$k$ solve
+reproduces a single np=1 solve to floating-point reassociation, precisely as
+[the bit-for-bit gate](abstract-solver-backend.md#the-bit-for-bit-gate) argues
+it must. What the 50-step number measures is the integrator amplifying that
+reassociation through a near-collision, where the trajectory is chaotic and
+Lyapunov growth is unbounded — not a partition-dependent answer.
+
+So the cross-rank half of the gate is **sound in principle and validated in
+practice at ranks 2-6**. Only the 50-step configuration is unusable.
+
+### A second finding: np=6 hangs on the degenerate tree
+
+In job `f3XK879Eqj4T`, `LaplaceSolve.crossRankAgreement` at np=6 produced no
+output for over 14 minutes and the job was killed at its 20-minute wall. np 1-5
+each completed the same test in 8-12 seconds. At `num_steps = 1` (job
+`f3XKLVSa9diw`) np=6 completes in **7.4 seconds** and all six rank counts pass,
+so this is not an inherent np=6 problem and not a defect in the harness: it is
+the post-collapse tree — 29 cells spread over a box roughly thirty times the
+original, at six ranks — that hangs. It is plausibly related to the np=3 hang
+this log already records against the regression suite, but that was not
+established and should not be assumed.
+
+### What the harness does demonstrate
+
+Run against provisional reference data generated from the same binary in an
+*earlier job*, the machinery is correct end to end:
+
+- **`bitForBitArtifacts` passes at np=1 and at both ranks of np=2**, comparing
+  bit patterns written by job `f3XK1SHwZ5NF` against a solve in job
+  `f3XK879Eqj4T`. Bit-for-bit reproducibility across runs at np 1-2 is
+  confirmed for the 50-step loop, so `migrate` really does leave the partition
+  alone, as the design's reason for choosing it over `rebalance` predicted.
+- **`bitForBitArtifacts` skips at np 3-6** with the partitioner message, so
+  `ctest` output shows the gate skipped rather than passed.
+- **The `initial` hash check, the `GlobalId` pairing, the gather, the direct
+  sum, the mismatch dumps, the regeneration gate and the parser all work.** At
+  `num_steps = 1` the whole suite reports `100% tests passed, 0 tests failed
+  out of 6`.
+
+The one thing not exercised is the pair of sensitivity perturbations, for the
+reason given above.
+
+### Repository state left behind
+
+- `tests/data/laplace_solve_P6.txt` is **not committed.** Generating it from
+  the degenerate state would commit a baseline whose operator table is empty,
+  and every later task would compare against nothing. `ctest -R
+  Canopy_Test_LaplaceSolve_MPI_SERIAL` therefore fails at every rank count with
+  `cannot open reference data file`, naming the regeneration script. That is
+  the honest IN-PROGRESS state; `LaplaceSolve` is in the `unit` tier and does
+  not gate ships.
+- `tests/data/golden_solid_harmonic_P6.txt` is **left in place but orphaned** —
+  `tstGolden.hpp` no longer exists and its own header now names a deleted file.
+  It is keyed to the old per-rank generator (`1234 + rank * 31 + P`, 400 per
+  rank) and cannot serve the new harness. Delete it when valid replacement data
+  is committed.
+- The reference data that *was* generated, at commit
+  `0d51d790713b09b9ee26ec999b9414bbf584f0b3` (tuolumne, Cray clang 20.0.0,
+  spack env `tuolumne_trilinos`, RelWithDebInfo, Kokkos SERIAL, flux job
+  `f3XK1SHwZ5NF`), is recorded here for provenance only and was discarded.
+- Temporary artifacts — the per-step trace instrumentation, `t1_trace.flux`,
+  `t1_onestep.flux` and the provisional data file — were all removed, and
+  `LS_NUM_STEPS` is back at 50. Nothing under `src/` was modified at any point.
+
+### What the next session has to decide
+
+The blocker is a configuration question, and it is **not** one this session had
+the authority to answer: `num_steps = 50`, `dt = 1.0e-4`,
+`drift_multiplier = 1.0`, `softening = 0.0` and charges on $[-1, 1]$ are frozen
+by the design, and changing any of them silently redefines what T1's **DONE**
+means. The options, in the order they preserve the design's intent:
+
+1. **Give the frozen configuration a softening floor.** `FmmConfig::softening`
+   is already a knob and is currently 0.0. A non-zero value removes the
+   two-body singularity without touching the integrator. It changes what the
+   MAC softening floor does, though — the design notes `near_softening_factor`
+   "only has an effect when softening > 0" — so R4's `total_fallback_pair_count
+   == 0` would have to be re-verified.
+2. **Make the charges one-signed**, as `tstMultiSolve` does. Gravity still
+   collapses, but far more slowly than an opposite-charge pair at contact.
+3. **Shorten the interval** to a step count that stays inside the collapse
+   time. The trace puts the first collision at step 15, so anything up to about
+   10 steps is safe at this `dt`; 5 is what `MultiSolve.StableTree_Migrate`
+   uses. This is the smallest change but it weakens the "state at step 50 is
+   cumulative" argument the design leans on.
+4. **Reduce `dt`.** Scaling `dt` down by 10 moves the collision out past step
+   150 and leaves 50 steps comfortably inside it, at the cost of the
+   trajectory barely evolving.
+
+Whichever is chosen, the harness itself needs no structural change: only the
+constants in the frozen-configuration block, a regeneration run, and the
+tolerance pinning that the 1-step numbers above already show is achievable
+(4.0e-11 cross-rank, 9.8e-06 direct-sum).
+
+**Affects:** **T1 itself** — remains IN PROGRESS; the file, the renames, the
+CMake wiring, the scripts and all three gates are done, and what is outstanding
+is a frozen-configuration decision plus one regeneration and one measurement
+run. **T3** — its bit-for-bit gate at np 1-2 is now demonstrated to work
+across runs for a 50-step `migrate` loop, which is stronger than the previous
+session's single-solve result; but it has no committed baseline until T1's
+configuration is settled. **T4** and **T10** — their tight multi-rank gate is
+in better shape than the previous log entry implied: `crossRankAgreement`
+measures 1e-15/3e-13 at np 2-6 on a healthy tree, so the cross-rank check is a
+real gate for the MPI packing and the shared-cell Allreduce, provided the
+configuration evaluates a far field at all. **R8** — **retired as a live risk
+at this configuration**: the FMM answer is partition-independent to
+reassociation at every rank count from 2 to 6, measured directly. **R4** —
+discriminator still intact, `total_fallback_pair_count()` is 0 at every rank,
+rank count and step count measured. **T8** — `n_unique_ops` at 600 particles on
+a healthy tree is 604 at np=1 and 348/316 at np=2, well under the 32768 count
+cap, consistent with the earlier 400-particle figures. **A new investigation
+may be warranted**: `crossRankAgreement` hangs at np=6 on a tree degenerated by
+particle ejection; whether that shares a cause with the np=3 regression-suite
+hang recorded above is unknown.

@@ -369,6 +369,37 @@ test binaries. To be triaged in a separate session: either make the partitioner
 deterministic (a deterministic algorithm, or a seeded / host-serial MJ) or cache
 and reuse a committed assignment.
 
+### `LaplaceSolve` has no committed reference data, and its frozen configuration collapses
+
+`Canopy_Test_LaplaceSolve_MPI_SERIAL` fails at every rank count with `cannot
+open reference data file .../tests/data/laplace_solve_P6.txt`. The data is
+deliberately not committed: running the harness showed that the configuration
+it is frozen at drives a two-body collapse, and committing a baseline taken
+from that state would be worse than having none.
+
+At 600 particles with charges uniform on `[-1, 1]`, `softening = 0.0`,
+`dt = 1.0e-4` and 50 steps, the closest opposite-charge pair free-falls to
+contact at about step 15. The participants are ejected, the bounding box grows
+from `[0.05, 0.95]` to roughly `[-20, 11]`, and with `max_depth = 6` the tree
+cannot refine into what is left. By the 50th solve there are 29 cells, no pair
+is MAC-admissible, and `n_unique_ops` is **0** at every rank count from 1 to 6
+— the far field the harness exists to protect is never evaluated, and the
+direct-sum deviation reads 1e-15 (machine precision) instead of the ~3e-6 a
+working far field gives.
+
+The harness itself is sound. At `num_steps = 1`, where the tree is healthy (95
+cells, 604 realized operators at np=1), all three gates pass at ranks 1-6:
+bit-for-bit artifacts reproduce across runs at np 1-2, the cross-rank deviation
+is 1e-15 on the potential and 3e-13 on the gradient at np 2-6, and the
+direct-sum deviation is 3.3e-6. Choosing a viable frozen configuration —
+softening, one-signed charges, fewer steps or a smaller `dt` — is a design
+decision left to a later session; see `tasks/abstract-solver-backend.md` T1 and
+the second `## T1` section of its progress log.
+
+Related: `LaplaceSolve.crossRankAgreement` **hangs at np=6** on the collapsed
+tree (>14 min against 8-12 s at np 1-5). At `num_steps = 1` np=6 finishes in
+7.4 s, so this is a property of the degenerate tree, not of the rank count.
+
 ### Six `MultiSolve` tests fail the `1e-8` multi-step check, and np=3 hangs
 
 `ctest --output-on-failure -L regression -R MPI_SERIAL` does not currently pass.
