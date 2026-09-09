@@ -194,6 +194,8 @@ is a separate and still-open question and is not assumed anywhere here.
 | Failure on operator-table overflow | keep today's loud path | One `fprintf` warning (`:1038-1046`) plus routing to the per-pair fallback. Extended by T8 with a per-basis policy. |
 | Test tier for new tests | `unit` | The `regression` tier is the ship gate and holds only `MultiSolve` (`tests/CMakeLists.txt:60-62`). Promoting anything into it requires confirming with the user first, per the repository's own rule. |
 | New test registration | add the name to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:47-55`) or `UNIT_SERIAL_TESTS` (`:35-38`) | Target becomes `Canopy_Test_<Name>_MPI_<DEVICE>`, tests `..._np_<N>` for `N` in 1-6. |
+| Golden reference data | one committed file under `tests/data/`, keyed by `(nprocs, rank)` | The particle seed is `1234 + rank * 31 + P` (`tests/tstMultiSolve.hpp:757`), so the particle set — and every artifact derived from it — is a function of the rank count and the rank. Ranks 1-6 means 21 sets. |
+| Golden artifact form | 64-bit hash plus extents for `locals()` and the operator table; full bit patterns for the $A_{n,m}$ table and `n_unique_ops` | The operator table costs $N_t N_s \cdot 16 = 28\cdot49\cdot16$, 21.4 KB per key at $P=6$; committing it in full for 21 sets is not affordable. A hash over the raw bytes is exactly as sensitive to a bitwise change and still attributes a failure to one artifact, which is all any exit criterion here asks. |
 | Provenance comments | required on any operator derived from a paper, spec or reference implementation | Name the source and the exact theorem/section on the routine, as `:265` and `:676` already do. |
 | Units and conventions on declarations | required | Every width parameter states whether it is a half-width or a full width; every offset states its sign convention (`source − target` or the reverse); every operator states which normalized quantity it consumes and produces. These are not recoverable from the code. |
 
@@ -325,6 +327,23 @@ Only `:1518` is shape-committing. `LayoutLeft` is deliberate: a
 `subview(_m2l_op_table, ALL, ALL, op_idx)` is a contiguous column-major
 $(N_t, N_s)$ matrix consumable by a BLAS `gemm` without transpose (`:337-340`).
 
+**The golden artifacts are not all reachable from a test.** `DownwardSweep`'s
+read-only surface is `locals()` (`:217`), `interaction_list_build_count()`
+(`:236-239`), `total_fallback_pair_count()` (`:424-430`) and
+`total_m2l_pair_count()` (`:439`). `_m2l_op_table` (`:341-342`) and `_A_table`
+(`:264`) are private with no accessor, and the realized key list is not retained
+at all — `ops` (`:752`) and `n_unique_ops` (`:1070`) are function-locals in
+`build_interaction_list_device`, discarded when it returns. `Solver` exposes
+`downward()` (`src/Canopy_Solver.hpp:480`) but no `upward()`, so
+`UpwardSweep::A_table()` (`src/Canopy_UpwardSweep.hpp:139`) is unreachable
+through the solver. T1 adds the accessors and the retained key list; T7 and T9
+read them.
+
+**Tests have no way to locate a data file.** `Canopy_add_tests`
+(`cmake/test_harness/test_harness.cmake:87`) sets no `WORKING_DIRECTORY` on any
+`add_test`, and no data-directory compile definition exists anywhere in the
+harness. No test under `tests/` opens a file today.
+
 **The key, the cap and the overflow path.** The key struct is `{dd, ii, jj, kk}`
 (`:308-318`) with an FNV-style hash (`:319-335`). The class comment at
 `:280-294` describes the key as `(max_d, dd, ii, jj, kk)` — **the struct has no
@@ -388,32 +407,67 @@ reopening a question this document treats as settled. Each entry ends with an
 **Depends on:** none.
 
 **Fill in:** new `tests/tstGolden.hpp`; `tests/CMakeLists.txt` `UNIT_MPI_TESTS`
-(`:47-55`); new committed reference data under `tests/data/`.
+(`:47-55`) plus a `CANOPY_TEST_DATA_DIR` compile definition; new committed
+reference data under `tests/data/`; additive read-only accessors in
+`src/Canopy_DownwardSweep.hpp` (public blocks at `:103-240` and from `:408`) and
+`src/Canopy_Solver.hpp:480`.
 
 **Reference:** `tests/tstMultiSolve.hpp:915-931` for how a full-pipeline solve is
 driven and compared; `tests/tstDownwardSweep.hpp:1314-1332` for the model of a
-compile-time layout assertion.
+compile-time layout assertion; the reachability facts in
+[Current state](#current-state).
 
 **Do:**
 
-1. Fix one configuration and hold it forever: `P = 6`, `NComps = 1`,
-   `mac_theta = 0.5`, `ncrit = 16`, `max_depth = 6`, 400 particles from a named
-   seed, `Scalar = double`. Reuse `MultiSolveTest::run_fmm_and_compare`'s
-   particle generation so the input is reproducible from the seed alone.
-2. After `execute()`, dump four artifacts to host and compare each with
-   `EXPECT_EQ` on the **bit pattern** (compare as `uint64_t` via `memcpy`, not as
-   `double` — `EXPECT_DOUBLE_EQ` has a tolerance and `NaN != NaN`):
-   - `DownwardSweep::locals()` in full;
-   - the M2L operator table for the realized key set;
-   - the $A_{n,m}$ table and its extent;
-   - the sorted realized key list and `n_unique_ops`.
-3. Assert `total_fallback_pair_count() == 0` (`:424-430`) for this
+1. Expose the artifacts. All of this is additive and none of it changes
+   behavior:
+   - an accessor for `_m2l_op_table` (`src/Canopy_DownwardSweep.hpp:341-342`);
+   - a member retaining the realized key list and `n_unique_ops` past the end of
+     `build_interaction_list_device` — `ops` (`:752`) and `n_unique_ops`
+     (`:1070`) are locals there today — plus an accessor for it;
+   - `Solver::upward()` (`src/Canopy_Solver.hpp:480`, matching `downward()`), or
+     a `DownwardSweep::A_table()` accessor for the table it already borrows at
+     `:529`.
+   Carry the qualification already on `downward()` (`src/Canopy_Solver.hpp:477-479`):
+   this is a diagnostic surface, not part of the supported runtime API.
+2. Fix one configuration and hold it forever: `P = 6`, `NComps = 1`,
+   `Scalar = double`, `mac_theta = 0.5`, `ncrit = 16`, `max_depth = 6`, 400
+   particles **per rank**, `replication_depth = 2`, `imbalance_tolerance = 0.05`,
+   and the six box tolerances plus `ncrit_tol` at `0.1`, `softening = 0.0`
+   (`tests/tstMultiSolve.hpp:770-782`). Copy the particle generator from
+   `tests/tstMultiSolve.hpp:753-767` verbatim — seed `1234 + rank * 31 + P`,
+   positions uniform on `[0.05, 0.95]`, charges uniform on `[-1, 1]`. It is
+   inlined inside `run_fmm_and_compare` and cannot be called on its own.
+3. After `execute()`, dump four artifacts to host and compare each on the **bit
+   pattern** — as `uint64_t` via `memcpy`, never as `double`, since
+   `EXPECT_DOUBLE_EQ` has a tolerance and `NaN != NaN`:
+   - `DownwardSweep::locals()` — hash and extents;
+   - the M2L operator table for the realized key set — hash and extents;
+   - the $A_{n,m}$ table and its extent — full bit patterns;
+   - the sorted realized key list — hash — and `n_unique_ops` — full.
+   Hash the raw bytes with a fixed in-repo 64-bit function (the FNV-1a at
+   `src/Canopy_DownwardSweep.hpp:319-335` is the model) so the committed values
+   do not depend on a library version. On any mismatch, write the full arrays to
+   the build directory and name the paths in the failure message: R2's procedure
+   is to compare the sorted key lists directly, which a hash alone does not
+   permit.
+4. Assert `total_fallback_pair_count() == 0` (`:424-430`) for this
    configuration, so a later change that silently moves pairs onto the per-pair
-   path is caught rather than absorbed.
-4. Add a `static_assert` that `DownwardSweep::coeff_view_type` is `LayoutRight`
+   path is caught rather than absorbed. If it is non-zero at any rank count,
+   **stop, record the measured counts in the log, and report.** R4's
+   discriminator and T8's exit criterion both rest on it being zero at $P=6$;
+   pinning a non-zero value instead would retire that discriminator silently.
+5. Add a `static_assert` that `DownwardSweep::coeff_view_type` is `LayoutRight`
    and that the operator table is `LayoutLeft`.
-5. Generate the reference data once from the current unmodified tree, commit it,
-   and record in the log the commit it was generated at.
+6. Plumb the data directory: `target_compile_definitions` setting
+   `CANOPY_TEST_DATA_DIR` to `${CMAKE_CURRENT_SOURCE_DIR}/data`, applied from
+   `tests/CMakeLists.txt` by looping `CANOPY_TEST_DEVICES` over the generated
+   target name `Canopy_Test_Golden_MPI_<DEVICE>`. Do **not** put it in
+   `Canopy_add_tests` (`cmake/test_harness/test_harness.cmake:87`) — that macro
+   is shared by every test and no other test reads a data file.
+7. Generate the reference data once from the current unmodified tree at each
+   rank count 1-6, commit it as one file keyed by `(nprocs, rank)`, and record in
+   the log the commit it was generated at.
 
 **Exit criterion:** `ctest -R Canopy_Test_Golden_MPI_SERIAL` passes at ranks 1-6
 on unmodified code; and, with the `m` loop at
