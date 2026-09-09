@@ -402,7 +402,7 @@ reopening a question this document treats as settled. Each entry ends with an
 
 ## Task sequence
 
-### T1 — A golden bit-for-bit harness exists and passes against unrefactored code — **NOT STARTED**
+### T1 — A golden bit-for-bit harness exists and passes against unrefactored code — **BLOCKED**
 
 **Depends on:** none.
 
@@ -475,6 +475,46 @@ on unmodified code; and, with the `m` loop at
 (`for ( int m = n; m >= -n; m-- )` — a change that is mathematically identical
 and bitwise different), the same command **fails on the `locals()` comparison
 specifically**, not merely somewhere. Revert the perturbation before finishing.
+
+**Not met.** The harness is built, committed and demonstrably sensitive, but the
+exit criterion cannot be met as written and T1 is **BLOCKED** on a defect it
+found rather than on anything in its own scope. Details and measurements in
+[the progress log](abstract-solver-backend-progress-log.md#t1--the-golden-bit-for-bit-harness).
+
+*Built and verified.* `tests/tstGolden.hpp` fixes the configuration of **Do**
+step 2, compares the four artifacts of **Do** step 3 on bit patterns, carries
+the **Do** step 5 layout `static_assert`s, and reads its data through a
+`CANOPY_TEST_DATA_DIR` compile definition applied per generated target from
+`tests/CMakeLists.txt` (**Do** step 6). It is registered in `UNIT_MPI_TESTS`, so
+it runs at ranks 1-6 under the `unit` label; nothing was promoted into
+`regression`. The accessors of **Do** step 1 are additive and read-only and
+change no arithmetic — independently confirmed, since the pre-existing
+`MultiSolve` failures reproduce to every digit against the pre-T1 source.
+`total_fallback_pair_count()` (**Do** step 4) is **0** at every rank count and
+every rank, so R4's discriminator and T8's exit criterion stand. Reference data
+for all 21 `(nprocs, rank)` sets is committed, generated at commit `6f79075`
+(**Do** step 7). The harness **passes at ranks 1 and 2** against that committed
+data on unmodified code, and with the `m` loop reversed by hand it **fails on
+the `locals()` comparison and on nothing else** at both rank counts — the exact
+discrimination the criterion asks for. The perturbation was reverted.
+
+*Why it is blocked.* At ranks 3-6 the solve is **not reproducible run-to-run**:
+`n_unique_ops` alone varies by tens between consecutive runs of the same binary
+at the same commit. `num_cells` is identical across runs at every rank count, so
+the tree build is deterministic and it is cell *ownership* that moves.
+`TreePartitioner::partition_leaves` uses the Zoltan2 `multijagged` algorithm,
+which `src/Canopy_TreePartitioner.hpp:417-419` already documents as
+non-deterministic; computing on rank 0 and broadcasting makes the partition
+consistent *within* a run but not *across* runs. This contradicts
+[The bit-for-bit gate](#the-bit-for-bit-gate) above, whose determinism argument
+covers the M2L CSR ordering but never examined the partitioner that decides the
+CSR's input. No rank count was dropped and no comparison was loosened to get
+around it.
+
+*What has to happen first.* A new task ahead of T3: make `partition_leaves`
+reproducible run-to-run — a deterministic partitioner, a seeded or host-serial
+MJ, or committing and reusing the assignment. Until then T3, the gate for this
+entire document, has no stable baseline above two ranks.
 
 ---
 

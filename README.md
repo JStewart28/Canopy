@@ -337,6 +337,60 @@ Canopy runs at many thousands of ranks.
 Tracked defects to be addressed in a later session. These are not introduced by
 current feature work — they reproduce on the pre-existing baseline.
 
+### The leaf partition is not reproducible run-to-run above two ranks
+
+`TreePartitioner::partition_leaves` uses the Zoltan2 `multijagged` algorithm,
+which `src/Canopy_TreePartitioner.hpp:417-419` already documents as
+non-deterministic. Computing the partition on rank 0 and broadcasting it makes
+the assignment consistent across ranks *within* a run, but it is not reproducible
+*across* runs: two runs of the same binary at the same commit produce different
+leaf-to-rank assignments at every rank count from 3 to 6.
+
+Reproduce with the golden harness, which measures it directly:
+
+```bash
+ctest -V -R Canopy_Test_Golden_MPI_SERIAL      # run twice, diff the "[golden]" lines
+```
+
+`n_unique_ops` for one `(nprocs, rank)` moves by tens between runs — e.g.
+`(3,0)` gave 1630 / 1605 / 1605 and `(6,3)` gave 974 / 947 / 973 over three
+consecutive runs. `num_cells` is identical across runs at every rank count (80,
+170, 316, 431, 500, 524), so the tree build is deterministic and it is cell
+*ownership* that moves; the interaction lists, the M2L operator table and
+`locals()` all follow it. np=1 and np=2 are stable, the multijagged cut being
+trivial for one or two parts.
+
+This is **pre-existing** — it is a property of the partitioner, untouched by the
+golden-harness work that found it. It blocks any bit-for-bit comparison above two
+ranks, which is why `tasks/abstract-solver-backend.md` T1 is marked **BLOCKED**.
+A plausible but unverified mechanism is Zoltan2 MJ running on
+`Kokkos::DefaultExecutionSpace`, which is HIP in this build even for the SERIAL
+test binaries. To be triaged in a separate session: either make the partitioner
+deterministic (a deterministic algorithm, or a seeded / host-serial MJ) or cache
+and reuse a committed assignment.
+
+### Six `MultiSolve` tests fail the `1e-8` multi-step check, and np=3 hangs
+
+`ctest --output-on-failure -L regression -R MPI_SERIAL` does not currently pass.
+At np=1 and np=2, six tests fail the multi-step position/velocity comparison at
+`fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:542,546`) with measured relative
+errors of 3e-7 to 9e-6: `MultiSolve.StableTree_Migrate`,
+`IntermediateMotion_Rebalance`, `LargeMotion_Rebuild`, `AutoMaintain`,
+`AutoRebalance`, `M2L_BinEdge_Fallback`. The gate then hung at
+`Canopy_Test_MultiSolve_MPI_SERIAL_np_3` and was killed at a 15-minute wall —
+note that the np=3 hang below was previously seen only when `SingleSolve` ran in
+the same `ctest` process, whereas this run was `MultiSolve` alone.
+
+This is **pre-existing**: checking out `src/Canopy_DownwardSweep.hpp` at the
+pre-golden-harness commit `a6c90de`, rebuilding and rerunning reproduces the
+identical error values to every digit (`3.485035469067542e-07`,
+`6.8419528791564039e-07`, `9.1947965989306709e-06`).
+
+It supersedes part of the entry below, which was written when these tests passed:
+`SolveFusedM2L.FP32_smokeTest` is no longer the suite's only failure, and it
+*passed* at np=1 in these runs. Whether the six failures and the np=3 hang share
+a cause with the partitioner non-determinism above has not been investigated.
+
 ### `SolveFusedM2L.FP32_smokeTest` fails at ≥ 2 ranks
 
 In the `Canopy_Test_MultiSolve_MPI_SERIAL` suite, `SolveFusedM2L.FP32_smokeTest`
