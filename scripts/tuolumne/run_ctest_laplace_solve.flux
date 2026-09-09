@@ -7,7 +7,7 @@
 # flux: -q pdebug
 #
 # T1's exit criterion: the Laplace-solve gate at ranks 1-6 on the SERIAL
-# backend. Three tests per rank count, each a 50-timestep, 600-particle solve
+# backend. Three tests per rank count, each a 12-timestep, 600-particle solve
 # — bitForBitArtifacts (np 1-2), crossRankAgreement (np 2-6) and
 # matchesDirectSum (np 1-6). CTest already knows the rank counts
 # (Canopy_TEST_MPI_RANKS, default 1-6) and launches each test through

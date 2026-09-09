@@ -12,8 +12,8 @@
 // ===========================================================================
 // tstLaplaceSolve — the solve-level gate for the solid-harmonic far field.
 //
-// One frozen FMM configuration is driven for 50 timesteps and the state
-// after the 50th solve is gated three ways, split by rank count because the
+// One frozen FMM configuration is driven for 12 timesteps and the state
+// after the 12th solve is gated three ways, split by rank count because the
 // leaf partition is not reproducible run-to-run above two ranks
 // (TreePartitioner::partition_leaves uses Zoltan2 multijagged; see
 // src/Canopy_TreePartitioner.hpp:417-419 and README "Known Issues"):
@@ -109,6 +109,19 @@ namespace LaplaceSolveTest
 // the perturbed positions feed the next step. A large dt compounds it until
 // the cross-rank deviation measures trajectory divergence instead of
 // summation order, which is the one quantity crossRankAgreement bounds.
+//
+// LS_NUM_STEPS was CHOSEN BY MEASUREMENT and is now frozen with the rest. A
+// 50-step trace of this exact configuration (see the per-step table in
+// tasks/abstract-solver-backend-progress-log.md, section T1) was read against
+// three degeneracy tests — n_unique_ops below half its step-0 value, the
+// global position range more than 50% wider than the initial bounding box in
+// any dimension, or the maximum gradient magnitude above 100x its step-0
+// value. The first degenerate step is step 18, where max |grad phi| reaches
+// 3.81e+06 against 8.60e+03 at step 0; nothing before it trips any test.
+// LS_NUM_STEPS is two thirds of that, rounded down, so a later task that
+// perturbs the trajectory is not sitting on a cliff edge. Raising it back
+// toward 50 drives the tree to zero realized M2L operators and makes every
+// check here pass vacuously.
 // ---------------------------------------------------------------------------
 static constexpr int LS_P = 6;
 static constexpr int LS_NCOMPS = 1;
@@ -116,7 +129,7 @@ static constexpr int LS_NUM_PARTICLES = 600; // global total, sliced per rank
 static constexpr double LS_MAC_THETA = 0.5;
 static constexpr int LS_NCRIT = 16;
 static constexpr int LS_MAX_DEPTH = 6;
-static constexpr int LS_NUM_STEPS = 50;
+static constexpr int LS_NUM_STEPS = 12;
 static constexpr double LS_DT = 1.0e-4;
 static constexpr double LS_DRIFT_MULTIPLIER = 1.0;
 
@@ -234,7 +247,7 @@ inline bool key_less( const Key& a, const Key& b )
 
 // ---------------------------------------------------------------------------
 // One bit-for-bit record: the four artifacts for one (nprocs, rank), taken
-// from the 50th solve.
+// from the 12th solve.
 // ---------------------------------------------------------------------------
 struct BitRecord
 {
@@ -255,7 +268,7 @@ struct BitRecord
     std::vector<std::uint64_t> a_bits;
 };
 
-// The np=1 field after the 50th solve: potential and gradient bit patterns
+// The np=1 field after the 12th solve: potential and gradient bit patterns
 // in canonical GlobalId order. The np=1 run is bit-reproducible, which is
 // what makes committing its output meaningful.
 struct FieldRecord
@@ -612,7 +625,7 @@ inline void dump_a_table( const BitRecord& r, const BitRecord& ref,
 }
 
 // ---------------------------------------------------------------------------
-// The step-50 global state, gathered to rank 0 and reordered into canonical
+// The last-step global state, gathered to rank 0 and reordered into canonical
 // GlobalId order. Only rank 0's copy is filled; every other rank sees empty
 // vectors and `valid == false`.
 // ---------------------------------------------------------------------------
@@ -627,7 +640,7 @@ struct GatheredState
     std::vector<double> chg;  // n
 };
 
-// Everything one 50-step run produces.
+// Everything one 12-step run produces.
 template <class DS>
 struct SolveOutcome
 {
@@ -682,13 +695,23 @@ void with_laplace_solve( Fn&& after )
     // [rank * N / nprocs, (rank+1) * N / nprocs); setup() redistributes, so
     // the slicing does not affect the answer. Velocities start at zero:
     // the generator draws positions and charges only.
+    //
+    // Charges are uniform on [0.5, 1.5] — ONE-SIGNED, the distribution
+    // tests/tstMultiSolve.hpp:200 uses for its gravity tests. With charges on
+    // [-1, 1] and softening = 0.0 the closest opposite-charge pair free-falls
+    // to contact inside the simulated interval, the participants are ejected,
+    // the bounding box grows about thirtyfold, and with max_depth = 6 the tree
+    // cannot refine into the residual cloud: no pair is MAC-admissible and
+    // n_unique_ops falls to 0, at which point every check here passes
+    // vacuously. A one-signed set is mutually attracting — it still collapses,
+    // but as a cloud rather than as a two-body singularity.
     // -----------------------------------------------------------------------
     std::vector<double> g_pos( 3 * n_total );
     std::vector<double> g_chg( n_total );
     {
         std::mt19937 gen( 1234 + P );
         std::uniform_real_distribution<double> pos_dist( 0.05, 0.95 );
-        std::uniform_real_distribution<double> q_dist( -1.0, 1.0 );
+        std::uniform_real_distribution<double> q_dist( 0.5, 1.5 );
         for ( int i = 0; i < n_total; i++ )
         {
             g_pos[3 * i + 0] = pos_dist( gen );
@@ -757,12 +780,12 @@ void with_laplace_solve( Fn&& after )
     // rebuilds the tree and re-runs downward.setup(), which would overwrite
     // locals() and the operator table, while the update would move the
     // particles away from the positions the field was evaluated at. So the
-    // loop is 50 solves with 49 intervening maintenance steps.
+    // loop is 12 solves with 11 intervening maintenance steps.
     //
     // migrate(), and never rebalance(), rebuild() or auto_maintain():
     // migrate moves particles to the ranks that already own their cells and
     // never repartitions, so the np 1-2 bitwise gate faces one partition
-    // rather than fifty. The partitioner is not reproducible run-to-run
+    // rather than twelve. The partitioner is not reproducible run-to-run
     // above two ranks (src/Canopy_TreePartitioner.hpp:417-419) and every
     // further invocation is another opportunity for the np=2 cut to stop
     // coming out the same way.
@@ -815,11 +838,11 @@ void with_laplace_solve( Fn&& after )
     r.fallback_pairs = ds.total_fallback_pair_count();
 
     // -----------------------------------------------------------------------
-    // Gather the step-50 state to rank 0 and reorder it into canonical
+    // Gather the last-step state to rank 0 and reorder it into canonical
     // GlobalId order, as tests/tstMultiSolve.hpp:790-852 gathers it.
     // Particles pair across rank counts by GlobalId and by nothing else:
     // migration scrambles the local ordering, and the solve has moved the
-    // particles, so the step-50 positions are not bit-identical between one
+    // particles, so the last-step positions are not bit-identical between one
     // rank count and another.
     // -----------------------------------------------------------------------
     GatheredState gs;
@@ -996,9 +1019,12 @@ inline bool load_reference( std::uint64_t measured_initial_hash,
 
 // The global normalization scales for one field: max |phi| and the maximum
 // gradient magnitude, both over the whole set. Never a per-particle relative
-// error: charges are uniform on [-1, 1], so per-particle |phi| passes
-// through zero and a per-particle ratio measures cancellation rather than
-// accuracy.
+// error. The charges are one-signed, on [0.5, 1.5], which does keep
+// per-particle |phi| away from zero — but the GRADIENT components still pass
+// through zero by cancellation wherever a particle's neighbours pull against
+// each other, so a per-particle ratio there would measure that cancellation
+// rather than accuracy. One scale rule for both fields keeps the two
+// comparisons reading the same way.
 inline void field_scales( const std::vector<double>& pot,
                           const std::vector<double>& grad, int n,
                           double& pot_scale, double& grad_scale )
@@ -1060,7 +1086,7 @@ void testBitForBitArtifacts()
                 {
                     os << serialize_initial( outcome.initial_hash );
                     ASSERT_TRUE( outcome.gathered.valid )
-                        << "gathered step-50 state is invalid: "
+                        << "gathered last-step state is invalid: "
                         << outcome.gathered.err;
                     FieldRecord f;
                     f.n = outcome.gathered.n;
@@ -1091,6 +1117,20 @@ void testBitForBitArtifacts()
             EXPECT_EQ( 0, r.fallback_pairs )
                 << "total_fallback_pair_count() must be 0 for the frozen "
                    "Laplace-solve configuration "
+                << tag;
+
+            // A tree that has degenerated realizes ZERO M2L operators, and at
+            // that point every check in this harness passes without measuring
+            // the far field: matchesDirectSum passes to machine precision
+            // because the solve is pure P2P, this test compares an operator
+            // table with zero realized columns, and the m-loop perturbation
+            // the exit criterion requires to FAIL cannot fire, because the
+            // loop is reached only through a CSR entry with a valid op_idx.
+            // This assertion is what makes that state a failure.
+            EXPECT_GT( r.n_unique_ops, 0 )
+                << "m2l_n_unique_ops() is 0: the tree has degenerated and no "
+                   "pair is MAC-admissible, so the far field this harness "
+                   "exists to protect was never evaluated "
                 << tag;
 
             ReferenceData ref_all;
@@ -1199,7 +1239,7 @@ void testBitForBitArtifacts()
 // Allreduce summing rank 0's contribution against zeros
 // (src/Canopy_DownwardSweep.hpp:701-708); every non-shared target is owned by
 // exactly one rank. Only the summation order moves when the partition moves.
-// What that argument does not settle is the size of the deviation after 50
+// What that argument does not settle is the size of the deviation after 12
 // steps, because each step's difference enters the velocity update and is
 // carried into the next step's positions — so LS_CROSS_RANK_TOL is measured,
 // not derived.
@@ -1233,6 +1273,20 @@ void testCrossRankAgreement()
                    "Laplace-solve configuration "
                 << tag;
 
+            // A tree that has degenerated realizes ZERO M2L operators, and at
+            // that point every check in this harness passes without measuring
+            // the far field: matchesDirectSum passes to machine precision
+            // because the solve is pure P2P, this test compares an operator
+            // table with zero realized columns, and the m-loop perturbation
+            // the exit criterion requires to FAIL cannot fire, because the
+            // loop is reached only through a CSR entry with a valid op_idx.
+            // This assertion is what makes that state a failure.
+            EXPECT_GT( r.n_unique_ops, 0 )
+                << "m2l_n_unique_ops() is 0: the tree has degenerated and no "
+                   "pair is MAC-admissible, so the far field this harness "
+                   "exists to protect was never evaluated "
+                << tag;
+
             ReferenceData ref_all;
             ASSERT_TRUE( load_reference( outcome.initial_hash, ref_all ) );
             if ( r.rank != 0 )
@@ -1242,7 +1296,7 @@ void testCrossRankAgreement()
                 << "no np=1 field record in " << LS_DATA_FILE;
             const GatheredState& gs = outcome.gathered;
             ASSERT_TRUE( gs.valid )
-                << "gathered step-50 state is invalid: " << gs.err;
+                << "gathered last-step state is invalid: " << gs.err;
             ASSERT_EQ( ref_all.field.n, gs.n )
                 << "np=1 field record holds a different particle count";
 
@@ -1289,7 +1343,7 @@ void testCrossRankAgreement()
             // summation order, and the tolerance must not be raised to
             // accommodate it. Re-measure the same configuration at
             // LS_NUM_STEPS = 1 before attributing it to the dataflow — a
-            // one-step deviation at reassociation level with a 50-step
+            // one-step deviation at reassociation level with a 12-step
             // deviation above the threshold is the integrator amplifying
             // reassociation; a one-step deviation already above it is R8.
             const double worst = std::max( max_pot_dev, max_grad_dev );
@@ -1342,10 +1396,10 @@ void testMatchesDirectSum()
 
             const GatheredState& gs = outcome.gathered;
             ASSERT_TRUE( gs.valid )
-                << "gathered step-50 state is invalid: " << gs.err;
+                << "gathered last-step state is invalid: " << gs.err;
 
             // Brute-force O(N^2) reference in double precision over the
-            // gathered step-50 positions and charges, structured as
+            // gathered last-step positions and charges, structured as
             // tests/tstMultiSolve.hpp:866-901.
             const int n = gs.n;
             std::vector<double> bf_pot( n, 0.0 ), bf_grad( 3 * n, 0.0 );
