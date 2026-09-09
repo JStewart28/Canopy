@@ -447,13 +447,9 @@ reopening a question this document treats as settled. Each entry ends with an
 
 **Depends on:** none.
 
-**Fill in:** new `tests/tstLaplaceSolve.hpp`, built from the existing
-`tests/tstGolden.hpp`, which is deleted; `tests/tstLaplace.hpp` renamed to
-`tests/tstLaplaceKernel.hpp`; `tests/CMakeLists.txt` `UNIT_SERIAL_TESTS`
-(`:35-38`), `UNIT_MPI_TESTS` (`:47-56`), the comment at `:28`, and the
-`CANOPY_TEST_DATA_DIR` loop (`:73-82`); regenerated reference data under
-`tests/data/`; `README.md:352`; `scripts/tuolumne/run_ctest_golden.flux:54`
-and `scripts/tuolumne/run_golden_regenerate.flux:10`, `:63`.
+**Fill in:** `tests/tstLaplaceSolve.hpp`, the frozen-configuration block and
+the generator in particular; regenerated reference data under `tests/data/`,
+replacing the orphaned `tests/data/golden_solid_harmonic_P6.txt`.
 
 **Reference:** `tests/tstMultiSolve.hpp:866-901` for the brute-force $N^2$
 reference and `:798-852` for the MPI gather that feeds it; `:915-931` for how a
@@ -463,20 +459,28 @@ model of a compile-time layout assertion; the reachability facts in
 
 #### What already exists
 
-`tests/tstGolden.hpp` is built, committed and demonstrably sensitive. It fixes
-the frozen configuration below, compares four artifacts on their bit patterns,
-carries the layout `static_assert`s, and reads committed data through a
-`CANOPY_TEST_DATA_DIR` compile definition applied per generated target from
-`tests/CMakeLists.txt:79-82`. Its diagnostic accessors — `m2l_op_table()`,
+`tests/tstLaplaceSolve.hpp` is built, formatted and committed, and carries all
+three tests — `bitForBitArtifacts`, `crossRankAgreement` and `matchesDirectSum`
+— over a time loop with `migrate` between steps. The names of step 1, the
+rank-count-independent global generator of step 2 (bar its charge
+distribution), the time loop of step 4, the
+`GlobalId` pairing, the MPI gather, the direct sum, the mismatch dumps, the
+regeneration gate and the reference-file parser are all in place and
+demonstrated working. The diagnostic accessors — `m2l_op_table()`,
 `m2l_realized_keys()`, `m2l_n_unique_ops()`, `A_table()` and the retained
-`_m2l_realized_keys` member — are in place, additive, read-only, and change no
-arithmetic. `total_fallback_pair_count()` is 0 at every rank and every rank
-count. This task moves that file to `tests/tstLaplaceSolve.hpp`, changes the
-particle generator, wraps the solve in a time loop, and adds two tests beside
-it; it does not rebuild what is already there. The time loop is the one
-structural addition: `with_golden_solve` (`tests/tstGolden.hpp:467-553`) calls
-`setup()` and then exactly one `solve()`, and the file carries no integrator
-and no maintenance call at all.
+`_m2l_realized_keys` member — are additive, read-only, and change no
+arithmetic. `total_fallback_pair_count()` measures 0 at every rank and every
+rank count. Committed data is read through a `CANOPY_TEST_DATA_DIR` compile
+definition applied per generated target from `tests/CMakeLists.txt:79-82`.
+
+**What is not done:** `tests/data/laplace_solve_P6.txt` is not committed, so
+`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` fails at every rank count with
+`cannot open reference data file`; `LS_CROSS_RANK_TOL` and `LS_DIRECT_SUM_TOL`
+are placeholders rather than measured values; and neither sensitivity
+perturbation has been run. All three are downstream of the frozen
+configuration's charge distribution and step count, which steps 2 and 3 fix.
+`tests/data/golden_solid_harmonic_P6.txt` is orphaned — keyed to the deleted
+per-rank generator — and is deleted when the replacement is committed.
 
 #### Why the gate is split by rank count
 
@@ -499,6 +503,40 @@ and the gate is built around it instead:
 - **np 2-6 — cross-rank agreement.** The solve at $k$ ranks must reproduce the
   np=1 solve to floating-point reassociation.
 - **np 1-6 — direct-sum accuracy.** The field must be the right field.
+
+#### Why the charges are one-signed and the interval is bounded
+
+The harness exists to protect the far field, so the configuration must leave a
+far field to evaluate at the step the checks read. Two properties of the
+integrated problem decide that, and both are constraints rather than free
+choices.
+
+**Charges are one-signed.** With charges on $[-1, 1]$ and `softening = 0.0`, the
+closest opposite-charge pair in a 600-particle set free-falls to contact well
+inside any interval long enough to be worth integrating: the expected
+closest-pair distance is $\approx 0.0099$, giving a relative acceleration of
+$\approx 1.0\times10^{4}$ and a free-fall time of $\approx 1.4\times10^{-3}$
+— about 14 steps at $dt = 10^{-4}$. The pair collides, both participants are
+ejected at high velocity, the bounding box grows roughly thirtyfold, and with
+`max_depth = 6` the tree cannot refine into the residual cloud: the solve
+degenerates to 29 cells at which **no pair is MAC-admissible and `n_unique_ops`
+is 0**. Every check then passes vacuously — `matchesDirectSum` to machine
+precision because the answer is pure P2P, `bitForBitArtifacts` against an
+operator table with zero realized columns — and the exit criterion's first
+sensitivity perturbation cannot fire at all, because the `m` loop it reverses is
+reached only through a CSR entry with a valid `op_idx`. Measurements are in
+[the progress log](abstract-solver-backend-progress-log.md). Charges uniform on
+$[0.5, 1.5]$, the distribution `tests/tstMultiSolve.hpp:200` uses for its
+gravity tests, remove the opposite-sign singularity. `grad` is $\nabla\varphi$
+and the update is `v += dt * g` (`tests/tstMultiSolve.hpp:376-386`), so a
+one-signed set is mutually attracting — it still collapses, but as a cloud
+rather than as a two-body singularity.
+
+**The interval is bounded by measurement, not by assumption.** Attraction alone
+does not guarantee the tree survives 50 steps: the closest *same*-sign pair
+free-falls on a comparable timescale. The step count is therefore fixed by
+tracing the run and reading where the tree degenerates, not by asserting a
+number — see step 3.
 
 #### Why the far field is not checked to $10^{-10}$
 
@@ -534,48 +572,38 @@ count, confirming it.
 
 **Do:**
 
-1. **Rename, and update every reference.**
-   - `git mv tests/tstGolden.hpp tests/tstLaplaceSolve.hpp`. The harness macro
-     maps a name to `tst<NAME>.hpp` and to the target
-     `Canopy_Test_<NAME>_MPI_<DEVICE>` (`cmake/test_harness/test_harness.cmake:104-112`),
-     so the `UNIT_MPI_TESTS` entry `Golden` (`tests/CMakeLists.txt:50`) becomes
-     `LaplaceSolve` and the target becomes `Canopy_Test_LaplaceSolve_MPI_<DEVICE>`.
-     Delete `tstGolden.hpp` outright; do not leave a forwarding header.
-   - `git mv tests/tstLaplace.hpp tests/tstLaplaceKernel.hpp` — the per-operator
-     kernel tests, renamed for specificity now that a solve-level Laplace test
-     exists — and change `UNIT_SERIAL_TESTS` `Laplace` (`:37`) to
-     `LaplaceKernel`. Fix the example in the comment at `:28`.
-   - Update the `target_compile_definitions` loop (`:79-82`) and its comment
-     (`:73-78`) to the new target name.
-   - Update `README.md:352`, which names the old target in the reproducer for
-     the partitioner Known Issue.
-   - Rename the two flux scripts to match — `run_ctest_golden.flux` to
-     `run_ctest_laplace_solve.flux`, `run_golden_regenerate.flux` to
-     `run_laplace_solve_regenerate.flux` — and update the target name at
-     `run_ctest_golden.flux:54` and `run_golden_regenerate.flux:63`, and the
-     regeneration comment at `run_golden_regenerate.flux:12`. Leaving them named
-     for a test that no longer exists is the cheapest way for the next session to
-     run the wrong thing.
-   - Rename the regeneration environment variable `CANOPY_GOLDEN_REGENERATE` to
-     `CANOPY_LAPLACE_SOLVE_REGENERATE`, in the test and in the script.
-   - `tasks/todo_0.md:483` also names `tests/tstLaplace.hpp`. It is a different
-     document and is **out of scope**; do not edit it.
+1. **The names are fixed, and nothing may rename them again.** The harness
+   macro maps a name to `tst<NAME>.hpp` and to the target
+   `Canopy_Test_<NAME>_MPI_<DEVICE>`
+   (`cmake/test_harness/test_harness.cmake:104-112`), so the solve-level gate is
+   `tests/tstLaplaceSolve.hpp`, the `UNIT_MPI_TESTS` entry `LaplaceSolve`
+   (`tests/CMakeLists.txt:50`) and the target
+   `Canopy_Test_LaplaceSolve_MPI_<DEVICE>`; the per-operator kernel tests are
+   `tests/tstLaplaceKernel.hpp` under `UNIT_SERIAL_TESTS` (`:37`). The
+   regeneration environment variable is `CANOPY_LAPLACE_SOLVE_REGENERATE` and
+   the two flux wrappers are
+   `scripts/tuolumne/run_ctest_laplace_solve.flux` and
+   `scripts/tuolumne/run_laplace_solve_regenerate.flux`. `tasks/todo_0.md:483`
+   still names the old kernel-test path; it is a different document and is
+   **out of scope**.
 
-2. **Replace the particle generator with a rank-count-independent global set.**
-   Today's generator seeds `1234 + rank * 31 + P` and makes 400 particles *per
-   rank*, so both the global particle set and the total $N$ are functions of the
-   rank count: np=1 and np=6 are different physics problems and cannot be
-   compared to one another at all. Instead: fix $N_{\rm total} = 600$, seed
+2. **The particle generator is a rank-count-independent global set.** A
+   per-rank generator would make both the global particle set and the total $N$
+   functions of the rank count, so np=1 and np=6 would be different physics
+   problems and could not be compared to one another at all. Instead: fix
+   $N_{\rm total} = 600$, seed
    `1234 + P` once, generate the identical global set on every rank, and have
    each rank keep the contiguous slice
    `[rank * N_total / nprocs, (rank+1) * N_total / nprocs)`. Positions stay
-   uniform on `[0.05, 0.95]` and charges uniform on `[-1, 1]`. `setup()`
+   uniform on `[0.05, 0.95]`; charges are uniform on `[0.5, 1.5]` — one-signed,
+   for the reason above. Velocities start at zero. `setup()`
    redistributes particles, so the initial slicing does not affect the answer;
    every rank count from 1 to 6 divides 600 exactly, giving 100 per rank at
    np=6, and the $N^2$ reference is 360 k pairs, which is milliseconds. This is
    a deliberate departure from reusing `tests/tstMultiSolve.hpp:753-767`
-   verbatim: that generator makes the cross-rank comparison in step 6
-   impossible to define.
+   verbatim: that generator is per-rank, and makes the cross-rank comparison in
+   step 6 impossible to define. Everything in this step but the charge
+   distribution is already in place; the charge distribution is the change.
 
    The AoSoA gains a `GlobalId` member, `first_id_on_this_rank + i`, the same
    device `tests/tstMultiSolve.hpp:110-113` uses. It is what pairs a particle
@@ -587,22 +615,39 @@ count, confirming it.
 3. **Hold the rest of the configuration fixed forever:** `P = 6`, `NComps = 1`,
    `Scalar = double`, `mac_theta = 0.5`, `ncrit = 16`, `max_depth = 6`,
    `replication_depth = 2`, `imbalance_tolerance = 0.05`, the six box tolerances
-   and `ncrit_tol` at `0.1`, `softening = 0.0`, `num_steps = 50`,
-   `dt = 1.0e-4`, `drift_multiplier = 1.0`, and `migrate` as the between-step
-   maintenance call.
+   and `ncrit_tol` at `0.1`, `softening = 0.0`, `dt = 1.0e-4`,
+   `drift_multiplier = 1.0`, and `migrate` as the between-step maintenance call.
 
-4. **Drive 50 timesteps, and evaluate all three checks on the state after the
-   last solve.** Each step is: `solve<Position, Charge>(particles,
+   **`num_steps` is fixed by measurement and then frozen with the rest.** Trace
+   the run at `num_steps = 50` on the one-signed set and record, per step, the
+   cell count, `n_unique_ops`, the global position range and the maximum
+   gradient magnitude. A step is degenerate when any of three things holds:
+   `n_unique_ops` has fallen below half its step-0 value; the global position
+   range exceeds the initial bounding box by more than 50% in any dimension; or
+   the maximum gradient magnitude exceeds 100x its step-0 value. If no step
+   through 50 is degenerate, `num_steps = 50`. Otherwise `num_steps` is two
+   thirds of the first degenerate step, rounded down — a margin, so that a later
+   task perturbing the trajectory does not push the gate over a cliff it was
+   sitting on. Record the trace and the chosen value in the log. The trace
+   instrumentation is temporary and is removed before the task finishes.
+
+4. **Drive `num_steps` timesteps, and evaluate all three checks on the state
+   after the last solve.** Each step is: `solve<Position, Charge>(particles,
    /*compute_gradient=*/true)`; then the symplectic-Euler update
    `v += dt * g; r += dt * drift_multiplier * v`, on device against the AoSoA
    slices, exactly as `tests/tstMultiSolve.hpp:365-392` writes it; then
-   `solver.migrate<Position>(particles)`. The 50th solve's artifacts and field
-   are what every check below reads.
+   `solver.migrate<Position>(particles)`. The last solve's artifacts and field
+   are what every check below reads. There is no update and no `migrate` after
+   that solve: `migrate()` re-runs `downward.setup()`, which would overwrite
+   `locals()` and the operator table before the gate reads them, and the update
+   would move the particles away from the positions the field was evaluated at.
+   The loop is therefore `num_steps` solves with `num_steps - 1` intervening
+   maintenance steps.
 
    **`migrate`, and not `rebalance`, `rebuild` or `auto_maintain`.** Migrate
    moves particles to the ranks that already own their cells and never
-   repartitions, so the np 1-2 bitwise gate faces one partition rather than
-   fifty. The partitioner is not reproducible run-to-run above two ranks
+   repartitions, so the np 1-2 bitwise gate faces one partition rather than one
+   per step. The partitioner is not reproducible run-to-run above two ranks
    (`src/Canopy_TreePartitioner.hpp:417-419`), and every further invocation is
    another opportunity for the np=2 cut to stop coming out the same way.
 
@@ -615,8 +660,7 @@ count, confirming it.
 5. **`LaplaceSolve.bitForBitArtifacts` — np 1-2.** `GTEST_SKIP` at np ≥ 3 with a
    message naming the partitioner non-determinism and pointing at `README.md`
    "Known Issues", so `ctest` output shows the gate was skipped rather than
-   passed. The body is today's `tstGolden.hpp` test moved across essentially
-   unchanged: the same four artifacts, taken from the 50th solve, dumped to host
+   passed. Four artifacts, taken from the last solve, are dumped to host
    and compared on their bit patterns — as `uint64_t` via `memcpy`, never as
    `double`, since `EXPECT_DOUBLE_EQ` has a tolerance and `NaN != NaN`:
    - `DownwardSweep::locals()` — hash and extents;
@@ -625,8 +669,8 @@ count, confirming it.
    - the sorted realized key list — hash — and `n_unique_ops` — full.
 
    Only the last solve's artifacts are compared, and that is sufficient: the
-   state at step 50 is cumulative — the locals, the operator table and the
-   realized key set there all descend from the positions the preceding 49 solves
+   state at the last step is cumulative — the locals, the operator table and the
+   realized key set there all descend from the positions the preceding solves
    produced — so a bitwise difference introduced at any earlier step is already
    carried into it.
 
@@ -647,7 +691,7 @@ count, confirming it.
    floating-point reassociation, order $10^{-13}$ relative.
 
    What that argument does not settle on its own is the size of the deviation
-   after 50 steps. Each step's $O(10^{-13})$ field difference enters the
+   after the full interval. Each step's $O(10^{-13})$ field difference enters the
    velocity update and is carried into the next step's positions, so the
    integrator amplifies it by a factor this document does not derive. The
    tolerance is therefore **measured, not derived**. It remains far tighter than
@@ -659,9 +703,11 @@ count, confirming it.
      `GlobalId`.
    - Compare against the committed np=1 record, normalizing by a **global**
      scale: $\max|\varphi|$ for the potential and $\max|\nabla\varphi|$ for the
-     gradient over the gathered set. Never a per-particle relative error:
-     charges are uniform on $[-1,1]$, so per-particle $|\varphi|$ passes through
-     zero and a per-particle ratio measures cancellation rather than accuracy.
+     gradient over the gathered set. Never a per-particle relative error: the
+     gradient components pass through zero wherever a particle's neighbours
+     cancel, so a per-particle ratio measures that cancellation rather than
+     accuracy. One scale rule for both fields keeps the two comparisons reading
+     the same way.
    - **Measure the tolerance before pinning it.** Record the maximum normalized
      deviation at every rank count in the progress log, then pin the assertion
      at 100× the worst measured value. If the measured deviation exceeds
@@ -670,15 +716,18 @@ count, confirming it.
      the parallel dataflow.
    - **Before attributing such a deviation to the dataflow, re-measure the same
      configuration at `num_steps = 1`.** A one-step deviation at reassociation
-     level with a 50-step deviation above the threshold is the integrator
+     level with a full-interval deviation above the threshold is the integrator
      amplifying reassociation; a one-step deviation already above the threshold
-     is R8. Record both numbers either way.
+     is R8. Record both numbers either way. Measured on unmodified code at
+     `num_steps = 1`, the cross-rank deviation is $10^{-15}$ on the potential and
+     $3\times10^{-13}$ on the gradient at every rank count from 2 to 6, which is
+     what retires R8 at this configuration.
    - Assert `total_fallback_pair_count() == 0` here too, so R4's discriminator
      is still covered at 3-6 where `bitForBitArtifacts` no longer runs.
 
 7. **`LaplaceSolve.matchesDirectSum` — np 1-6.** A brute-force $O(N^2)$
-   reference on rank 0 in double precision, over the gathered step-50 positions
-   and charges, structured as `tests/tstMultiSolve.hpp:866-901`, with the same
+   reference on rank 0 in double precision, over the gathered last-step
+   positions and charges, structured as `tests/tstMultiSolve.hpp:866-901`, with the same
    global-scale normalization as step 6 rather than that function's per-particle
    ratio, for the same cancellation reason. **Measure first at every rank count,
    record in the log, and pin at 3× the worst measured value.** This test
@@ -692,14 +741,14 @@ count, confirming it.
    replacing `golden_solid_harmonic_P6.txt`. Keep the existing provenance header
    and record format. It holds:
    - three bit-for-bit records — `(nprocs, rank)` of `(1,0)`, `(2,0)`, `(2,1)` —
-     each from that configuration's 50th solve, rather than the 21 that a 1-6
+     each from that configuration's last solve, rather than the 21 that a 1-6
      bit-for-bit gate required;
    - one np=1 field record: 600 potentials and $3\times600$ gradient components
      as bit patterns in canonical `GlobalId` order (~41 KB). The np=1 run is
      bit-reproducible, which is what makes committing its output meaningful;
    - a hash of the initial global particle set — 600 positions and 600 charges,
      as bit patterns. That set is generated identically on every rank at every
-     rank count, so the hash is exact by construction, which the step-50
+     rank count, so the hash is exact by construction, which the last-step
      positions are not. It is checked first, so a generator drift fails with one
      legible message instead of 600 value mismatches.
 
@@ -713,8 +762,20 @@ count, confirming it.
    every test and no other test reads a data file.
 
 **Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes at
-ranks 1-6 on unmodified code, and both sensitivity perturbations behave as
-stated:
+ranks 1-6 on unmodified code, with `m2l_n_unique_ops() > 0` asserted at every
+rank and every rank count, and both sensitivity perturbations behave as stated.
+
+The `n_unique_ops` assertion is load-bearing rather than decorative: a
+configuration whose tree has degenerated realizes zero M2L operators, at which
+point `matchesDirectSum` passes to machine precision because the solve is pure
+P2P, `bitForBitArtifacts` compares an operator table with zero realized columns,
+and the first perturbation below cannot fail because the loop it reverses is
+never entered. Every check passes and none of them measures the far field. The
+assertion is what makes that state a failure instead of a pass. Put it in
+`bitForBitArtifacts` and in `crossRankAgreement`, beside the existing
+`total_fallback_pair_count() == 0`, so it is checked at all six rank counts.
+
+The two perturbations:
 
 - With the `m` loop at `src/Canopy_DownwardSweep.hpp:1559` reversed by hand
   (`for ( int m = n; m >= -n; m-- )` — mathematically identical and bitwise
@@ -1314,9 +1375,13 @@ cells only — then the np=$k$ field differs from the np=1 field by far more tha
 reassociation and the test has no stable reference at all. **Presents as:** T1's
 measurement step finding a deviation above $10^{-9}$ at some rank count on
 unmodified code, before any refactor has happened, **and that deviation still
-being present at `num_steps = 1`**. Crossing the threshold at 50 steps but not
-at one is the integrator amplifying reassociation, not an answer that depends on
-the partition. **Distinguished from a genuine packing bug** by exactly that
+being present at `num_steps = 1`**. Crossing the threshold over the full
+interval but not at one step is the integrator amplifying reassociation, not an
+answer that depends on the partition. Measured at `num_steps = 1` on unmodified
+code the deviation is $10^{-15}$ on the potential and $3\times10^{-13}$ on the
+gradient at every rank count from 2 to 6, so this risk does not fire at the
+frozen configuration; it stays recorded because T4 and T10 rewrite the dataflow
+the measurement covers. **Distinguished from a genuine packing bug** by exactly that
 timing: this fires on the current tree, a packing bug fires only after T4 or
 T10. **Do:** T1's stop-and-report clause exists for
 this. Do not raise the tolerance to accommodate it — a partition-dependent answer
