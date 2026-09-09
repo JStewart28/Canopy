@@ -564,7 +564,7 @@ TEST( MultiSolve, StableTree_Migrate )
                           /*dt=*/1.0e-4, /*drift_multiplier=*/1.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/1.0e-2 );
+                          /*fmm_tol=*/1.0e-8 );
 }
 
 //---------------------------------------------------------------------------//
@@ -580,7 +580,7 @@ TEST( MultiSolve, IntermediateMotion_Rebalance )
                           /*dt=*/1.0e-3, /*drift_multiplier=*/5.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/2.0e-2 );
+                          /*fmm_tol=*/1.0e-8 );
 }
 
 //---------------------------------------------------------------------------//
@@ -597,7 +597,7 @@ TEST( MultiSolve, LargeMotion_Rebuild )
                           /*dt=*/1.0e-3, /*drift_multiplier=*/50.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/3.0e-2 );
+                          /*fmm_tol=*/1.0e-8 );
 }
 
 //---------------------------------------------------------------------------//
@@ -614,7 +614,7 @@ TEST( MultiSolve, AutoMaintain )
                           /*dt=*/1.0e-3, /*drift_multiplier=*/5.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/2.0e-2, counts );
+                          /*fmm_tol=*/1.0e-8, counts );
 
     int rank;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
@@ -650,7 +650,7 @@ TEST( MultiSolve, AutoRebalance )
                           /*dt=*/1.0e-3, /*drift_multiplier=*/2.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.3, /*repl_depth=*/2,
-                          /*fmm_tol=*/2.0e-2, counts );
+                          /*fmm_tol=*/1.0e-8, counts );
 
     int rank;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
@@ -691,7 +691,7 @@ TEST( MultiSolve, M2L_BinEdge_Fallback )
                           /*dt=*/1.0e-4, /*drift_multiplier=*/1.0,
                           /*ncrit=*/8, /*max_depth=*/8,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/3.0e-2,
+                          /*fmm_tol=*/1.0e-8,
                           /*out_action_counts=*/nullptr,
                           /*clustered=*/true,
                           /*mac_theta_override=*/0.3, &max_fallback );
