@@ -1007,3 +1007,275 @@ reproduces T1's numbers exactly. **Whoever fixes the partitioner** (the task the
 first T1 section called for before T3) — the baseline's clean 62 s run at all
 six rank counts is a data point that the hang is not deterministic in the tree
 shape alone.
+
+## T3 — M2L is three kernel-owned stages
+
+T3 is **DONE**, and the load-bearing result is negative in the way the document
+wanted: **R1 did not fire.** The solid-harmonic M2L moved out of the sweep and
+into the basis with identical bit patterns on all four artifacts at np 1-2, and
+every cross-rank and direct-sum deviation at np 1-6 reproduces T1's pinned table
+to all 17 digits. The design's three-stage decision survives, and the fallback to
+the narrow abstraction is not needed. Commit `49a88de`; gate run flux job
+**`f3XWVoKhkc5u`**.
+
+### The four contract members as actually written
+
+All in `src/Canopy_LaplaceKernel.hpp`, all `KOKKOS_INLINE_FUNCTION static`,
+plus two typedefs. The document specified the parameter *lists*; the types below
+are what they had to become.
+
+```cpp
+template <class MemorySpace>
+using m2l_operators_type =
+    Kokkos::View<complex_type***, Kokkos::LayoutLeft, MemorySpace>;
+
+template <class ScratchSpace>
+using m2l_accumulator_type =
+    Kokkos::View<scalar_type*, ScratchSpace,
+                 Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+
+static constexpr std::size_t m2l_scratch_bytes( int n_comps );
+
+template <class TeamMember, class MView, class OpsType, class ScratchView>
+static void m2l_pre_cell( const TeamMember&, const MView& M_full,
+                          int source_cell, const OpsType& ops,
+                          const ScratchView& scratch );
+
+template <class TeamMember, class MView, class OpsType, class ScratchView>
+static void m2l_core( const TeamMember&, const MView& M_full,
+                      int source_cell, const OpsType& ops, int op_idx,
+                      const ScratchView& scratch );
+
+template <class TeamMember, class ScratchView, class LView, class OpsType>
+static void m2l_post_cell( const TeamMember&, const ScratchView& scratch,
+                           const LView& L_out, int target_cell,
+                           const OpsType& ops );
+```
+
+**`m2l_operators_type` had to become an alias *template*.** The document names it
+as a plain typedef, but `LaplaceKernel<Scalar, P, NComps>` carries no memory
+space — every one of its methods is templated on the view type instead — while
+`_m2l_op_table` is declared in `memory_space`. The sweep therefore spells it
+`typename KernelType::template m2l_operators_type<memory_space>` and re-exports
+that as its own `m2l_operators_type`; the existing public
+`m2l_op_table_view_type` (which `tests/tstLaplaceSolve.hpp:689` `static_assert`s
+on for LayoutLeft) is now an alias of it, so the test compiles unchanged and
+still asserts the layout the committed hashes assume. **T9 should keep the alias
+template, not flatten it**: a basis that builds its operators in a different
+memory space than the sweep's would be the only reason to change it, and nothing
+here needs that.
+
+**`m2l_scratch_bytes` is `constexpr`, and that is load-bearing for R3.** The
+sweep calls it as `KernelType::m2l_scratch_bytes( NComps )` and assigns the
+result to a `constexpr size_t`, so the scratch size, the `TeamVectorRange` bound
+and every extent inside the stages stay compile-time constants. `n_comps` is
+formally a parameter but is only ever passed the sweep's `NComps`, which is
+`KernelType::num_components`; inside the stages the extents come from the basis's
+own `num_coeffs_per_cell * NComps` rather than from the argument, so nothing in
+the moved arithmetic can be turned into a runtime value by a caller.
+
+### How the scratch bytes are sized and viewed
+
+`m2l_scratch_bytes( n ) = 2 * num_coeffs_per_cell * n * sizeof( scalar_type )` —
+896 bytes at $P=6$, `NComps = 1`, `double`.
+
+The sweep allocates it as **raw bytes**:
+
+```cpp
+using ScratchBytes = Kokkos::View<char*, scratch_space,
+                                  Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+policy.set_scratch_size( 0, Kokkos::PerTeam(
+    ScratchBytes::shmem_size( scratch_bytes ) ) );
+...
+ScratchBytes scratch( team.team_scratch( 0 ), scratch_bytes );
+```
+
+and the basis re-views the same storage as the two `scalar_type` arrays the old
+sweep held directly, at offsets 0 and `n_acc`:
+
+```cpp
+scalar_type* acc_base = reinterpret_cast<scalar_type*>( scratch.data() );
+acc_type team_acc_re( acc_base, n_acc );
+acc_type team_acc_im( acc_base + n_acc, n_acc );
+```
+
+This is the part the task flagged as most likely to break the gate, and it did
+not: the real/imag **split** is preserved, so each accumulator update touches 8
+bytes rather than 16, and the summation is the same sequence of `double`
+additions it was before. The rationale comment moved with it onto
+`m2l_scratch_bytes`, which now also says explicitly that collapsing the two
+arrays into one `complex_type` array is mathematically identical and *bitwise
+different* and so is not an available simplification. A single
+`Kokkos::View<char*>` allocation replaces the two `ScratchReal::shmem_size` ones;
+`ScratchMemorySpace::get_shmem` returns an 8-byte-aligned pointer, which is what
+makes the `reinterpret_cast` to `scalar_type*` well-defined.
+
+**The zero-fill stayed in the sweep, as the task directed, and therefore became a
+byte fill** — the sweep no longer knows the layout, so it fills raw storage and
+relies on IEEE-754 giving every floating-point accumulator an all-zero-bytes
+representation. The contract is documented on `run_m2l_fused`: a basis whose
+accumulator identity element is not all-zero bytes must establish it itself.
+
+### Where `m2l_pre_cell` is called, and what that placement is worth
+
+Once per source cell in the target team's CSR slice, immediately before
+`m2l_core` for that pair. Within a team that is genuinely once per source cell —
+a target's CSR slice holds distinct sources — but *across* teams the same source
+cell is re-visited by every target that sees it. So the hook exists and is
+correctly scoped for a basis that needs per-source state in team scratch, but it
+does **not** yet deliver the flop advantage the design's
+$U_\ell(\sum C_{\rm key}(V_\ell^\top M^B))$ form is after, which needs
+$V_\ell^\top M^B$ computed once per source cell *globally* and stored somewhere
+that outlives the team. That storage does not exist: the signature the document
+specifies hands `m2l_pre_cell` the team scratch, which is per-target by
+construction. **This is the genuinely new structural element the design predicted
+would "fit nowhere", and it is only half-placed.** Whoever builds the first basis
+that needs it (T6, and T8 if it assumes the compressed form's cost model) must
+either add a per-source-cell buffer outside the team loop or accept
+recomputation per target.
+
+### Where the fused loop's arithmetic and `m2l_apply_operator`'s differed
+
+Two differences, and per the task the fused loop won both:
+
+- **Source access.** `m2l_apply_operator` read the multipole through
+  `get_coeff_3d( M_full, source_cell, n, m, c )`; the fused loop expanded the
+  conjugate symmetry inline as `storage_idx = n*(n+1)/2 + abs_m` followed by
+  `complex_type( stored.real(), -stored.imag() )` for $m<0$. These are
+  arithmetically the same here — `get_coeff_3d`'s two out-of-range guards cannot
+  fire for $0 \le n \le P$, $|m| \le n$, `coeff_index(n, abs_m)` *is*
+  `n*(n+1)/2 + abs_m` (`Canopy_SphericalCoefficients.hpp:59`), and its $m<0$
+  branch is the same conjugation. Kept the inline form anyway: identical
+  arithmetic is not the same claim as identical code generation, and the gate is
+  bitwise.
+- **Loop nesting.** `m2l_apply_operator` nested $(n, m, c)$ with a
+  `complex_type accum[NComps]` array; the fused loop nested $(c, n, m)$ with one
+  `complex_type acc(0,0)` scalar. The per-component addition *sequence* is the
+  same in both, so this was a free choice on paper — but only the fused nesting
+  had been compiled and measured against the reference data, so it is what
+  `m2l_core` carries.
+
+The function was grown, not deleted and rewritten: it keeps its identity, its
+`KOKKOS_INLINE_FUNCTION static` form and its documentation lineage, and the
+comment now records both deviations above so the next reader does not "restore"
+`get_coeff_3d` and silently break the gate.
+
+### R3 — measured, and it fired
+
+Not a correctness gate and no exit criterion depends on it, but the answer is not
+"no change". Method: a **second** build tree, `build-tuolumne-prof/`, configured
+from the same `run_cmake_tuolumne.sh` with `Canopy_ENABLE_PROFILING=ON` and
+`Canopy_PROFILING_LEVEL=2` — **the committed `build-tuolumne/` has profiling
+`OFF`**, contrary to what the task prompt assumed, and reconfiguring it would
+have put the bitwise gate and the timing measurement in different build
+configurations across the before/after pair. `scripts/tuolumne/run_laplace_solve_profile.flux`
+runs `Canopy_Test_LaplaceSolve_MPI_SERIAL_np_1` there under `ctest -V`. The
+figure is `M2L kernel (all depths)` from the `DownwardSweep::execute()` table,
+summed over the 24 solves one np=1 invocation performs.
+
+| Build | flux job | M2L kernel (24 solves) | Downward sweep total | Total solve |
+| --- | --- | --- | --- | --- |
+| before (unmodified) | `f3XW3XTKcr8o` | **0.053** | 1.169 | 1.348 |
+| before (repeat) | `f3XW5NgdA1y9` | **0.055** | 1.185 | 1.365 |
+| after (T3 as committed) | `f3XWBFwkZb6f` | **0.065** | 1.198 | 1.380 |
+| after (repeat) | `f3XWDkueaXqq` | **0.063** | 1.192 | 1.367 |
+| after (final binary) | `f3XWWdYC7twR` | **0.068** | 1.210 | 1.390 |
+| variant: word-granularity zero-fill | `f3XWNdSA5rpf` | 0.062 | 1.196 | 1.374 |
+| variant: raw pointers, no accumulator views | `f3XWQMddcbRH` | 0.067 | 1.211 | 1.390 |
+
+**The two clusters do not overlap**: 0.053-0.055 before, 0.062-0.068 after. That
+is roughly **+18% on the M2L kernel**, which is +1.5% on the downward sweep and
++0.5% on `solve()`. The per-sample timer prints only three decimals on values of
+0.002-0.004 s, so no single sample is meaningful; the signal is the summed total
+and the histogram shift (before: 20x 2 ms / 3x 3 ms / 1x 4 ms; after: 10 / 8 / 6).
+
+**Two candidate causes were tested and both were excluded.** Making the sweep's
+zero-fill word-granular instead of byte-granular (0.062) and replacing the
+basis's two unmanaged accumulator views with raw `scalar_type*` (0.067) both land
+inside the post-move cluster. Both experiments were reverted; the committed code
+is the byte fill and the unmanaged views, which is also the form the design
+document describes. **The cost is therefore intrinsic to putting the contraction
+behind the basis interface**, not to either micro-detail, and finding it would
+need a sharper instrument than a 1 ms timer — a Kokkos kernel-level profile or a
+raw loop-count harness. Recorded, not fixed: it is 0.5% of a solve, and chasing
+it inside T3 would have meant expanding the one diff this task exists to keep
+attributable.
+
+### What only running revealed
+
+- **`build-tuolumne/` is configured with `Canopy_ENABLE_PROFILING=OFF`.** The
+  task prompt states it is ON. It is not, and no prior gate log contains a single
+  `[Canopy Diagnostics]` line. Anyone else asked to measure R3 or R4 needs the
+  second build tree (or to reconfigure and accept the confound); the script and
+  the reasoning are committed.
+- **The partitioner's non-determinism now shows up *within a single job* at
+  np=5, and it is not T3's.** At np=5 the three test bodies run three separate
+  solves. In every T1/T2-era log all three drew the same cut
+  (`n_unique_ops` 180/168/147/217/187). In this session's runs they split into
+  two cuts — one solve draws 170 on rank 0 and 177 on rank 1, the others draw the
+  old set — which moves the np=5 direct-sum deviation in its 9th significant
+  digit (3.209361028925181e-07 vs 3.2093610310582619e-07), still 3x under
+  tolerance. **Attributed by a control run, not by argument**: the change was
+  stashed, `build-tuolumne/` rebuilt from unmodified `HEAD`, and the gate re-run
+  (flux job **`f3XWSVHd6FVh`**) — unmodified code reproduces the same 170/177
+  split. So this is `TreePartitioner::partition_leaves`' documented multijagged
+  non-determinism (`src/Canopy_TreePartitioner.hpp:417-419`) presenting between
+  invocations in one process, and something about this session's nodes rather
+  than the source changed how it lands. The final gate run happened to draw the
+  T1 cut in all three solves, which is why the **Met.** paragraph can claim all
+  17 digits at all six rank counts. **A later task must not read a np=5
+  direct-sum difference in the 9th digit as its own doing**, and the np 1-2
+  bitwise half of the gate is unaffected because the cut over one or two parts is
+  reproducible.
+- **The gate ran clean six times in a row.** No np=3 hang appeared in any of the
+  four full-gate jobs this session (41-46 s each), consistent with T2's note that
+  it is intermittent.
+- **Formatting.** `clang-format` was run with explicit `--lines=` ranges covering
+  only the touched hunks, per the task's instruction not to run `clangformat.sh`
+  over these headers. It changed exactly one line — reflowing the `ScratchBytes`
+  alias onto two lines.
+
+### Repository state left behind
+
+- `src/Canopy_LaplaceKernel.hpp` — `m2l_operators_type`,
+  `m2l_accumulator_type`, `m2l_scratch_bytes`, `m2l_pre_cell`, `m2l_core`
+  (grown from `m2l_apply_operator`), `m2l_post_cell`; `#include <cstddef>`
+  added for `std::size_t`.
+- `src/Canopy_DownwardSweep.hpp` — `run_m2l_fused`'s body is now traversal,
+  zero-fill and three stage calls; `_m2l_op_table` and the two other spellings of
+  its type route through `m2l_operators_type`; `m2l_op_table_view_type` is an
+  alias of it. No `complex_type` remains anywhere in the fused kernel's body.
+- `scripts/tuolumne/run_laplace_solve_profile.flux` — new, the R3 instrument.
+  `build-tuolumne-prof/` is a build tree, not committed.
+- Logs kept: `canopy-laplace-solve.f3XWVoKhkc5u.log` (the gate),
+  `canopy-laplace-solve.f3XWSVHd6FVh.log` (the unmodified control),
+  and the seven `canopy-laplace-solve-prof.*.log` R3 runs.
+- **No test was added**, per the task's scope: `tests/tstLaplaceKernel.hpp` still
+  does not compile and was not touched. `ctest -L regression`,
+  `Canopy_Test_MultiSolve_*`, the np=3 hang, the partitioner, R6's premise and
+  `README.md` were all left alone as directed.
+
+**Affects:** **T4** — `coeff_type`'s shape is now constrained from two sides.
+The operator table's element type is fixed by
+`m2l_operators_type<MemorySpace> = View<complex_type***, LayoutLeft>` and the
+`LayoutLeft` `static_assert` in `tests/tstLaplaceSolve.hpp:689` is now written
+against that alias, so a T4 that generalizes the coefficient element type must
+carry the operator table's element type with it or the two will silently
+disagree. The scratch, by contrast, imposes **nothing**: it is raw bytes sized by
+a basis-supplied `constexpr`, so a basis whose coefficients are real, or blocked,
+or of a different width needs no sweep change at all. T4 should also re-run the
+R3 measurement with `scripts/tuolumne/run_laplace_solve_profile.flux` against
+this section's table rather than against unmodified code, since T3 has already
+moved the baseline. **T7** and **T8** — the `op_idx` boundary is now the *only*
+thing the sweep says about an operator: `csr_op_idx` carries an `int`, `-1` still
+means "fall back", and `m2l_core` is the sole reader. T7's depth-carrying key
+changes what `op_idx` *indexes* and needs no change to the sweep's fused kernel;
+T8's overflow policy changes which pairs get `-1` and likewise touches only the
+builder. Both are now genuinely local edits. **T9** — the operator builder it
+replaces is the block at `src/Canopy_DownwardSweep.hpp:1121` that allocates
+`m2l_operators_type op_table( ..., Nt, Ns, n_unique_ops )` and fills it with
+`KernelType::m2l_build_operator`; that is the last place in the sweep that
+commits to the operator table's *shape*, and the typedef it now uses is the
+handle T9 should move behind a basis-owned `build_m2l_operators`. **T6** — see
+the `m2l_pre_cell` placement note above: the hook exists, but a basis needing
+once-per-source-cell work that outlives the team has nowhere to put it yet.

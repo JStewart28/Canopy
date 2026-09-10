@@ -1003,7 +1003,7 @@ values included. np=3-6 were not compared, and no later task carries a
 
 ---
 
-### T3 — M2L is a three-stage kernel-owned operation, solid-harmonic bit-identical — **NOT STARTED**
+### T3 — M2L is a three-stage kernel-owned operation, solid-harmonic bit-identical — **DONE**
 
 **This is the gate for the whole document.** Perform it alone. Do not fold any
 part of T4 or later into it: the value of this task is that a bitwise difference
@@ -1051,6 +1051,27 @@ sufficient: the contraction being moved is per-target-cell arithmetic, so R1
 presents at np=1 (see [The bit-for-bit gate](#the-bit-for-bit-gate)).
 Additionally, `grep -n "complex_type" src/Canopy_DownwardSweep.hpp` must show no
 hit inside `run_m2l_fused`'s body.
+
+**Met.** Commit `49a88de`, flux job **`f3XWVoKhkc5u`** (tuolumne1040, Cray clang
+20.0.0, `RelWithDebInfo`, Kokkos SERIAL): `ctest -R
+Canopy_Test_LaplaceSolve_MPI_SERIAL` reports **6/6 passed**, and every measured
+deviation reproduces T1's pinned table to all 17 digits at **every** rank count
+1-6 — cross-rank 4.1994107222659022e-13 / 2.1570013757642702e-12 (np=2),
+1.114294857300434e-12 / 5.5987399483706545e-12 (np=4, the worst, against
+`LS_CROSS_RANK_TOL = 5.6e-10`), and direct-sum 3.2093610331931809e-07 /
+4.2399302231264458e-08 (np=1) through 3.2093610299905848e-07 (np=6) against
+`LS_DIRECT_SUM_TOL = 9.63e-07`. `fallback_pairs` is 0 at every rank and rank
+count, so **R4**'s discriminator is intact. `bitForBitArtifacts` passes at np 1-2
+on all four artifacts, so **R1 did not fire**: the solid-harmonic M2L moved into
+the basis bit-identically and the rest of this document stands as written. The
+`complex_type` grep returns no hit inside `run_m2l_fused`'s 73-line body.
+
+**R3 did fire, mildly, and is recorded rather than fixed.** The M2L-kernel timer
+rises from 0.053-0.055 s to 0.062-0.068 s summed over 24 solves (about +18%),
+against 1.5% on the downward sweep and 0.5% on `solve()`. It is not the scratch
+byte-fill and not the per-pair accumulator-view construction — both were
+measured and neither accounts for it. Numbers, variants and method are in the
+progress log; no exit criterion depends on this.
 
 ---
 
