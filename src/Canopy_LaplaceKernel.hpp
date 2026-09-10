@@ -156,7 +156,6 @@ struct LaplaceKernel
     static constexpr int max_order = P;
     static constexpr int num_coeffs_per_cell = ( P + 1 ) * ( P + 2 ) / 2;
     static constexpr int num_components = NComps;
-    static constexpr bool has_mplus_symmetry = true;
 
     // -----------------------------------------------------------------------
     // Retrieve a coefficient from 3D storage with symmetry for m < 0.

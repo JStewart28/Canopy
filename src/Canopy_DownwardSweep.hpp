@@ -107,7 +107,6 @@ class DownwardSweep
     using scalar_type = typename KernelType::scalar_type;
     using complex_type = typename KernelType::complex_type;
 
-    static constexpr int P = KernelType::max_order;
     static constexpr int coeffs_per_cell = KernelType::num_coeffs_per_cell;
     static constexpr int NComps = KernelType::num_components;
 
@@ -302,8 +301,6 @@ class DownwardSweep
         std::is_same<typename KernelType::scalar_type, float>::value ? 4 : 6;
     static constexpr int M2L_KEY_OFFSET_MAX = 32;
     static constexpr int M2L_OP_COUNT_CAP = 32768;
-
-    static constexpr int M2L_NUM_SRC = ( P + 1 ) * ( P + 1 );
 
     struct M2LKey
     {
@@ -517,18 +514,6 @@ class DownwardSweep
                   const potential_view_type& potential_out,
                   const gradient_view_type& gradient_out,
                   bool compute_gradient );
-
-    // Step-2 scaffolding: multiplies every leaf cell's local by
-    // w_self^{n} so the bridged pipeline (L2L produces physical L,
-    // L2P consumes L̄) is numerically identical to the original.
-    void apply_l2p_normalization_bridge();
-
-    // Step-4 scaffolding: scales L at every cell of `depth` by
-    // w_self^{n · exp_sign}. exp_sign=+1 converts physical → L̄,
-    // exp_sign=-1 converts L̄ → physical. Used to bracket
-    // run_l2l_at_depth so the new (L̄ in, L̄ out) kernel can be
-    // tested without disturbing L state outside the call.
-    void scale_locals_at_depth( int depth, int exp_sign );
 
     // Multipole exchange for M2L: receive source multipoles from
     // remote ranks so we can run M2L locally.
@@ -1957,90 +1942,6 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
-void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
-    scale_locals_at_depth( int depth, int exp_sign )
-{
-    if ( depth < 0 || depth > _max_depth )
-        return;
-    auto& d_all = _d_all_at_depth[depth];
-    const int n_cells = d_all.extent( 0 );
-    if ( n_cells == 0 )
-        return;
-
-    auto locals = _locals;
-    auto device_cells = _device_cells;
-    auto d_all_view = d_all;
-    constexpr int P_local = KernelType::max_order;
-    constexpr int NComps_local = KernelType::num_components;
-    const int sign = exp_sign;
-
-    Kokkos::parallel_for(
-        "scale_locals_at_depth",
-        Kokkos::RangePolicy<execution_space>( 0, n_cells ),
-        KOKKOS_LAMBDA( int i ) {
-            const int cidx = d_all_view( i );
-            const auto& dci = device_cells( cidx );
-            const scalar_type w = dci.half_width;
-            const scalar_type step =
-                ( sign > 0 ) ? w : ( static_cast<scalar_type>( 1 ) / w );
-            // factor = w^{n · sign}; n=0 ⇒ factor=1 (skip).
-            scalar_type factor = step; // for n=1
-            for ( int n = 1; n <= P_local; n++ )
-            {
-                for ( int m = 0; m <= n; m++ )
-                {
-                    const int idx = n * ( n + 1 ) / 2 + m;
-                    for ( int c = 0; c < NComps_local; c++ )
-                    {
-                        auto& L = locals( cidx, idx, c );
-                        L.real() *= factor;
-                        L.imag() *= factor;
-                    }
-                }
-                factor *= step;
-            }
-        } );
-    Kokkos::fence();
-}
-
-template <class MemorySpace, class ExecutionSpace, class KernelType>
-void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
-    apply_l2p_normalization_bridge()
-{
-    auto locals = _locals;
-    auto device_cells = _device_cells;
-    const int num_cells = device_cells.extent( 0 );
-    constexpr int P_local = KernelType::max_order;
-    constexpr int NComps_local = KernelType::num_components;
-
-    Kokkos::parallel_for(
-        "l2p_norm_bridge",
-        Kokkos::RangePolicy<execution_space>( 0, num_cells ),
-        KOKKOS_LAMBDA( int cidx ) {
-            const auto& dci = device_cells( cidx );
-            if ( !dci.is_leaf )
-                return;
-            const scalar_type w = dci.half_width;
-            scalar_type w_pow = static_cast<scalar_type>( 1 ); // w^n at n=0
-            for ( int n = 0; n <= P_local; n++ )
-            {
-                for ( int m = 0; m <= n; m++ )
-                {
-                    const int idx = n * ( n + 1 ) / 2 + m;
-                    for ( int c = 0; c < NComps_local; c++ )
-                    {
-                        auto& L = locals( cidx, idx, c );
-                        L.real() *= w_pow;
-                        L.imag() *= w_pow;
-                    }
-                }
-                w_pow *= w;
-            }
-        } );
-    Kokkos::fence();
-}
-
-template <class MemorySpace, class ExecutionSpace, class KernelType>
 template <class PositionType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2p(
     const PositionType& particle_positions,
@@ -2176,8 +2077,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
 
         // L2P: evaluate local expansion at each particle. After step 5
         // every multipole/local in the pipeline is in scale-normalized
-        // form, so no bridges are needed — l2p_evaluate consumes L̄
-        // directly.
+        // form, so l2p_evaluate consumes L̄ directly.
         run_l2p( particle_positions, potential_out, gradient_out,
                  compute_gradient );
     }

@@ -867,3 +867,143 @@ re-establishing it. **A note for whoever revisits the second perturbation:** it
 cannot be made to fire at np ≥ 2 only, for the reason measured above; if the
 design wants a perturbation that discriminates np=1 from np ≥ 2 in this path,
 it needs one that touches the summation rather than the slot indexing.
+
+## T2 — dead solid-harmonic scaffolding deleted
+
+T2 is **DONE**. Six members removed, 142 lines, no arithmetic change
+demonstrated by the Laplace-solve gate reproducing T1's entire measured table to
+every digit. The regression comparison was completed at np 1-2 and then stopped
+at the user's direction because the run was hanging at np=3; that clause of the
+exit criterion is therefore partially met, and the gap is np=3-6.
+
+### The searches, run before deleting and again after
+
+Each of the six was searched across `src/`, `tests/` and `examples/` before it
+was touched. The document's callers table was correct — no caller had landed
+since:
+
+| Symbol | Hits before | What they were |
+| --- | --- | --- |
+| `apply_p2m_normalization_bridge` | 2 | declaration `Canopy_UpwardSweep.hpp:212`, definition `:418` |
+| `apply_l2p_normalization_bridge` | 2 | declaration `Canopy_DownwardSweep.hpp:524`, definition `:2008` |
+| `scale_locals_at_depth` | 3 | declaration `:531`, definition `:1961`, and its own `parallel_for` label string `:1978` |
+| `M2L_NUM_SRC` | 1 | definition `:306` |
+| `has_mplus_symmetry` | 1 | definition `Canopy_LaplaceKernel.hpp:159` |
+| `DownwardSweep::P` | 1 code + 4 comments | definition `:110`, read only by `M2L_NUM_SRC`; `:97`, `:296`, `:299`, `:493`, `:1520` are prose |
+
+The third `scale_locals_at_depth` hit is worth naming because a callers table
+cannot show it: the Kokkos kernel-label string inside its own body. It is not a
+caller, and it disappeared with the body.
+
+`M2L_NUM_SRC` was deleted first and `P` second, as required. After deletion all
+five named symbols return **zero hits** across the three directories, and the
+only surviving whole-word `P` in `Canopy_DownwardSweep.hpp` is in five prose
+comments (`:97`, `:295`, `:298`, `:490`, `:1505`) that refer to the expansion
+order as a concept, not to the deleted member. `get_coeff_3d` keeps all seven
+references and `Canopy_SphericalCoefficients.hpp:70-91` is untouched.
+
+### Measured line-number offsets after the deletion
+
+Deletions: `Canopy_DownwardSweep.hpp` −100 net (1 at `:110`, 2 at `:304`, 12 at
+`:518`, 84 at `:1941`, and −2/+1 on `execute()`'s reworded comment);
+`Canopy_UpwardSweep.hpp` −40 (5 at `:208`, 35 at `:411`);
+`Canopy_LaplaceKernel.hpp` −1. File lengths went 2190 → 2090 and 683 → 643.
+
+The document's "low by roughly 55 after `:408`" was measured, not guessed, and
+it was *approximately* right for the wrong reason: relative to pre-T1 commit
+`a6c90de`, T1's three insertions (+6 at `:343`, +44 at `:445`, +5 at `:1071`)
+made the tail exactly +55 and the band `:446`-`:1071` +50, so the single figure
+hid a two-band structure. After T2 the offset is genuinely multi-band and the
+tail **changes sign**. Measured by `git diff -U0 a6c90de -- <file>`, added to a
+cited line to reach the current one:
+
+- `Canopy_DownwardSweep.hpp`: `0` ≤`:109`, `-1` ≤`:305`, `-3` ≤`:343`,
+  `+3` ≤`:445`, `+47` ≤`:470`, `+35` ≤`:1071`, `+40` ≤`:1903`, `-45` >`:1903`.
+- `Canopy_UpwardSweep.hpp`: T1 changed nothing, so citations were exact;
+  now `0` ≤`:207`, `-5` ≤`:416`, `-40` >`:416`.
+
+The Current-state paragraph carries both, plus the post-T1-numbering variant for
+T1's and T2's own citations. Individual citations elsewhere were deliberately
+not renumbered.
+
+### What only running revealed
+
+- **The ship-gate baseline does not match what Current state describes.** Flux
+  job **`f3XUAWAy6WFR`**, `ctest --output-on-failure -L regression -R MPI_SERIAL`
+  at commit `64d1648` before any deletion: **all six** rank counts fail, not
+  np=1-2 as the document says, and a **seventh** test fails —
+  `SolveFusedM2L.FP32_smokeTest`, at np 2-6, passing only at np=1 (`max_grad_rel`
+  0.277 at np=2 rising to 0.339 at np=3 against a 5e-2 budget). The six
+  `MultiSolve` failures are the documented ones and np=1 reproduces the
+  document's digits exactly (`3.485035469067542e-07`,
+  `6.8419528791564039e-07`, `9.1947965989306709e-06`). The document's
+  "six pre-existing failures" phrasing is what an exit criterion is compared
+  against, so **a later task using it verbatim will mis-attribute
+  `FP32_smokeTest` to itself.** It is pre-existing: it is in the baseline.
+- **The np=3 hang is intermittent, and that cost this task its np=3-6
+  comparison.** The baseline ran the entire gate at all six rank counts in 62 s
+  with no hang at all — the first time this has been observed. The
+  post-deletion run (**`f3XUPJqSuqdh`**, same script, same wall, same binary
+  path) hung at np=3 for over 10 minutes and was cancelled. Same command, same
+  checkout, opposite behaviour, which points at the partitioner
+  non-determinism rather than at anything T2 touched. Anyone budgeting wall for
+  this gate should assume the hang, not the 62 s.
+- **The np 1-2 overlap is identical, which is the real evidence.** Baseline and
+  post-deletion agree on the failure *set* at np=1 and np=2 and on **every
+  reported error value to the last digit**, including the np=2 values that
+  depend on the partition and the FP32 gradient `0.27730911646389911`. A
+  deletion that changed arithmetic could not do that.
+- **Two `unit` test targets do not compile, and neither is T2's doing.** A
+  `make -j 4 -k` over the whole tree fails exactly two targets at every backend:
+  `Canopy_Test_LaplaceKernel_*` (35 errors, "no matching function" for
+  `p2m_contribution`, `m2m_translate`, `m2l_translate`, `l2l_translate`,
+  `l2p_evaluate`) and `Canopy_Test_P2P_*` (3 errors, `tstP2P.hpp:449` passes
+  `std::array<double,3>` where `TreeBuilder`'s constructor
+  (`Canopy_TreeBuilder.hpp:164-166`) takes `std::array<double,6>`). Both files
+  are unmodified by T2, the `TreeBuilder` signature drift traces to commit
+  `8b0298e` "Refactor Solver constructor", and stashing T2's diff and rebuilding
+  `Canopy_Test_LaplaceKernel_SERIAL` at `64d1648` produces the same 14 errors.
+  Neither is in the `regression` gate, so neither blocks the ship gate — but
+  `ctest -L unit` cannot be run as the document's diagnostic layer until they
+  are fixed, and **`tstLaplaceKernel.hpp` is where T3 has to add its
+  per-operator tests.**
+- **Formatting.** `Canopy_DownwardSweep.hpp` is 365 lines from
+  `.clang-format`-clean after the deletion (431 before, the drop being deleted
+  non-clean lines), `Canopy_UpwardSweep.hpp` 31 and `Canopy_LaplaceKernel.hpp`
+  63. `clangformat.sh` was not run, per the task's instruction; the one line T2
+  inserted is format-clean on its own.
+
+### Repository state left behind
+
+- `src/Canopy_UpwardSweep.hpp`, `src/Canopy_DownwardSweep.hpp`,
+  `src/Canopy_LaplaceKernel.hpp` — six members deleted, one comment reworded.
+  Pure deletion otherwise; no reformatting, no renaming, no behaviour change.
+- `tasks/abstract-solver-backend.md` — T2 marked **DONE** with a `Met.`
+  paragraph; the Current-state opener now states what T1 and T2 actually built;
+  the line-number paragraph replaced with the measured multi-band offsets; the
+  group (a) heading marked done so a later session does not re-run T2.
+- Logs kept: `canopy-ctest-minset-dev.f3XUAWAy6WFR.log` (baseline),
+  `canopy-laplace-solve.f3XUMSqyY4qV.log` (gate),
+  `canopy-ctest-minset-dev.f3XUPJqSuqdh.log` (partial post-deletion).
+- Out of scope and untouched: the pre-existing regression failures, the np=3
+  hang, the partitioner non-determinism, the two broken `unit` targets, and
+  `README.md` "Known Issues".
+
+**Affects:** **T3** — three things. Its exit criterion must not be written
+against "the six pre-existing `MultiSolve` failures": the real baseline is seven
+tests at the rank counts measured above, and `FP32_smokeTest` will otherwise be
+charged to T3. Its per-operator tests belong in `tests/tstLaplaceKernel.hpp`,
+**which does not currently compile** for reasons predating T2, so T3 must budget
+for repairing that target before it can add anything to it. And
+`m2l_apply_operator`, which T3 grows into `m2l_core`, was left alone by T2 as
+the document's [Deliberate deviations](#deliberate-deviations) directs. **T4**,
+**T7**, **T8**, **T10** — same baseline correction applies to every exit
+criterion phrased as "exactly the six pre-existing failures". **Every task whose
+gate is the regression suite** — budget for the np=3 hang; it is intermittent,
+it consumed this task's np=3-6 comparison, and 15 minutes of wall is not enough
+when it fires. The Laplace-solve gate, by contrast, completed in 41 s and is the
+cheaper and sharper instrument: it caught nothing here precisely because it
+reproduces T1's numbers exactly. **Whoever fixes the partitioner** (the task the
+first T1 section called for before T3) — the baseline's clean 62 s run at all
+six rank counts is a data point that the hang is not deterministic in the tree
+shape alone.

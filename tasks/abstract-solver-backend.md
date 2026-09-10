@@ -254,21 +254,45 @@ a task in this document.
 
 ## Current state
 
-Nothing in this document has been built except the diagnostic surface and the
-harness skeleton T1 needs; those are described below where they are relevant.
+Two things in this document are built. **T1 is complete** — the diagnostic
+surface on the sweeps, the solve-level gate `tests/tstLaplaceSolve.hpp`, its
+committed reference data `tests/data/laplace_solve_P6.txt`, and both pinned
+tolerances (`LS_CROSS_RANK_TOL = 5.6e-10`, `LS_DIRECT_SUM_TOL = 9.63e-07`) all
+exist and pass at ranks 1-6. **T2 is complete** — the five dead scaffolding
+members and `has_mplus_symmetry` are deleted. Nothing else here has been built.
 What follows is what is true of the repository now.
 
-**Line numbers in this document that fall after
-`src/Canopy_DownwardSweep.hpp:408` are low by roughly 55**, because T1's
-accessors were inserted there. Where a citation and the code disagree, the code
-is authoritative — search for the named symbol rather than trusting the number.
-T1's own citations are current.
+**Line numbers in this document no longer track either sweep header**, and the
+offset is not a single figure. Most citations here were written against the
+pre-T1 numbering (commit `a6c90de`); T1 inserted 55 lines into
+`Canopy_DownwardSweep.hpp` and T2 deleted 100 from it and 40 from
+`Canopy_UpwardSweep.hpp`. Measured net offsets, to be *added* to a cited line
+to reach the current one:
+
+- `src/Canopy_DownwardSweep.hpp`: `0` up to `:109`, `-1` through `:305`, `-3`
+  through `:343`, `+3` through `:445`, `+47` through `:470`, `+35` through
+  `:1071`, `+40` through `:1903`, and **`-45` from `:1904` on**. The tail of
+  this file was low by 55 before T2; it is now high by 45.
+- `src/Canopy_UpwardSweep.hpp`: T1 changed nothing here, so these citations
+  were exact. After T2: `0` up to `:207`, `-5` through `:416`, and **`-40` from
+  `:417` on**.
+
+T1's and T2's own citations were current when written, which is the post-T1
+numbering; for those, only T2's deletions apply — `-1` past `:110`, `-3` past
+`:307`, `-15` past `:532`, `-99` past `:2042` and `-100` past `:2180` in
+`Canopy_DownwardSweep.hpp`, and `-5` past `:212`, `-40` past `:449` in
+`Canopy_UpwardSweep.hpp`. Individual citations elsewhere in this document have
+deliberately **not** been renumbered. Where a citation and the code disagree,
+the code is authoritative — search for the named symbol rather than trusting
+the number.
 
 **Twelve sites in shared code encode the solid-harmonic basis.** Grouped by what
 fixes each:
 
-*(a) Five are dead. Deleting them removes the leak for free.* Verified by
-repository-wide search over `src/`, `tests/` and `examples/`:
+*(a) Five are dead. Deleting them removes the leak for free.* **Done in T2** —
+all five, plus `has_mplus_symmetry`, are deleted; the table below is the
+historical record of what was removed and its line numbers are pre-deletion.
+Verified by repository-wide search over `src/`, `tests/` and `examples/`:
 
 | Site | What it encodes | Callers |
 | --- | --- | --- |
@@ -864,7 +888,7 @@ Revert both perturbations and rebuild before finishing.
 
 ---
 
-### T2 — Dead solid-harmonic scaffolding is deleted — **NOT STARTED**
+### T2 — Dead solid-harmonic scaffolding is deleted — **DONE**
 
 **Depends on:** T1.
 
@@ -895,6 +919,44 @@ pre-existing `MultiSolve` failures of [Current state](#current-state) and no
 others, against a baseline run of the same command on the same checkout taken
 before the deletion; and a search for each deleted symbol across `src/`,
 `tests/` and `examples/` returns no hits.
+
+**Met.** All six members are deleted — `apply_p2m_normalization_bridge`,
+`apply_l2p_normalization_bridge`, `scale_locals_at_depth`, `M2L_NUM_SRC`,
+`DownwardSweep::P` and `LaplaceKernel::has_mplus_symmetry` — 142 lines removed
+across the three headers, `M2L_NUM_SRC` before `P` as required. Each symbol's
+explanatory comment went with it; `execute()`'s comment kept its invariant and
+lost the bridge clause. Neither sweep header was reformatted.
+
+**The Laplace-solve gate passes at every rank count** (flux job `f3XUMSqyY4qV`):
+`100% tests passed, 0 tests failed out of 6`, with `bitForBitArtifacts` green on
+all three committed records at np 1-2, `crossRankAgreement` green at np 2-6 and
+`matchesDirectSum` green at np 1-6. Stronger than pass/fail: every measured
+deviation reproduces T1's pinned table **to every digit** at every rank count —
+worst cross-rank `5.5987399483706545e-12` at np=4 against
+`LS_CROSS_RANK_TOL = 5.6e-10`, worst direct-sum `3.2093610363952985e-07` at
+np=2 against `LS_DIRECT_SUM_TOL = 9.63e-07` — as do `n_unique_ops` per rank
+(686; 368/386; 273/204/329; 264/128/234/194; 180/168/147/217/187;
+174/156/111/160/116/175), `initial_hash = 0xb6ad437608ad69b7`,
+`locals_ext = (103,28,1)`, `a_extent = 169` and `fallback_pairs = 0`. Neither
+tolerance was touched.
+
+**Searches returned no hits.** After the deletion,
+`grep -rn <symbol> src/ tests/ examples/` is empty for all five named symbols;
+the only surviving whole-word `P` in `Canopy_DownwardSweep.hpp` is in four prose
+comments (`:97`, `:295`, `:298`, `:490`, `:1505`). `get_coeff_3d` (7 references)
+and `Canopy_SphericalCoefficients.hpp`'s `get_coeff` are untouched, per
+[Deliberate deviations](#deliberate-deviations).
+
+**The regression comparison is met at np 1-2 only, and was stopped there at the
+user's direction.** The pre-deletion baseline is flux job **`f3XUAWAy6WFR`** on
+this checkout at commit `64d1648`; the post-deletion run is flux job
+**`f3XUPJqSuqdh`**, cancelled after np=3 hung. Over the np=1 and np=2 overlap
+the two runs are **identical** — same failure sets and every reported error
+value equal to the last digit, the partitioner-dependent np=2 values included.
+np=3-6 were not compared. Note that the baseline itself contradicts
+[Current state](#current-state) in two ways, recorded in the progress log: the
+six `MultiSolve` failures occur at **all six** rank counts, not just np=1-2, and
+`SolveFusedM2L.FP32_smokeTest` fails alongside them at np 2-6.
 
 ---
 
