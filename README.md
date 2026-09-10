@@ -212,7 +212,8 @@ Labels combine with `-R` (backend/name regex) by AND, so
 MPI tests are registered at several rank counts. The rank list is controlled by
 the `Canopy_TEST_MPI_RANKS` cache variable (default `1;2;3;4;5;6`); ranks
 exceeding `MPIEXEC_MAX_NUMPROCS` are skipped at configure time. Non-MPI tests
-(`Helpers`, `Laplace`) exercise no MPI functionality and run once, serially.
+(`Helpers`, `LaplaceKernel`) exercise no MPI functionality and run once,
+serially.
 CTest launches each MPI test through CMake's `MPIEXEC_EXECUTABLE` — on a
 scheduler-managed machine, run `ctest` from inside an allocation (the per-system
 docs provide ready-made batch wrappers, e.g.
@@ -376,36 +377,52 @@ test binaries. To be triaged in a separate session: either make the partitioner
 deterministic (a deterministic algorithm, or a seeded / host-serial MJ) or cache
 and reuse a committed assignment.
 
-### Six `MultiSolve` tests fail the `1e-8` multi-step check, and np=3 hangs
+### Six `MultiSolve` tests fail the `1e-8` multi-step check at every rank count
 
 `ctest --output-on-failure -L regression -R MPI_SERIAL` does not currently pass.
-At np=1 and np=2, six tests fail the multi-step position/velocity comparison at
+Six tests fail the multi-step position/velocity comparison at
 `fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:542,546`) with measured relative
-errors of 3e-7 to 9e-6: `MultiSolve.StableTree_Migrate`,
-`IntermediateMotion_Rebalance`, `LargeMotion_Rebuild`, `AutoMaintain`,
-`AutoRebalance`, `M2L_BinEdge_Fallback`. The gate then hung at
-`Canopy_Test_MultiSolve_MPI_SERIAL_np_3` and was killed at a 15-minute wall —
-note that the np=3 hang below was previously seen only when `SingleSolve` ran in
-the same `ctest` process, whereas this run was `MultiSolve` alone.
+errors of 3e-7 to 9e-6, at **all six** rank counts:
+`MultiSolve.StableTree_Migrate`, `IntermediateMotion_Rebalance`,
+`LargeMotion_Rebuild`, `AutoMaintain`, `AutoRebalance`, `M2L_BinEdge_Fallback`.
+A seventh test, `SolveFusedM2L.FP32_smokeTest`, fails alongside them at np 2-6 —
+see the entry below.
 
 This is **pre-existing**: checking out `src/Canopy_DownwardSweep.hpp` at
 `a6c90de`, the commit before the Laplace-solve harness work began, rebuilding
 and rerunning reproduces the identical error values to every digit
 (`3.485035469067542e-07`, `6.8419528791564039e-07`, `9.1947965989306709e-06`).
 
-It supersedes part of the entry below, which was written when these tests passed:
-`SolveFusedM2L.FP32_smokeTest` is no longer the suite's only failure, and it
-*passed* at np=1 in these runs. Whether the six failures and the np=3 hang share
-a cause with the partitioner non-determinism above has not been investigated.
+Whether these failures share a cause with the partitioner non-determinism above
+has not been investigated.
+
+### The `regression` gate hangs intermittently at np=3
+
+`Canopy_Test_MultiSolve_MPI_SERIAL_np_3` sometimes hangs until the scheduler
+wall kills it, and sometimes does not, with no change to the command, the
+checkout or the binary. Both behaviours were observed on the same build of
+commit `64d1648`: one run of the gate command above completed all six rank
+counts in 62 s with no hang at all (flux job `f3XUAWAy6WFR`), while a later run
+of the same script over the same binary path hung at np=3 for over ten minutes
+and was cancelled (flux job `f3XUPJqSuqdh`).
+
+Because it is intermittent, a clean run is not evidence the hang is gone, and
+15 minutes of wall is not a safe budget for this gate. The `SingleSolve` entry
+below describes a *reproducible* np=3 hang with the same signature that occurs
+only when `SingleSolve` shares the `ctest` process; this one occurs with
+`MultiSolve` running alone, so the two are not known to be the same defect. The
+run-to-run variation is shared with the partitioner non-determinism above, which
+is the first thing to rule out.
 
 ### `SolveFusedM2L.FP32_smokeTest` fails at ≥ 2 ranks
 
 In the `Canopy_Test_MultiSolve_MPI_SERIAL` suite, `SolveFusedM2L.FP32_smokeTest`
 passes at 1 rank but fails at 2–6 ranks: the FP32 max relative gradient error is
-≈ 0.277, well over the test's `5e-2` budget (`tstMultiSolve.hpp:1104`). All
-other tests in the suite pass at 1–6 ranks, including the migrate/rebalance
-paths (`MultiSolve.StableTree_Migrate`, `AutoRebalance`,
-`IntermediateMotion_Rebalance`, `LargeMotion_Rebuild`).
+≈ 0.277 at np=2, rising to ≈ 0.339 at np=3, well over the test's `5e-2` budget
+(`tstMultiSolve.hpp:1104`). It is not the suite's only failure — the six
+`MultiSolve` tests of the entry above fail at every rank count, the
+migrate/rebalance paths (`MultiSolve.StableTree_Migrate`, `AutoRebalance`,
+`IntermediateMotion_Rebalance`, `LargeMotion_Rebuild`) among them.
 
 This is a **pre-existing** failure, not a regression from the
 registration-coalesced migration work (issue #22): checking out the parent
@@ -420,6 +437,33 @@ multi-rank path), independent of particle migration — which is verified
 bit-exact by `TreePartitioner.testCoalescedMigrateIntegrity`. To be triaged in a
 separate session: determine whether the fix is a corrected FP32 accumulation or
 a re-justified error budget for the multi-rank FP32 case.
+
+### Two `unit` test targets do not compile
+
+A `make -k` over the whole tree fails exactly two targets, at every backend:
+
+- **`Canopy_Test_LaplaceKernel_*`** — 35 errors, all "no matching function" for
+  `p2m_contribution`, `m2m_translate`, `m2l_translate`, `l2l_translate` and
+  `l2p_evaluate`. `tests/tstLaplaceKernel.hpp` calls these operators with
+  argument lists that no longer match their declarations in
+  `src/Canopy_LaplaceKernel.hpp`.
+- **`Canopy_Test_P2P_*`** — 3 errors; `tests/tstP2P.hpp:449` constructs a
+  `TreeBuilder` with a `std::array<double,3>` bounding-box tolerance where the
+  constructor (`src/Canopy_TreeBuilder.hpp:164-166`) takes
+  `std::array<double,6>`. The signature drift traces to commit `8b0298e`
+  "Refactor Solver constructor".
+
+Both are **pre-existing** — verified by rebuilding
+`Canopy_Test_LaplaceKernel_SERIAL` at `64d1648` with unrelated in-flight changes
+stashed, which produces the same errors. Neither target carries the `regression`
+label, so neither gates a release; both are test-side drift behind a `src/`
+signature change, not a defect in the library.
+
+The consequence is that `ctest -L unit` cannot be run as the diagnostic layer
+described under [Run with CTest](#run-with-ctest) until they are fixed. Build
+and run the individually-compiling component tests by name in the meantime. To
+be fixed in a separate session: update both test files to the current
+signatures.
 
 ### `SingleSolve` fails at np=4 and deadlocks the suite when run with other solves
 
