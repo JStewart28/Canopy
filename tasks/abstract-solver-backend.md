@@ -1417,25 +1417,39 @@ and the two hand-rolled Allreduce loops change.
    `NComps * sets_per_component`, and the same in the snapshot pack (`:1723-1740`,
    `per_cell_complex` at `:1724`) and the Allreduce pack/unpack (`:1760-1802`,
    `per_cell_complex` at `:1760`).
+
+   **Give the three loops one slot expression rather than three running
+   counters.** The snapshot pack, the Allreduce pack and the Allreduce unpack each
+   hand-roll their own `idx++` over the same `(ci, c)` nest, and the third factor
+   is what makes them able to disagree. A single
+   `shared_slot(i, ci, c, s) -> int`, used by all three and stating its own
+   flattening order on the declaration, removes that class by construction — see
+   R6, where it is the most loudly-caught class but also the easiest not to write.
 3. Raise `MonopoleBasis` to `sets_per_component = 2`, where set 0 is the monopole
    potential and set 1 is a **deliberately distinct** quantity — the monopole
    scaled by the cell half-width. A packing bug that aliases the two sets is
    invisible if they hold the same numbers.
 4. Extend the conformance test to check both sets independently across the
-   shared-cell Allreduce, at ranks 1-6. Shared cells exist at np=1 too (R6), and
-   a permutation applied consistently to both pack and unpack loops is invisible
-   to the Laplace-solve gate at every rank count, so this comparison is the only
-   thing that sees it.
+   shared-cell Allreduce, at ranks 1-6 — shared cells exist at np=1 too (R6).
+5. **Assert that the slot map is a bijection onto the full slot range**, in the
+   conformance fixture or under `CANOPY_ENABLE_DEBUG`: mark each buffer slot as
+   the pack writes it, then require every slot written exactly once and the total
+   to equal `nshared * coeffs_per_cell * NComps * sets_per_component`. This is the
+   property that separates an inert relabeling from the two classes that corrupt
+   an answer — aliasing, which writes a slot twice, and truncation, which leaves
+   slots unwritten. It needs no reference data, no configuration change, and holds
+   at every rank count.
 
 **Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
 [Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
 `crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6
-(`sets_per_component == 1` reproduces today's shapes exactly; a packing error
-whose two loops disagree fails this gate everywhere, `bitForBitArtifacts` at 1-2
-and `crossRankAgreement` at 3-6, but one applied consistently to both loops fails
-none of it — see R6, and rely on the conformance test below for that); and
+(`sets_per_component == 1` reproduces today's shapes exactly; per R6 this gate
+catches a pack/unpack disagreement everywhere, aliasing at np 1-2 through
+`bitForBitArtifacts`, and truncation at np 2-6 through `crossRankAgreement`); and
 `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` passes at ranks 1-6 with both
-sets checked, failing if set 1 is replaced by a copy of set 0.
+sets checked, failing if set 1 is replaced by a copy of set 0, and with the
+step-5 slot-coverage assertion holding at every rank count — verified by
+deliberately shortening the packed slot range so it fails, then restoring it.
 
 ---
 
@@ -1619,41 +1633,54 @@ counter, which is easy to get wrong when a third factor enters.
 `allreduce_shared_locals_at_depth` is called unconditionally
 (`src/Canopy_DownwardSweep.hpp:2050`), returning early only on `nshared == 0`
 (`:1776-1777`). At the frozen configuration np=1 has 1 shared cell at depth 0, 8
-at depth 1 and 3-4 at depth 2 — the same counts as np=2. At one rank
-`MPI_Allreduce` copies send to recv elementwise, so a pack/unpack mismatch
-corrupts np=1 exactly as it corrupts np ≥ 2.
+at depth 1 and 3-4 at depth 2 — the same counts as np=2.
 
-**Presents as one of two things, and they are not equally visible.**
+**What np=1 does instead is make the function an exact identity, structurally.**
+At one rank `MPI_Allreduce` copies send to recv, so the unpack computes
+`Snap[k] + (L(j) - Snap[k])`, which is `L(j)`. The snapshot terms cancel whatever
+they hold, and the slot expression `k` cancels with itself however wrong it is.
+So at np=1 `_locals` is unchanged by this function **whenever its own pack and
+unpack agree** — this does not depend on the snapshot being zero, and it is why
+the pack-side-only perturbation T1 ran does corrupt np=1 while a both-sides one
+does not.
 
-- *An inconsistent error* — the two loops disagreeing about a slot — corrupts
-  **every** rank count including np=1. `bitForBitArtifacts` and `matchesDirectSum`
-  fail at np=1 and `crossRankAgreement` fails at np 2-6, all by orders of
-  magnitude: a one-slot rotation of the pack side alone measures
-  $2.6\times10^{-2}$ against a $5.6\times10^{-10}$ cross-rank tolerance and a
-  $9.63\times10^{-7}$ direct-sum tolerance. This form is caught loudly and
-  everywhere.
-- *A consistent error* — the same wrong permutation applied to both loops —
-  is invisible to all three checks at every rank count. It commutes through an
-  elementwise reduction, leaving a residue of $(P-1)\big(S[j] - S[\pi(j)]\big)$
-  in the pre-M2L snapshot $S$, and $S$ measures identically **0** at every depth
-  where shared cells exist at this configuration, because no pair is
-  MAC-admissible at depth 0 or 1 under $\theta = 0.5$. **The Laplace-solve gate
-  cannot see this failure mode at all**, which is what makes T10's conformance
-  test load-bearing rather than confirmatory.
+Let $\sigma$ be the slot map the loops actually realize. Four classes follow, and
+they are not equally dangerous:
+
+| Class | np=1 | np ≥ 2 | Caught by |
+| --- | --- | --- | --- |
+| pack and unpack disagree | broken | broken | everything, by seven orders of magnitude — a one-slot rotation of the pack side alone measures $2.6\times10^{-2}$ against a $5.6\times10^{-10}$ cross-rank and a $9.63\times10^{-7}$ direct-sum tolerance |
+| **aliasing** — $\sigma$ not injective | slot $A$ receives $L(B)$ | broken | `bitForBitArtifacts` at np 1-2 |
+| **truncation** — the slot range misses a set | identity, correct | that set's M2L delta is never summed across ranks | `crossRankAgreement` at np 2-6 |
+| $\sigma$ a bijection, applied consistently | identity | residue $(P-1)\big(S[j] - S[\sigma(j)]\big)$, and $S \equiv 0$ | nothing |
+
+**The one invisible class is also the one that does not matter.** A bijection
+applied uniformly is an arbitrary internal relabeling: `_shared_snapshot_buf`
+(`src/Canopy_DownwardSweep.hpp:414`) is private and read only by these two
+functions, so no correctness claim rests on which slot holds which coefficient.
+The two classes that corrupt an answer — aliasing and truncation, which are the
+likely slips when a third factor enters — are each already covered, one at np=1
+and one at np ≥ 2. $S$ is identically zero at every shared depth at this
+configuration, because no pair is MAC-admissible at depth 0 or 1 under
+$\theta = 0.5$; that is what empties the fourth row, and it is not worth
+engineering around.
 
 **Distinguished from R1** by which checks fail: R1 moves `locals()` at np 1-2
 with the operator table, $A_{n,m}$ table and key list all matching, and leaves
-`matchesDirectSum` passing, because it is a reassociation-level difference. An
-inconsistent packing error fails `matchesDirectSum` too, four orders of magnitude
-above truncation.
+`matchesDirectSum` passing, because it is a reassociation-level difference. A
+disagreeing or aliasing packing error fails `matchesDirectSum` too, four orders
+of magnitude above truncation.
 
-**Do:** T10's conformance test must run at ranks **1-6**, not 2-6, and must give
-the two sets deliberately distinct values — equal values hide aliasing entirely.
-It must compare both sets against a host computation *after* the Allreduce, since
-that comparison is the only instrument that sees a consistent permutation. Do not
-reach for a perturbation that is meant to fail at np ≥ 2 while sparing np=1: no
-slot offset behaves that way, for the reason above, and one that did would have
-to touch the summation rather than the indexing.
+**Do:** the coverage above is a property of the gate, not something to add tests
+for. What is worth building is in T10, steps 2 and 5: one slot expression shared
+by all three loops, so "pack and unpack disagree" cannot be written; and a
+slot-coverage assertion that $\sigma$ is a bijection onto the full slot range,
+which is what separates the inert relabeling from aliasing and truncation. Do not
+reach for a perturbation meant to fail at np ≥ 2 while sparing np=1 — no slot
+offset behaves that way, for the identity reason above. Do not pin the exchange
+buffer's bytes as a further bit-for-bit artifact either: it would lock an internal
+ordering that T10 legitimately changes, so it would fire on T10 by construction,
+be re-baselined, and catch nothing.
 
 **R7 — the realized key count makes a compressed-operator basis unbuildable.**
 Not a risk to this abstraction, but to whether it is worth building. If the
