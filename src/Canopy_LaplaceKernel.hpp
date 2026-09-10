@@ -17,6 +17,7 @@
 #include <Kokkos_Complex.hpp>
 #include <Kokkos_Core.hpp>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace Canopy
@@ -156,6 +157,35 @@ struct LaplaceKernel
     static constexpr int max_order = P;
     static constexpr int num_coeffs_per_cell = ( P + 1 ) * ( P + 2 ) / 2;
     static constexpr int num_components = NComps;
+
+    // -----------------------------------------------------------------------
+    // The M2L operator set. Opaque to the sweep, which stores one of these,
+    // hands it back to m2l_pre_cell / m2l_core / m2l_post_cell and never
+    // indexes it — the only thing the sweep says about an operator is the
+    // integer op_idx its CSR carries.
+    //
+    // For this basis it is the hashed operator table, shape
+    // (num_coeffs_per_cell, m2l_num_src_coeffs, n_unique_ops): column op_idx
+    // is the dense (Nt, Ns) operator for one canonicalized translation key.
+    // LayoutLeft so subview(ops, ALL, ALL, op_idx) is a contiguous
+    // column-major (Nt, Ns) matrix consumable by cuBLAS / hipBLAS /
+    // KokkosBlas::gemm without copy or transpose.
+    //
+    // Parameterized on the memory space because the kernel itself is not;
+    // the sweep supplies its own. Spell it
+    //     typename KernelType::template m2l_operators_type<memory_space>
+    // -----------------------------------------------------------------------
+    template <class MemorySpace>
+    using m2l_operators_type =
+        Kokkos::View<complex_type***, Kokkos::LayoutLeft, MemorySpace>;
+
+    // One half of the M2L team scratch, viewed as a scalar array. See
+    // m2l_scratch_bytes for the layout and for why the real/imag split is
+    // arithmetic-visible rather than cosmetic.
+    template <class ScratchSpace>
+    using m2l_accumulator_type =
+        Kokkos::View<scalar_type*, ScratchSpace,
+                     Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
     // -----------------------------------------------------------------------
     // Retrieve a coefficient from 3D storage with symmetry for m < 0.
@@ -629,44 +659,182 @@ struct LaplaceKernel
     }
 
     // =======================================================================
-    // m2l_apply_operator
+    // M2L as three kernel-owned stages: m2l_pre_cell (per source cell),
+    // m2l_core (per pair), m2l_post_cell (per target cell). The sweep owns
+    // the traversal, the CSR walk, the team-per-target launch and the
+    // scratch allocation; everything about *what* an M2L operator is and
+    // how it is applied lives here.
     //
-    // Apply a precomputed M2L operator T_in (for one source-target offset)
-    // to translate `source_cell`'s multipole into `L_target_out`. T_in
-    // is indexed as T_in(out_idx, n*n+n+m).
+    // Contract with the sweep:
+    //   * scratch is m2l_scratch_bytes(num_components) bytes of team
+    //     scratch, zero-filled by the sweep once per team before the pair
+    //     loop and shared by all three stages. Its layout is this basis's.
+    //   * the operator set arrives as m2l_operators_type and is addressed
+    //     only by the integer op_idx the CSR carries.
+    //   * m2l_post_cell is the only stage that writes to the locals view.
     // =======================================================================
-    template <class TeamMember, class MView, class TView, class LTargetType>
-    KOKKOS_INLINE_FUNCTION static void
-    m2l_apply_operator( const TeamMember& team_member, const MView& M_full,
-                        int source_cell, const TView& T_in,
-                        const LTargetType& L_target_out )
+
+    // =======================================================================
+    // m2l_scratch_bytes
+    //
+    // Per-team M2L scratch this basis needs, in bytes. The sweep allocates
+    // exactly this much and passes it to every stage as raw bytes.
+    //
+    // Layout: two contiguous scalar_type arrays of
+    // num_coeffs_per_cell * n_comps entries — the real parts of the target
+    // local accumulator, then the imaginary parts. That split is deliberate
+    // and load-bearing: each thread touches 8 bytes per accumulator update
+    // rather than the 16 a single complex_type scratch would, which halves
+    // shared-memory bank conflicts. Collapsing the two arrays into one
+    // complex_type array is mathematically identical and *bitwise
+    // different*, so it is not a simplification available here.
+    //
+    // n_comps is the sweep's component count; it must equal num_components,
+    // and is a parameter only so the sweep can size scratch without
+    // reaching into this basis's template arguments.
+    // =======================================================================
+    KOKKOS_INLINE_FUNCTION
+    static constexpr std::size_t m2l_scratch_bytes( int n_comps )
     {
+        return 2 * static_cast<std::size_t>( num_coeffs_per_cell ) *
+               static_cast<std::size_t>( n_comps ) * sizeof( scalar_type );
+    }
+
+    // =======================================================================
+    // m2l_pre_cell
+    //
+    // Optional per-source-cell pass, run once for each source cell in a
+    // target team's CSR slice, immediately before m2l_core for that pair.
+    // A compressed shared-basis M2L forms V_l^T M^B here so the pair loop
+    // carries only the small r x r core; an FFT-accelerated M2L takes the
+    // forward transform here.
+    //
+    // The solid-harmonic basis contracts the packed multipole directly and
+    // has no per-source work, so this is a no-op. It must not write to
+    // scratch: the accumulator living there is zeroed once per team and
+    // carried across every pair of that team.
+    // =======================================================================
+    template <class TeamMember, class MView, class OpsType, class ScratchView>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_pre_cell( const TeamMember& team_member, const MView& M_full,
+                  int source_cell, const OpsType& ops,
+                  const ScratchView& scratch )
+    {
+        (void)team_member;
+        (void)M_full;
+        (void)source_cell;
+        (void)ops;
+        (void)scratch;
+    }
+
+    // =======================================================================
+    // m2l_core
+    //
+    // The per-pair apply: translate `source_cell`'s multipole through the
+    // operator at column `op_idx` of `ops` and accumulate into the team's
+    // scratch target-local accumulator.
+    //
+    // Grown from the former m2l_apply_operator, which took a preselected
+    // T_in slice and wrote into a caller-supplied local view. Two things
+    // changed, both deliberately:
+    //
+    //   * The operator set is reached only through op_idx, so the sweep
+    //     never indexes it and m2l_operators_type stays opaque there.
+    //     ops(out_idx, n*n+n+m, op_idx) is the operator entry.
+    //   * The source multipole is read by expanding the m < 0 conjugate
+    //     symmetry inline rather than through get_coeff_3d. The two are
+    //     arithmetically the same here — get_coeff_3d's out-of-range guards
+    //     cannot fire for 0 <= n <= P and |m| <= n, and its m < 0 branch is
+    //     this same conjugation — but this is the expression the fused sweep
+    //     kernel evaluated before the move, and the solid-harmonic path is
+    //     required to come through it bit-identical.
+    //
+    // Accumulation order is (out_idx) x (component) x (n) x (m) with one
+    // complex accumulator per (out_idx, component), which is likewise the
+    // order the fused sweep kernel used.
+    // =======================================================================
+    template <class TeamMember, class MView, class OpsType, class ScratchView>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_core( const TeamMember& team_member, const MView& M_full,
+              int source_cell, const OpsType& ops, int op_idx,
+              const ScratchView& scratch )
+    {
+        constexpr int n_acc = num_coeffs_per_cell * NComps;
+        using acc_type =
+            m2l_accumulator_type<typename ScratchView::memory_space>;
+        scalar_type* acc_base =
+            reinterpret_cast<scalar_type*>( scratch.data() );
+        acc_type team_acc_re( acc_base, n_acc );
+        acc_type team_acc_im( acc_base + n_acc, n_acc );
+
         Kokkos::parallel_for(
             Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
             [&]( const int out_idx )
             {
-                complex_type accum[NComps];
                 for ( int c = 0; c < NComps; c++ )
-                    accum[c] = complex_type( 0.0, 0.0 );
-
-                for ( int n = 0; n <= P; n++ )
                 {
-                    for ( int m = -n; m <= n; m++ )
+                    complex_type acc( 0, 0 );
+                    for ( int n = 0; n <= P; n++ )
                     {
-                        const int src_idx = n * n + n + m;
-                        const complex_type T_val =
-                            T_in( out_idx, src_idx );
-                        for ( int c = 0; c < NComps; c++ )
+                        for ( int m = -n; m <= n; m++ )
                         {
-                            const complex_type M_val = get_coeff_3d(
-                                M_full, source_cell, n, m, c );
-                            accum[c] += T_val * M_val;
+                            const int j = n * n + n + m;
+                            const int abs_m = ( m < 0 ) ? -m : m;
+                            const int storage_idx = n * ( n + 1 ) / 2 + abs_m;
+                            const complex_type stored =
+                                M_full( source_cell, storage_idx, c );
+                            const complex_type m_val =
+                                ( m >= 0 ) ? stored
+                                           : complex_type( stored.real(),
+                                                           -stored.imag() );
+                            acc += ops( out_idx, j, op_idx ) * m_val;
                         }
                     }
+                    const int slot = out_idx * NComps + c;
+                    team_acc_re( slot ) += acc.real();
+                    team_acc_im( slot ) += acc.imag();
                 }
+            } );
+    }
 
+    // =======================================================================
+    // m2l_post_cell
+    //
+    // Optional per-target-cell pass, run once after the team's whole source
+    // slice has been applied: it flushes the scratch accumulator into
+    // L_out(target_cell, :, :). A compressed shared-basis M2L applies U_l
+    // here; an FFT-accelerated M2L takes the inverse transform here.
+    //
+    // += rather than = so the write composes with state already in L_out:
+    // on shared targets, L2L from shallower depths has written there before
+    // the per-depth M2L runs. Each target is owned by exactly one team, so
+    // no atomics are needed.
+    // =======================================================================
+    template <class TeamMember, class ScratchView, class LView, class OpsType>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_post_cell( const TeamMember& team_member, const ScratchView& scratch,
+                   const LView& L_out, int target_cell, const OpsType& ops )
+    {
+        (void)ops;
+
+        constexpr int n_acc = num_coeffs_per_cell * NComps;
+        using acc_type =
+            m2l_accumulator_type<typename ScratchView::memory_space>;
+        scalar_type* acc_base =
+            reinterpret_cast<scalar_type*>( scratch.data() );
+        acc_type team_acc_re( acc_base, n_acc );
+        acc_type team_acc_im( acc_base + n_acc, n_acc );
+
+        Kokkos::parallel_for(
+            Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
+            [&]( const int out_idx )
+            {
                 for ( int c = 0; c < NComps; c++ )
-                    L_target_out( out_idx, c ) += accum[c];
+                {
+                    const int slot = out_idx * NComps + c;
+                    L_out( target_cell, out_idx, c ) += complex_type(
+                        team_acc_re( slot ), team_acc_im( slot ) );
+                }
             } );
     }
 

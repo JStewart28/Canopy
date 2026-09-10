@@ -331,12 +331,17 @@ class DownwardSweep
         }
     };
 
-    // Operator tables: shape (Nt, Ns, n_unique_ops). LayoutLeft so a
-    // subview(_m2l_op_table, ALL, ALL, op_idx) is a contiguous column-major
-    // (Nt, Ns) matrix consumable by cuBLAS / hipBLAS / KokkosBlas::gemm
-    // without copy or transpose.
-    Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
-        _m2l_op_table;
+    // The M2L operator set. Its type, shape and layout belong to the basis
+    // (see KernelType::m2l_operators_type, which documents the
+    // solid-harmonic one); the sweep stores it, hands it to the basis's
+    // three M2L stages and never indexes it. The only thing the sweep says
+    // about an operator is the integer op_idx its CSR carries.
+    using m2l_operators_type =
+        typename KernelType::template m2l_operators_type<memory_space>;
+
+    // The operator set built by the last build_interaction_list_device().
+    // Entry op_idx corresponds to _m2l_realized_keys[op_idx].
+    m2l_operators_type _m2l_op_table;
 
     // The realized key set, in operator-table column order: entry i is the
     // key of _m2l_op_table(:, :, i). Retained past the end of
@@ -455,10 +460,10 @@ class DownwardSweep
     // surface and not part of the supported runtime API.
     // -----------------------------------------------------------------------
 
-    // Type of the hashed M2L operator table: (Nt, Ns, n_unique_ops),
-    // LayoutLeft (see the _m2l_op_table declaration for why).
-    using m2l_op_table_view_type =
-        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>;
+    // Type of the hashed M2L operator table: whatever the basis says an
+    // M2L operator set is (see the _m2l_op_table declaration). For the
+    // solid-harmonic basis, (Nt, Ns, n_unique_ops) and LayoutLeft.
+    using m2l_op_table_view_type = m2l_operators_type;
 
     // The canonicalized M2L key, {dd, ii, jj, kk} — a signed depth
     // difference and an integer offset in units of the smaller cell width.
@@ -495,12 +500,12 @@ class DownwardSweep
 
     // Tier 2 fused team-per-target M2L kernel. For each target in
     // [target_index_lo, target_index_hi) of `csr_targets`, walks that
-    // target's source slice in csr_sources/csr_op_idx and accumulates
-    // T(:, :, op_idx) @ M(source) into _locals(target, :, :). Each
-    // target is owned by exactly one team, so no atomics on _locals.
-    // Pairs with op_idx == -1 are skipped (handled by fallback path).
-    // Public because CUDA forbids extended __host__ __device__ lambdas
-    // inside private member functions.
+    // target's source slice in csr_sources/csr_op_idx and drives the
+    // basis's three M2L stages over it, so that _locals(target, :, :)
+    // is written once. Each target is owned by exactly one team, so no
+    // atomics on _locals. Pairs with op_idx == -1 are skipped (handled
+    // by the fallback path). Public because CUDA forbids extended
+    // __host__ __device__ lambdas inside private member functions.
     void run_m2l_fused(
         const Kokkos::View<int*, memory_space>& csr_targets,
         const Kokkos::View<int*, memory_space>& csr_offsets,
@@ -654,8 +659,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     // rebuilds it against the current tree. Without this, a re-setup
     // after a tree-topology change would silently reuse stale cell
     // indices from the previous tree.
-    _m2l_op_table =
-        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>();
+    _m2l_op_table = m2l_operators_type();
     _m2l_ns_csr_targets = Kokkos::View<int*, memory_space>();
     _m2l_ns_csr_offsets = Kokkos::View<int*, memory_space>();
     _m2l_ns_csr_sources = Kokkos::View<int*, memory_space>();
@@ -1119,10 +1123,9 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     {
         const int Nt = KernelType::num_coeffs_per_cell;
         const int Ns = KernelType::m2l_num_src_coeffs;
-        Kokkos::View<complex_type***, Kokkos::LayoutLeft, memory_space>
-            op_table( Kokkos::view_alloc( Kokkos::WithoutInitializing,
-                                          "m2l_op_table" ),
-                      Nt, Ns, n_unique_ops > 0 ? n_unique_ops : 1 );
+        m2l_operators_type op_table(
+            Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_op_table" ),
+            Nt, Ns, n_unique_ops > 0 ? n_unique_ops : 1 );
         auto h_op = Kokkos::create_mirror_view( op_table );
 
         if ( n_unique_ops > 0 )
@@ -1456,17 +1459,33 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 }
 
 // -------------------------------------------------------------------------
-// Tier 2 fused team-per-target M2L kernel. Each team owns one target cell:
-// it walks its CSR source slice, applies T_op @ M(source) (with on-the-fly
-// conjugate-symmetry expansion of the packed source multipole), accumulates
-// into a per-team scratch local, and finally adds the result into
-// _locals(target, :, :). One team per target means no atomics across pairs
-// of the same target. Pairs with op_idx == -1 are skipped — they are
-// processed by the per-depth fallback path.
+// Tier 2 fused team-per-target M2L kernel. Each team owns one target cell
+// and walks its CSR source slice, driving the basis's three M2L stages:
 //
-// We use += into _locals (read-modify-write, no atomics) so the kernel is
-// composable with both the L2L-pre-existing state on shared targets at
-// per-depth time and the (zero-initialized) state on nonshared targets.
+//   KernelType::m2l_pre_cell   once per source cell in the slice,
+//   KernelType::m2l_core       once per (target, source) pair,
+//   KernelType::m2l_post_cell  once, after the slice, to write _locals.
+//
+// The sweep owns the traversal, the CSR walk, the team launch, the scratch
+// allocation and its zero-fill; it owns nothing about the arithmetic. The
+// operator set is opaque here — it is carried into the stages untouched and
+// selected only by the integer op_idx the CSR holds. Pairs with
+// op_idx == -1 are skipped; they are processed by the per-depth fallback
+// path.
+//
+// The scratch is KernelType::m2l_scratch_bytes(NComps) raw bytes of team
+// scratch, zero-filled once per team before the pair loop and shared by all
+// three stages. The layout inside is the basis's: the solid-harmonic basis
+// splits it into separate real and imaginary scalar arrays, a choice that
+// halves shared-memory bank conflicts and is arithmetic-visible, and that
+// is why the sweep hands over bytes rather than a typed accumulator view.
+// A basis whose accumulator identity element is not all-zero bytes must
+// establish it itself.
+//
+// m2l_post_cell uses += into _locals (read-modify-write, no atomics) so the
+// kernel is composable with both the L2L-pre-existing state on shared
+// targets at per-depth time and the (zero-initialized) state on nonshared
+// targets.
 // -------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace, class KernelType>
 void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_fused(
@@ -1480,33 +1499,33 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_fused(
     if ( n_teams <= 0 )
         return;
 
-    constexpr int Nt = KernelType::num_coeffs_per_cell;
-    constexpr int P_local = KernelType::max_order;
-    constexpr int n_acc = Nt * NComps;
-
     auto multipoles = _m2l_multipoles_view;
     auto locals = _locals;
-    auto op_table = _m2l_op_table;
+    auto ops = _m2l_op_table;
 
     using team_policy = Kokkos::TeamPolicy<execution_space>;
     using member_t = typename team_policy::member_type;
     using scratch_space = typename execution_space::scratch_memory_space;
-    using ScratchReal =
-        Kokkos::View<scalar_type*, scratch_space,
-                     Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
-    // Two scalar scratch arrays (real + imag) so each thread accesses 8
-    // bytes per accumulator update, halving shared-memory bank conflicts
-    // vs a single complex_type (16-byte) scratch view.
-    const size_t scratch_bytes_re = ScratchReal::shmem_size( n_acc );
-    const size_t scratch_bytes_im = ScratchReal::shmem_size( n_acc );
+    // Raw bytes: the basis owns the layout inside (see
+    // KernelType::m2l_scratch_bytes), the sweep only sizes it, zero-fills
+    // it and passes it to the stages.
+    using ScratchBytes = Kokkos::View<char*, scratch_space,
+                                      Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+
+    // constexpr, not a runtime size: NComps is a compile-time constant and
+    // m2l_scratch_bytes is constexpr, so the stages' internal extents stay
+    // compile-time and the fused kernel keeps unrolling as it did before
+    // the arithmetic moved into the basis.
+    constexpr size_t scratch_bytes = KernelType::m2l_scratch_bytes( NComps );
+    constexpr int scratch_bytes_int = static_cast<int>( scratch_bytes );
 
     // Kokkos::AUTO picks a sensible team_size per backend (e.g. 32-128 on
     // CUDA, 1 on Serial). Nt=28 at P=6 fits inside a warp; AUTO has been
     // observed to choose ~32 there, which gives good occupancy.
     team_policy policy( n_teams, Kokkos::AUTO );
     policy.set_scratch_size(
-        0, Kokkos::PerTeam( scratch_bytes_re + scratch_bytes_im ) );
+        0, Kokkos::PerTeam( ScratchBytes::shmem_size( scratch_bytes ) ) );
 
     Kokkos::parallel_for(
         "M2L_fused", policy, KOKKOS_LAMBDA( const member_t& team ) {
@@ -1515,15 +1534,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_fused(
             const int off_lo = csr_offsets( k );
             const int off_hi = csr_offsets( k + 1 );
 
-            ScratchReal team_acc_re( team.team_scratch( 0 ), n_acc );
-            ScratchReal team_acc_im( team.team_scratch( 0 ), n_acc );
+            ScratchBytes scratch( team.team_scratch( 0 ), scratch_bytes );
 
+            // Zero-fill is a byte fill because the layout is the basis's.
+            // Every floating-point accumulator this can hold has an
+            // all-zero-bytes representation under IEEE-754.
             Kokkos::parallel_for(
-                Kokkos::TeamVectorRange( team, n_acc ),
-                [&]( int i ) {
-                    team_acc_re( i ) = scalar_type( 0 );
-                    team_acc_im( i ) = scalar_type( 0 );
-                } );
+                Kokkos::TeamVectorRange( team, scratch_bytes_int ),
+                [&]( int i ) { scratch( i ) = char( 0 ); } );
             team.team_barrier();
 
             for ( int s = off_lo; s < off_hi; s++ )
@@ -1533,53 +1551,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2l_fused(
                     continue;
                 const int src_cell = csr_sources( s );
 
-                Kokkos::parallel_for(
-                    Kokkos::TeamThreadRange( team, Nt ),
-                    [&]( int out_idx ) {
-                        for ( int c = 0; c < NComps; c++ )
-                        {
-                            complex_type acc( 0, 0 );
-                            for ( int n = 0; n <= P_local; n++ )
-                            {
-                                for ( int m = -n; m <= n; m++ )
-                                {
-                                    const int j = n * n + n + m;
-                                    const int abs_m = ( m < 0 ) ? -m : m;
-                                    const int storage_idx =
-                                        n * ( n + 1 ) / 2 + abs_m;
-                                    const complex_type stored = multipoles(
-                                        src_cell, storage_idx, c );
-                                    const complex_type m_val =
-                                        ( m >= 0 )
-                                            ? stored
-                                            : complex_type(
-                                                  stored.real(),
-                                                  -stored.imag() );
-                                    acc += op_table( out_idx, j, op_idx ) *
-                                           m_val;
-                                }
-                            }
-                            const int slot = out_idx * NComps + c;
-                            team_acc_re( slot ) += acc.real();
-                            team_acc_im( slot ) += acc.imag();
-                        }
-                    } );
+                KernelType::m2l_pre_cell( team, multipoles, src_cell, ops,
+                                          scratch );
+                KernelType::m2l_core( team, multipoles, src_cell, ops, op_idx,
+                                      scratch );
             }
 
-            // Single += per (out_idx, c). No atomics: each target has one
-            // team. We use += rather than = so the kernel composes with
-            // pre-existing state on shared targets (L2L from previous
-            // depths writes to _locals before per-depth M2L runs).
-            Kokkos::parallel_for(
-                Kokkos::TeamThreadRange( team, Nt ), [&]( int out_idx ) {
-                    for ( int c = 0; c < NComps; c++ )
-                    {
-                        const int slot = out_idx * NComps + c;
-                        locals( target_cell, out_idx, c ) +=
-                            complex_type( team_acc_re( slot ),
-                                          team_acc_im( slot ) );
-                    }
-                } );
+            KernelType::m2l_post_cell( team, scratch, locals, target_cell,
+                                       ops );
         } );
 }
 
