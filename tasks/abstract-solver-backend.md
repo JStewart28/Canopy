@@ -443,7 +443,59 @@ reopening a question this document treats as settled. Each entry ends with an
 
 ## Task sequence
 
-### T1 — The Laplace-solve harness gates the solid-harmonic path at every rank count — **IN PROGRESS**
+### T1 — The Laplace-solve harness gates the solid-harmonic path at every rank count — **DONE**
+
+**Met.** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes 6/6 at ranks 1-6
+on unmodified code (flux job `f3XTw8Jdt7eo`, commit `4a351e1`), against
+`tests/data/laplace_solve_P6.txt` generated at commit `fedf400` (flux job
+`f3XKhLPnyd9H`). The configuration is frozen at charges uniform on
+$[0.5, 1.5]$ and `num_steps = 12`, the latter chosen by the step-3 measurement
+procedure: a 50-step trace first trips a degeneracy test at step 18, and 12 is
+two thirds of that rounded down. `m2l_n_unique_ops() > 0` is asserted in
+`bitForBitArtifacts` and `crossRankAgreement` and holds at all 21
+(rank, rank-count) pairs — 686 at np=1, 111 to 386 per rank at np 2-6 — so the
+far field is genuinely evaluated at the step every check reads, which is what
+the 50-step configuration failed to do. `total_fallback_pair_count()` is 0
+everywhere, keeping R4's discriminator intact. `LS_CROSS_RANK_TOL` is
+$5.6\times10^{-10}$, 100x the worst measured cross-rank deviation of
+$5.60\times10^{-12}$ (np=4, gradient); `LS_DIRECT_SUM_TOL` is
+$9.63\times10^{-7}$, 3x the worst measured direct-sum deviation of
+$3.21\times10^{-7}$ (np=2, potential). No cross-rank deviation came within
+two orders of magnitude of the $10^{-9}$ stop-and-report threshold, so R8 did
+not fire and stays retired at this configuration.
+
+**The first sensitivity perturbation behaves exactly as required** (flux job
+`f3XTnWDziu35`): with the `m` loop at `src/Canopy_DownwardSweep.hpp:1559`
+reversed, `bitForBitArtifacts` fails on the `locals()` comparison and on
+nothing else at np=1 rank 0 and both np=2 ranks — no operator-table, key-list,
+`n_unique_ops`, $A_{n,m}$ or extent failure accompanies it — while
+`crossRankAgreement` passes at np 2-6 and `matchesDirectSum` passes at np 1-6.
+
+**The second perturbation does not behave as this document states it will, and
+the reason is a property of the code rather than of the harness.** Offsetting
+the running counter by one slot at *both* `:1832` (pack) and `:1854` (unpack)
+is a **provable no-op**: the rotation is applied identically on both sides of
+an elementwise `MPI_Allreduce`, so it commutes through, and the only residue
+is proportional to `_shared_snapshot_buf`, which measures identically **0** at
+every depth where shared cells exist at this configuration. Verified rather
+than argued — flux job `f3XTprsFKehD` reproduces every cross-rank and
+direct-sum deviation to all 17 digits of the unperturbed run, and
+`bitForBitArtifacts` still passes at np 1-2. Offsetting the pack side alone
+*does* corrupt the dataflow, and `crossRankAgreement` catches it at np 2-6 by
+seven orders of magnitude (deviation $2.6\times10^{-2}$ against a
+$5.6\times10^{-10}$ tolerance; flux job `f3XTuDYZg9G3`) — so the substantive
+claim, that this test protects the shared-cell dataflow T4 and T10 rewrite, is
+verified. What is **not** true is the clause "while np=1 is unaffected":
+`bitForBitArtifacts` and `matchesDirectSum` both fail at np=1 under that
+perturbation, because the shared-cell Allreduce path runs at np=1 too —
+measured `nshared` is 1 at depth 0, 8 at depth 1 and 3-4 at depth 2. That
+contradicts R6's premise that "shared cells only exist above one rank", and R6
+should be corrected before T10 relies on it. No tolerance was raised, no rank
+count dropped, and both perturbations were reverted and the target rebuilt.
+
+Full per-step trace, per-rank-count measurements, provenance and the
+shared-cell diagnostic are in
+[the progress log](abstract-solver-backend-progress-log.md#t1--the-laplace-solve-gate-12-step-harness-completed).
 
 **Depends on:** none.
 
