@@ -216,11 +216,11 @@ is verified against all three:
 **np ≤ 2 is sufficient for T3 specifically**, which is what keeps the document's
 own gate intact. R1 — the scratch-layout regression that is the likely way the
 M2L move fails — is per-target-cell arithmetic and presents at np=1. R6's shared
-cells exist at np=2, since `replication_depth = 2` and shared cells are those at
-depth ≤ `replication_depth` (`src/Canopy_CommunicationPlan.hpp:698`). What np ≥ 3
-uniquely adds is rank-*count*-dependent indexing in the MPI packing loops, and
-the cross-rank check of T1 covers that at a tolerance far tighter than any
-accuracy bound.
+cells exist at np=1 already, since shared cells are the non-leaf cells at
+depth ≤ `replication_depth` (`src/Canopy_CommunicationPlan.hpp:698`) and nothing
+in that condition mentions the rank count. What np ≥ 3 uniquely adds is
+rank-*count*-dependent indexing in the MPI packing loops, and the cross-rank
+check of T1 covers that at a tolerance far tighter than any accuracy bound.
 
 Making the partitioner reproducible run-to-run is a recorded limitation under
 `README.md` "Known Issues", **not** a prerequisite for any task here. It is not
@@ -611,10 +611,10 @@ claim, that this test protects the shared-cell dataflow T4 and T10 rewrite, is
 verified. What is **not** true is the clause "while np=1 is unaffected":
 `bitForBitArtifacts` and `matchesDirectSum` both fail at np=1 under that
 perturbation, because the shared-cell Allreduce path runs at np=1 too —
-measured `nshared` is 1 at depth 0, 8 at depth 1 and 3-4 at depth 2. That
-contradicts R6's premise that "shared cells only exist above one rank", and R6
-should be corrected before T10 relies on it. No tolerance was raised, no rank
-count dropped, and both perturbations were reverted and the target rebuilt.
+measured `nshared` is 1 at depth 0, 8 at depth 1 and 3-4 at depth 2. R6 carries
+that measurement and what it means for T10's discriminator. No tolerance was
+raised, no rank count dropped, and both perturbations were reverted and the
+target rebuilt.
 
 Full per-step trace, per-rank-count measurements, provenance and the
 shared-cell diagnostic are in
@@ -1422,14 +1422,18 @@ and the two hand-rolled Allreduce loops change.
    scaled by the cell half-width. A packing bug that aliases the two sets is
    invisible if they hold the same numbers.
 4. Extend the conformance test to check both sets independently across the
-   shared-cell Allreduce, at ranks 2-6 where shared cells actually exist.
+   shared-cell Allreduce, at ranks 1-6. Shared cells exist at np=1 too (R6), and
+   a permutation applied consistently to both pack and unpack loops is invisible
+   to the Laplace-solve gate at every rank count, so this comparison is the only
+   thing that sees it.
 
 **Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
 [Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
 `crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6
-(`sets_per_component == 1` reproduces today's shapes exactly; `crossRankAgreement`
-at 3-6 is what covers R6's rank-count-dependent packing, since the bitwise
-comparison no longer runs there); and
+(`sets_per_component == 1` reproduces today's shapes exactly; a packing error
+whose two loops disagree fails this gate everywhere, `bitForBitArtifacts` at 1-2
+and `crossRankAgreement` at 3-6, but one applied consistently to both loops fails
+none of it — see R6, and rely on the conformance test below for that); and
 `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` passes at ranks 1-6 with both
 sets checked, failing if set 1 is replaced by a copy of set 0.
 
@@ -1607,11 +1611,49 @@ declare so and opt out of the cache.
 
 **R6 — `sets_per_component != 1` breaks the shared-cell Allreduce.** The two
 hand-rolled pack/unpack loops (`:1774-1779`, `:1796-1801`) index by a running
-counter, which is easy to get wrong when a third factor enters. **Presents as:**
-correct results at rank 1 and wrong results at ranks 2-6, since shared cells only
-exist above one rank. **Do:** T10's conformance test must run at ranks 2-6 and
-must give the two sets distinct values; equal values would hide an aliasing bug
-entirely.
+counter, which is easy to get wrong when a third factor enters.
+
+**Shared cells are not a multi-rank phenomenon.** A cell is shared when
+`depth <= _replication_depth && !is_leaf` (`src/Canopy_CommunicationPlan.hpp:698`)
+— a function of the tree alone, with no rank-count condition — and
+`allreduce_shared_locals_at_depth` is called unconditionally
+(`src/Canopy_DownwardSweep.hpp:2050`), returning early only on `nshared == 0`
+(`:1776-1777`). At the frozen configuration np=1 has 1 shared cell at depth 0, 8
+at depth 1 and 3-4 at depth 2 — the same counts as np=2. At one rank
+`MPI_Allreduce` copies send to recv elementwise, so a pack/unpack mismatch
+corrupts np=1 exactly as it corrupts np ≥ 2.
+
+**Presents as one of two things, and they are not equally visible.**
+
+- *An inconsistent error* — the two loops disagreeing about a slot — corrupts
+  **every** rank count including np=1. `bitForBitArtifacts` and `matchesDirectSum`
+  fail at np=1 and `crossRankAgreement` fails at np 2-6, all by orders of
+  magnitude: a one-slot rotation of the pack side alone measures
+  $2.6\times10^{-2}$ against a $5.6\times10^{-10}$ cross-rank tolerance and a
+  $9.63\times10^{-7}$ direct-sum tolerance. This form is caught loudly and
+  everywhere.
+- *A consistent error* — the same wrong permutation applied to both loops —
+  is invisible to all three checks at every rank count. It commutes through an
+  elementwise reduction, leaving a residue of $(P-1)\big(S[j] - S[\pi(j)]\big)$
+  in the pre-M2L snapshot $S$, and $S$ measures identically **0** at every depth
+  where shared cells exist at this configuration, because no pair is
+  MAC-admissible at depth 0 or 1 under $\theta = 0.5$. **The Laplace-solve gate
+  cannot see this failure mode at all**, which is what makes T10's conformance
+  test load-bearing rather than confirmatory.
+
+**Distinguished from R1** by which checks fail: R1 moves `locals()` at np 1-2
+with the operator table, $A_{n,m}$ table and key list all matching, and leaves
+`matchesDirectSum` passing, because it is a reassociation-level difference. An
+inconsistent packing error fails `matchesDirectSum` too, four orders of magnitude
+above truncation.
+
+**Do:** T10's conformance test must run at ranks **1-6**, not 2-6, and must give
+the two sets deliberately distinct values — equal values hide aliasing entirely.
+It must compare both sets against a host computation *after* the Allreduce, since
+that comparison is the only instrument that sees a consistent permutation. Do not
+reach for a perturbation that is meant to fail at np ≥ 2 while sparing np=1: no
+slot offset behaves that way, for the reason above, and one that did would have
+to touch the summation rather than the indexing.
 
 **R7 — the realized key count makes a compressed-operator basis unbuildable.**
 Not a risk to this abstraction, but to whether it is worth building. If the
