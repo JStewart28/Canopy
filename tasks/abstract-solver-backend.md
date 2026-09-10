@@ -273,15 +273,15 @@ repository-wide search over `src/`, `tests/` and `examples/`:
 | Site | What it encodes | Callers |
 | --- | --- | --- |
 | `UpwardSweep::apply_p2m_normalization_bridge` (`src/Canopy_UpwardSweep.hpp:212`, `:418-449`) | $w^{n+1}$ scaling, `n*(n+1)/2+m`, `.real()/.imag()` | none |
-| `DownwardSweep::apply_l2p_normalization_bridge` (`src/Canopy_DownwardSweep.hpp:474`, `:1953-1986`) | $w^n$, same index map | none |
-| `DownwardSweep::scale_locals_at_depth` (`:481`, `:1906-1949`) | $w^{n\cdot\mathrm{sign}}$, same | none |
+| `DownwardSweep::apply_l2p_normalization_bridge` (`src/Canopy_DownwardSweep.hpp:524`, `:2006-2041`) | $w^n$, same index map | none |
+| `DownwardSweep::scale_locals_at_depth` (`:531`, `:1959-2004`) | $w^{n\cdot\mathrm{sign}}$, same | none |
 | `DownwardSweep::M2L_NUM_SRC` (`:306`) | duplicates `LaplaceKernel::m2l_num_src_coeffs` (`:488`) | none |
 | `DownwardSweep::P` (`:110`) | expansion order | only `M2L_NUM_SRC`, itself dead |
 
 `LaplaceKernel::has_mplus_symmetry` (`:159`) is also dead and is deleted with
 them. `execute()`'s own comment already records that the bridges are obsolete —
 "after step 5 every multipole/local in the pipeline is in scale-normalized form,
-so no bridges are needed" (`:2122-2125`).
+so no bridges are needed" (`:2176-2179`).
 
 *(b) Six are removed by a `coeff_type` + `scalars_per_coeff` trait pair:*
 
@@ -384,6 +384,22 @@ applies to all of it. T7 and T9 read these.
 any `add_test` and defines no data directory, so the definition is applied per
 generated target from `tests/CMakeLists.txt:79-82` instead. Only the solve-level
 Laplace test reads a file; no other test under `tests/` opens one.
+
+**The repository's ship gate does not pass on unmodified code.**
+`ctest --output-on-failure -L regression -R MPI_SERIAL` fails six `MultiSolve`
+tests at np=1 and np=2 on a multi-step position/velocity comparison at
+`fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:542,546`), with measured
+relative errors of 3e-7 to 9e-6: `StableTree_Migrate`,
+`IntermediateMotion_Rebalance`, `LargeMotion_Rebuild`, `AutoMaintain`,
+`AutoRebalance`, `M2L_BinEdge_Fallback`. The gate then hangs at
+`Canopy_Test_MultiSolve_MPI_SERIAL_np_3`. Checking out the pre-T1
+`src/Canopy_DownwardSweep.hpp` (commit `a6c90de`), rebuilding and rerunning
+reproduces the identical error values to every digit, so these predate all work
+in this document; they are recorded under `README.md` "Known Issues". Fixing
+them is **not** a prerequisite for any task here, and no exit criterion below
+asks for a green run — the four tasks that touch shared code ask instead for a
+comparison against a baseline run of the same command on the same checkout,
+which is what detects a *new* failure without waiting on the six old ones.
 
 **The key, the cap and the overflow path.** The key struct is `{dd, ii, jj, kk}`
 (`:308-318`) with an FNV-style hash (`:319-335`). The class comment at
@@ -853,8 +869,8 @@ Revert both perturbations and rebuild before finishing.
 **Depends on:** T1.
 
 **Fill in:** `src/Canopy_UpwardSweep.hpp:212`, `:418-449`;
-`src/Canopy_DownwardSweep.hpp:110`, `:306`, `:474`, `:481`, `:1906-1949`,
-`:1953-1986`; `src/Canopy_LaplaceKernel.hpp:159`.
+`src/Canopy_DownwardSweep.hpp:110`, `:306`, `:524`, `:531`, `:1959-2004`,
+`:2006-2041`; `src/Canopy_LaplaceKernel.hpp:159`.
 
 **Reference:** the callers table in [Current state](#current-state) (a),
 re-verified by search before deleting.
@@ -874,8 +890,11 @@ re-verified by search before deleting.
 **Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
 [Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
 `crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6;
-`ctest --output-on-failure -L regression -R MPI_SERIAL` passes; and a search for
-each deleted symbol across `src/`, `tests/` and `examples/` returns no hits.
+`ctest --output-on-failure -L regression -R MPI_SERIAL` shows exactly the six
+pre-existing `MultiSolve` failures of [Current state](#current-state) and no
+others, against a baseline run of the same command on the same checkout taken
+before the deletion; and a search for each deleted symbol across `src/`,
+`tests/` and `examples/` returns no hits.
 
 ---
 
@@ -920,7 +939,10 @@ the scratch-split rationale is `:1458-1462`; the write-back is `:1533-1542`.
 **Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes with
 **identical bit patterns** on all four artifacts at ranks 1-2, and with
 `crossRankAgreement` at 2-6 and `matchesDirectSum` at 1-6 passing at their pinned
-tolerances; and `ctest --output-on-failure -L regression -R MPI_SERIAL` passes. If
+tolerances; and `ctest --output-on-failure -L regression -R MPI_SERIAL` shows
+exactly the six pre-existing `MultiSolve` failures of
+[Current state](#current-state) and no others, against a baseline run of the
+same command on the same checkout taken before the move. If
 the bit patterns differ, **stop and record the difference in the log before
 changing anything else** — that is R1's trigger and it changes the rest of the
 document. Ranks 1-2 are the whole bitwise gate for this task and that is
@@ -970,7 +992,10 @@ changes. `CoalescedExchangeBuffers<complex_type, …>` becomes
 (`scalars_per_coeff == 2` must reproduce today's packing exactly — bit-for-bit at
 1-2 pins the layout, and `crossRankAgreement` at 3-6 is what pins the
 rank-count-dependent indexing this task rewrites);
-`ctest --output-on-failure -L regression -R MPI_SERIAL` passes; and a
+`ctest --output-on-failure -L regression -R MPI_SERIAL` shows exactly the six
+pre-existing `MultiSolve` failures of [Current state](#current-state) and no
+others, against a baseline run of the same command on the same checkout taken
+before the change; and a
 `static_assert` that `sizeof(coeff_type) == scalars_per_coeff * sizeof(component_scalar_type)`
 holds for the solid-harmonic basis.
 
@@ -1271,7 +1296,10 @@ sets checked, failing if set 1 is replaced by a copy of set 0.
 **Exit criterion:** all six existing instantiations compile **unmodified** — do
 not touch `tests/tstMultiSolve.hpp` or the three examples; the Laplace-solve gate
 passes all three checks (`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`);
-`ctest --output-on-failure -L regression -R MPI_SERIAL` passes;
+`ctest --output-on-failure -L regression -R MPI_SERIAL` shows exactly the six
+pre-existing `MultiSolve` failures of [Current state](#current-state) and no
+others, against a baseline run of the same command on the same checkout taken
+before the change;
 and a new compile-only test instantiates
 `Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, 1, 1, MonopoleBasis>` successfully.
 
