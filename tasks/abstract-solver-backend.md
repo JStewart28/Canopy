@@ -187,6 +187,23 @@ computing it on rank 0 and broadcasting makes the assignment consistent within a
 run but not across runs. Determinism of the sweep given a partition is not
 determinism of the solve.
 
+**The partition can also move between invocations inside a single process, and a
+later task must not read that as its own doing.** At np=5 the three test bodies
+run three separate solves. Those three drew the same cut through T1 and T2
+(`n_unique_ops` 180/168/147/217/187) and have since been observed splitting into
+two cuts within one job — one solve drawing 170 on rank 0 and 177 on rank 1
+while the other two drew the earlier set. That moves the np=5 direct-sum
+deviation in its 9th significant figure, `3.209361028925181e-07` against
+`3.2093610310582619e-07`, still 3x under `LS_DIRECT_SUM_TOL`. It is the same
+multijagged non-determinism and not a property of any change: it is reproduced by
+unmodified `HEAD` (flux job `f3XWSVHd6FVh`, the control run T3 attributed it
+with). **So a np 3-6 direct-sum or cross-rank deviation that moves only in its
+9th or later significant figure and stays under its pinned tolerance is this.**
+Confirm it the same way — stash the change, rebuild, re-run the gate from
+unmodified `HEAD` — before recording it as a finding of the task. The np 1-2
+bitwise half of the gate is unaffected, because the cut over one or two parts is
+reproducible.
+
 So the gate is three checks — **the Laplace-solve gate** — and every task below
 is verified against all three:
 
@@ -264,28 +281,39 @@ a task in this document.
 
 ## Current state
 
-Two things in this document are built. **T1 is complete** — the diagnostic
+Three things in this document are built. **T1 is complete** — the diagnostic
 surface on the sweeps, the solve-level gate `tests/tstLaplaceSolve.hpp`, its
 committed reference data `tests/data/laplace_solve_P6.txt`, and both pinned
 tolerances (`LS_CROSS_RANK_TOL = 5.6e-10`, `LS_DIRECT_SUM_TOL = 9.63e-07`) all
 exist and pass at ranks 1-6. **T2 is complete** — the five dead scaffolding
-members and `has_mplus_symmetry` are deleted. Nothing else here has been built.
-What follows is what is true of the repository now.
+members and `has_mplus_symmetry` are deleted. **T3 is complete** — M2L is three
+kernel-owned stages, `m2l_pre_cell` / `m2l_core` / `m2l_post_cell` over a
+basis-sized raw-byte scratch, and the solid-harmonic path came through
+bit-identical, so **R1 did not fire** and the narrow-abstraction fallback is not
+needed. Nothing else here has been built. What follows is what is true of the
+repository now.
 
 **Line numbers in this document no longer track either sweep header**, and the
 offset is not a single figure. Most citations here were written against the
 pre-T1 numbering (commit `a6c90de`); T1 inserted 55 lines into
-`Canopy_DownwardSweep.hpp` and T2 deleted 100 from it and 40 from
-`Canopy_UpwardSweep.hpp`. Measured net offsets, to be *added* to a cited line
-to reach the current one:
+`Canopy_DownwardSweep.hpp`, T2 deleted 100 from it and 40 from
+`Canopy_UpwardSweep.hpp`, and T3 rewrote `run_m2l_fused` and shifted everything
+after it again. Measured net offsets, to be *added* to a cited line to reach the
+current one:
 
 - `src/Canopy_DownwardSweep.hpp`: `0` up to `:109`, `-1` through `:305`, `-3`
-  through `:343`, `+3` through `:445`, `+47` through `:470`, `+35` through
-  `:1071`, `+40` through `:1903`, and **`-45` from `:1904` on**. The tail of
-  this file was low by 55 before T2; it is now high by 45.
-- `src/Canopy_UpwardSweep.hpp`: T1 changed nothing here, so these citations
-  were exact. After T2: `0` up to `:207`, `-5` through `:416`, and **`-40` from
-  `:417` on**.
+  through `:336`, `+8` through `:445`, `+52` through `:470`, `+40` through
+  `:621`, `+39` through `:1071`, `+44` through `:1081`, `+43` through `:1418`,
+  `+19` from `:1543` through `:1903`, `-65` through `:2123`, and `-66` beyond.
+  **`run_m2l_fused` — pre-T1 `:1419-:1542` — was rewritten by T3 and no offset
+  maps into it**; locate anything there by symbol. Spot-checks that hold:
+  pre-T1 `:406` is `:414`, `:1725` is `:1744`, `:1782` is `:1801`, `:2073` is
+  `:2008`.
+- `src/Canopy_UpwardSweep.hpp`: T1 and T3 changed nothing here, so these
+  citations were exact before T2. After it: `0` up to `:207`, `-5` through
+  `:416`, and **`-40` from `:417` on**.
+- `src/Canopy_MpiCoalescedExchange.hpp`: no task has touched this file, so every
+  citation to it is exact.
 
 T1's and T2's own citations were current when written, which is the post-T1
 numbering; for those, only T2's deletions apply — `-1` past `:110`, `-3` past
@@ -317,19 +345,30 @@ them. `execute()`'s own comment already records that the bridges are obsolete �
 "after step 5 every multipole/local in the pipeline is in scale-normalized form,
 so no bridges are needed" (`:2176-2179`).
 
-*(b) Six are removed by a `coeff_type` + `scalars_per_coeff` trait pair:*
+*(b) Five in shared code go to a `coeff_type` + `scalars_per_coeff` trait pair:*
 
 | Site | Today |
 | --- | --- |
 | `src/Canopy_UpwardSweep.hpp:72-73` | `View<complex_type***, LayoutRight>` |
 | `src/Canopy_DownwardSweep.hpp:117-118` | same, for locals |
-| `src/Canopy_DownwardSweep.hpp:341-342` | same, `LayoutLeft`, for the operator table |
 | `src/Canopy_UpwardSweep.hpp:664`, `src/Canopy_DownwardSweep.hpp:2073` | `deep_copy(view, complex_type(0,0))` |
 | `src/Canopy_DownwardSweep.hpp:406`, `:1725-1726` | `std::vector<complex_type>` snapshot, zero-filled |
 | `src/Canopy_DownwardSweep.hpp:253-254`, `src/Canopy_UpwardSweep.hpp:179-180` | `CoalescedExchangeBuffers<complex_type, …>` |
 
 The snapshot arithmetic (`:1778` subtract, `:1800` add) works unchanged for a
 real type — `operator-` and `operator+` exist for both.
+
+**The M2L operator table's element type is already basis-owned** and is not one
+of the five. `src/Canopy_DownwardSweep.hpp:339-340` holds only
+`using m2l_operators_type = typename KernelType::template m2l_operators_type<memory_space>;`,
+with `_m2l_op_table` declared from it at `:344`; the literal
+`Kokkos::View<complex_type***, Kokkos::LayoutLeft, MemorySpace>` lives in the
+basis at `src/Canopy_LaplaceKernel.hpp:178-180`. Generalizing the element type
+there is an edit to the basis alias, not to a sweep typedef, and it must move
+together with `coeff_type` or the two can silently disagree — the sweep's
+`m2l_op_table_view_type` (`src/Canopy_DownwardSweep.hpp:466`) is an alias of
+`m2l_operators_type`, and `tests/tstLaplaceSolve.hpp:689-691` `static_assert`s
+`LayoutLeft` through it.
 
 *(c) Three assume complex arithmetic **structurally**, not by typedef. All three
 are MPI packing:*
@@ -1079,8 +1118,9 @@ progress log; no exit criterion depends on this.
 
 **Depends on:** T3.
 
-**Fill in:** the six typedef sites of [Current state](#current-state) (b) and the
-three structural sites of (c).
+**Fill in:** the five shared-code typedef sites of
+[Current state](#current-state) (b), the basis-owned `m2l_operators_type` alias
+named alongside them, and the three structural sites of (c).
 
 **Reference:** `src/Canopy_MpiCoalescedExchange.hpp:72`, `:93-94`, `:96`;
 `src/Canopy_UpwardSweep.hpp:534-535`, `:581-584`;
@@ -1089,17 +1129,26 @@ three structural sites of (c).
 **Do:**
 
 1. Add three traits to the contract:
-   - `coeff_type` — replaces `complex_type` (`src/Canopy_LaplaceKernel.hpp:154`).
+   - `coeff_type` — replaces `complex_type` (`src/Canopy_LaplaceKernel.hpp:155`).
      For the solid-harmonic basis this is `Kokkos::complex<Scalar>` **exactly**;
      a "generalization" to `struct { Scalar re, im; }` or to split real/imag
      planes changes the layout and breaks T1.
    - `component_scalar_type` — the real scalar the MPI packing sees.
    - `scalars_per_coeff` — 2 for the solid-harmonic basis, 1 for a real basis.
-2. Replace `typename complex_type::value_type`
-   (`src/Canopy_MpiCoalescedExchange.hpp:72`) with the trait, and the two literal
-   `2 *` factors (`:96`; `src/Canopy_UpwardSweep.hpp:583`;
+2. Carry the operator table's element type with `coeff_type`: the basis's
+   `m2l_operators_type<MemorySpace>` (`src/Canopy_LaplaceKernel.hpp:178-180`)
+   becomes `Kokkos::View<coeff_type***, Kokkos::LayoutLeft, MemorySpace>`. For
+   the solid-harmonic basis `coeff_type` *is* `Kokkos::complex<Scalar>`, so this
+   is a rename that changes no bits; it exists so the operator-table element type
+   and the coefficient element type cannot be set independently and silently
+   disagree. `tests/tstLaplaceSolve.hpp:689-691` `static_assert`s `LayoutLeft`
+   through `DownwardSweep::m2l_op_table_view_type`, which is an alias of
+   `m2l_operators_type` — that test must keep compiling untouched.
+3. Replace `typename complex_type::value_type`
+   (`src/Canopy_MpiCoalescedExchange.hpp:72`) with the trait, and the three
+   literal `2 *` factors (`:96`; `src/Canopy_UpwardSweep.hpp:583`;
    `src/Canopy_DownwardSweep.hpp:1788`) with `scalars_per_coeff`.
-3. Leave `view.extent(1)` / `view.extent(2)` (`:93-94`) alone — already generic.
+4. Leave `view.extent(1)` / `view.extent(2)` (`:93-94`) alone — already generic.
 
 **Signature changes and their callers.** `coalesced_view_exchange`
 (`src/Canopy_MpiCoalescedExchange.hpp:64-70`) keeps its signature; only its body
@@ -1517,10 +1566,27 @@ not being applied before hashing.
 `num_coeffs_per_cell`, `Nt` and `NComps` are `constexpr` and drive unrolling
 (`:1443-1445`, `:1499`). If any becomes a runtime value the kernel slows down
 with no correctness signal. **Presents as:** every test passing and the solve
-being slower. **Do:** compare the profiling breakdown
-(`CANOPY_PRINT_SOLVE_BREAKDOWN`, `src/Canopy_Solver.hpp:238`) before and after T3
-and T4, and record both numbers in the log. This is not a correctness gate and no
-exit criterion depends on it.
+being slower.
+
+**This risk has already fired once, at T3**, at roughly +18% on the M2L kernel —
+which is +1.5% on the downward sweep and +0.5% on `solve()`. Two candidate causes
+were tested and both excluded: making the sweep's zero-fill word-granular rather
+than byte-granular, and replacing the basis's unmanaged accumulator views with
+raw `scalar_type*`. The cost is intrinsic to putting the contraction behind the
+basis interface. It is recorded, not fixed; no exit criterion depends on it.
+
+**Do:** measure with the committed `scripts/tuolumne/run_laplace_solve_profile.flux`
+against a **second build tree**, `build-tuolumne-prof/`, configured from the same
+`run_cmake_tuolumne.sh` with `Canopy_ENABLE_PROFILING=ON` and
+`Canopy_PROFILING_LEVEL=2`. The committed `build-tuolumne/` is configured
+`Canopy_ENABLE_PROFILING=OFF` and emits no `[Canopy Diagnostics]` line at all, so
+reading `CANOPY_PRINT_SOLVE_BREAKDOWN` (`src/Canopy_Solver.hpp:238`) there
+measures nothing; reconfiguring it instead would put the bitwise gate and the
+timing measurement in different build configurations. The figure is
+`M2L kernel (all depths)` from the `DownwardSweep::execute()` table, summed over
+the 24 solves one np=1 invocation performs. **T4's "before" number is T3's, not
+unmodified code's:** 0.053-0.055 s before T3, 0.062-0.068 s after it. Record the
+new number in the log against that pair.
 
 **R4 — the byte budget changes which pairs overflow.** The overflow set decides
 which pairs take the per-pair path, which is *different arithmetic* from the
