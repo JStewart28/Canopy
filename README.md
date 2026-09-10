@@ -346,7 +346,9 @@ the assignment consistent across ranks *within* a run, but it is not reproducibl
 *across* runs: two runs of the same binary at the same commit produce different
 leaf-to-rank assignments at every rank count from 3 to 6.
 
-Reproduce with the golden harness, which measures it directly:
+Reproduce with the Laplace-solve harness, which measures it directly — the
+`[laplace-solve]` line is printed unconditionally at every rank count
+(`tests/tstLaplaceSolve.hpp:976-986`):
 
 ```bash
 ctest -V -R Canopy_Test_LaplaceSolve_MPI_SERIAL   # run twice, diff "[laplace-solve]"
@@ -354,51 +356,25 @@ ctest -V -R Canopy_Test_LaplaceSolve_MPI_SERIAL   # run twice, diff "[laplace-so
 
 `n_unique_ops` for one `(nprocs, rank)` moves by tens between runs — e.g.
 `(3,0)` gave 1630 / 1605 / 1605 and `(6,3)` gave 974 / 947 / 973 over three
-consecutive runs. `num_cells` is identical across runs at every rank count (80,
-170, 316, 431, 500, 524), so the tree build is deterministic and it is cell
-*ownership* that moves; the interaction lists, the M2L operator table and
-`locals()` all follow it. np=1 and np=2 are stable, the multijagged cut being
-trivial for one or two parts.
+consecutive runs, while `num_cells` was identical across all runs at every rank
+count (80, 170, 316, 431, 500, 524). The tree build is therefore deterministic
+and it is cell *ownership* that moves; the interaction lists, the M2L operator
+table and `locals()` all follow it. np=1 and np=2 are stable, the multijagged
+cut being trivial for one or two parts. Those figures were measured on the
+harness's earlier per-rank 400-particle generator — the absolute numbers a run
+prints today differ (686 realized operators at np=1 on the current 600-particle
+global set), but the run-to-run drift above two parts does not.
 
-This is **pre-existing** — it is a property of the partitioner, untouched by the
-golden-harness work that found it. It blocks any bit-for-bit comparison above two
-ranks, which is why `tasks/abstract-solver-backend.md` T1 is marked **BLOCKED**.
-A plausible but unverified mechanism is Zoltan2 MJ running on
+This is **pre-existing** — a property of the partitioner, untouched by the
+harness work that found it. It blocks any bit-for-bit comparison above two
+ranks, and `LaplaceSolve.bitForBitArtifacts` is gated at np 1-2 for exactly that
+reason, with a `GTEST_SKIP` message naming it (`tests/tstLaplaceSolve.hpp:1065`);
+`crossRankAgreement` and `matchesDirectSum` carry ranks 3-6 instead. A plausible
+but unverified mechanism is Zoltan2 MJ running on
 `Kokkos::DefaultExecutionSpace`, which is HIP in this build even for the SERIAL
 test binaries. To be triaged in a separate session: either make the partitioner
 deterministic (a deterministic algorithm, or a seeded / host-serial MJ) or cache
 and reuse a committed assignment.
-
-### `LaplaceSolve` has no committed reference data, and its frozen configuration collapses
-
-`Canopy_Test_LaplaceSolve_MPI_SERIAL` fails at every rank count with `cannot
-open reference data file .../tests/data/laplace_solve_P6.txt`. The data is
-deliberately not committed: running the harness showed that the configuration
-it is frozen at drives a two-body collapse, and committing a baseline taken
-from that state would be worse than having none.
-
-At 600 particles with charges uniform on `[-1, 1]`, `softening = 0.0`,
-`dt = 1.0e-4` and 50 steps, the closest opposite-charge pair free-falls to
-contact at about step 15. The participants are ejected, the bounding box grows
-from `[0.05, 0.95]` to roughly `[-20, 11]`, and with `max_depth = 6` the tree
-cannot refine into what is left. By the 50th solve there are 29 cells, no pair
-is MAC-admissible, and `n_unique_ops` is **0** at every rank count from 1 to 6
-— the far field the harness exists to protect is never evaluated, and the
-direct-sum deviation reads 1e-15 (machine precision) instead of the ~3e-6 a
-working far field gives.
-
-The harness itself is sound. At `num_steps = 1`, where the tree is healthy (95
-cells, 604 realized operators at np=1), all three gates pass at ranks 1-6:
-bit-for-bit artifacts reproduce across runs at np 1-2, the cross-rank deviation
-is 1e-15 on the potential and 3e-13 on the gradient at np 2-6, and the
-direct-sum deviation is 3.3e-6. Choosing a viable frozen configuration —
-softening, one-signed charges, fewer steps or a smaller `dt` — is a design
-decision left to a later session; see `tasks/abstract-solver-backend.md` T1 and
-the second `## T1` section of its progress log.
-
-Related: `LaplaceSolve.crossRankAgreement` **hangs at np=6** on the collapsed
-tree (>14 min against 8-12 s at np 1-5). At `num_steps = 1` np=6 finishes in
-7.4 s, so this is a property of the degenerate tree, not of the rank count.
 
 ### Six `MultiSolve` tests fail the `1e-8` multi-step check, and np=3 hangs
 
@@ -412,10 +388,10 @@ errors of 3e-7 to 9e-6: `MultiSolve.StableTree_Migrate`,
 note that the np=3 hang below was previously seen only when `SingleSolve` ran in
 the same `ctest` process, whereas this run was `MultiSolve` alone.
 
-This is **pre-existing**: checking out `src/Canopy_DownwardSweep.hpp` at the
-pre-golden-harness commit `a6c90de`, rebuilding and rerunning reproduces the
-identical error values to every digit (`3.485035469067542e-07`,
-`6.8419528791564039e-07`, `9.1947965989306709e-06`).
+This is **pre-existing**: checking out `src/Canopy_DownwardSweep.hpp` at
+`a6c90de`, the commit before the Laplace-solve harness work began, rebuilding
+and rerunning reproduces the identical error values to every digit
+(`3.485035469067542e-07`, `6.8419528791564039e-07`, `9.1947965989306709e-06`).
 
 It supersedes part of the entry below, which was written when these tests passed:
 `SolveFusedM2L.FP32_smokeTest` is no longer the suite's only failure, and it
