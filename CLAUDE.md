@@ -91,11 +91,7 @@ repository, not the default plan location.
   explicit checkpoints in the plan file where progress should be committed.
   If a later step fails (test failure, performance regression), we can roll
   back to the nearest checkpoint and retry.
-- **Follow `.clang-format`.** If `.clang-format` exists at the repo root,
-  follow its formatting rules for any C/C++ code you write or edit. If it
-  does not exist, ignore this rule. For fast formatting, run the
-  `clangformat.sh` script at the repo root — it formats every `.cpp`/`.hpp`
-  in the tree (skipping `*build*` directories) in place with `clang-format -i`.
+- Do not clang format.
 - **Keep `README.md` in sync.** When a public-facing API changes, or when the
   arguments accepted by an example problem change, update `README.md` in the
   same change so its documentation stays accurate.
