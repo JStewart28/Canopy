@@ -152,7 +152,12 @@ class DownwardSweep
     using gradient_view_type =
         Kokkos::View<scalar_type* [NComps][3], memory_space>;
 
-    using a_view_type = Kokkos::View<scalar_type*, memory_space>;
+    // The basis's auxiliary tables — precomputed, order-dependent data the
+    // basis's own operators need. Opaque here: this sweep borrows one from
+    // the UpwardSweep at setup(), hands it to m2l_translate and
+    // l2l_translate, and never looks inside. May be an empty struct.
+    using aux_tables_type =
+        typename KernelType::template aux_tables_type<memory_space>;
 
     // Gradient accessor passed to l2p_evaluate — avoids nested device lambdas
     // (CUDA does not allow extended __host__ __device__ lambdas nested inside
@@ -288,7 +293,7 @@ class DownwardSweep
         MemorySpace, ExecutionSpace, KernelType>::children_view_type;
     const children_view_type* _d_cell_children;
     particle_cell_idx_view_type _particle_cell_idx;
-    a_view_type _A_table;
+    aux_tables_type _aux;
 
     // Per-depth cell-index lists (this rank processes these cells).
     // Reconstructed during setup().
@@ -518,10 +523,10 @@ class DownwardSweep
         return static_cast<int>( _m2l_realized_keys.size() );
     }
 
-    // The A_{n,m} normalization table borrowed from the UpwardSweep at
-    // setup(). Flat, indexed by a_index(n, m) = n*n + n + m, covering
-    // degrees up to 2*P. Empty before setup().
-    const a_view_type& A_table() const { return _A_table; }
+    // The basis's auxiliary tables, borrowed from the UpwardSweep at
+    // setup(). Empty before setup(). Shared code must not name a member of
+    // this struct — a basis whose aux_tables_type is empty has none.
+    const aux_tables_type& aux() const { return _aux; }
 
     // Per-pair fallback for out-of-range pairs at depth `depth`.
     void run_m2l_fallback_at_depth( int depth );
@@ -594,7 +599,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _device_cells = upward_sweep.device_cells();
     _key_to_cell_idx = &upward_sweep.key_to_cell_idx();
     _d_cell_children = &upward_sweep.cell_children();
-    _A_table = upward_sweep.A_table();
+    _aux = upward_sweep.aux();
     _max_depth = upward_sweep.max_depth();
 
     const int num_cells = _device_cells.extent( 0 );
@@ -1160,15 +1165,24 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         {
             CANOPY_SCOPED_TIMER_DETAILED(
                 Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
-            auto h_A = Kokkos::create_mirror_view_and_copy(
-                Kokkos::HostSpace{}, _A_table );
+            // m2l_build_operator runs on host, so it needs a HostSpace
+            // aux. Build one rather than mirroring the device aux: the
+            // sweep cannot mirror a struct it is not allowed to look
+            // inside. This is bit-identical, not merely equal —
+            // build_aux_tables fills every entry on a host mirror from a
+            // pure function of (n, m) before deep-copying, so the host
+            // build and a mirror of the device build produce the same
+            // bytes.
+            const auto h_aux =
+                KernelType::template build_aux_tables<Kokkos::HostSpace>(
+                    KernelType::max_order );
             for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
             {
                 const auto& k = ops[op_idx];
                 auto T_slice = Kokkos::subview( h_op, Kokkos::ALL,
                                                 Kokkos::ALL, op_idx );
-                KernelType::m2l_build_operator( k.dd, k.ii, k.jj, k.kk,
-                                                h_A, T_slice );
+                KernelType::m2l_build_operator( k.dd, k.ii, k.jj, k.kk, h_aux,
+                                                T_slice );
             }
         }
         {
@@ -1660,7 +1674,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     auto fb_targets = _m2l_fallback_targets;
     auto fb_sources = _m2l_fallback_sources;
     auto locals = _locals;
-    auto A_table = _A_table;
+    auto aux = _aux;
     auto multipoles = _m2l_multipoles_view;
 
     using team_policy = Kokkos::TeamPolicy<execution_space>;
@@ -1682,8 +1696,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                                              Kokkos::ALL );
             KernelType::m2l_translate( team, multipoles, source_cell, dx, dy,
                                        dz, src_ci.half_width,
-                                       target_ci.half_width,
-                                       A_table, L_target );
+                                       target_ci.half_width, aux, L_target );
         } );
 }
 
@@ -1704,7 +1717,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth(
 
     auto locals = _locals;
     auto device_cells = _device_cells;
-    auto A_table = _A_table;
+    auto aux = _aux;
     auto& d_parents = _d_internals_at_depth[depth];
     auto children = *_d_cell_children;
 
@@ -1734,8 +1747,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_l2l_at_depth(
                     Kokkos::subview( locals, ci, Kokkos::ALL, Kokkos::ALL );
                 KernelType::l2l_translate( team, locals, parent_cell, dx, dy,
                                            dz, ccell.half_width,
-                                           parent_ci.half_width,
-                                           A_table, L_child );
+                                           parent_ci.half_width, aux, L_child );
             }
         } );
 

@@ -240,7 +240,9 @@ a task in this document.
 | Failure on unsatisfiable contract | `static_assert` at instantiation | A basis asking for a capability the sweeps do not have must not compile. Never a runtime fallback that silently produces a different answer. |
 | Failure on operator-table overflow | keep today's loud path | One `fprintf` warning (`:1038-1046`) plus routing to the per-pair fallback. Extended by T8 with a per-basis policy. |
 | Test tier for new tests | `unit` | The `regression` tier is the ship gate and holds only `MultiSolve` (`tests/CMakeLists.txt:60-62`), and no task here runs it — see [Deliberate deviations](#deliberate-deviations). Promoting anything into it requires confirming with the user first, per the repository's own rule. |
-| New test registration | add the name to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:47-55`) or `UNIT_SERIAL_TESTS` (`:35-38`) | Target becomes `Canopy_Test_<Name>_MPI_<DEVICE>`, tests `..._np_<N>` for `N` in 1-6. |
+| New test registration | add the name to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:48-57`) or `UNIT_SERIAL_TESTS` (`:36-39`) | Target becomes `Canopy_Test_<Name>_MPI_<DEVICE>`, tests `..._np_<N>` for `N` in 1-6. |
+| Build command | `make -j <N> <target>` for exactly the target(s) the task's exit criterion names, in whichever build tree the step is using — never a bare `make` | A whole-tree build compiles 33 test executables and the two examples, and cannot exit 0 in any case because two of those targets do not compile — see [Current state](#current-state). "Rebuild" anywhere below means rebuilding the named targets, and nothing else. Scope the build with the target argument and **not** by reconfiguring `Canopy_TEST_DEVICES` in the committed `build-tuolumne/`: that tree is the bitwise gate's configuration, and R3 rests on it not moving. |
+| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve` — built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. T11 is the only task whose criterion is about other callers compiling, which is why it is the only one that reaches beyond the two gate targets. |
 | Reference data | one committed file, `tests/data/laplace_solve_P6.txt` | Three bit-for-bit records — `(nprocs, rank)` of `(1,0)`, `(2,0)`, `(2,1)` — plus one np=1 field record in canonical `GlobalId` order and a hash of the initial global particle set. The particle set is a fixed global set of $N_{\rm total} = 600$ from seed `1234 + P`, identical at every rank count, which is what makes the np=$k$-versus-np=1 comparison definable at all. The committed drift check hashes that *initial* set and not the state the field record is taken at: the solve drives the particles, so their positions at the last step are not bit-identical across rank counts. |
 | Test naming | `tests/tstLaplaceSolve.hpp` for the solve-level gate, `tests/tstLaplaceKernel.hpp` for the per-operator kernel tests | `Canopy_add_tests` maps a name to `tst<NAME>.hpp` and to `Canopy_Test_<NAME>_MPI_<DEVICE>` (`cmake/test_harness/test_harness.cmake:104-112`), so the file name, the `tests/CMakeLists.txt` entry and every exit criterion below move together. |
 | Bit-for-bit artifact form | 64-bit hash plus extents for `locals()` and the operator table; full bit patterns for the $A_{n,m}$ table and `n_unique_ops` | The operator table costs $N_t N_s \cdot 16 = 28\cdot49\cdot16$, 21.4 KB per key at $P=6$; committing it in full is not affordable. A hash over the raw bytes is exactly as sensitive to a bitwise change and still attributes a failure to one artifact, which is all any exit criterion here asks. Hashes are computed with the in-repo FNV-1a so a committed value depends on no library version. |
@@ -250,12 +252,24 @@ a task in this document.
 ### Deliberate deviations
 
 - **No task here runs the `regression` suite.** `CLAUDE.md` "Minimum test set"
-  makes it the required gate before a code change ships; every exit criterion
-  below names the Laplace-solve gate instead, and none names `regression`. The
+  makes it the required gate before a code change ships; every remaining task's
+  exit criterion names the Laplace-solve gate instead. `MultiSolve` is built
+  once more, by T11, purely to prove it still compiles against the new `Solver`
+  signature — it is not run there. The
   suite does not pass on unmodified code, it hangs intermittently, and the
   Laplace-solve gate is the sharper and far cheaper instrument — measurements
   and the failing set are in [Current state](#current-state). This scopes to
   this document's tasks and leaves the repository's ship gate as it is.
+- **No task here builds the whole tree.** `systems/tuolumne/claude.md` §3 offers
+  plain `make -j` for a full build; every task here builds only the targets its
+  exit criterion names, for the reasons in the [Conventions](#conventions) rows.
+  The coverage that gives up is worth stating: a change to a shared header is
+  compiled only in that one SERIAL translation unit, so a compile error that
+  appears only in the HIP or OPENMP variant — a device-lambda capture, a
+  `KOKKOS_INLINE_FUNCTION` that reaches host-only code — is not caught by any
+  exit criterion here. A task that changes device-side code may additionally
+  build `Canopy_Test_LaplaceSolve_MPI_HIP` to check that it compiles; no exit
+  criterion requires it, and no exit criterion runs it.
 - **The operator-count cap is retained alongside the byte budget.** T8 makes the
   cap a memory budget, but keeps `M2L_OP_COUNT_CAP` (`:304`) as a floor:
   `effective_cap = min(M2L_OP_COUNT_CAP, byte_budget / bytes_per_key)`. A pure
@@ -281,7 +295,7 @@ a task in this document.
 
 ## Current state
 
-Four things in this document are built. **T1 is complete** — the diagnostic
+Five things in this document are built. **T1 is complete** — the diagnostic
 surface on the sweeps, the solve-level gate `tests/tstLaplaceSolve.hpp`, its
 committed reference data `tests/data/laplace_solve_P6.txt`, and both pinned
 tolerances (`LS_CROSS_RANK_TOL = 5.6e-10`, `LS_DIRECT_SUM_TOL = 9.63e-07`) all
@@ -293,7 +307,11 @@ bit-identical, so **R1 did not fire** and the narrow-abstraction fallback is not
 needed. **T4 is complete** — the five typedef sites of (b) and the three MPI
 packing sites of (c) route through `coeff_type` / `component_scalar_type` /
 `scalars_per_coeff`, the operator table's element type moved with them, and the
-gate reproduced T1's table to all 17 digits at every rank count. Nothing else
+gate reproduced T1's table to all 17 digits at every rank count. **T5 is
+complete** — the $A_{n,m}$ table is a basis-owned `aux_tables_type` reached
+through `aux()`, the `2*P` reasoning lives on
+`LaplaceKernel::build_aux_tables`, and the table's 169 bit patterns are
+unchanged, so group (d)'s first bullet is closed. Nothing else
 here has been built. What follows is what is true of the repository now; the
 tables in (b) and (c) below are the historical record of what T4 changed and
 their "Today" columns are pre-T4.
@@ -404,11 +422,13 @@ there.
 *(d) Two need a trait to supply a value shared code derives from harmonic
 reasoning:*
 
-- `src/Canopy_UpwardSweep.hpp:233-235` builds the $A_{n,m}$ table to $2P$ because
-  "M2L accesses A at degree n+j where both n and j go up to P". Shared code owns
-  a table whose *existence* is basis-specific. `DownwardSweep` borrows it
-  (`:529`) and threads it into three operators (`:1099-1100`, `:1636-1639`,
-  `:1688-1691`), plus `src/Canopy_UpwardSweep.hpp:501-504`.
+- **Done in T5** — the $A_{n,m}$ table is now a basis-owned `aux_tables_type`
+  and the line numbers below are pre-T5. `src/Canopy_UpwardSweep.hpp:258-259`
+  built the $A_{n,m}$ table to $2P$ because "M2L accesses A at degree n+j where
+  both n and j go up to P". Shared code owned a table whose *existence* is
+  basis-specific. `DownwardSweep` borrowed it (`:597`) and threaded it into
+  three operators (`:1164`, `:1686`, `:1738`), plus
+  `src/Canopy_UpwardSweep.hpp:493`.
 - `src/Canopy_DownwardSweep.hpp:301-302` branches `M2L_KEY_DD_MAX` on
   `KernelType::scalar_type` being `float`, with a rationale (`:295-300`) derived
   entirely from the solid-harmonic scale normalization. For a non-homogeneous
@@ -524,6 +544,23 @@ tests to `tests/tstLaplaceKernel.hpp`.** The consequence worth stating is that
 `ctest -L unit` cannot serve as this document's diagnostic layer until they are
 fixed; the diagnostic layer is the individually-compiling component tests plus
 `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`.
+
+**What a build touches.** `build-tuolumne/` is configured with Kokkos SERIAL,
+OPENMP and HIP all enabled and the `Canopy_TEST_DEVICES` filter left empty
+(`CMakeLists.txt:210-217`), so `Canopy_add_tests` generates one executable per
+backend per test name (`cmake/test_harness/test_harness.cmake:51-63`,
+`:104-112`) — 33 test executables from the eleven names in
+`tests/CMakeLists.txt:36-64`, plus `example_fmm` and `gravity_solve`
+(`examples/CMakeLists.txt:14-15`). `Canopy` is an INTERFACE target
+(`src/CMakeLists.txt:24`), so every one of those recompiles the whole
+header-only library from scratch and nothing is shared between them; the HIP
+variants are the most expensive of the three. By the same token a *named* test
+target compiles exactly its own two translation units — the generated
+`tst<Name>_<Device>.cpp` and `mpi_unit_test_main.cpp` — and links. That is the
+entire cost of the gate: `make Canopy_Test_LaplaceSolve_MPI_SERIAL`. And
+`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` selects only that variant's six
+registered tests, so the OPENMP and HIP variants need not exist for the gate to
+run.
 
 **The key, the cap and the overflow path.** The key struct is `{dd, ii, jj, kk}`
 (`:308-318`) with an FNV-style hash (`:319-335`). The class comment at
@@ -1232,9 +1269,54 @@ T3's ranges. The trait indirection is compile-time and costs nothing further.
 
 ---
 
-### T5 — Auxiliary tables are owned by the basis — **NOT STARTED**
+### T5 — Auxiliary tables are owned by the basis — **DONE**
 
 **Depends on:** T4.
+
+**Met.** Flux job **`f3XfiYHXy4b1`** (tuolumne1020, Cray clang 20.0.0,
+`RelWithDebInfo`, Kokkos SERIAL, `build-tuolumne/`, `HEAD` = `d72c3c4`): `ctest
+-R Canopy_Test_LaplaceSolve_MPI_SERIAL` reports **6/6 passed**.
+`bitForBitArtifacts` ran and passed at np=1 rank 0 and np=2 both ranks — all
+four artifacts, so `locals()`, the operator table, the $A_{n,m}$ table and the
+realized key list are byte-identical to `tests/data/laplace_solve_P6.txt`, which
+was not regenerated — and is SKIPPED at np 3-6 by design. **The $A_{n,m}$
+artifact is the one this task moved and it did not move a bit:** `a_extent =
+169` at every rank and rank count, which is $(2P+1)^2$ at $P=6$ and so pins the
+`2*P` argument, and all 169 bit patterns match the committed record at both
+compared rank counts — read through `ds.aux().A_table`, the only line of
+`tests/tstLaplaceSolve.hpp` this task changed. `fallback_pairs` is 0 and
+`locals_ext` is `(103,28,1)` at every rank and rank count, so **R4**'s
+discriminator is intact.
+
+Twenty-one of the 22 cross-rank and direct-sum deviations reproduce T1's pinned
+table to all 17 printed digits — cross-rank 4.1994107222659022e-13 /
+2.1570013757642702e-12 (np=2) through 5.688835866646797e-13 /
+2.8631357246763719e-12 (np=6), worst 1.114294857300434e-12 /
+5.5987399483706545e-12 at np=4 against `LS_CROSS_RANK_TOL = 5.6e-10`; direct-sum
+3.2093610331931809e-07 / 4.2399302231264458e-08 (np=1) through
+3.2093610299905848e-07 / 4.2399381662523099e-08 (np=6) against
+`LS_DIRECT_SUM_TOL = 9.63e-07`. The 22nd, the **np=3 direct-sum gradient**, is
+4.2399380705233977e-08 against T1's 4.2399380705248681e-08 — agreement to
+twelve significant figures, a move in the thirteenth, and 22x under its
+tolerance. **That is the multijagged partitioner and no control run was needed
+to say so, because the same log shows the two cuts directly:** np=3's three
+solves drew `(273, 204, 329)` — T1's set — on two of them and `(285, 189, 329)`
+on the third. This is the same two-cut split T3 and T4 recorded at np=5; np=5
+itself drew T1's `(180, 168, 147, 217, 187)` on all three solves this run. It is
+[the documented wobble](#the-bit-for-bit-gate), not a finding of this task.
+
+`grep -n "_A_table" src/Canopy_UpwardSweep.hpp src/Canopy_DownwardSweep.hpp`
+returns **no hits**, and neither sweep names $A_{n,m}$ at all: both hold an
+opaque `aux_tables_type` behind `aux()`, and the `2*P` reasoning has moved onto
+`LaplaceKernel::build_aux_tables`. The table is of `scalar_type`, the basis's
+*arithmetic* scalar, not `component_scalar_type`, which is a storage trait about
+MPI packing that $A_{n,m}$ never undergoes; the reasoning is on the declaration
+and in the log. **R3 was sampled and did not fire:** 0.070 s on the M2L-kernel
+timer over 24 solves against T4's 0.065 and T3's 0.062-0.068 cluster, but the
+downward sweep (1.209 s) and `solve()` (1.390 s) both sit inside T3's post-move
+ranges, and T5 changes nothing inside that timer's scope — the fused kernel does
+not take `aux`, and the per-pair fallback that does is never entered at
+`fallback_pairs = 0`. One sample, recorded not tuned.
 
 **Fill in:** fifteen sites, verified against the working tree.
 `src/Canopy_UpwardSweep.hpp:104` (the `a_view_type` alias), `:168` (`A_table()`),
@@ -1338,7 +1420,7 @@ fixture, not a method: low accuracy, but an **exactly checkable** far field.
 
 **Fill in:** new `tests/CanopyTest_MonopoleBasis.hpp`; new
 `tests/tstFarFieldContract.hpp`; `tests/CMakeLists.txt` `UNIT_MPI_TESTS`
-(`:47-55`).
+(`:48-57`).
 
 **Reference:** the trait and operator contract as it stands after T5;
 `tests/tstDownwardSweep.hpp:57` for how a test instantiates a basis and drives
@@ -1579,7 +1661,9 @@ deliberately shortening the packed slot range so it fails, then restoring it.
 
 **Depends on:** T9, T10.
 
-**Fill in:** `src/Canopy_Solver.hpp:104-105`, `:112`, `:719-727`.
+**Fill in:** `src/Canopy_Solver.hpp:104-105`, `:112`, `:719-727`;
+`tests/tstFarFieldContract.hpp` for the compile-only instantiation below, which
+goes there because `MonopoleBasis` is defined beside it in `tests/`.
 
 **Reference:** the six existing instantiations listed under R-A..R-D in
 [Problem](#problem).
@@ -1601,10 +1685,20 @@ deliberately shortening the packed slot range so it fails, then restoring it.
    which is T12's business.
 
 **Exit criterion:** all six existing instantiations compile **unmodified** — do
-not touch `tests/tstMultiSolve.hpp` or the three examples; the Laplace-solve gate
-passes all three checks (`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`);
-and a new compile-only test instantiates
-`Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, 1, 1, MonopoleBasis>` successfully.
+not touch `tests/tstMultiSolve.hpp` or the three examples. Five of the six are
+covered by `make Canopy_Test_MultiSolve_MPI_SERIAL example_fmm gravity_solve`
+exiting 0; that MultiSolve target is built to compile and is **not** run, per
+[Deliberate deviations](#deliberate-deviations). The sixth,
+`examples/04_nan_replay/nan_replay.cpp:66`, is in no build target —
+`examples/CMakeLists.txt:14-15` adds only `02_full_fmm` and `03_gravity_solve` —
+and its instantiation is character-for-character the other two examples',
+`Canopy::Solver<MemorySpace, ExecutionSpace, double, P_ORDER, N_COMPS>`, so
+those two cover it; do not add it to the build. Also: the Laplace-solve gate
+passes all three checks (`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`); and a
+new compile-only test in `tests/tstFarFieldContract.hpp` instantiates
+`Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, 1, 1, MonopoleBasis>`
+successfully, so `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` still passes
+at ranks 1-6.
 
 ---
 
@@ -1718,7 +1812,8 @@ basis interface. It is recorded, not fixed; no exit criterion depends on it.
 **Do:** measure with the committed `scripts/tuolumne/run_laplace_solve_profile.flux`
 against a **second build tree**, `build-tuolumne-prof/`, configured from the same
 `run_cmake_tuolumne.sh` with `Canopy_ENABLE_PROFILING=ON` and
-`Canopy_PROFILING_LEVEL=2`. The committed `build-tuolumne/` is configured
+`Canopy_PROFILING_LEVEL=2`. Build `Canopy_Test_LaplaceSolve_MPI_SERIAL` there
+too, and nothing else. The committed `build-tuolumne/` is configured
 `Canopy_ENABLE_PROFILING=OFF` and emits no `[Canopy Diagnostics]` line at all, so
 reading `CANOPY_PRINT_SOLVE_BREAKDOWN` (`src/Canopy_Solver.hpp:238`) there
 measures nothing; reconfiguring it instead would put the bitwise gate and the

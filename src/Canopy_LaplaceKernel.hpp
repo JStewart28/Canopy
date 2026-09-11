@@ -225,6 +225,67 @@ struct LaplaceKernel
     using m2l_operators_type =
         Kokkos::View<coeff_type***, Kokkos::LayoutLeft, MemorySpace>;
 
+    // -----------------------------------------------------------------------
+    // Auxiliary tables. Precomputed, order-dependent data that the basis's
+    // own operators need and that shared code neither builds, indexes nor
+    // knows the shape of: the sweeps store one of these, hand it back to
+    // m2m_translate / m2l_translate / l2l_translate / m2l_build_operator,
+    // and never look inside. A basis needing no such data returns an empty
+    // struct.
+    //
+    // For this basis the one member is the A_{n,m} normalization table of
+    // Greengard & Rokhlin's translation theorems, flat, indexed by
+    // a_index(n, m) = n*n + n + m.
+    //
+    // Element type is scalar_type, not component_scalar_type. The two are
+    // the same Scalar for this basis, so the choice moves no bits and is
+    // made here only to settle what it means. component_scalar_type is a
+    // *storage* trait: it names the real scalar that coeff_type decomposes
+    // into for MPI packing, and it exists so the sweeps can reinterpret_cast
+    // a coefficient buffer. A_{n,m} is not a coefficient, is never packed,
+    // and never crosses a rank boundary; it is a real constant multiplied
+    // into the translation arithmetic. Its natural type is therefore the
+    // basis's *arithmetic* scalar, scalar_type — which is what
+    // m2m_translate, m2l_translate, l2l_translate and m2l_build_operator
+    // all read it into (`const Scalar A_jk = ...`). A basis whose packed
+    // component is narrower than its arithmetic type (a blocked or
+    // mixed-precision coeff_type) would otherwise silently demote this table
+    // along with its storage, which is a decision about bandwidth leaking
+    // into a decision about accuracy.
+    //
+    // Parameterized on the memory space because the kernel is not; the
+    // caller supplies its own. Two spaces are genuinely in use: the three
+    // device operators consume the sweep's memory_space table, while
+    // m2l_build_operator runs on host over a Kokkos::HostSpace one. Spell it
+    //     typename KernelType::template aux_tables_type<memory_space>
+    // -----------------------------------------------------------------------
+    template <class MemorySpace>
+    struct aux_tables_type
+    {
+        Kokkos::View<scalar_type*, MemorySpace> A_table;
+    };
+
+    // Build the auxiliary tables for expansion order `order` (= max_order;
+    // the argument is passed rather than read off the basis so a caller can
+    // build a table for a different order in a test).
+    //
+    // The A_{n,m} table is built to degree 2*order, not order: M2L accesses
+    // A at degree n+j where both n and j run up to P. A table one degree
+    // short does not fault — m2l_build_operator skips a zero A entry with
+    // `continue` — it silently produces a wrong operator. The factor of two
+    // is the reason this table cannot live in shared code: it is a fact
+    // about the solid-harmonic translation theorems and nothing else.
+    //
+    // Host function, not device-callable: it allocates and fills a View.
+    template <class MemorySpace>
+    static aux_tables_type<MemorySpace> build_aux_tables( int order )
+    {
+        aux_tables_type<MemorySpace> aux;
+        aux.A_table =
+            build_A_coefficients<scalar_type, MemorySpace>( 2 * order );
+        return aux;
+    }
+
     // One half of the M2L team scratch, viewed as a scalar array. See
     // m2l_scratch_bytes for the layout and for why the real/imag split is
     // arithmetic-visible rather than cosmetic.
@@ -345,13 +406,18 @@ struct LaplaceKernel
     // For a standard octree (w_c = w_p/2) this is 2^{-(j+1)}, but we
     // compute it from the actual widths so the kernel doesn't assume
     // a fixed refinement ratio.
-    template <class TeamMember, class MView, class AType, class MParentType>
+    template <class TeamMember, class MView, class AuxType, class MParentType>
     KOKKOS_INLINE_FUNCTION static void
     m2m_translate( const TeamMember& team_member, const MView& M_full,
                    int child_cell, Scalar dx, Scalar dy, Scalar dz,
-                   Scalar w_child, Scalar w_parent,
-                   const AType& A_table, const MParentType& M_parent_out )
+                   Scalar w_child, Scalar w_parent, const AuxType& aux,
+                   const MParentType& M_parent_out )
     {
+        // The A_{n,m} table this basis puts in its aux tables. Named
+        // locally so the translation arithmetic below reads as the
+        // theorem it implements.
+        const auto& A_table = aux.A_table;
+
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
 
@@ -445,13 +511,18 @@ struct LaplaceKernel
     // produces L̄^t = L^t · w_t^j. The original 1/rho^{n+j+1} factor
     // expands as (w_s/rho)^{n+1} · (w_t/rho)^j so each per-pair table is
     // O(1) magnitude regardless of cell depths — FP32-safe.
-    template <class TeamMember, class MView, class AType, class LTargetType>
+    template <class TeamMember, class MView, class AuxType, class LTargetType>
     KOKKOS_INLINE_FUNCTION static void
     m2l_translate( const TeamMember& team_member, const MView& M_full,
                    int source_cell, Scalar dx, Scalar dy, Scalar dz,
-                   Scalar w_source, Scalar w_target,
-                   const AType& A_table, const LTargetType& L_target_out )
+                   Scalar w_source, Scalar w_target, const AuxType& aux,
+                   const LTargetType& L_target_out )
     {
+        // The A_{n,m} table this basis puts in its aux tables. Named
+        // locally so the translation arithmetic below reads as the
+        // theorem it implements.
+        const auto& A_table = aux.A_table;
+
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
 
@@ -588,11 +659,16 @@ struct LaplaceKernel
     //   dd ≥ 0  →  F = 2^{ j · dd}           (per output row j)
     //   dd <  0 →  F = 2^{-(n+1) · dd}       (per source column n)
     // F(dd=0, ·, ·) = 1, so same-depth operators have no extra scaling.
-    template <class AType, class TView>
+    template <class AuxType, class TView>
     KOKKOS_INLINE_FUNCTION static void
-    m2l_build_operator( int dd, int ix, int iy, int iz, const AType& A_table,
+    m2l_build_operator( int dd, int ix, int iy, int iz, const AuxType& aux,
                         const TView& T_out )
     {
+        // The A_{n,m} table this basis puts in its aux tables. Named
+        // locally so the translation arithmetic below reads as the
+        // theorem it implements.
+        const auto& A_table = aux.A_table;
+
         // (ix, iy, iz) is the integer offset in deeper-cell half-widths.
         // T̃ depends only on this dimensionless geometry plus dd.
         const Scalar dx = static_cast<Scalar>( ix );
@@ -898,13 +974,18 @@ struct LaplaceKernel
     // Scale-normalized L2L: consumes L̄^p = L^p · w_p^n and produces
     // L̄^c = L^c · w_c^j. The rho^{n-j} factor becomes (rho/w_p)^{n-j}
     // and a per-output-row constant (w_c/w_p)^j is applied at the end.
-    template <class TeamMember, class LView, class AType, class LChildType>
+    template <class TeamMember, class LView, class AuxType, class LChildType>
     KOKKOS_INLINE_FUNCTION static void
     l2l_translate( const TeamMember& team_member, const LView& L_full,
                    int parent_cell, Scalar dx, Scalar dy, Scalar dz,
-                   Scalar w_child, Scalar w_parent,
-                   const AType& A_table, const LChildType& L_child_out )
+                   Scalar w_child, Scalar w_parent, const AuxType& aux,
+                   const LChildType& L_child_out )
     {
+        // The A_{n,m} table this basis puts in its aux tables. Named
+        // locally so the translation arithmetic below reads as the
+        // theorem it implements.
+        const auto& A_table = aux.A_table;
+
         Scalar rho, theta, phi;
         cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
 

@@ -1556,3 +1556,342 @@ T9 should note only that the operator table it moves behind
 `build_m2l_operators` now has element type `coeff_type`, so the basis-owned
 builder and the basis-owned coefficient type are already consistent by
 construction.
+
+## T5 — auxiliary tables are owned by the basis
+
+T5 is **DONE** and, like T3 and T4, the load-bearing result is negative: the
+$A_{n,m}$ table came out of the sweeps and into `LaplaceKernel` with **identical
+bit patterns**, all 169 of them, at np 1-2. Gate run flux job
+**`f3XfiYHXy4b1`**; R3 instrument flux job **`f3Xfk8H1YPNF`**. Worked at `HEAD` =
+`d72c3c4` (T4 was already committed there — the handoff prompt's claim that T4
+sat uncommitted in the working tree was stale, and nothing depended on it).
+
+### The decision T5 owned: `scalar_type`, not `component_scalar_type`
+
+T4 handed this choice forward explicitly, having left `a_view_type` on
+`scalar_type` because for this basis the two are the same `Scalar` and the
+question was group (d)'s, not (b)'s. **The table is of `scalar_type`.**
+
+The reasoning, which is written out on the `aux_tables_type` declaration in
+`src/Canopy_LaplaceKernel.hpp` and is the part worth inheriting:
+
+- **`component_scalar_type` is a storage trait, and $A_{n,m}$ is not storage.**
+  Its contract, as T4 wrote it, is "the real scalar MPI sees": it names what
+  `coeff_type` decomposes into so the sweeps can `reinterpret_cast` a coefficient
+  buffer and hand MPI a count. $A_{n,m}$ is never packed, never crosses a rank
+  boundary, and is not a coefficient — it is a real constant multiplied into the
+  translation arithmetic. Nothing about the MPI datatype selection has any claim
+  on it.
+- **`scalar_type` is what the four operators already read it into.** Every use
+  site in the basis is `const Scalar A_jk = A_table( a_index( j, k ) );` and its
+  siblings. Typing the table as anything else would introduce a conversion at
+  every read that the code does not currently perform.
+- **The two types can come apart, and when they do, `component_scalar_type`
+  would be the wrong one.** A basis with a blocked or mixed-precision
+  `coeff_type` — the case T4's `detail::coeff_traits` primary template invites a
+  specialization for — would have a packed component narrower than its
+  arithmetic type. Keying this table on that would silently demote a table of
+  normalization constants along with the storage, which is a decision about
+  bandwidth leaking into a decision about accuracy.
+
+No bits moved either way here, which is precisely why it was cheap to settle
+now: `scalar_type` and `component_scalar_type` are both `Scalar` on
+`LaplaceKernel`, so the gate cannot distinguish the two choices and the argument
+had to be made on meaning rather than on measurement.
+
+### The contract as actually written
+
+On `LaplaceKernel`, `src/Canopy_LaplaceKernel.hpp`, immediately after
+`m2l_operators_type` and in the same memory-space-parameterized shape:
+
+```cpp
+template <class MemorySpace>
+struct aux_tables_type
+{
+    Kokkos::View<scalar_type*, MemorySpace> A_table;
+};
+
+template <class MemorySpace>
+static aux_tables_type<MemorySpace> build_aux_tables( int order )
+{
+    aux_tables_type<MemorySpace> aux;
+    aux.A_table =
+        build_A_coefficients<scalar_type, MemorySpace>( 2 * order );
+    return aux;
+}
+```
+
+`aux_tables_type` is a **struct template, not an alias template**, unlike
+`m2l_operators_type`. It has to be: a basis with two tables adds a second member
+without any caller changing, and T6's `MonopoleBasis` supplies an empty struct.
+The spelling at the sweeps is the same either way —
+`typename KernelType::template aux_tables_type<memory_space>`.
+
+**`build_aux_tables` takes the order and multiplies by two itself.** The `2 *`
+and the sentence explaining it — M2L reaches degree $n+j$ with both $n$ and $j$
+up to $P$ — moved out of `src/Canopy_UpwardSweep.hpp` and onto the basis
+function, which is the substance of this task rather than a side effect of it:
+the factor of two is a fact about the solid-harmonic translation theorems and
+shared code had no business asserting it. The comment on `build_aux_tables` also
+records why a short table is dangerous rather than loud — `m2l_build_operator`
+`continue`s on a zero $A$ (`src/Canopy_LaplaceKernel.hpp:688-689` pre-T5), so
+one degree short is a quietly wrong operator, not a fault.
+
+**`build_aux_tables` is a plain static member, not `KOKKOS_INLINE_FUNCTION`**,
+matching the Conventions table's rule for host-side construction: it allocates
+and fills a `View`.
+
+### The two memory spaces, and why the host one is built rather than mirrored
+
+The device aux is built once in `UpwardSweep::setup()` and borrowed by
+`DownwardSweep::setup()`, exactly as the bare view was. The host aux is built
+fresh at the operator-table build:
+
+```cpp
+const auto h_aux =
+    KernelType::template build_aux_tables<Kokkos::HostSpace>(
+        KernelType::max_order );
+```
+
+replacing `create_mirror_view_and_copy( Kokkos::HostSpace{}, _A_table )`. The
+sweep **cannot** mirror the device aux, because mirroring means naming members,
+and the whole point of `aux_tables_type` is that shared code does not know what
+is in it. Building is bit-identical rather than merely equal, for the reason the
+design gave and which held: `build_A_coefficients` fills a host mirror from
+`A_coeff<Scalar>(n, m)` — a pure function of $(n,m)$ — before deep-copying, so
+the host build and a mirror of the device build are the same bytes by
+construction, and on the SERIAL backend `memory_space` *is* `Kokkos::HostSpace`
+so they are the same code path besides. The gate confirms it: the M2L operator
+table's hash is unchanged at np 1-2, and that table is built entirely from
+`h_aux`.
+
+One cost worth naming: the host table is now rebuilt on every operator-table
+build rather than mirrored. At $P=6$ that is 169 doubles and 169 calls to
+`A_coeff`, inside a block that then fills a $28\times49\times n_{\rm ops}$
+operator table — unmeasurable, and the profile run confirms the operator-table
+build did not move. It is the right trade for not having shared code reach
+inside the struct.
+
+### Signatures and declarations changed
+
+- `src/Canopy_LaplaceKernel.hpp` — `aux_tables_type<MemorySpace>` and
+  `build_aux_tables<MemorySpace>(int order)` added. Four operators take
+  `const AuxType& aux` where they took `const AType& A_table`:
+  `m2m_translate`, `m2l_translate`, `m2l_build_operator`, `l2l_translate`. Each
+  body opens with `const auto& A_table = aux.A_table;` so the translation
+  arithmetic below is untouched — that is what makes the diff readable and what
+  makes "no bits moved" checkable by eye as well as by the gate.
+  `p2m_contribution`, `l2p_evaluate`, `m2l_pre_cell`, `m2l_core` and
+  `m2l_post_cell` never took the table and are unchanged.
+- `src/Canopy_UpwardSweep.hpp` — `a_view_type` replaced by `aux_tables_type`;
+  `_A_table` → `_aux`; `A_table()` → `aux()`; the `2*P`
+  `build_A_coefficients` call in `setup()` → `build_aux_tables<memory_space>(P)`;
+  the M2M lambda capture `auto A_table = _A_table;` → `auto aux = _aux;` and the
+  `m2m_translate` call updated.
+- `src/Canopy_DownwardSweep.hpp` — the same alias, member and accessor changes;
+  `_aux = upward_sweep.aux();` at `setup()`; the HostSpace aux at the
+  operator-table build feeding `m2l_build_operator`; and both device lambda
+  captures (`run_m2l_fallback_at_depth`, `run_l2l_at_depth`) with their
+  `m2l_translate` / `l2l_translate` calls.
+- `tests/tstLaplaceSolve.hpp` — **one line**, `collect_a_table`'s
+  `ds.A_table()` → `ds.aux().A_table`. `tests/data/laplace_solve_P6.txt` was not
+  regenerated; the four `"A_table()"` strings elsewhere in the file are failure
+  messages and were left as they are.
+
+`grep -n "_A_table" src/Canopy_UpwardSweep.hpp src/Canopy_DownwardSweep.hpp`
+returns nothing, and neither sweep mentions $A_{n,m}$ at all now.
+
+### Gate measurements
+
+Flux job **`f3XfiYHXy4b1`**, tuolumne1020, Cray clang 20.0.0, spack env
+`tuolumne_trilinos`, `RelWithDebInfo`, Kokkos SERIAL, `build-tuolumne/`
+(`Canopy_ENABLE_PROFILING=OFF`), 39.99 s of CTest wall time.
+`100% tests passed, 0 tests failed out of 6`.
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (reference) | (reference) | 3.2093610331931809e-07 | 4.2399302231264458e-08 |
+| 2 | 4.1994107222659022e-13 | 2.1570013757642702e-12 | 3.2093610363952985e-07 | 4.239936667274564e-08 |
+| 3 | 8.0211305411572796e-13 | 4.0353546216363242e-12 | 3.2093610299898352e-07 | **4.2399380705233977e-08** |
+| 4 | 1.114294857300434e-12 | 5.5987399483706545e-12 | 3.2093610299888352e-07 | 4.2399368624331468e-08 |
+| 5 | 9.5809726336249496e-14 | 6.4438389009577268e-13 | 3.209361028925181e-07 | 4.2399357908696204e-08 |
+| 6 | 5.688835866646797e-13 | 2.8631357246763719e-12 | 3.2093610299905848e-07 | 4.2399381662523099e-08 |
+
+**Twenty-one of the 22 cells are character-for-character T1's.** The bolded one
+is not: T1 and T4 both printed 4.23993807052**48681**e-08 and this run printed
+4.23993807052**33977**e-08 — twelve significant figures of agreement, a move in
+the thirteenth, 22x under `LS_DIRECT_SUM_TOL`.
+
+`fallback_pairs = 0`, `locals_ext = (103,28,1)`, `optab_ext = (28,49,n_ops)`,
+`a_extent = 169` and `initial_hash = 0xb6ad437608ad69b7` at every rank and rank
+count. `bitForBitArtifacts` ran and passed at np=1 rank 0 and np=2 ranks 0 and 1
+— all four artifacts byte-identical to `tests/data/laplace_solve_P6.txt`, so no
+hashes needed recording — and `SKIPPED` at np 3-6 by design. Per-test tallies
+from the log: `bitForBitArtifacts` 3 OK / 36 SKIPPED, `crossRankAgreement` 20 OK
+/ 2 SKIPPED, `matchesDirectSum` 21 OK.
+
+`n_unique_ops` per rank at the last solve: np=1 → 686; np=2 → 368, 386;
+np=4 → 264, 128, 234, 194; np=5 → 180, 168, 147, 217, 187; np=6 → 174, 156, 111,
+160, 116, 175 — all identical to T1. **np=3 is where the multijagged split
+landed this time**, and it is the whole explanation of the one moved figure.
+
+### The np=3 wobble, attributed from the gate log alone
+
+The design's procedure for a np 3-6 deviation that moves in its 9th or later
+significant figure is to confirm it against a control run from unmodified `HEAD`
+before recording it as a finding. **No control run was needed, because this run's
+own log is the control.** `ctest -V` prints one `[laplace-solve] nprocs=3 rank=R`
+line per test body, and np=3's three solves did not draw the same cut:
+
+| solve | rank 0 | rank 1 | rank 2 | sum |
+| --- | --- | --- | --- | --- |
+| two of the three | 273 | 204 | 329 | 806 |
+| the other one | 285 | 189 | 329 | 803 |
+
+`(273, 204, 329)` is T1's np=3 set exactly. The second cut is a different
+partition of the same tree, which is the same two-cut split T3 first saw and T4
+recorded at np=5 — reproduced there by unmodified `HEAD` in flux job
+`f3XWSVHd6FVh`. It has now been observed at np=3 as well, so it is not a property
+of any particular rank count. This run it moved one direct-sum gradient in its
+thirteenth significant figure; at np=5, where T4 saw it, it moved nothing
+printable. Both observations are consistent with the documented statement and
+neither is a finding of T5.
+
+Two things worth keeping from this. First, **the split is visible directly in
+the `ctest -V` output and does not need a separate run to diagnose** — comparing
+the per-rank `n_unique_ops` lines across the three test bodies at one rank count
+is enough, and is cheaper than a stash-and-rebuild control. Later tasks should
+look there first. Second, **T4's "the split does not move any printed figure" is
+now known to be configuration-dependent rather than general**: it did not move
+one at np=5 and it does move one, in the thirteenth figure, at np=3.
+
+### R3 — sampled, and it did not fire
+
+Flux job **`f3Xfk8H1YPNF`**, `build-tuolumne-prof/`
+(`Canopy_ENABLE_PROFILING=ON`, `Canopy_PROFILING_LEVEL=2`), np=1 only,
+`M2L kernel (all depths)` from the `DownwardSweep::execute()` table summed over
+the 24 solves of one invocation. Neither build tree was reconfigured.
+
+| Build | flux job | M2L kernel (24 solves) | Downward sweep total | Total solve |
+| --- | --- | --- | --- | --- |
+| before T3 (unmodified) | `f3XW3XTKcr8o` / `f3XW5NgdA1y9` | 0.053 / 0.055 | 1.169 / 1.185 | 1.348 / 1.365 |
+| after T3 | `f3XWBFwkZb6f` … `f3XWWdYC7twR` | 0.062 - 0.068 | 1.192 - 1.210 | 1.367 - 1.390 |
+| after T4 | `f3XfAAGBc1fm` | 0.065 | 1.205 | 1.385 |
+| after T5 | `f3Xfk8H1YPNF` | **0.070** | **1.209** | **1.390** |
+
+0.070 is 2 ms above the top of T3's five-sample post-move cluster, over 24
+samples that the timer prints to three decimals on values of 0.002-0.004 s — one
+tick per sample of quantization. The per-sample histogram is 6x 2 ms / 14x 3 ms /
+4x 4 ms, against T4's 8/15/1 and T3's post-move 10/8/6. The two figures that are
+~20x larger and therefore far better resolved — downward sweep 1.209 and total
+solve 1.390 — both sit inside T3's post-move ranges, at their tops.
+
+**The structural argument says T5 cannot have cost anything here, and it is
+stronger than the sample.** `TIMER_M2L_KERNEL` scopes `run_m2l_all` and
+`run_m2l_at_depth`. The fused kernel inside them goes through `m2l_pre_cell` /
+`m2l_core` / `m2l_post_cell` against the operator table and **never takes
+`aux`**; the only operator in that scope that does is `m2l_translate`, reached
+through `run_m2l_fallback_at_depth`, which returns immediately on `n_fb == 0` —
+and `fallback_pairs` is 0 at np=1. So no line T5 touched executes inside this
+timer at this configuration. The three operators that did change signature are
+M2M, L2L and the host-side operator build, none of which this timer covers. One
+sample, no repeat, nothing tuned — R3 is not a correctness gate.
+
+### What only running revealed
+
+- **Nothing failed on the first build, and nothing failed on the first run.** No
+  compile error, no gate failure, no bitwise difference.
+- **`clang-format` reflowed six call sites and three signatures, and nothing
+  else.** Run with explicit `--lines=` ranges derived from `git diff -U0` over
+  each touched hunk, per the instruction not to run `clangformat.sh` over these
+  headers. Every reflow was confined to a line this task had already changed:
+  three operator parameter lists in `Canopy_LaplaceKernel.hpp` repacking
+  `const AuxType& aux` onto the previous line, and the `m2m_translate`,
+  `m2l_build_operator`, `m2l_translate` and `l2l_translate` call sites in the two
+  sweeps repacking now that `aux` is shorter than `A_table`. The
+  `aux_tables_type` / `build_aux_tables` block was already in the repo style.
+- **The four other SERIAL targets and both examples compile**, verified because
+  these are shared headers: `Canopy_Test_UpwardSweep_MPI_SERIAL`,
+  `Canopy_Test_DownwardSweep_MPI_SERIAL`, `Canopy_Test_MultiSolve_MPI_SERIAL`,
+  `Canopy_Test_SingleSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve` — all
+  built and linked clean. **They were built before the `clang-format` pass and
+  not rebuilt after it**, at the user's instruction to skip the full rebuild for
+  time; the only post-build change to those headers was the whitespace reflow
+  described above, and `Canopy_Test_LaplaceSolve_MPI_SERIAL` *was* rebuilt after
+  it and is the binary the gate ran. Not built: `Canopy_Test_LaplaceKernel_*`
+  and `Canopy_Test_P2P_*`, out of scope — see the next item.
+- **`tests/tstLaplaceKernel.hpp` is now broken in one more way than it was, as
+  the task anticipated.** It calls `build_A_coefficients` directly at `:397`,
+  `:559`, `:682` and `:773` and passes the resulting bare `View` to
+  `m2m_translate`, `m2l_translate`, `m2l_build_operator` and `l2l_translate`,
+  which now want an aux struct. That target already did not compile at `HEAD`
+  (35 errors, "no matching function" on exactly those five operators), so this
+  deepens a pre-existing breakage rather than creating one. **The repair is
+  mechanical when someone takes it on**, but the four sites do not all map the
+  same way: `:559`, `:682` and `:773` build to `2 * P_ORDER` and become
+  `Kernel::template build_aux_tables<TEST_MEMSPACE>( P_ORDER )` exactly, while
+  `:397` builds only to `P_ORDER` and feeds `m2m_translate`, which reads $A$ at
+  degree $j \le P$ and so does not need the doubled table. `:397` can either
+  call `build_aux_tables<TEST_MEMSPACE>( P_ORDER )` and over-build harmlessly, or
+  keep `build_A_coefficients` and wrap the view in an
+  `aux_tables_type<TEST_MEMSPACE>` by hand. `build_A_coefficients` itself is
+  unchanged and still public, so neither route needs a new function.
+- **Both sweeps still `#include "Canopy_SphericalCoefficients.hpp"` and no
+  longer use anything from it.** Verified by grep for every symbol the header
+  defines — `num_coeffs_symmetric`, `coeff_index`, `get_coeff`, `A_coeff`,
+  `build_A_coefficients`, `a_index` — zero hits in either sweep after this
+  change. The includes were **left in place**: they are not among T5's fifteen
+  named sites, and removing them risks breaking a consumer that was relying on
+  the transitive include, which is a build cycle this task did not need to spend.
+  It is a one-line cleanup for whoever is next in these headers.
+- **`make -j 4` again, per T1's operational note.** No SIGKILL.
+- **`run_cmake_tuolumne.sh` still shows as modified and is still not this task's.**
+  Whole-file line-ending churn plus a mode change to 755, predating the session.
+  `setup-repo.txt` is likewise a pre-existing untracked file. Both left alone.
+
+### Repository state left behind
+
+- Three headers plus one test line modified: `src/Canopy_LaplaceKernel.hpp`,
+  `src/Canopy_UpwardSweep.hpp`, `src/Canopy_DownwardSweep.hpp`,
+  `tests/tstLaplaceSolve.hpp`. No test added, per scope.
+  `tests/data/laplace_solve_P6.txt` and `README.md` untouched.
+- `tasks/abstract-solver-backend.md`: T5 marked **DONE** with a **Met.**
+  paragraph; the "Current state" opening updated from four built tasks to five;
+  group (d)'s first bullet renumbered off the stale pre-T1 citations
+  (`UpwardSweep:233-235`, `:501-504`; `DownwardSweep:529`, `:1099-1100`,
+  `:1636-1639`, `:1688-1691`) onto the verified pre-T5 ones (`:258-259`, `:493`;
+  `:597`, `:1164`, `:1686`, `:1738`) and marked **Done in T5**.
+- Logs kept: `canopy-laplace-solve.f3XfiYHXy4b1.log` (the gate),
+  `canopy-laplace-solve-prof.f3Xfk8H1YPNF.log` (R3).
+- Out of scope and untouched, as directed: T6's `MonopoleBasis`;
+  `M2L_KEY_DD_MAX`'s `float` branch, group (d)'s second bullet (T7);
+  `sets_per_component` and the shared-cell Allreduce shape (T10);
+  `kernel_params` (T9); the `per_cell_complex` / `total_complex` /
+  `umcplx_view` / function-local `scalar_type` names T4 deliberately left (T10);
+  `tests/tstLaplaceKernel.hpp` and `Canopy_Test_P2P_*`; `ctest -L regression`;
+  and the partitioner's non-determinism. No `regression`-suite run was attempted.
+
+**Affects:** **T6** — the last sweep-side obstacle group (d) posed to a
+non-harmonic basis is gone on the aux half: `MonopoleBasis` supplies
+`template <class MS> struct aux_tables_type {};` and
+`build_aux_tables(int) { return {}; }`, and both sweeps compile against it with
+no further change, because neither names a member of the struct. The remaining
+group (d) obstacle is `M2L_KEY_DD_MAX`'s `float` branch, which is T7's. Note
+also that **`aux()` returns the struct and not the table**, so T6 must not write
+a conformance test that calls `ds.A_table()` — there is no such accessor on
+either sweep now; `tests/tstLaplaceSolve.hpp:569` shows the solid-harmonic
+spelling, `ds.aux().A_table`, and it is correct only for this basis. **T9** —
+`build_aux_tables` takes exactly one argument today and the declaration says so;
+when T9 introduces `kernel_params` and plumbs `FmmConfig::softening` into
+`_downward`, the second argument goes here, and there are exactly two call sites
+to update (`UpwardSweep::setup()` and the operator-table build in
+`DownwardSweep`). **T7** — if the `M2L_KEY_DD_MAX` work wants a basis-supplied
+value keyed on order, `aux_tables_type` is not the place: it is a *table* type
+built at setup, and a scalar cap should be a `static constexpr` trait alongside
+`m2l_num_src_coeffs`. **T10 and any later task using the gate** — the np 3-6
+partitioner wobble is now known to reach np=3, not just np=5, and to be
+diagnosable from the `ctest -V` log alone by comparing the three test bodies'
+per-rank `n_unique_ops` lines; T4's observation that the split moves no printed
+figure holds at np=5 but not at np=3, where it moved a direct-sum gradient in
+its thirteenth significant figure. Do not read a 9th-or-later-figure move at any
+rank count 3-6 as a finding without checking those lines first.

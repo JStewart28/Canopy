@@ -101,7 +101,12 @@ class UpwardSweep
     using coeff_view_type =
         Kokkos::View<coeff_type***, Kokkos::LayoutRight, memory_space>;
 
-    using a_view_type = Kokkos::View<scalar_type*, memory_space>;
+    // The basis's auxiliary tables — precomputed, order-dependent data the
+    // basis's own operators need. Opaque here: this sweep builds one in
+    // setup(), hands it to m2m_translate and lends it to DownwardSweep, and
+    // never looks inside. May be an empty struct.
+    using aux_tables_type =
+        typename KernelType::template aux_tables_type<memory_space>;
 
     struct DeviceCellInfo
     {
@@ -164,8 +169,9 @@ class UpwardSweep
         return ( it != _key_to_cell_idx.end() ) ? it->second : -1;
     }
 
-    // Access the A_{n,m} table
-    const a_view_type& A_table() const { return _A_table; }
+    // Access the basis's auxiliary tables (shared with DownwardSweep).
+    // Empty before setup().
+    const aux_tables_type& aux() const { return _aux; }
 
     // Access device cell info (shared with DownwardSweep)
     const cell_view_type& device_cells() const { return _device_cells; }
@@ -199,7 +205,7 @@ class UpwardSweep
     int _nprocs;
 
     coeff_view_type _multipoles;
-    a_view_type _A_table;
+    aux_tables_type _aux;
     cell_view_type _device_cells;
     std::unordered_map<MortonKey, int> _key_to_cell_idx;
 
@@ -254,9 +260,10 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     _multipoles =
         coeff_view_type( "multipoles", num_cells, coeffs_per_cell, NComps );
 
-    // M2L accesses A at degree n+j where both n and j go up to P, so the
-    // table must cover up to 2*P.
-    _A_table = build_A_coefficients<scalar_type, memory_space>( 2 * P );
+    // Whether any table is needed, and how far it must extend, is the
+    // basis's business — the solid-harmonic basis builds A_{n,m} to 2*P
+    // here because M2L reaches degree n+j.
+    _aux = KernelType::template build_aux_tables<memory_space>( P );
 
     _key_to_cell_idx.clear();
     _key_to_cell_idx.reserve( num_cells );
@@ -449,7 +456,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2m_at_depth(
 
     auto multipoles = _multipoles;
     auto device_cells = _device_cells;
-    auto A_table = _A_table;
+    auto aux = _aux;
     auto& d_internals = _d_internals_at_depth[depth];
     auto children = _d_cell_children;
     const int this_rank = _rank;
@@ -487,10 +494,9 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::run_m2m_at_depth(
                 const scalar_type dy = ccell.center[1] - parent_ci.center[1];
                 const scalar_type dz = ccell.center[2] - parent_ci.center[2];
 
-                KernelType::m2m_translate( team, multipoles, ci, dx, dy, dz,
-                                           ccell.half_width,
-                                           parent_ci.half_width,
-                                           A_table, M_parent );
+                KernelType::m2m_translate(
+                    team, multipoles, ci, dx, dy, dz, ccell.half_width,
+                    parent_ci.half_width, aux, M_parent );
             }
         } );
 
