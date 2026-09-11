@@ -13,6 +13,7 @@
 #define CANOPY_DOWNWARD_SWEEP_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_FarFieldContract.hpp"
 #include "Canopy_MpiCoalescedExchange.hpp"
 #include "Canopy_Profiling.hpp"
 #include "Canopy_LaplaceKernel.hpp"
@@ -26,6 +27,8 @@
 
 #include <mpi.h>
 
+#include <cstddef>
+#include <cstdio>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -262,6 +265,48 @@ class DownwardSweep
     // -----------------------------------------------------------------------
     void invalidate_interaction_list() { _interaction_list_dirty = true; }
 
+    // -----------------------------------------------------------------------
+    // set_m2l_op_table_byte_budget()
+    //
+    // Cap the hashed M2L operator table at `bytes` per rank. The cap that
+    // actually binds is m2l_effective_op_cap(), the smaller of this budget's
+    // worth of columns and M2L_OP_COUNT_CAP; pairs beyond it are refused a
+    // column and take the basis's overflow path (for
+    // M2LOverflow::PerPairTranslate, the per-pair m2l_translate fallback,
+    // counted by total_fallback_pair_count()).
+    //
+    // Solver calls this from its constructor with
+    // FmmConfig::m2l_op_table_byte_budget. It has a default here so a test
+    // that drives the sweeps directly is unaffected. Changing the budget
+    // invalidates the interaction list, since the table it sizes is built
+    // there; in the Solver path that is redundant with setup().
+    //
+    // A budget smaller than one column is legal and means what it says: no
+    // operator column is built at all and every pair takes the overflow path.
+    // -----------------------------------------------------------------------
+    void set_m2l_op_table_byte_budget( std::size_t bytes )
+    {
+        _m2l_op_table_byte_budget = bytes;
+        _interaction_list_dirty = true;
+    }
+
+    std::size_t m2l_op_table_byte_budget() const
+    {
+        return _m2l_op_table_byte_budget;
+    }
+
+    // The operator-column cap actually in force: the byte budget's worth of
+    // columns, floored by the count cap. bytes_per_key is the basis's and is
+    // derived from its coeff_type, so a basis running in single precision
+    // gets twice as many columns out of the same budget, as it should.
+    int m2l_effective_op_cap() const
+    {
+        const std::size_t from_bytes =
+            _m2l_op_table_byte_budget / KernelType::bytes_per_key;
+        const std::size_t cap = static_cast<std::size_t>( M2L_OP_COUNT_CAP );
+        return static_cast<int>( from_bytes < cap ? from_bytes : cap );
+    }
+
     // Number of times build_interaction_list_device has actually performed
     // a rebuild (i.e. did not early-return because dirty was false). Used
     // by tests to verify caching.
@@ -340,7 +385,61 @@ class DownwardSweep
     // FP32 valve live on KernelType::m2l_key_dd_max.
     static constexpr int M2L_KEY_DD_MAX = KernelType::m2l_key_dd_max;
     static constexpr int M2L_KEY_OFFSET_MAX = 32;
+
+    // -----------------------------------------------------------------------
+    // How many operator columns this sweep will build, and what happens to the
+    // pairs it refuses.
+    //
+    // TWO CAPS, AND THE SMALLER BINDS. M2L_OP_COUNT_CAP is a bound on the
+    // column COUNT; _m2l_op_table_byte_budget is a bound on the table's SIZE,
+    // converted to a count by dividing by the basis's bytes_per_key. The
+    // effective cap is the minimum of the two — see m2l_effective_op_cap().
+    //
+    // The count cap is retained as a floor deliberately, and removing it is
+    // not a simplification. Which pairs overflow decides which pairs take the
+    // per-pair fallback path, and that path is DIFFERENT ARITHMETIC from the
+    // table path (the same mathematics, reassociated). A pure byte budget
+    // would move that boundary for every existing configuration and change
+    // answers that have nothing to do with memory. With the 2 GB default and
+    // 58 KB per key at P = 8 the count cap binds first, so today's overflow
+    // set is provably unchanged: 32768 * 58320 B is 1.9 GB, under the budget.
+    //
+    // Both caps are a defense against a pathological tree, not a tuning knob
+    // for a healthy one. A healthy MAC traversal at theta = 0.5 realizes
+    // hundreds of keys per rank, not tens of thousands.
+    // -----------------------------------------------------------------------
     static constexpr int M2L_OP_COUNT_CAP = 32768;
+
+    // Default per-rank byte budget for the operator table: 2 GB. Overridden
+    // through FmmConfig::m2l_op_table_byte_budget, which Solver routes to
+    // set_m2l_op_table_byte_budget().
+    static constexpr std::size_t DEFAULT_M2L_OP_TABLE_BYTE_BUDGET =
+        2ull * 1024ull * 1024ull * 1024ull;
+
+    // The basis's overflow policy. EscalateToP2P asks for a pair to be handed
+    // to the direct sum, and NO PATH EXISTS HERE TO DO THAT: P2P's pair set is
+    // fixed by the MAC in CommunicationPlan before the operator table is even
+    // sized, and nothing downstream of it can add a pair. Refusing at compile
+    // time is the whole point — a lenient fallback would drop the pair from
+    // both the far field and the near field and return a partial answer that
+    // no assertion in this repository would catch. See
+    // Canopy_FarFieldContract.hpp.
+    //
+    // CLASS-SCOPE static_assert, and the negative-compile block in
+    // tests/tstFarFieldContract.hpp carries its own basis for it: clang
+    // reports only the FIRST failing class-scope assert per instantiation, so
+    // a case folded into one of the existing inconsistent bases there would
+    // never be reached.
+    static_assert(
+        KernelType::m2l_overflow_policy == M2LOverflow::PerPairTranslate,
+        "DownwardSweep: this basis selects M2LOverflow::EscalateToP2P, and "
+        "the escalation path is unimplemented — the downward sweep cannot "
+        "hand an M2L pair to the direct sum, because P2P's pair set is fixed "
+        "by the MAC in CommunicationPlan before the operator table is sized. "
+        "A basis that can neither evaluate its own operator per pair "
+        "(M2LOverflow::PerPairTranslate, which requires m2l_translate) nor "
+        "escalate has no correct answer available for an overflowing pair, "
+        "and must not silently produce a partial far field." );
 
     struct M2LKey
     {
@@ -443,6 +542,12 @@ class DownwardSweep
     // false. setup() and invalidate_interaction_list() set it to true; the
     // builder clears it at the end of a successful rebuild.
     bool _interaction_list_dirty = true;
+
+    // Per-rank memory budget for the hashed M2L operator table, in bytes.
+    // Converted to a column count by m2l_effective_op_cap(). Set through
+    // set_m2l_op_table_byte_budget(); a sweep driven directly by a test and
+    // never handed a budget runs at the default.
+    std::size_t _m2l_op_table_byte_budget = DEFAULT_M2L_OP_TABLE_BYTE_BUDGET;
 
     // Count of actual rebuilds done by build_interaction_list_device (does
     // not increment on the early-return path). Surfaced by
@@ -842,6 +947,11 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     std::vector<M2LKey> ops;
     bool overflow_warned = false;
 
+    // The column cap in force for this build: the byte budget's worth of
+    // columns, floored by M2L_OP_COUNT_CAP. Read once here so every key in
+    // the serial merge below is tested against the same number.
+    const int effective_op_cap = m2l_effective_op_cap();
+
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_ILIST_S3_CLASSIFY_PAIRS );
@@ -1128,7 +1238,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                     g = it->second;
                 }
                 else if ( static_cast<int>( ops.size() ) <
-                          M2L_OP_COUNT_CAP )
+                          effective_op_cap )
                 {
                     g = static_cast<int>( ops.size() );
                     key_to_op.emplace( key, g );
@@ -1141,9 +1251,13 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                     {
                         std::fprintf(
                             stderr,
-                            "[Canopy] M2L op count exceeded cap %d; "
-                            "remaining pairs route to fallback path.\n",
-                            M2L_OP_COUNT_CAP );
+                            "[Canopy] M2L op count exceeded cap %d "
+                            "(count cap %d, byte budget %zu B at %zu B "
+                            "per key); remaining pairs route to fallback "
+                            "path.\n",
+                            effective_op_cap, M2L_OP_COUNT_CAP,
+                            _m2l_op_table_byte_budget,
+                            KernelType::bytes_per_key );
                         overflow_warned = true;
                     }
                 }
@@ -1170,6 +1284,35 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     const int n_unique_ops = static_cast<int>( ops.size() );
+
+#ifdef CANOPY_ENABLE_PROFILING
+    // The realized key count, instrumented. Before this line the only figure
+    // on record was a tuning comment's "globally ~16 k under MAC=0.5" —
+    // a claim, never a measurement, and 50x the textbook 316-offset figure
+    // (risk R7 in tasks/abstract-solver-backend.md). The table's size follows
+    // from it and the basis's bytes_per_key, and it is the product that
+    // decides whether a compressed-operator basis is buildable at all, so
+    // both are printed. Per rank and unreduced: the key set is per rank, and
+    // a mean over ranks would hide the rank that actually runs out of memory.
+    //
+    // key_needs_level says whether this basis's keys carry the absolute level
+    // (canonicalize_key keeps max_d) or collapse every level onto one column
+    // (it zeroes max_d). A level-carrying basis realizes strictly more keys on
+    // the same tree — measured at 4628 against 2572, a factor of 1.8, on one
+    // 694-cell tree (T7) — so it is printed beside the count that it explains.
+    std::printf( "[Canopy Diagnostics] M2L operator table: rank %d "
+                 "n_unique_ops=%d bytes_per_key=%zu table_bytes=%zu "
+                 "effective_cap=%d count_cap=%d byte_budget=%zu "
+                 "key_needs_level=%d\n",
+                 _rank, n_unique_ops,
+                 static_cast<std::size_t>( KernelType::bytes_per_key ),
+                 static_cast<std::size_t>( n_unique_ops ) *
+                     KernelType::bytes_per_key,
+                 effective_op_cap, M2L_OP_COUNT_CAP,
+                 _m2l_op_table_byte_budget,
+                 KernelType::key_needs_level ? 1 : 0 );
+    std::fflush( stdout );
+#endif
 
     // Retain the realized key list past the end of this function as a
     // read-only diagnostic surface (see m2l_realized_keys()). Copy rather

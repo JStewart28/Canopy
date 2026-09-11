@@ -3,6 +3,7 @@ configure_file(Canopy_Config.hpp.cmakein Canopy_Config.hpp)
 set(HEADERS_PUBLIC
   Canopy_CommunicationPlan.hpp
   Canopy_DownwardSweep.hpp
+  Canopy_FarFieldContract.hpp
   Canopy_Helpers.hpp
   Canopy_LaplaceKernel.hpp
   Canopy_MpiCoalescedExchange.hpp

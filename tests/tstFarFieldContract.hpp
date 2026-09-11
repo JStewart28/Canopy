@@ -120,11 +120,13 @@
 // sed re-supplies the defines the build needs and appends ours. `touch` is
 // there because changing a -D does not change any file timestamp.)
 //
-// Expect a diagnostic quoting one of the four sweep static_asserts:
+// Expect a diagnostic quoting one of the five sweep static_asserts:
 //   src/Canopy_UpwardSweep.hpp:73-78    sizeof relation
 //   src/Canopy_UpwardSweep.hpp:84-92    agreement with detail::coeff_traits
 //   src/Canopy_DownwardSweep.hpp:117-122  sizeof relation
 //   src/Canopy_DownwardSweep.hpp:128-136  agreement with detail::coeff_traits
+//   src/Canopy_DownwardSweep.hpp:433-442  the M2LOverflow::EscalateToP2P
+//                                         rejection
 // A build that fails with any other template error has not established that
 // the guard is what rejected the basis.
 // ===========================================================================
@@ -985,12 +987,13 @@ TEST( FarFieldContract, levelReachesTheKey )
 //---------------------------------------------------------------------------//
 // PERMANENT NEGATIVE TEST — this block must not compile.
 //
-// Two bases, each MonopoleBasis with one or two traits changed, and each
-// instantiated on both sweeps. Between them they hit all four guards; see the
-// per-case comments below for why one basis is not enough.
+// Three bases, each MonopoleBasis with one or two traits changed, and each
+// instantiated on the sweep(s) that guard the trait it breaks. Between them
+// they hit all five guards; see the per-case comments below for why one basis
+// is not enough.
 //
 // WHAT IS BEING TESTED IS THE GUARD THE SWEEPS CARRY, not MonopoleBasis's own
-// assert. The four asserts are:
+// assert. The five asserts are:
 //
 //   src/Canopy_UpwardSweep.hpp:73-78     "UpwardSweep: the basis's coeff_type
 //                                         is not scalars_per_coeff contiguous
@@ -1000,13 +1003,16 @@ TEST( FarFieldContract, levelReachesTheKey )
 //                                         detail::coeff_traits ..."
 //   src/Canopy_DownwardSweep.hpp:117-122 the DownwardSweep sizeof analogue
 //   src/Canopy_DownwardSweep.hpp:128-136 the DownwardSweep traits analogue
+//   src/Canopy_DownwardSweep.hpp:433-442 "this basis selects
+//                                         M2LOverflow::EscalateToP2P, and the
+//                                         escalation path is unimplemented"
 //
-// and all four are at class scope, so naming a sweep type completely — which
+// and all five are at class scope, so naming a sweep type completely — which
 // the sizeof() calls below do — is enough to fire them. An inconsistent basis
 // cannot instantiate a sweep at all.
 //
 // DERIVATION IS DELIBERATE, not a shortcut. Because the ONLY thing wrong with
-// each basis below is its one or two changed traits, deleting the four
+// each basis below is its one or two changed traits, deleting the five
 // asserts would make this block COMPILE — the sweeps would instantiate
 // happily and then mis-size an MPI count at runtime. A hand-rolled minimal
 // bad basis would keep failing on missing members after the asserts were
@@ -1042,12 +1048,31 @@ struct InconsistentCoeffBasis
 // static_assert per class instantiation, so Case A alone produces two
 // diagnostics (one per sweep) and never reaches the traits cross-check —
 // which means Case A alone would not notice if the two traits asserts were
-// deleted. Both cases together cover all four guards.
+// deleted. Cases A and B together cover the four coefficient guards; Case C
+// below covers the fifth.
 struct InconsistentComponentBasis
     : public CanopyTest::MonopoleBasis<double, BASIS_ORDER, BASIS_NCOMPS>
 {
     using component_scalar_type = float;
     static constexpr int scalars_per_coeff = 2;
+};
+
+// Case C — selects an overflow policy no path exists to implement. Every
+// coefficient trait is MonopoleBasis's and therefore consistent, so Cases A
+// and B's four guards all pass and this is the first assert reached. Targets
+// the DownwardSweep M2LOverflow guard.
+//
+// CASE C NEEDS ITS OWN BASIS, for the same reason Case B does: clang reports
+// only the FIRST failing class-scope static_assert per class instantiation,
+// so folding m2l_overflow_policy into Case A's basis would put it behind that
+// basis's sizeof failure and it would never be reached. UpwardSweep is not
+// instantiated on it — overflow is an M2L concern and only DownwardSweep
+// carries the guard.
+struct EscalateToP2PBasis
+    : public CanopyTest::MonopoleBasis<double, BASIS_ORDER, BASIS_NCOMPS>
+{
+    static constexpr Canopy::M2LOverflow m2l_overflow_policy =
+        Canopy::M2LOverflow::EscalateToP2P;
 };
 
 using InconsistentUpwardA =
@@ -1058,6 +1083,8 @@ using InconsistentUpwardB =
     UpwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, InconsistentComponentBasis>;
 using InconsistentDownwardB =
     DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, InconsistentComponentBasis>;
+using EscalatingDownwardC =
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, EscalateToP2PBasis>;
 
 // sizeof() requires a complete type, which instantiates the class body and
 // therefore the static_asserts in it.
@@ -1081,6 +1108,12 @@ static_assert( sizeof( InconsistentDownwardB ) > 0,
                "basis whose traits disagree with detail::coeff_traits. Its "
                "coeff_traits cross-check static_assert "
                "(Canopy_DownwardSweep.hpp:128-136) has been deleted." );
+static_assert( sizeof( EscalatingDownwardC ) > 0,
+               "CANOPY_TEST_EXPECT_COMPILE_FAILURE: DownwardSweep accepted a "
+               "basis selecting M2LOverflow::EscalateToP2P. No path exists to "
+               "hand an overflowing M2L pair to the direct sum, so its "
+               "m2l_overflow_policy static_assert has been deleted and such a "
+               "basis now silently produces a partial far field." );
 
 } // namespace FarFieldContractTest
 #endif // CANOPY_TEST_EXPECT_COMPILE_FAILURE

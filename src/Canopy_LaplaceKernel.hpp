@@ -12,6 +12,7 @@
 #ifndef CANOPY_LAPLACE_KERNEL_HPP
 #define CANOPY_LAPLACE_KERNEL_HPP
 
+#include "Canopy_FarFieldContract.hpp"
 #include "Canopy_SphericalCoefficients.hpp"
 
 #include <Kokkos_Complex.hpp>
@@ -703,6 +704,38 @@ struct LaplaceKernel
         k.max_d = 0;
         return k;
     }
+
+    // =======================================================================
+    // The operator-table budget contract: bytes_per_key, m2l_overflow_policy.
+    //
+    // The sweep builds one operator column per canonical key and caps how many
+    // it will build, by a count (M2L_OP_COUNT_CAP) and by a per-rank memory
+    // budget in bytes (FmmConfig::m2l_op_table_byte_budget). Converting the
+    // budget into a column count needs the per-column size, which only the
+    // basis knows, and deciding what happens to a refused pair is likewise the
+    // basis's. These two members are those two answers.
+    // =======================================================================
+
+    // Bytes one operator column costs in the sweep's table, i.e. one key's
+    // worth of m2l_operators_type. DERIVED, never a literal: the table's
+    // element type follows coeff_type (see m2l_operators_type above), and this
+    // basis has a live float path where sizeof(coeff_type) is 8 and not 16 —
+    // a hardcoded 16 would let an FP32 solve run at twice the budget it was
+    // given. At P = 6 with Scalar = double this is 28 * 49 * 16 = 21952 B;
+    // at P = 8, 45 * 81 * 16 = 58320 B.
+    static constexpr std::size_t bytes_per_key =
+        static_cast<std::size_t>( num_coeffs_per_cell ) *
+        static_cast<std::size_t>( m2l_num_src_coeffs ) * sizeof( coeff_type );
+
+    // What the sweep does with a pair whose key got no column. This basis has
+    // a per-pair operator — m2l_translate, the same mathematics evaluated at
+    // the physical geometry — so it takes the per-pair path. That path is
+    // different arithmetic from the table path, which is why the count cap is
+    // retained as a floor alongside the byte budget: see the deliberate
+    // deviation on the operator-count cap in
+    // tasks/abstract-solver-backend.md.
+    static constexpr M2LOverflow m2l_overflow_policy =
+        M2LOverflow::PerPairTranslate;
 
     // =======================================================================
     // m2l_build_operator

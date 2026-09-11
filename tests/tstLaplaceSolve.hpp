@@ -78,6 +78,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -189,6 +190,38 @@ static constexpr double LS_DIRECT_SUM_TOL = 9.63e-07;
 // longer attributable to reassociation and the tolerance must not be raised
 // to accommodate it.
 static constexpr double LS_CROSS_RANK_R8_THRESHOLD = 1.0e-9;
+
+// ---------------------------------------------------------------------------
+// The operator-table byte-budget check (testOpTableByteBudget). NOT part of
+// the frozen configuration: these two constants configure a SECOND solve of
+// the same problem, run beside the default-budget one in the same process,
+// and nothing about them reaches tests/data/laplace_solve_P6.txt.
+//
+// LS_BUDGET_KEYS is how many operator columns the tight-budget solve is
+// allowed; the budget handed to it is that many times the basis's
+// bytes_per_key, so the test states the thing it means (a column count) while
+// exercising the path that matters (the byte budget dividing by
+// bytes_per_key). 64 is well under the 111-686 keys every rank realizes at
+// the frozen configuration, so every rank overflows and
+// total_fallback_pair_count() is positive everywhere.
+//
+// A LARGER CAP DOES NOT WORK AT EVERY RANK COUNT, and this is measured rather
+// than assumed: at 256 columns, rank 1 at np=3 realizes only 204 keys,
+// overflows nothing, and the anti-vacuity assertion below fires (flux job
+// f3XiTuYB2mao). Raise this only after checking the per-rank n_unique_ops
+// table in tasks/abstract-solver-backend-progress-log.md, section T8.
+//
+// LS_BUDGET_POTENTIAL_TOL is 5e-2, the same relative bound
+// tests/tstMultiSolve.hpp:929 puts on the potential, and it is a bound on a
+// DIFFERENT-ARITHMETIC comparison rather than on an error: the overflowing
+// pairs are evaluated by the basis's per-pair m2l_translate instead of out of
+// the operator table, which is the same mathematics reassociated. The
+// measured deviation is far below this; the tolerance is loose deliberately,
+// because a tight one here would be pinning the difference between two
+// summation orders and would fail for reasons that are not defects.
+// ---------------------------------------------------------------------------
+static constexpr int LS_BUDGET_KEYS = 64;
+static constexpr double LS_BUDGET_POTENTIAL_TOL = 5.0e-2;
 
 static const char* const LS_DATA_FILE =
     CANOPY_TEST_DATA_DIR "/laplace_solve_P6.txt";
@@ -692,8 +725,15 @@ struct SolveOutcome
 // the callback so a mismatch can dump the full arrays without solving a
 // second time.
 // ---------------------------------------------------------------------------
+// `m2l_op_table_byte_budget` is the ONE configuration knob this driver takes,
+// and 0 means "leave FmmConfig's default in place" — which is what the three
+// bodies gating the frozen configuration pass, so their solves are the same
+// solve they always were. Only testOpTableByteBudget passes a non-zero value,
+// to make the operator table's byte budget bind before its count cap. The
+// frozen-configuration block above is untouched by it: a budget changes which
+// pairs get an operator column, not the problem being solved.
 template <class MemorySpace, class ExecutionSpace, class Fn>
-void with_laplace_solve( Fn&& after )
+void with_laplace_solve( Fn&& after, std::size_t m2l_op_table_byte_budget = 0 )
 {
     constexpr int P = LS_P;
     using Scalar = double;
@@ -805,6 +845,8 @@ void with_laplace_solve( Fn&& after )
     cfg.imbalance_tolerance = 0.05;
     cfg.mac_theta = LS_MAC_THETA;
     cfg.softening = 0.0;
+    if ( m2l_op_table_byte_budget > 0 )
+        cfg.m2l_op_table_byte_budget = m2l_op_table_byte_budget;
 
     Solver_t solver( MPI_COMM_WORLD, cfg );
     solver.template setup<Position, Charge>( particles, n_local_initial );
@@ -1005,12 +1047,14 @@ void with_laplace_solve( Fn&& after )
     // per-rank-count n_unique_ops and fallback counts reach the progress log.
     std::printf( "[laplace-solve] nprocs=%d rank=%d steps=%d n_unique_ops=%d "
                  "fallback_pairs=%lld locals_ext=(%zu,%zu,%zu) "
-                 "optab_ext=(%zu,%zu,%zu) a_extent=%zu initial_hash=%s\n",
+                 "optab_ext=(%zu,%zu,%zu) a_extent=%zu initial_hash=%s "
+                 "op_budget=%zu op_cap=%d\n",
                  r.nprocs, r.rank, LS_NUM_STEPS, r.n_unique_ops,
                  r.fallback_pairs, r.locals_ext[0], r.locals_ext[1],
                  r.locals_ext[2], r.optab_ext[0], r.optab_ext[1],
                  r.optab_ext[2], r.a_bits.size(),
-                 hex64( initial_hash ).c_str() );
+                 hex64( initial_hash ).c_str(),
+                 cfg.m2l_op_table_byte_budget, ds.m2l_effective_op_cap() );
     std::fflush( stdout );
 
     SolveOutcome<DS> outcome;
@@ -1538,6 +1582,176 @@ void testMatchesDirectSum()
         } );
 }
 
+// ---------------------------------------------------------------------------
+// np 1-6. The operator table's memory budget, and the overflow path it drives.
+//
+// Two Solvers, one process, one rank count: the first at FmmConfig's default
+// 2 GB budget, where the count cap binds and no pair overflows; the second at
+// LS_BUDGET_KEYS columns' worth of bytes, where the budget binds long before
+// the count cap and most pairs are refused a column. The refused pairs take
+// the basis's overflow path — for LaplaceKernel, M2LOverflow::PerPairTranslate
+// — and the two solves must still agree on the potential.
+//
+// WHAT THIS ASSERTS, AND WHY EACH HALF MATTERS.
+//
+//   - The default-budget run has total_fallback_pair_count() == 0. That is
+//     R4's discriminator: the byte budget must not change which pairs overflow
+//     at the frozen configuration, and the retained count cap is what
+//     guarantees it. bitForBitArtifacts and crossRankAgreement assert the same
+//     thing; this body asserts it a third time, in the one test that also
+//     proves a non-zero count is reachable.
+//   - The tight-budget run has total_fallback_pair_count() > 0 on every rank,
+//     and n_unique_ops <= LS_BUDGET_KEYS. Without both, the comparison below
+//     would be comparing two identical runs and would pass vacuously — which
+//     is exactly how a cap that silently stopped binding would look.
+//   - The potentials agree to LS_BUDGET_POTENTIAL_TOL. This is the substantive
+//     claim: the fallback path is different arithmetic, not wrong arithmetic.
+//
+// Rank 0 does the comparison, on the gathered GlobalId-ordered field, with the
+// same global-scale normalization crossRankAgreement and matchesDirectSum use.
+// Both runs are fully collective and every rank drives both.
+//
+// This body does not read tests/data/laplace_solve_P6.txt and does not depend
+// on the two pinned tolerances. It compares one run against another run of the
+// same binary at the same rank count, so the partitioner's run-to-run
+// non-determinism enters only as reassociation — orders of magnitude under
+// this tolerance — and no committed record constrains it.
+// ---------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace>
+void testOpTableByteBudget()
+{
+    using Kernel = Canopy::LaplaceKernel<double, LS_P, LS_NCOMPS>;
+
+    // DERIVED, never a literal: the budget is expressed in columns and
+    // converted here by the same trait the sweep divides by, so this test
+    // cannot drift from the thing it is testing if a basis's coefficient
+    // width changes.
+    constexpr std::size_t bytes_per_key = Kernel::bytes_per_key;
+    const std::size_t tight_budget =
+        bytes_per_key * static_cast<std::size_t>( LS_BUDGET_KEYS );
+
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    GatheredState wide_field;
+    long long wide_fallback = -1;
+    int wide_ops = -1;
+    int wide_cap = -1;
+
+    with_laplace_solve<MemorySpace, ExecutionSpace>(
+        [&]( const auto& outcome, const auto& ds )
+        {
+            wide_fallback = outcome.bits.fallback_pairs;
+            wide_ops = outcome.bits.n_unique_ops;
+            wide_cap = ds.m2l_effective_op_cap();
+            wide_field = outcome.gathered;
+        } );
+
+    GatheredState tight_field;
+    long long tight_fallback = -1;
+    int tight_ops = -1;
+    int tight_cap = -1;
+
+    with_laplace_solve<MemorySpace, ExecutionSpace>(
+        [&]( const auto& outcome, const auto& ds )
+        {
+            tight_fallback = outcome.bits.fallback_pairs;
+            tight_ops = outcome.bits.n_unique_ops;
+            tight_cap = ds.m2l_effective_op_cap();
+            tight_field = outcome.gathered;
+        },
+        tight_budget );
+
+    std::printf( "[laplace-solve] nprocs=%d rank=%d op_budget_check "
+                 "bytes_per_key=%zu wide(budget=default cap=%d ops=%d "
+                 "fallback=%lld) tight(budget=%zu cap=%d ops=%d "
+                 "fallback=%lld)\n",
+                 nprocs, rank, bytes_per_key, wide_cap, wide_ops,
+                 wide_fallback, tight_budget, tight_cap, tight_ops,
+                 tight_fallback );
+    std::fflush( stdout );
+
+    // The default budget must leave the count cap binding and no pair
+    // overflowing — R4's discriminator, asserted on every rank.
+    EXPECT_EQ( wide_cap, 32768 )
+        << "the default FmmConfig budget no longer leaves M2L_OP_COUNT_CAP "
+           "as the binding cap, so the byte budget has moved which pairs "
+           "overflow at the frozen configuration";
+    EXPECT_EQ( wide_fallback, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " the default-budget solve routed pairs to the per-pair fallback; "
+           "R4's discriminator has fired";
+    EXPECT_GT( wide_ops, 0 );
+
+    // The tight budget must actually bind, or the comparison below is
+    // vacuous.
+    EXPECT_EQ( tight_cap, LS_BUDGET_KEYS )
+        << "the tight budget of " << tight_budget << " B at " << bytes_per_key
+        << " B per key did not produce a cap of " << LS_BUDGET_KEYS
+        << " columns";
+    EXPECT_LE( tight_ops, LS_BUDGET_KEYS )
+        << "np=" << nprocs << " rank=" << rank
+        << " the tight-budget solve built more operator columns than the cap "
+           "allows";
+    EXPECT_GT( tight_fallback, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " the tight-budget solve overflowed no pair onto the fallback "
+           "path, so this test compares two identical solves and proves "
+           "nothing";
+
+    if ( rank != 0 )
+        return;
+
+    ASSERT_TRUE( wide_field.valid )
+        << "default-budget gathered state is invalid: " << wide_field.err;
+    ASSERT_TRUE( tight_field.valid )
+        << "tight-budget gathered state is invalid: " << tight_field.err;
+    ASSERT_EQ( wide_field.n, tight_field.n );
+
+    const int n = wide_field.n;
+    double pot_scale = 0.0, grad_scale = 0.0;
+    field_scales( wide_field.pot, wide_field.grad, n, pot_scale, grad_scale );
+    ASSERT_GT( pot_scale, 0.0 );
+    ASSERT_GT( grad_scale, 0.0 );
+
+    double max_pot_dev = 0.0, max_grad_dev = 0.0;
+    for ( int i = 0; i < n; i++ )
+    {
+        max_pot_dev = std::max(
+            max_pot_dev,
+            std::abs( tight_field.pot[i] - wide_field.pot[i] ) / pot_scale );
+        const double dx = tight_field.grad[3 * i + 0] -
+                          wide_field.grad[3 * i + 0];
+        const double dy = tight_field.grad[3 * i + 1] -
+                          wide_field.grad[3 * i + 1];
+        const double dz = tight_field.grad[3 * i + 2] -
+                          wide_field.grad[3 * i + 2];
+        max_grad_dev =
+            std::max( max_grad_dev,
+                      std::sqrt( dx * dx + dy * dy + dz * dz ) / grad_scale );
+    }
+
+    // The gradient deviation is PRINTED and not asserted. The exit criterion
+    // this body exists for is a statement about the potential, and the
+    // overflowing pairs are a different subset of the far field at every rank
+    // count, so a pinned gradient bound here would be pinning how the
+    // partitioner happened to cut rather than a property of the fallback path.
+    std::printf( "[laplace-solve] nprocs=%d op_budget max_pot_dev=%.17g "
+                 "max_grad_dev=%.17g tol=%.17g\n",
+                 nprocs, max_pot_dev, max_grad_dev,
+                 LS_BUDGET_POTENTIAL_TOL );
+    std::fflush( stdout );
+
+    EXPECT_LT( max_pot_dev, LS_BUDGET_POTENTIAL_TOL )
+        << "np=" << nprocs
+        << " the tight-budget solve does not reproduce the default-budget "
+           "potential. The per-pair fallback path is different arithmetic "
+           "from the operator-table path, not different mathematics, so a "
+           "deviation this large is a defect in the fallback and not a "
+           "consequence of the budget";
+}
+
 } // namespace LaplaceSolveTest
 
 //---------------------------------------------------------------------------//
@@ -1559,6 +1773,13 @@ TEST( LaplaceSolve, crossRankAgreement )
 TEST( LaplaceSolve, matchesDirectSum )
 {
     LaplaceSolveTest::testMatchesDirectSum<TEST_MEMSPACE, TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+
+TEST( LaplaceSolve, opTableByteBudget )
+{
+    LaplaceSolveTest::testOpTableByteBudget<TEST_MEMSPACE, TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

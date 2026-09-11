@@ -27,6 +27,7 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <memory>
 #include <unordered_set>
@@ -75,6 +76,23 @@ struct FmmConfig
     // widens the near field (more P2P pairs). 0 disables the floor. Only has an
     // effect when softening > 0.
     double near_softening_factor = 4.0;
+
+    // Per-rank memory budget for the hashed M2L operator table, in bytes.
+    // The downward sweep builds one dense operator column per distinct
+    // translation key; this bounds how much memory that table may occupy.
+    // The cap that actually binds is the smaller of this budget's worth of
+    // columns and the sweep's M2L_OP_COUNT_CAP (32768) — see
+    // DownwardSweep::m2l_effective_op_cap(). Pairs beyond the cap are refused
+    // a column and fall back to the per-pair M2L translation, which is the
+    // same mathematics evaluated pair by pair; they are counted by
+    // DownwardSweep::total_fallback_pair_count().
+    //
+    // A column costs the basis's bytes_per_key: num_coeffs_per_cell *
+    // m2l_num_src_coeffs * sizeof(coeff_type), which is 21952 B at P = 6 and
+    // 58320 B at P = 8 in double precision. At the 2 GB default the count cap
+    // binds first at every order this solver supports, so lowering this is
+    // the only way to make the budget the binding constraint.
+    std::size_t m2l_op_table_byte_budget = 2ull * 1024ull * 1024ull * 1024ull;
 };
 
 // ============================================================================
@@ -163,6 +181,12 @@ class Solver
         , _near_softening_factor( cfg.near_softening_factor )
         , _softening_initialized( false )
     {
+        // Memory budget for the M2L operator table. Routed to the downward
+        // sweep here rather than through setup(), beside the other two config
+        // knobs a subsystem has to be told about; the sweep's own default
+        // applies to a sweep driven directly by a test.
+        _downward.set_m2l_op_table_byte_budget( cfg.m2l_op_table_byte_budget );
+
         // Explicit softening (including an explicit 0 for an unsoftened run):
         // apply it now. A negative value defers to the distribution-based
         // auto-softening computed in _full_setup().

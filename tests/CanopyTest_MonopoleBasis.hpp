@@ -12,6 +12,8 @@
 #ifndef CANOPY_TEST_MONOPOLE_BASIS_HPP
 #define CANOPY_TEST_MONOPOLE_BASIS_HPP
 
+#include "Canopy_FarFieldContract.hpp"
+
 #include <Kokkos_Core.hpp>
 
 #include <cstddef>
@@ -164,6 +166,39 @@ struct MonopoleBasis
     {
         return k;
     }
+
+    // -----------------------------------------------------------------------
+    // The operator-table budget contract: bytes_per_key, m2l_overflow_policy.
+    // See LaplaceKernel for the full statement of what the sweep does with
+    // these two.
+    // -----------------------------------------------------------------------
+
+    // Bytes one operator column costs. DERIVED from sizeof(coeff_type), never
+    // a literal, for the reason given on LaplaceKernel::bytes_per_key: the
+    // operator table's element type follows coeff_type, and it is not the same
+    // width for every basis. Here coeff_type is a bare double and the operator
+    // is 1x1, so this is 8 — the cheapest key in the repository, which is why
+    // an overflow policy is cheap to exercise against this basis: the count
+    // cap binds long before any plausible byte budget does.
+    static constexpr std::size_t bytes_per_key =
+        static_cast<std::size_t>( num_coeffs_per_cell ) *
+        static_cast<std::size_t>( m2l_num_src_coeffs ) * sizeof( coeff_type );
+
+    // This basis has a per-pair m2l_translate that reconstructs the same
+    // integer key from the physical geometry and calls the same
+    // m2l_operator_entry the table build calls, so an overflowing pair takes
+    // the per-pair path and lands on the same operator value. That is what
+    // makes total_fallback_pair_count() a printed diagnostic in
+    // tests/tstFarFieldContract.hpp rather than something the host reference
+    // has to know about.
+    //
+    // The other enumerator, M2LOverflow::EscalateToP2P, does not compile: the
+    // sweep's class-scope static_assert rejects it, and the permanent
+    // #ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE block in
+    // tests/tstFarFieldContract.hpp carries a basis that proves the assert is
+    // still there.
+    static constexpr Canopy::M2LOverflow m2l_overflow_policy =
+        Canopy::M2LOverflow::PerPairTranslate;
 
     // NOTHING CONSUMES THIS YET. `grep -rn sets_per_component src/ tests/`
     // finds no reader: T10 is the task that raises the locals view to

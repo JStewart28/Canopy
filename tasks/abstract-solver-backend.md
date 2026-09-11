@@ -276,7 +276,8 @@ a task in this document.
   tightly are named per task in the [Conventions](#conventions) row rather than
   left to a whole-tree build to catch.
 - **The operator-count cap is retained alongside the byte budget.** T8 makes the
-  cap a memory budget, but keeps `M2L_OP_COUNT_CAP` (`:304`) as a floor:
+  cap a memory budget, but keeps `M2L_OP_COUNT_CAP`
+  (`src/Canopy_DownwardSweep.hpp:343`) as a floor:
   `effective_cap = min(M2L_OP_COUNT_CAP, byte_budget / bytes_per_key)`. A pure
   byte budget would change *which* pairs overflow into the per-pair fallback path
   — which is different arithmetic — and so would break the bit-for-bit
@@ -300,7 +301,7 @@ a task in this document.
 
 ## Current state
 
-Seven things in this document are built. **T1 is complete** — the diagnostic
+Eight things in this document are built. **T1 is complete** — the diagnostic
 surface on the sweeps, the solve-level gate `tests/tstLaplaceSolve.hpp`, its
 committed reference data `tests/data/laplace_solve_P6.txt`, and both pinned
 tolerances (`LS_CROSS_RANK_TOL = 5.6e-10`, `LS_DIRECT_SUM_TOL = 9.63e-07`) all
@@ -329,7 +330,14 @@ is the basis's `m2l_key_dd_max`. `LaplaceKernel` zeroes `max_d` and reproduced
 the committed key set, operator table and `locals()` bit-for-bit at np 1-2
 without the reference data being regenerated, while `MonopoleBasis` keeps it
 and realizes strictly more distinct keys on the same tree, so both branches of
-the contract are exercised. Nothing else here has been built. What follows is what is true of the repository now; the
+the contract are exercised.
+**T8 is complete** — the operator-table cap is
+`min(M2L_OP_COUNT_CAP, byte_budget / KernelType::bytes_per_key)`, the budget is
+an `FmmConfig` field routed through the first `Solver` → `_downward` setter,
+`m2l_overflow_policy` is a per-basis trait whose second enumerator
+`EscalateToP2P` is rejected by a sweep `static_assert`, and the realized key
+count is emitted under `CANOPY_ENABLE_PROFILING` and measured.
+Nothing else here has been built. What follows is what is true of the repository now; the
 tables in (b) and (c) below are the historical record of what T4 changed and
 their "Today" columns are pre-T4.
 
@@ -596,6 +604,11 @@ field, one `mix()` call and no new computation. The cap is a count,
 warning (`:1028-1047`) and routes those pairs to the per-pair `m2l_translate`
 fallback (`:1231-1315` builds the tables, `:1599-1641` runs them).
 `total_fallback_pair_count()` (`:424-430`) already exposes the count.
+**T8 changed the cap and nothing else in this paragraph**: the count cap is
+retained as a floor and the test is now against
+`min(M2L_OP_COUNT_CAP, _m2l_op_table_byte_budget / KernelType::bytes_per_key)`,
+computed once per build by `m2l_effective_op_cap()`. The `op_idx = -1`
+assignment, the one-shot warning and the fallback routing are unchanged.
 
 **Physical width was deliberately removed from the interaction-list builder.**
 The classify pass is a pure-integer pipeline precisely so it produces
@@ -617,9 +630,15 @@ per key. The mathematics says the tables depend only on
 (level, offset, $b$) and not on particle positions — true, and false of this
 code as written.
 
-**The realized key count is unmeasured.** A tuning comment states it as
-"globally ~16 k under MAC=0.5" (`:36-42`), which is 50× the textbook 316-offset
-figure. This is a claim in a comment, not a measurement. T8 instruments it.
+**The realized key count is measured.** **Done in T8** — the count and the
+table's byte size are emitted per rank under `CANOPY_ENABLE_PROFILING`
+immediately after `n_unique_ops` is computed. The tuning comment's "globally
+~16 k under MAC=0.5" (`:36-42`) is **not** reproduced at any configuration this
+document has: the measured counts are 686 (Laplace-solve gate, np=1, 103
+cells), 468 and 168 (`FarFieldContract` Basic and Small) and 4628 on the
+ncrit-4 694-cell tree, against a level-blind 2572 on the same tree. None of
+these is production scale, so the comment is not disproved and **R7 is bounded
+from below rather than answered**. The comment was left as written.
 
 **Trilinos is already a required dependency**, found and marked `TYPE REQUIRED`
 (`CMakeLists.txt:73-74`) for load balancing, with `${Trilinos_LIBRARIES}` linked
@@ -1694,7 +1713,49 @@ at np=1, where the key set is reproducible.
 
 ---
 
-### T8 — The operator-table cap is a memory budget with a per-basis overflow policy — **NOT STARTED**
+### T8 — The operator-table cap is a memory budget with a per-basis overflow policy — **DONE**
+
+**Met.** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` and
+`ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` both pass 6/6 at ranks 1-6
+(flux jobs `f3XiPmWSEucB` and, after the negative-compile test and a rebuild,
+`f3XiYE4xRbBd` — both suites in one allocation each). The Laplace-solve gate is
+unmoved: **all 22** cross-rank and direct-sum deviations reproduce T1's table to
+all 17 printed digits in the first run and **21 of 22** in the second, the
+exception being the np=5 cross-rank pair, which moved from
+$9.58\times10^{-14}$ to $3.34\times10^{-13}$ — three orders under
+`LS_CROSS_RANK_TOL` in both. That is run-to-run and not this task's: the two
+jobs ran the same code, drew the identical np=5 cut (180/168/147/217/187) and
+printed identical np=5 direct-sum figures to all 17 digits. `bitForBitArtifacts`
+matches the committed
+`locals()`, operator-table, key-list and $A_{n,m}$ bytes at np=1 rank 0 and np=2
+ranks 0 and 1 without the reference data being regenerated, and
+`total_fallback_pair_count()` is **0** at every rank and rank count in both
+`bitForBitArtifacts` and `crossRankAgreement` — so **R4 did not fire** and its
+discriminator survives at 3-6.
+
+The new fourth body, `opTableByteBudget`, runs two `Solver`s in one process at
+each rank count and asserts the byte budget actually binds: the default-budget
+solve keeps `m2l_effective_op_cap() == 32768` with 0 fallback pairs, while a
+budget of `64 * bytes_per_key` drives `n_unique_ops` to exactly 64 and
+`total_fallback_pair_count()` to 52-1428 pairs on **every** rank at **every**
+rank count. The two potentials agree to $4.23\times10^{-7}$ at worst against
+the $5\times10^{-2}$ bound — five orders of margin. `bytes_per_key` measures
+21952 B for `LaplaceKernel<double, 6>` ($28\cdot49\cdot16$) and 8 B for
+`MonopoleBasis`, both derived from `sizeof(coeff_type)` and neither a literal.
+
+A basis declaring `M2LOverflow::EscalateToP2P` fails to compile with the named
+message: the permanent `#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block gained
+a third basis for it, because clang reports only the first failing class-scope
+`static_assert` per instantiation and a case folded into one of the two
+existing inconsistent bases would never have been reached.
+
+The realized key count is instrumented and measured (flux job `f3XiSBpnpRh9`,
+`build-tuolumne-prof/`): **686** keys at the Laplace-solve gate's last solve
+(15.06 MB of table), **468** and **168** at `FarFieldContract`'s two
+configurations, and **4628** against a level-blind **2572** on the ncrit-4
+694-cell tree. The comment's "globally ~16 k under MAC=0.5" is not reproduced
+at any configuration this document has, but none of them is production scale,
+so **R7 is bounded from below rather than answered** — see the log.
 
 **Depends on:** T7.
 
@@ -2089,6 +2150,14 @@ operator path. **Presents as:** the Laplace-solve gate failing while
 discriminator — assert it is 0 for the frozen configuration, which the retained
 count cap guarantees at $P=8$.
 
+**Measured in T8, and it did not fire.** At the default 2 GB budget
+`m2l_effective_op_cap()` is 32768 — the count cap, unchanged — and
+`total_fallback_pair_count()` is 0 at every rank and rank count in all four
+Laplace-solve bodies and in all three `FarFieldContract` bodies. The overflow
+set moved only where the new `opTableByteBudget` body deliberately lowered the
+budget, and that body compares two runs against each other rather than against
+committed data.
+
 **R5 — the operator cache holds stale operators across a topology change.** T9's
 cache persists deliberately; if a basis's operator depends on anything beyond the
 canonicalized key and `kernel_params`, persistence is a correctness bug rather
@@ -2163,7 +2232,19 @@ Not a risk to this abstraction, but to whether it is worth building. If the
 "~16 k under MAC=0.5" figure (`:36-42`) is right, an uncompressed $n^3\times n^3$
 operator at $n=6$ costs roughly 17.6 TB per rank before the key even carries a
 level. **Presents as:** T8's instrumentation reporting a key count in the
-thousands. **Do:** record the measured number in the log against T8. If
+thousands. **Do:** record the measured number in the log against T8.
+
+**Measured in T8, and R7 stays open.** The realized count is 686 at the
+Laplace-solve gate (103 cells), 468 and 168 at `FarFieldContract`'s two
+configurations, and 4628 on the ncrit-4 694-cell tree — one to two orders under
+the "~16 k" the comment claims, but on trees far smaller than production, so
+the measurement bounds the count from below and does not answer the question.
+The 17.6 TB figure above does not follow from any count measured here: at
+$n = 6$ an uncompressed $216\times216$ double operator is 365 KB per key, so
+4628 keys is 1.7 GB per rank and even 16 k keys is 6.0 GB. What is measured is
+that a level-carrying key costs **1.8x** the key count of a level-blind one on
+the same tree (4628 against 2572), which is the multiplier
+`n_keys * bytes_per_key` must absorb when `key_needs_level` is true. If
 compression at every usable order cannot fit in available memory, the black-box
 basis is not buildable here, and the correct response is to build T12 standalone
 — which this task sequence already supports, since T12 depends on nothing that a

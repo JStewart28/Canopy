@@ -2703,3 +2703,419 @@ np=6, and this run adds a case T5's diagnostic procedure does not cover: all
 three bodies at a rank count can agree with *each other* and still differ from
 T1's cut. When that happens, compare the cut against the cuts earlier logs
 record before treating the figure as a finding.
+
+## T8 — the operator-table cap is a memory budget
+
+T8 is **DONE**. The cap is now
+`min(M2L_OP_COUNT_CAP, byte_budget / KernelType::bytes_per_key)`, the budget
+rides the first `Solver` → `_downward` configuration path (which T9 inherits),
+the second overflow enumerator is rejected at compile time rather than
+implemented, and the realized key count is measured instead of quoted.
+
+The Laplace-solve gate is unmoved: **all 22 cross-rank and direct-sum deviations
+reproduce T1's table character-for-character** in the first gate run and 21 of
+22 in the verification run (the np=5 cross-rank pair moved, three orders under
+tolerance, between two runs of the same code — see "Gate measurements"),
+`bitForBitArtifacts` matches the committed bytes at np 1-2 with no
+regeneration, and `total_fallback_pair_count()` is 0 everywhere at the default
+budget — so **R4 did not fire**.
+
+Gate runs flux jobs **`f3XiPmWSEucB`** and **`f3XiYE4xRbBd`** (both suites, one
+allocation each; the second is the post-negative-test verification run),
+instrument run **`f3XiSBpnpRh9`** (`build-tuolumne-prof/`), attribution probe
+**`f3XiTuYB2mao`**. Worked at `HEAD` = `109955d`.
+
+### Decisions taken (given, not chosen here)
+
+- **`bytes_per_key` is derived from `sizeof(coeff_type)`**, never a literal:
+  `num_coeffs_per_cell * m2l_num_src_coeffs * sizeof(coeff_type)`. Measured
+  21952 B for `LaplaceKernel<double, 6>` and **8 B** for `MonopoleBasis` — a
+  2744x spread across two bases in this repository, which is the argument
+  against a literal in one sentence.
+- **The count cap is retained as a floor.** `m2l_effective_op_cap()` is 32768 at
+  the default budget at both orders, so the overflow set is unchanged and the
+  bit-for-bit gate is untouched.
+- **The byte-budget test is a new body in `tests/tstLaplaceSolve.hpp`**, not in
+  `tests/tstFarFieldContract.hpp`, because it compares a *potential*.
+- **The R7 measurement is scoped to the configurations that already exist.** No
+  benchmark was built and no new configuration was added.
+
+### `M2LOverflow` needed its own header
+
+`enum class M2LOverflow` is contract vocabulary that both sweeps and **every**
+basis must name, and the two bases in this repository have no header in common:
+`tests/CanopyTest_MonopoleBasis.hpp` includes `<Kokkos_Core.hpp>` and nothing
+else from `src/`, deliberately — T6 built it to have nothing to do with the
+solid-harmonic basis. Putting the enum in `Canopy_LaplaceKernel.hpp` would have
+made the conformance fixture include the solid-harmonic basis to name an
+enumerator; putting it in `Canopy_DownwardSweep.hpp` would have made a basis
+include a sweep.
+
+So **`src/Canopy_FarFieldContract.hpp` is new** — 70 lines, one enum, no
+dependencies, added to `HEADERS_PUBLIC` in `src/CMakeLists.txt`. It is the
+right home for any later contract-wide vocabulary (T10's `sets_per_component`
+policy, if that ever becomes an enum rather than an int).
+
+### The contract as actually written
+
+On `LaplaceKernel` (`src/Canopy_LaplaceKernel.hpp`, in its own block after the
+M2L key contract) and on `MonopoleBasis` (`tests/CanopyTest_MonopoleBasis.hpp`):
+
+```cpp
+static constexpr std::size_t bytes_per_key =
+    static_cast<std::size_t>( num_coeffs_per_cell ) *
+    static_cast<std::size_t>( m2l_num_src_coeffs ) * sizeof( coeff_type );
+
+static constexpr M2LOverflow m2l_overflow_policy =
+    M2LOverflow::PerPairTranslate;   // both bases
+```
+
+and on `DownwardSweep`:
+
+```cpp
+static constexpr std::size_t DEFAULT_M2L_OP_TABLE_BYTE_BUDGET =
+    2ull * 1024ull * 1024ull * 1024ull;
+std::size_t _m2l_op_table_byte_budget = DEFAULT_M2L_OP_TABLE_BYTE_BUDGET;
+
+void        set_m2l_op_table_byte_budget( std::size_t bytes );  // + dirty
+std::size_t m2l_op_table_byte_budget() const;
+int         m2l_effective_op_cap() const;   // min(count cap, budget/bytes)
+
+static_assert( KernelType::m2l_overflow_policy ==
+                   M2LOverflow::PerPairTranslate, "...unimplemented..." );
+```
+
+`m2l_effective_op_cap()` is read **once** per interaction-list build, into a
+function-local `const int effective_op_cap`, so every key in the serial merge is
+tested against the same number even though the budget is a mutable member.
+
+### The `Solver` → `_downward` path, which T9 inherits
+
+`DownwardSweep` had no setters at all before this; `Solver` reached it only to
+drive it. The path added is one line in `Solver`'s constructor body, beside
+`_p2p.set_softening` and `_comm_plan.set_near_softening`:
+
+```cpp
+_downward.set_m2l_op_table_byte_budget( cfg.m2l_op_table_byte_budget );
+```
+
+placed **before** the `if ( cfg.softening >= 0.0 )` block, unconditionally,
+because unlike softening the budget has no "defer to auto" sentinel. The setter
+carries a default on `DownwardSweep`, so `tests/tstFarFieldContract.hpp` and
+`tests/tstDownwardSweep.hpp`, which construct the sweep directly and never see
+an `FmmConfig`, are unaffected and were not touched.
+
+**T9's `kernel_params` should ride this same path** rather than opening a
+second one. Two cautions from building it: the setter sets
+`_interaction_list_dirty`, which is right for anything the operator table
+depends on and would be **wrong** for a knob that does not (it would force a
+rebuild every time it was set); and `FmmConfig` is copied into `Solver`'s
+members field by field, so a new field that must survive to a later `setup()`
+needs its own member, while one consumed in the constructor — as this one is —
+does not.
+
+### The negative-compile block needed a third basis, and why
+
+T6 recorded that clang reports only the **first** failing class-scope
+`static_assert` per class instantiation, and that this is why the block carries
+two bases rather than one. T8 adds the first new sweep `static_assert` since
+then, so the same rule applied: `EscalateToP2PBasis` derives from
+`MonopoleBasis` and changes **only** `m2l_overflow_policy`, so Cases A and B's
+four coefficient guards all pass and the overflow guard is the first assert
+reached. Only `DownwardSweep` is instantiated on it — `UpwardSweep` carries no
+overflow guard.
+
+**Run, not merely written.** The by-hand build emits **five** diagnostics, one
+per guard, and the new one reads
+
+```
+src/Canopy_DownwardSweep.hpp:434:9: error: static assertion failed due to
+requirement 'EscalateToP2PBasis::m2l_overflow_policy ==
+M2LOverflow::PerPairTranslate': DownwardSweep: this basis selects
+M2LOverflow::EscalateToP2P, and the escalation path is unimplemented — ...
+```
+
+with the instantiation note pointing at `tests/tstFarFieldContract.hpp:1111`.
+Re-run by hand exactly as T6 documents (the command is in the header comment of
+`tests/tstFarFieldContract.hpp`), and **rebuild the positive target
+afterwards** — which this session did, and then re-ran both suites
+(`f3XiYE4xRbBd`) so the committed binaries are known good.
+
+### What the run revealed: the fallback path's disagreement is key-dependent, not rank-dependent
+
+The new body's first full run produced an asymmetry worth an attribution pass.
+With the budget capped at 64 columns, the tight-budget and default-budget
+potentials agree to
+
+| np | max_pot_dev, 64-column cap | max_pot_dev, 256-column cap |
+| --- | --- | --- |
+| 1 | 7.9251074301298586e-13 | 2.5392778249473697e-13 |
+| 2 | 4.2274510956121077e-07 | 1.5865194604286707e-07 |
+| 3 | 4.2273085802394018e-07 | 2.2405392573047057e-13 |
+| 4 | 1.5865194572254663e-07 | — |
+| 5 | 4.2274510838737706e-07 | — |
+| 6 | 4.2274511009425448e-07 | — |
+
+all against a 5e-2 bound, so the exit criterion is met by five orders at every
+cell. But 4.2e-7 against 7.9e-13 is six orders of spread, and the first reading
+— "the per-pair fallback is fine at one rank and wrong at several" — would have
+been a serious finding about pre-existing code.
+
+**It is not that.** The right-hand column is the attribution: a probe run with
+`LS_BUDGET_KEYS` temporarily at 256 (flux job **`f3XiTuYB2mao`**, in
+`build-tuolumne-prof/` so `build-tuolumne/` never saw the perturbed source)
+puts np=3 back at 2.2e-13 while np=2 stays at 1.6e-7. So the deviation is
+**not** a function of the rank count. Three further facts pin it down:
+
+- The large values are **discrete and recur exactly**. `1.5865194...e-07`
+  appears at np=4 with a 64-column cap and at np=2 with a 256-column cap;
+  `4.22745...e-07` appears at four different rank counts. These are the same
+  events, not noise, and they are two orders **below** the partition-induced
+  cross-rank deviations' ability to explain them (those measure 1e-13 to
+  5.6e-12 after the same 12 steps).
+- The tight run's tree is unchanged — `locals_ext = (103,28,1)` in both runs at
+  every rank count — so no cell count moved and no trajectory diverged into a
+  different tree.
+- The magnitude is the **method's own truncation error**: the direct-sum
+  deviation at this configuration is 3.2e-7.
+
+So the disagreement between the operator-table path and the per-pair
+`m2l_translate` path is a property of **which keys overflow**, and for the keys
+that show it the two paths differ by about one truncation error. That is the
+design document's own claim — "the fallback path is different arithmetic, not
+wrong arithmetic" — measured for the first time rather than assumed, and it is
+why `LS_BUDGET_POTENTIAL_TOL` is 5e-2 and not something tight. **Nobody has
+compared the two paths pair by pair**, and this task did not: what is
+established is a bound (4.3e-7 over every pair the six rank counts overflowed),
+not an explanation of which key class produces it.
+
+The probe also confirmed the new body's anti-vacuity guard works: at np=3 with
+a 256-column cap, rank 1 realizes only 204 keys, overflows nothing, and
+`EXPECT_GT( tight_fallback, 0 )` failed loudly rather than letting the body
+compare two identical solves. That is why the committed cap is 64 — every rank
+at every rank count from 1 to 6 overflows it.
+
+### Gate measurements — the Laplace-solve gate
+
+Flux job **`f3XiPmWSEucB`**, `build-tuolumne/` (`Canopy_ENABLE_PROFILING=OFF`),
+Kokkos SERIAL. `100% tests passed, 0 tests failed out of 6` for both suites.
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (reference) | (reference) | 3.2093610331931809e-07 | 4.2399302231264458e-08 |
+| 2 | 4.1994107222659022e-13 | 2.1570013757642702e-12 | 3.2093610363952985e-07 | 4.239936667274564e-08 |
+| 3 | 8.0211305411572796e-13 | 4.0353546216363242e-12 | 3.2093610299898352e-07 | 4.2399380705248681e-08 |
+| 4 | 1.114294857300434e-12 | 5.5987399483706545e-12 | 3.2093610299888352e-07 | 4.2399368624331468e-08 |
+| 5 | 9.5809726336249496e-14 | 6.4438389009577268e-13 | 3.209361028925181e-07 | 4.2399357908696204e-08 |
+| 6 | 5.688835866646797e-13 | 2.8631357246763719e-12 | 3.2093610299905848e-07 | 4.2399381662523099e-08 |
+
+**All 22 cells are character-for-character T1's table** — including the np=3
+direct-sum gradient that T5 and T7 printed one way and T1 and T6 the other.
+This run drew T1's np=3 cut, `(273, 204, 329)`, in all three bodies.
+
+**The verification run (`f3XiYE4xRbBd`) reproduces 21 of the 22, and the
+exception is a new kind of wobble worth recording.** It ran the same code — the
+only source change between the two jobs is comments — and reproduces every
+direct-sum figure and every other cross-rank figure to all 17 digits. The np=5
+cross-rank pair moved:
+
+| run | np=5 cross-rank pot | np=5 cross-rank grad |
+| --- | --- | --- |
+| `f3XiPmWSEucB` (and T1) | 9.5809726336249496e-14 | 6.4438389009577268e-13 |
+| `f3XiYE4xRbBd` | 3.3416042637542698e-13 | 1.7052716455411195e-12 |
+
+Both are three orders under `LS_CROSS_RANK_TOL = 5.6e-10`. **Attributed from
+the two logs alone, with no control run**, because two runs of the same code
+disagreeing with each other is the definition of run-to-run variation. What is
+new is that **the per-rank cut is identical in both** — `(180, 168, 147, 217,
+187)` in all three default-budget solves of both jobs — so the diagnostic
+procedure T5 and T7 established (compare the three bodies, then compare the cut
+against earlier logs) gives **no** signal here. Two further facts place it:
+
+- The np=5 **direct-sum** figures are identical to all 17 digits in both runs.
+  A field change large enough to move the cross-rank max from 9.6e-14 to 3.3e-13
+  is invisible there, because the direct-sum max is a truncation-dominated
+  3.2e-7 set by one particle and the cross-rank max is a reassociation-dominated
+  1e-13 set by whichever particle happens to hold it. The two maxima are over
+  different particles, and only the smaller one is sensitive at this scale.
+- Equal per-rank key counts do **not** imply an equal partition. The count is a
+  five-integer fingerprint of a 600-particle assignment; the multijagged cut can
+  move without moving it.
+
+**So the generalized procedure for a later task gains a third step.** Compare
+the three bodies; if they agree, compare the cut against the cuts earlier logs
+record; and if the cut agrees too, check whether the moved figure is the
+*cross-rank* one while the direct-sum one holds — that combination is
+reassociation under an unchanged key count and is not attributable to a source
+change at all. Only if the direct-sum figures move as well is a control run from
+unmodified `HEAD` worth the wall time.
+
+`fallback_pairs = 0`, `locals_ext = (103,28,1)`, `optab_ext = (28,49,n_ops)`,
+`a_extent = 169`, `initial_hash = 0xb6ad437608ad69b7` and `op_cap = 32768` at
+every rank and rank count in the three original bodies. `n_unique_ops` per rank:
+np=1 → 686; np=2 → 368, 386; np=3 → 273, 204, 329; np=4 → 264, 128, 234, 194;
+np=5 → 180, 168, 147, 217, 187; np=6 → 174, 156, 111, 160, 116, 175 — every one
+identical to T1's.
+
+The new body, per rank count (`wide` = default 2 GB budget, `tight` = 64
+columns' worth, 1404928 B):
+
+| np | wide cap / ops / fallback | tight cap / ops / fallback (per rank) |
+| --- | --- | --- |
+| 1 | 32768 / 686 / 0 | 64 / 64 / 1428 |
+| 2 | 32768 / 368, 386 / 0 | 64 / 64 / 639, 587 |
+| 3 | 32768 / 273, 204, 329 / 0 | 64 / 64 / 350, 269, 478 |
+| 4 | 32768 / 264, 128, 234, 194 / 0 | 64 / 64 / 336, 148, 238, 202 |
+| 5 | 32768 / 180, 168, 147, 217, 187 / 0 | 64 / 64 / 162, 137, 153, 196, 189 |
+| 6 | 32768 / 174, 156, 111, 160, 116, 175 / 0 | 64 / 64 / 148, 123, 102, 143, 52, 166 |
+
+### The R7 measurement
+
+Flux job **`f3XiSBpnpRh9`**, `build-tuolumne-prof/`
+(`Canopy_ENABLE_PROFILING=ON`, `Canopy_PROFILING_LEVEL=2`), np=1 of both
+suites, via the new `scripts/tuolumne/run_op_table_budget_profile.flux`. The
+emission is one line per interaction-list build:
+
+```
+[Canopy Diagnostics] M2L operator table: rank 0 n_unique_ops=686
+  bytes_per_key=21952 table_bytes=15059072 effective_cap=32768
+  count_cap=32768 byte_budget=2147483648 key_needs_level=0
+```
+
+Every distinct reading over the whole job:
+
+| Configuration | basis | key_needs_level | n_unique_ops | bytes_per_key | table_bytes |
+| --- | --- | --- | --- | --- | --- |
+| Laplace-solve gate, last solve (103 cells) | `LaplaceKernel<double,6>` | 0 | **686** | 21952 | 15 059 072 (14.4 MiB) |
+| Laplace-solve gate, steps 0-4 (95 cells) | same | 0 | 604 | 21952 | 13 259 008 |
+| `FarFieldContract` Basic (1000/rank, ncrit 32) | `MonopoleBasis` | 1 | **468** | 8 | 3744 |
+| `FarFieldContract` Small (200/rank, ncrit 16) | same | 1 | **168** | 8 | 1344 |
+| `levelReachesTheKey`, ncrit 4 (694 cells) | same | 1 | **4628** | 8 | 37 024 |
+| `levelReachesTheKey`, ncrit 4, level-blind twin | `LevelBlindBasis` | 0 | **2572** | 8 | 20 576 |
+
+Read against **R7**:
+
+- **The "globally ~16 k under MAC=0.5" comment
+  (`src/Canopy_DownwardSweep.hpp:36-42`) is not reproduced at any configuration
+  this document has**, by one to two orders. It was left as written: none of
+  these trees is production scale — 95 to 694 cells, 600 to 6000 particles —
+  and the comment is about a production run. The measurement bounds the count
+  from below; it does not refute the comment.
+- **A level-carrying key costs 1.8x**, 4628 against 2572 on the same 694-cell
+  tree (T7's number, re-confirmed here from the instrumentation rather than
+  from the test's own counting). That is the multiplier `bytes_per_key *
+  n_keys` must absorb when `key_needs_level` is true, and it is the reason the
+  two are printed on one line.
+- **The 17.6 TB figure in R7 does not follow from anything measured here.** At
+  $n = 6$ an uncompressed $n^3 \times n^3$ double operator is
+  $216^2 \times 8 = 373\,248$ B, 365 KiB per key. 4628 keys is 1.7 GB per rank;
+  even 16 k keys is 6.0 GB. **R7 therefore stays open**, and the honest
+  statement is that no configuration in this repository is large enough to
+  answer it. Answering it needs a production-scale tree, which is a benchmark
+  this task deliberately did not build.
+
+### Signatures and declarations changed
+
+- `Canopy::M2LOverflow` — new enum, new header `src/Canopy_FarFieldContract.hpp`,
+  added to `HEADERS_PUBLIC`.
+- `LaplaceKernel::bytes_per_key`, `LaplaceKernel::m2l_overflow_policy` — new
+  `static constexpr`.
+- `MonopoleBasis::bytes_per_key`, `MonopoleBasis::m2l_overflow_policy` — same
+  two, the same answers, different values.
+- `FmmConfig::m2l_op_table_byte_budget` — new field, default 2 GB. **The first
+  public-interface change in this document**, and `README.md`'s `FmmConfig`
+  table and the prose under it move with it.
+- `DownwardSweep::set_m2l_op_table_byte_budget`,
+  `DownwardSweep::m2l_op_table_byte_budget`,
+  `DownwardSweep::m2l_effective_op_cap`, `_m2l_op_table_byte_budget`,
+  `DEFAULT_M2L_OP_TABLE_BYTE_BUDGET` — new. The class had **no setter at all**
+  before this.
+- `with_laplace_solve` (`tests/tstLaplaceSolve.hpp`) gains a defaulted second
+  parameter, `std::size_t m2l_op_table_byte_budget = 0`, where 0 means "leave
+  `FmmConfig`'s default". The three existing bodies call it unchanged.
+- The `[laplace-solve]` measurement line gains `op_budget=` and `op_cap=`.
+  Appended at the end, so every earlier field is where earlier logs have it.
+
+### What only running revealed
+
+- **`make cmake_check_build_system` was needed in `build-tuolumne-prof/`**, and
+  for the reason T6 recorded: that tree was configured before
+  `FarFieldContract` existed in `tests/CMakeLists.txt`, so
+  `make Canopy_Test_FarFieldContract_MPI_SERIAL` fails with "No rule to make
+  target" until the Makefiles are regenerated. The cache was preserved —
+  `Canopy_ENABLE_PROFILING` stayed `ON` there.
+- **Nothing failed to compile**, in either tree, on the first attempt.
+- **The attribution probe never touched `build-tuolumne/`.** It was built and
+  run in `build-tuolumne-prof/` only, so the gate's binary was never produced
+  from perturbed source. The constant was reverted and both trees rebuilt.
+- **`m2l_effective_op_cap()` is public and defined above the constants it
+  reads.** That compiles because a member function body is a complete-class
+  context; the default member initializer for `_m2l_op_table_byte_budget` is
+  **not**, which is why `DEFAULT_M2L_OP_TABLE_BYTE_BUDGET` is declared before it
+  rather than beside the setter.
+- **No `clang-format` pass**, per `CLAUDE.md` and commit `82b052c`.
+- **`run_cmake_tuolumne.sh` still shows as modified and is still not this
+  task's** — line-ending churn plus a mode change, predating the session.
+  `setup-repo.txt` is likewise pre-existing and untracked. Both left alone.
+
+### Repository state left behind
+
+- `src/Canopy_FarFieldContract.hpp` — new; `src/CMakeLists.txt` — one line.
+- `src/Canopy_LaplaceKernel.hpp` — two traits, one include.
+- `src/Canopy_DownwardSweep.hpp` — the two-cap block and its rationale, the
+  overflow `static_assert`, the budget member and three accessors, the merge
+  loop's cap test, a widened overflow warning, and the profiling emission.
+- `src/Canopy_Solver.hpp` — the `FmmConfig` field and one constructor line.
+- `tests/CanopyTest_MonopoleBasis.hpp` — the two traits, one include.
+- `tests/tstFarFieldContract.hpp` — `EscalateToP2PBasis`, its sweep alias and
+  its `static_assert`, and the four/five guard wording in three comment blocks.
+- `tests/tstLaplaceSolve.hpp` — `LS_BUDGET_KEYS`, `LS_BUDGET_POTENTIAL_TOL`,
+  `testOpTableByteBudget`, its `TEST()`, the driver's defaulted budget
+  parameter and the two new fields on the measurement line.
+- `README.md` — one `FmmConfig` row and one paragraph.
+- `scripts/tuolumne/run_op_table_budget_profile.flux` — new, the R7 instrument.
+- Logs kept: `canopy-far-field-contract.f3XiPmWSEucB.log` (the gate),
+  `canopy-far-field-contract.f3XiYE4xRbBd.log` (the verification run, after the
+  negative-compile test and the rebuild it invalidates),
+  `canopy-op-table-budget-prof.f3XiSBpnpRh9.log` (the R7 measurement) and
+  `canopy-t8-probe256.f3XiTuYB2mao.log` (the attribution probe, kept because it
+  is the evidence for the key-dependence finding above).
+- **`tests/data/laplace_solve_P6.txt` not regenerated**, and the frozen
+  configuration block untouched.
+- Out of scope and untouched, as directed: `tests/tstLaplaceKernel.hpp` and
+  `Canopy_Test_P2P_*`; `ctest -L regression`; the partitioner's
+  non-determinism; `kernel_params` and `unit_w` (T9); `sets_per_component` and
+  the `per_cell_complex` / `total_complex` variable names (T10);
+  `run_cmake_tuolumne.sh`; `setup-repo.txt`.
+
+**Affects:** **T9** — it inherits four things. First, **the
+`Solver` → `_downward` path exists**: one setter call in the constructor body,
+with the two cautions above (the dirty flag, and constructor-consumed versus
+member-retained config). Second, `m2l_effective_op_cap()` is the single place
+the cap is computed and the merge loop reads it once into a local, so a cache
+that wants to know how many columns it may build should call that rather than
+re-deriving it. Third, **`bytes_per_key` is the accounting unit a persistent
+cache must be sized in**, and it is `constexpr` per basis, so a cache bounded in
+bytes converts to a column count the same way the sweep does. Fourth, the
+operator builder is still handed `(dd, ii, jj, kk)` and nothing else — T7's
+constraint is unchanged by T8. **T10** — nothing in the shared-cell path moved;
+`FarFieldContract` still runs at `NComps = 2` with `num_coeffs_per_cell = 1`.
+If T10 adds a class-scope `static_assert` to either sweep it must add its **own
+basis** to the negative block, which now has three. **T12** — a new basis must
+declare `bytes_per_key` and `m2l_overflow_policy` or `DownwardSweep` will not
+instantiate; both are one line and `MonopoleBasis` is the template.
+**Any later task using the gate** — the `[laplace-solve]` line has two new
+trailing fields, and the byte-budget body prints two further lines
+(`op_budget_check` and `op_budget`) at each rank count. It also costs two more
+12-step solves per rank count; the whole suite still runs in about 40 s. And
+the attribution procedure gains a third step: a np 3-6 **cross-rank** figure
+can move while the per-rank cut and every direct-sum figure hold, which is
+reassociation and not attributable to any source change — see "Gate
+measurements". **Whoever wants the
+fallback path understood** — this task measured that the per-pair path and the
+operator-table path disagree by up to 4.3e-7 on the potential for some keys and
+by 1e-13 for others, on the same tree at the same rank count. That is a bound,
+not an explanation, and the pre-existing `MultiSolve.M2L_BinEdge_Fallback`
+regression failure (3e-7 to 9e-6, recorded under `README.md` "Known Issues")
+exercises the same path at the same error scale. Connecting the two is a task
+this document does not have.
