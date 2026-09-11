@@ -47,6 +47,7 @@ Canopy::Solver<...> solver( MPI_Comm comm, const Canopy::FmmConfig& cfg );
 | `mac_theta` | Multipole acceptance criterion | `0.5` |
 | `softening` | Plummer softening length; `< 0` selects auto-softening from the inter-particle spacing | `-1.0` |
 | `near_softening_factor` | Near-field softening floor: pairs closer than `factor · softening` use the softened near-field (P2P) instead of the unsoftened multipole far-field (M2L). `0` disables. | `4.0` |
+| `m2l_op_table_byte_budget` | Per-rank memory budget, in bytes, for the hashed M2L operator table. Pairs beyond the cap it implies fall back to the per-pair M2L translation | `2 GB` |
 
 The multipole far-field is built from the **unsoftened** `1/r` Laplace kernel, so
 it is only accurate where the Plummer `softening` is negligible (separation
@@ -59,6 +60,17 @@ relative softening error `~ 1/(2·factor²)`, ≈3% at the default `4`) but wide
 the near field, putting more pairs in the (more expensive) P2P path. Set `0` to
 recover the pure geometric MAC (correct only when `softening` is small relative
 to all M2L separations).
+
+`m2l_op_table_byte_budget` bounds the hashed M2L operator table, which holds one
+dense operator column per distinct translation key. The cap that actually binds
+is the smaller of this budget's worth of columns and the sweep's internal count
+cap of 32768, so at the 2 GB default the count cap binds at every supported
+order and lowering the budget is the only way to make it the binding constraint.
+A column costs `num_coeffs_per_cell · m2l_num_src_coeffs · sizeof(coeff_type)` —
+21952 B at `P_ORDER = 6` and 58320 B at `P_ORDER = 8` in double precision. Pairs
+beyond the cap are refused a column and evaluated by the per-pair M2L
+translation instead, which is the same mathematics evaluated pair by pair; they
+are counted by `DownwardSweep::total_fallback_pair_count()`.
 
 The six bounding-box tolerances are per-face and may be set independently,
 e.g. to pad only the outflow boundary of an asymmetric domain. For an
