@@ -242,7 +242,7 @@ a task in this document.
 | Test tier for new tests | `unit` | The `regression` tier is the ship gate and holds only `MultiSolve` (`tests/CMakeLists.txt:60-62`), and no task here runs it — see [Deliberate deviations](#deliberate-deviations). Promoting anything into it requires confirming with the user first, per the repository's own rule. |
 | New test registration | add the name to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:48-57`) or `UNIT_SERIAL_TESTS` (`:36-39`) | Target becomes `Canopy_Test_<Name>_MPI_<DEVICE>`, tests `..._np_<N>` for `N` in 1-6. |
 | Build command | `make -j <N> <target>` for exactly the target(s) the task's exit criterion names, in whichever build tree the step is using — never a bare `make` | A whole-tree build compiles 33 test executables and the two examples, and cannot exit 0 in any case because two of those targets do not compile — see [Current state](#current-state). "Rebuild" anywhere below means rebuilding the named targets, and nothing else. Scope the build with the target argument and **not** by reconfiguring `Canopy_TEST_DEVICES` in the committed `build-tuolumne/`: that tree is the bitwise gate's configuration, and R3 rests on it not moving. |
-| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T10 additionally: `Canopy_Test_DownwardSweep_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve`. The last four are built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. The extras are the consumers that reach past `Solver` into what a task changes: `tests/tstDownwardSweep.hpp` reads `downward.locals()` at `:174`, `:265`, `:364` and `:376`, the view T10 reshapes, and T11 changes `Solver` itself, which `tests/tstMultiSolve.hpp` and the two examples instantiate. Nothing else in `tests/` couples that tightly — `tstUpwardSweep.hpp` and `tstSingleSolve.hpp` instantiate the sweeps but call none of the operators these tasks touch, and `tstMultiSolve.hpp`'s `m2l_translate` mentions are all comments — so no other task compiles a consumer. |
+| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T8, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T10 additionally: `Canopy_Test_DownwardSweep_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve`. The last four are built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. The extras are the consumers that reach past `Solver` into what a task changes: `tests/tstDownwardSweep.hpp` reads `downward.locals()` at `:174`, `:265`, `:364` and `:376`, the view T10 reshapes, and T11 changes `Solver` itself, which `tests/tstMultiSolve.hpp` and the two examples instantiate. T8 is on the `FarFieldContract` list for a different reason than T6, T7, T10 and T11: it adds two contract members the sweeps read, so `MonopoleBasis` must declare them or that target stops compiling, and its `EscalateToP2P` rejection is a case in that test's permanent negative-compile block. Nothing else in `tests/` couples that tightly — `tstUpwardSweep.hpp` and `tstSingleSolve.hpp` instantiate the sweeps but call none of the operators these tasks touch, and `tstMultiSolve.hpp`'s `m2l_translate` mentions are all comments — so no other task compiles a consumer. |
 | Reference data | one committed file, `tests/data/laplace_solve_P6.txt` | Three bit-for-bit records — `(nprocs, rank)` of `(1,0)`, `(2,0)`, `(2,1)` — plus one np=1 field record in canonical `GlobalId` order and a hash of the initial global particle set. The particle set is a fixed global set of $N_{\rm total} = 600$ from seed `1234 + P`, identical at every rank count, which is what makes the np=$k$-versus-np=1 comparison definable at all. The committed drift check hashes that *initial* set and not the state the field record is taken at: the solve drives the particles, so their positions at the last step are not bit-identical across rank counts. |
 | Test naming | `tests/tstLaplaceSolve.hpp` for the solve-level gate, `tests/tstLaplaceKernel.hpp` for the per-operator kernel tests | `Canopy_add_tests` maps a name to `tst<NAME>.hpp` and to `Canopy_Test_<NAME>_MPI_<DEVICE>` (`cmake/test_harness/test_harness.cmake:104-112`), so the file name, the `tests/CMakeLists.txt` entry and every exit criterion below move together. |
 | Bit-for-bit artifact form | 64-bit hash plus extents for `locals()` and the operator table; full bit patterns for the $A_{n,m}$ table and `n_unique_ops` | The operator table costs $N_t N_s \cdot 16 = 28\cdot49\cdot16$, 21.4 KB per key at $P=6$; committing it in full is not affordable. A hash over the raw bytes is exactly as sensitive to a bitwise change and still attributes a failure to one artifact, which is all any exit criterion here asks. Hashes are computed with the in-repo FNV-1a so a committed value depends on no library version. |
@@ -1698,21 +1698,47 @@ at np=1, where the key set is reproducible.
 
 **Depends on:** T7.
 
-**Fill in:** `src/Canopy_DownwardSweep.hpp:304`, `:1028-1047`, `:1070`.
+**Fill in:** `src/Canopy_DownwardSweep.hpp:343` (`M2L_OP_COUNT_CAP`),
+`:1129-1149` (the cap test and the `op_idx = -1` / one-shot `fprintf` overflow
+branch), `:1172` (`n_unique_ops`); `src/Canopy_LaplaceKernel.hpp:638-705` (the
+M2L key contract block, where the two new traits go beside `m2l_key_dd_max` and
+`key_needs_level`); `src/Canopy_Solver.hpp:52-78` (`FmmConfig`) and `:165-179`
+(the constructor's config routing); `tests/CanopyTest_MonopoleBasis.hpp:101-174`
+(the trait block); `tests/tstFarFieldContract.hpp` (the permanent
+`#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block); `tests/tstLaplaceSolve.hpp`
+(the new byte-budget test body); `README.md:35-49` (the `FmmConfig` table).
 
-**Reference:** the overflow path is `:1028-1047` (assign `op_idx = -1`, warn
-once); the fallback tables are built at `:1231-1315` and run at `:1599-1641`;
-`total_fallback_pair_count()` is `:424-430`.
+**Reference:** the overflow path is `src/Canopy_DownwardSweep.hpp:1129-1149`
+(assign `op_idx = -1`, warn once); the fallback tables are built at `:1235-1435`
+and run by `run_m2l_fallback_at_depth`, defined at `:1696` and called at `:1683`;
+`total_fallback_pair_count()` is `:475-482`.
 
 **Do:**
 
-1. Add `bytes_per_key` as a `constexpr size_t` to the contract. Solid-harmonic at
-   $P=8$: $N_t N_s \cdot 16 = 45\cdot81\cdot16$, about 58 KB.
+1. Add `bytes_per_key` as a `constexpr size_t` to the contract:
+   `num_coeffs_per_cell * m2l_num_src_coeffs * sizeof(coeff_type)`. It must be
+   derived from `sizeof(coeff_type)` rather than from a literal element width:
+   the operator table's element type follows `coeff_type`
+   (`m2l_operators_type<MemorySpace> = View<coeff_type***, LayoutLeft, MS>`), and
+   the solid-harmonic basis keeps a live `float` path where that is 8 bytes and
+   not 16. At $P=8$ with `Scalar = double` it evaluates to
+   $N_t N_s \cdot 16 = 45\cdot81\cdot16$, about 58 KB.
 2. Compute
    `effective_cap = min(M2L_OP_COUNT_CAP, byte_budget / KernelType::bytes_per_key)`
-   and use it at `:1028-1029`. The budget is a new `FmmConfig` field defaulting
-   to 2 GB. Retaining the count cap is deliberate — see
+   and use it at the cap test, `:1130-1131`. The budget is a new `FmmConfig`
+   field defaulting to 2 GB. Retaining the count cap is deliberate — see
    [Deliberate deviations](#deliberate-deviations).
+
+   **Carrying the budget to the sweep is the first `Solver` → `_downward`
+   configuration path, and this task builds it.** `Solver` reaches `_downward`
+   only to drive it — `execute` (`src/Canopy_Solver.hpp:229`), `setup` (`:570`,
+   `:615`, `:642`) and `invalidate_interaction_list` (`:565`, `:610`) —
+   `DownwardSweep`'s constructor takes only an `MPI_Comm`, and the class carries
+   no setters at all. Add one, called from `Solver`'s constructor beside
+   `_p2p.set_softening` and `_comm_plan.set_near_softening` (`:169-178`), and
+   give it a default on `DownwardSweep` so a test that drives the sweeps
+   directly is unaffected. T9's `kernel_params` rides this same path rather than
+   opening a second one.
 3. Add an `m2l_overflow_policy` trait taking one of two enumerators:
    - `M2LOverflow::PerPairTranslate` — today's behavior, and what the
      solid-harmonic and Cartesian-Taylor bases use. Requires the basis to define
@@ -1723,21 +1749,59 @@ once); the fallback tables are built at `:1231-1315` and run at `:1599-1641`;
      is unimplemented. Do not add a lenient fallback; a basis that cannot
      evaluate its own operator per pair and cannot escalate must not silently
      produce a partial far field.
-4. Emit `n_unique_ops` (`:1070`) and `n_unique_ops * bytes_per_key` under
+
+   Both new traits are read by the sweeps, so `MonopoleBasis` declares them as
+   well (`tests/CanopyTest_MonopoleBasis.hpp:101-174`) or
+   `Canopy_Test_FarFieldContract_MPI_SERIAL` stops compiling. The
+   `EscalateToP2P` rejection gets **its own basis** in the permanent
+   `#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block of
+   `tests/tstFarFieldContract.hpp`: clang reports only the first failing
+   class-scope `static_assert` per class instantiation, which is why that block
+   already carries two bases rather than one, and a case folded into an existing
+   basis would never be reached.
+4. Emit `n_unique_ops` (`:1172`) and `n_unique_ops * bytes_per_key` under
    `CANOPY_ENABLE_PROFILING`, so the realized key count stops being a claim in a
-   comment. Record the measured number in the progress log.
+   comment.
+
+   **The emission is invisible in `build-tuolumne/`**, which is configured
+   `Canopy_ENABLE_PROFILING=OFF` and prints no `[Canopy Diagnostics]` line at
+   all. The number comes from `build-tuolumne-prof/` via
+   `scripts/tuolumne/run_laplace_solve_profile.flux`, the second build tree R3
+   already uses.
+
+   Measure at the configurations that exist — the Laplace-solve gate's, and
+   `FarFieldContract`'s two — and record both figures in the log beside the
+   multiplier a level-carrying key costs: 4628 realized keys against a
+   level-blind 2572 on one 694-cell tree, a factor of 1.8 (T7). State in the log
+   that none of these is production scale, so **R7** is bounded from below rather
+   than answered.
+5. **The byte-budget test is a new body in `tests/tstLaplaceSolve.hpp`**, beside
+   `bitForBitArtifacts`, `crossRankAgreement` and `matchesDirectSum`. It
+   constructs two `Solver`s in one process — one at the default budget, one at a
+   budget low enough to bind before the count cap — and compares their
+   potentials. The exit criterion compares a *potential*, which is a
+   `Solver`-level quantity, so it belongs here rather than in
+   `tests/tstFarFieldContract.hpp`, which drives the sweeps directly and compares
+   `locals()`. It must not touch the frozen-configuration block or
+   `tests/data/laplace_solve_P6.txt`, and the three existing bodies must keep
+   reproducing their pinned numbers.
+6. Update the `FmmConfig` table at `README.md:35-49` with the new field, in this
+   same change. It is a public-facing configuration knob, and the repository's
+   rule is that `README.md` moves with the API rather than after it. This is the
+   first task in this document that changes a public interface; the earlier ones
+   could each truthfully leave `README.md` alone.
 
 **Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
 [Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
 `crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6,
 with `total_fallback_pair_count() == 0` asserted at every rank count — both
 `bitForBitArtifacts` and `crossRankAgreement` check it, so the discriminator
-survives at 3-6; a test that sets the byte
-budget low enough to bind before the count cap drives
+survives at 3-6; the new byte-budget body drives
 `total_fallback_pair_count() > 0` and **still produces the same potential to
 $5\times10^{-2}$** (the fallback path is different arithmetic, not wrong
-arithmetic); and a basis declaring `EscalateToP2P` fails to compile with the
-named message.
+arithmetic); `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` passes at ranks
+1-6, since this task changes the contract `MonopoleBasis` implements; and a basis
+declaring `EscalateToP2P` fails to compile with the named message.
 
 ---
 
