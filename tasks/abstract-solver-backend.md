@@ -300,7 +300,7 @@ a task in this document.
 
 ## Current state
 
-Five things in this document are built. **T1 is complete** — the diagnostic
+Six things in this document are built. **T1 is complete** — the diagnostic
 surface on the sweeps, the solve-level gate `tests/tstLaplaceSolve.hpp`, its
 committed reference data `tests/data/laplace_solve_P6.txt`, and both pinned
 tolerances (`LS_CROSS_RANK_TOL = 5.6e-10`, `LS_DIRECT_SUM_TOL = 9.63e-07`) all
@@ -316,7 +316,13 @@ gate reproduced T1's table to all 17 digits at every rank count. **T5 is
 complete** — the $A_{n,m}$ table is a basis-owned `aux_tables_type` reached
 through `aux()`, the `2*P` reasoning lives on
 `LaplaceKernel::build_aux_tables`, and the table's 169 bit patterns are
-unchanged, so group (d)'s first bullet is closed. Nothing else
+unchanged, so group (d)'s first bullet is closed. **T6 is complete** — a
+non-harmonic conformance basis, `tests/CanopyTest_MonopoleBasis.hpp`, drives
+both sweeps through `tests/tstFarFieldContract.hpp` at ranks 1-6 with **no
+change to any file under `src/`**, matching a host recomputation bit-for-bit,
+and the permanent `#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block rejects an
+inconsistent basis with all four sweep `static_assert` messages. The far-field
+contract is therefore a real interface rather than a rename. Nothing else
 here has been built. What follows is what is true of the repository now; the
 tables in (b) and (c) below are the historical record of what T4 changed and
 their "Today" columns are pre-T4.
@@ -1416,7 +1422,7 @@ returns no hits in either sweep.
 
 ---
 
-### T6 — A non-harmonic conformance basis drives the full pipeline — **NOT STARTED**
+### T6 — A non-harmonic conformance basis drives the full pipeline — **DONE**
 
 This is the first proof that the contract is real rather than a rename. It is a
 fixture, not a method: low accuracy, but an **exactly checkable** far field.
@@ -1428,8 +1434,12 @@ fixture, not a method: low accuracy, but an **exactly checkable** far field.
 (`:48-57`).
 
 **Reference:** the trait and operator contract as it stands after T5;
-`tests/tstDownwardSweep.hpp:57` for how a test instantiates a basis and drives
-the sweeps directly, without going through `Solver`.
+`tests/tstDownwardSweep.hpp:56` for how a test names a basis
+(`using Kernel = LaplaceKernel<double, P_ORDER>;`) and
+`tests/tstDownwardSweep.hpp:156-163` for the pattern actually worth copying —
+construct builder, partitioner and comm plan, then both sweeps and `setup()` —
+which is how a test drives the sweeps directly, without going through
+`Solver`.
 
 **Do:**
 
@@ -1438,6 +1448,13 @@ the sweeps directly, without going through `Solver`.
    `scalars_per_coeff = 1`, `num_coeffs_per_cell = 1`,
    `m2l_num_src_coeffs = 1`, `sets_per_component = 1`,
    `aux_tables_type` = empty struct.
+
+   **`sets_per_component` is inert here and forward-looking.** No sweep reads
+   it — `grep -rn sets_per_component src/ tests/` finds nothing, because T10 is
+   what adds it to the contract and raises it to 2. Declare it anyway, so the
+   trait list a basis author sees is complete and T10's diff is a change of
+   value rather than an addition, but say so on the declaration: a reader must
+   not go hunting for the consumer.
 2. Its operators: P2M sums charge; M2M sums children; M2L contracts the source
    monopole against a one-entry operator table; `m2l_pre_cell` and
    `m2l_post_cell` are no-ops; L2L copies the parent's local to each child; L2P
@@ -1494,6 +1511,80 @@ fails with a diagnostic **quoting one of the four sweep `static_assert`
 messages** of step 4. The quoted message is the load-bearing half: a build that
 fails with any other template error has not established that the guard is what
 rejected the basis, and would still fail after the assert was deleted.
+
+**Met.** All three parts, in one flux job, **`f3XgCb6ZSSwy`** (tuolumne1041,
+Cray clang 20.0.0, `build-tuolumne/`, `Canopy_ENABLE_PROFILING=OFF`,
+`HEAD` = `ac77ad3`). Details in the `## T6` section of the progress log.
+
+*`ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` at ranks 1-6:*
+`100% tests passed, 0 tests failed out of 6`, 35.09 s of CTest wall. Three
+bodies per rank count — `localsMatchHostReferenceBasic`,
+`localsMatchHostReferenceSmall`, `l2pReturnsTheLocal` — all `OK`, none
+`SKIPPED`. `MonopoleBasis<double, 0, 2>` drove both sweeps with **no change to
+any file under `src/`**. Every rank at every rank count reported
+`fallback_pairs=0` and **`not_bit_identical=0`**: the host reference is
+bit-exact, not merely inside `EXPECT_DOUBLE_EQ`'s 4 ULP, on all 9190
+(cell, component) slots checked across the 42 (rank, configuration) pairs. The
+largest sum reproduced bit-for-bit is a 197-target rank at np=3 carrying 26 121
+pairs. The shared-cell path is exercised at **every** rank count including np=1
+— `shared_cells` per rank is 11 (Basic, replication_depth 2) and 9 (Small,
+replication_depth 1) at np=1, rising to 73 and 9 at np=6 — and the reference
+carries a separate branch for it, because the snapshot/Allreduce round trip
+`a + fl(fl(a+D) - a)` is **not** `fl(a+D)`; R6's "exact identity at np=1" holds
+of the slot algebra and not of the arithmetic.
+
+*`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`:* `100% tests passed, 0 tests
+failed out of 6`, 36.02 s. **All 22 measured deviations reproduce the `T5` log
+section's table character-for-character — and in fact reproduce T1's, including
+the one np=3 direct-sum gradient cell that T5's run moved in its thirteenth
+figure** (4.2399380705248681e-08 here, T1's value, against T5's
+4.2399380705233977e-08), which retroactively confirms T5's attribution of that
+move to the partitioner. `fallback_pairs = 0`, `locals_ext = (103,28,1)`,
+`a_extent = 169`, `initial_hash = 0xb6ad437608ad69b7` everywhere.
+`bitForBitArtifacts` ran and passed at np=1 rank 0 and np=2 ranks 0-1 — all
+four artifacts byte-identical to `tests/data/laplace_solve_P6.txt` — and
+`SKIPPED` at np 3-6 by design. `n_unique_ops` per rank: np=1 → 686; np=2 → 368,
+386; np=3 → 273, 204, 329; np=4 → 264, 128, 234, 194; np=5 → 180, 168, 147,
+217, 187, all identical to T1. At np=6 the multijagged two-cut split appeared
+for the first time at that rank count — `matchesDirectSum` drew T1's
+(174, 156, 111, 160, 116, 175) and `crossRankAgreement` drew
+(174, 160, 111, 153, 126, 175) — and moved nothing printable; attributed from
+this job's own `ctest -V` log, no control run needed.
+
+*The compile-failure build:* fails as required, quoting **all four** sweep
+`static_assert` messages verbatim —
+
+```
+src/Canopy_UpwardSweep.hpp:73:20: error: static assertion failed due to
+  requirement 'sizeof(double) == scalars_per_coeff * sizeof(double)':
+  UpwardSweep: the basis's coeff_type is not scalars_per_coeff contiguous
+  component_scalar_type, so the shared-cell Allreduce would transfer the wrong
+  byte count
+src/Canopy_DownwardSweep.hpp:117:20: error: ... DownwardSweep: the basis's
+  coeff_type is not scalars_per_coeff contiguous component_scalar_type, ...
+src/Canopy_UpwardSweep.hpp:85:9: error: static assertion failed due to
+  requirement 'std::is_same<double, float>::value': UpwardSweep: the basis's
+  coefficient traits disagree with detail::coeff_traits for its coeff_type;
+  the M2M exchange and the shared-cell Allreduce would pack differently
+src/Canopy_DownwardSweep.hpp:129:9: error: ... DownwardSweep: the basis's
+  coefficient traits disagree with detail::coeff_traits for its coeff_type;
+  the M2L and L2L exchanges and the shared-cell Allreduce would pack
+  differently
+4 errors generated when compiling for gfx942.
+```
+
+Covering all four needed **two** bases rather than the one step 4 names:
+**clang reports only the first failing class-scope `static_assert` per class
+instantiation**, so `coeff_type = double` with `scalars_per_coeff = 2` alone
+produced exactly the two `sizeof` diagnostics and never reached the two
+`detail::coeff_traits` cross-checks — meaning a one-basis block would not have
+noticed if those two were deleted. The second case,
+`component_scalar_type = float` with `scalars_per_coeff = 2`, satisfies the
+`sizeof` relation (`8 == 2*4`) so the cross-check fails first. Both are
+`struct X : public MonopoleBasis<...>` with only the traits redeclared, so
+deleting the asserts makes the block compile, which is the signal. The by-hand
+command is committed in `tests/tstFarFieldContract.hpp`'s header comment and
+repeated in the progress log.
 
 ---
 

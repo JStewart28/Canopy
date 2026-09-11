@@ -1895,3 +1895,547 @@ per-rank `n_unique_ops` lines; T4's observation that the split moves no printed
 figure holds at np=5 but not at np=3, where it moved a direct-sum gradient in
 its thirteenth significant figure. Do not read a 9th-or-later-figure move at any
 rank count 3-6 as a finding without checking those lines first.
+
+## T6 — a non-harmonic conformance basis drives the full pipeline
+
+T6 is **DONE**, and unlike T3, T4 and T5 the load-bearing result is *positive*.
+A basis that is not a spherical harmonic — coefficient a bare `double` rather
+than `Kokkos::complex`, operator table $1\times1$ rather than $28\times49$,
+auxiliary tables an empty struct, one coefficient per cell instead of 28 —
+drives `UpwardSweep` and `DownwardSweep` end to end with **zero** changes to any
+file under `src/`. The whole diff is two new files in `tests/`, one line in
+`tests/CMakeLists.txt`, one new flux script, and the documentation. The
+far-field contract is a real interface, not a rename of the solid-harmonic one.
+
+Gate run flux job **`f3XgCb6ZSSwy`**. Worked at `HEAD` = `ac77ad3`.
+
+### Decisions taken (given, not chosen here)
+
+- **The host reference reads `comm_plan.m2l_plan().interaction_lists`**
+  (`src/Canopy_CommunicationPlan.hpp:96`, `:219`), not a new `DownwardSweep`
+  accessor. The eight CSR views the fused kernel actually walks
+  (`_m2l_ns_csr_*`, `_m2l_sh_csr_*`, `src/Canopy_DownwardSweep.hpp:402-411`) are
+  private with no accessor and stayed that way;
+  `tests/tstDownwardSweep.hpp:831` already establishes the interaction-list
+  route. **No diagnostic surface was added to `DownwardSweep`.** The two
+  accessors the test does use, `total_m2l_pair_count()` and
+  `total_fallback_pair_count()`, were already public (`:465`, `:478`).
+- **The host reference sums in the sweep's order, not merely over the same
+  set.** `EXPECT_DOUBLE_EQ` is 4 ULP and a reassociated sum of a few hundred
+  same-magnitude terms drifts past it. The CSR sorts target entries by
+  `(depth, target_idx)` (`src/Canopy_DownwardSweep.hpp:781-787`,
+  `:1245-1252`) and keeps the traversal's push order within an entry, and that
+  push order *is* the vector order of `interaction_lists[target_key]`
+  (`src/Canopy_CommunicationPlan.hpp:481`) — so the reference iterates that
+  vector as-is.
+- **The M2L operator is the document's scale-normalized dimensionless one**,
+  and the negative test is the document's permanent
+  `#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block. Neither was reopened.
+- **`m2l_pre_cell` is a no-op, so T3's half-placed-hook finding does not bite
+  and was not fixed.** T3 recorded that team scratch is per-target, so there is
+  nowhere to put once-per-source-cell work that outlives the team.
+  `MonopoleBasis` contracts the source monopole directly and has no per-source
+  work to hoist, so it never needed the storage. The gap is unchanged and still
+  belongs to whoever builds the first basis that needs it.
+
+### The `dd` convention chosen, and why
+
+The document requires a basis to state how it handles `dd` and does not pick
+one. **`MonopoleBasis` uses**
+
+$$
+T(dd, i_x, i_y, i_z) = \frac{F(dd)}{\lVert (i_x,i_y,i_z) \rVert},
+\qquad F(dd) = 2^{\max(0,\,-dd)}
+$$
+
+which is **`LaplaceKernel`'s own $F(dd, n, j)$ residual factor
+(`src/Canopy_LaplaceKernel.hpp:656-661`) evaluated at the monopole term
+$n = j = 0$**:
+
+- $dd \ge 0 \Rightarrow F = 2^{j\,dd} = 2^0 = 1$
+- $dd < 0 \Rightarrow F = 2^{-(n+1)\,dd} = 2^{-dd}$
+
+and $F(0,\cdot,\cdot) = 1$, so same-depth operators carry no extra scaling.
+
+Three reasons this was chosen over the two obvious alternatives:
+
+- **It is derived, not invented.** Read directly: the physical monopole M2L is
+  $L = M/r$. With this basis's multipole (a bare charge) and local (a charge
+  over a separation measured in *deeper-cell half-widths*), the conversion
+  between "separation in units of $w_{\rm unit}$" and "separation in units of
+  $w_{\rm source}$" is $w_s/w_{\rm unit}$, which is $1$ when the source is the
+  deeper cell ($dd \ge 0$) and $2^{-dd}$ when the target is ($dd < 0$). So
+  $F(dd)$ is exactly what makes the operator depth-independent given the key,
+  which is the premise hashing pairs onto keys rests on.
+- **It makes `dd` load-bearing.** The obvious alternative — ignore `dd`
+  entirely, $T = 1/\lVert\cdot\rVert$ — compiles and passes, but then distinct
+  `dd` values produce keys whose operators are bit-identical, and a sweep bug
+  that passed the wrong `dd` would be invisible to this fixture. Under the
+  chosen convention a wrong `dd` changes the answer by a factor of two.
+- **It is exact, not merely accurate.** $|dd| \le$ `M2L_KEY_DD_MAX` $= 6$ for
+  `Scalar = double`, so $F \le 64$, every $F$ is an exact power of two, and the
+  repeated doubling that computes it is exact in binary64. That matters because
+  the whole gate is an exactness claim.
+
+### Contract members `MonopoleBasis` had to supply that T6's `Do` list did not name
+
+`Do` step 1 names six traits and step 2 names the nine operators in prose. The
+complete set the two sweeps actually reach for, from
+`grep -o 'KernelType::[a-zA-Z_0-9]*'` over both, is larger. The ones **not** in
+the `Do` list, and what each had to become:
+
+| Member | Form | Why the `Do` list could not have known |
+| --- | --- | --- |
+| `scalar_type` | `using scalar_type = Scalar` | Both sweeps re-export it (`UpwardSweep:63`, `DownwardSweep:107`) and `potential_view_type` / `gradient_view_type` are built on it. |
+| `component_scalar_type` | `= Scalar` | T4's trait. The MPI datatype is selected from `sizeof` of it at three sites. |
+| `max_order` | `= Order` | `UpwardSweep:94` aliases it as `P` and passes it to `build_aux_tables`; `DownwardSweep:1177` does the same on host. Nothing else reads it, so `Order = 0` is safe and is what the test instantiates. |
+| `num_components` | `= NComps` | `NComps` in both sweeps, and the extent of `potential_view_type`. |
+| `m2l_accumulator_type<ScratchSpace>` | unmanaged `View<scalar_type*>` | Not named anywhere in the sweeps — it is basis-private — but it is the shape the raw-byte scratch is re-viewed as, and omitting it would have meant a bare `reinterpret_cast` in two stages. |
+| `m2l_scratch_bytes(int)` | `KOKKOS_INLINE_FUNCTION static constexpr` | `= num_coeffs_per_cell * n_comps * sizeof(scalar_type)`, i.e. 16 bytes at `NComps = 2`. **Kept `constexpr`**, per the task: `src/Canopy_DownwardSweep.hpp:1562` assigns it to a `constexpr size_t`. |
+| `m2l_operators_type<MemorySpace>` | alias template, `View<coeff_type***, LayoutLeft, MS>` | T3 made it an alias *template*; a plain typedef does not compile against `typename KernelType::template m2l_operators_type<memory_space>`. |
+| `m2l_translate` | full implementation, not a stub | The `Do` list's nine operators include it, but the list does not say it must agree *bit for bit* with the fused path. See the next section. |
+
+Plus two members that exist only to keep the test exact and are not part of the
+contract at all: **`m2l_operator_entry(dd, ix, iy, iz)`** and
+**`m2l_accumulate(acc, T, M)`**. See "What only running revealed".
+
+### `aux_tables_type` is a struct template, and nothing names a member of it
+
+Exactly as T5 handed forward:
+
+```cpp
+template <class MemorySpace>
+struct aux_tables_type
+{
+};
+
+template <class MemorySpace>
+static aux_tables_type<MemorySpace> build_aux_tables( int order )
+{
+    (void)order;
+    return {};
+}
+```
+
+Both sweeps compiled against this with no change, because neither names a
+member of the struct — which is the property T5 built and this is the first
+independent confirmation of it. T5's warning that **`aux()` returns the struct
+and not the table** was heeded: no conformance test here calls `A_table()` or
+`ds.aux().A_table`, and there is no such accessor on either sweep.
+
+### `sets_per_component` is declared and inert
+
+`grep -rn sets_per_component src/ tests/` finds it in exactly one place after
+this change: the declaration on `MonopoleBasis`. No sweep reads it, because
+**T10** is what raises it to 2 and teaches the sweeps to read it. It is
+declared anyway so the trait list a basis author sees is complete and T10's
+diff is a change of value rather than an addition, and the declaration says in
+its own comment that nothing consumes it until T10 — so a reader does not hunt
+for the consumer. T6's `Do` step 1 has been annotated to the same effect.
+
+### Signatures changed
+
+**None.** Not one file under `src/` was modified. The complete repository diff
+is:
+
+- `tests/CanopyTest_MonopoleBasis.hpp` — new, 663 lines.
+- `tests/tstFarFieldContract.hpp` — new, 798 lines.
+- `tests/CMakeLists.txt` — one line: `FarFieldContract` added to
+  `UNIT_MPI_TESTS` (`:48-57`), not to `REGRESSION_MPI_TESTS`. That yields
+  target `Canopy_Test_FarFieldContract_MPI_SERIAL` (and the OPENMP/HIP variants
+  the harness always generates, neither of which was built) and tests
+  `..._np_1` through `..._np_6` with CTest label `unit`.
+- `scripts/tuolumne/run_ctest_far_field_contract.flux` — new. Runs both suites
+  in one allocation deliberately, so the claim that the Laplace gate did not
+  move is checkable from one log.
+- `tasks/abstract-solver-backend.md` — T6 marked **DONE** with a **Met.**
+  paragraph; the two stale bits in T6 corrected (see below).
+- `tasks/abstract-solver-backend-progress-log.md` — this section.
+
+### The gate: what it compares, and why the comparison is exact
+
+`tests/tstFarFieldContract.hpp` drives both sweeps on `MonopoleBasis`, then
+compares `downward.locals()` against a host reference. Three tests, all at 1-6
+ranks: `localsMatchHostReferenceBasic` (1000 particles/rank, ncrit 32,
+max_depth 6, replication_depth 2), `localsMatchHostReferenceSmall` (200, 16, 4,
+1) and `l2pReturnsTheLocal`.
+
+For `MonopoleBasis` the whole downward pipeline collapses to a telescoping sum.
+Writing $D(a) = \sum_{s \in \mathrm{ilist}(a)} T(\mathrm{key}(a,s))\,M(s)$ for
+the M2L delta, and noting that L2L copies a parent's local to each child,
+`locals()` must hold $L(t) = D(t) + L(\mathrm{parent}(t))$ with
+$L(\mathrm{root}) = D(\mathrm{root})$. The reference evaluates that
+root-downward.
+
+Four things make it exact rather than close, and each is load-bearing:
+
+1. **$D(a)$ is summed in the sweep's order.** The reference iterates
+   `interaction_lists[target_key]` as-is, per the decision above.
+2. **The operator value and the multiply-accumulate step are not duplicated.**
+   Both go through `MonopoleBasis::m2l_operator_entry` and
+   `MonopoleBasis::m2l_accumulate`, the same functions the device kernel calls.
+3. **The reference takes the upward sweep's output as given.** It mirrors
+   `upward.multipoles()` rather than recomputing P2M and M2M, so no assumption
+   about particle or child iteration order enters. This gates the *far field* —
+   M2L, L2L, L2P — which is what T6 is for. The mirror is taken **after**
+   `downward.execute()`, because `exchange_multipoles_for_m2l` writes remote
+   source multipoles into the same view (non-accumulating,
+   `src/Canopy_DownwardSweep.hpp:1497`) and only then does it hold every source
+   the interaction lists name.
+4. **Shared cells get their own arithmetic branch.** See the next section; this
+   is the one place the reference had to reproduce a mechanism rather than a
+   result, and getting it wrong would have made the gate fail.
+
+$D(a)$ is defined globally — the plan puts `interaction_lists[a]` on exactly
+one rank (`src/Canopy_CommunicationPlan.hpp:477-486`: $a$'s owner, or rank 0
+when $a$ is shared) — so the reference computes the local part and closes it
+with one `MPI_Allreduce(MPI_SUM)` over a dense per-cell array in which every
+other rank contributes an exact `+0.0`. That is bit-exact whatever order the
+reduction takes, which is why the reference is the same expression at every
+rank count.
+
+The rank-local cell index is used as a global index, which is only valid
+because `TreeBuilder` builds the same tree on every rank (refinement driven by
+`MPI_Allreduce`'d per-cell global counts, `src/Canopy_TreeBuilder.hpp:743`).
+**That is asserted, not assumed**: the test `MPI_Allreduce`s the cell count
+(MIN vs MAX) and an in-repo FNV-1a hash of the key sequence (MIN vs MAX) and
+`ASSERT_EQ`s both, so if it ever stops holding the test says so rather than
+silently combining different cells.
+
+The comparison is restricted to cells this rank owns outright plus the shared
+ones. A cell a rank neither owns nor shares carries a partial value in
+`_locals` — L2L for a shared parent writes into every child's slot on every
+rank — and no correctness claim rests on it.
+
+### The one thing the design did not anticipate: the shared-cell round trip is not the identity
+
+R6 states that at np=1 `allreduce_shared_locals_at_depth` is "an exact
+identity, structurally", because the unpack computes
+`Snap[k] + (L(j) - Snap[k])` which "is `L(j)`". **That is true of the slot
+algebra and false of the floating-point arithmetic**, and a reference written on
+it would have failed the gate.
+
+Concretely, for a shared target with $a = L(\mathrm{parent})$ and $b = D(t)$ the
+sweep computes
+
+```
+a     = L(parent)      snapshot, taken after L2L(depth-1)
+c     = a + b          m2l_post_cell's `+=`
+delta = c - a          the Allreduce send buffer
+L(t)  = a + delta      snapshot + summed delta
+```
+
+and `a + fl(fl(a+b) - a)` is not `fl(a+b)` in general, because the subtraction
+re-rounds. A non-shared target, by contrast, really does get `D(t) + L(parent)`
+— `run_m2l_all` writes $D$ into a freshly zeroed local before the depth loop and
+L2L then adds the parent, directly or through the accumulating L2L exchange.
+
+So the reference carries **two branches**, selected by
+`owner == OWNER_SHARED`. That predicate is safe to use because
+`TreePartitioner` marks a cell `OWNER_SHARED` exactly when
+`depth <= replication_depth && !is_leaf`
+(`src/Canopy_TreePartitioner.hpp:493-502`), which is character-for-character
+`CommunicationPlan`'s shared-cell predicate (`:698`) — so the ownership map, the
+shared-target CSR filter and the snapshot's cell list agree by construction, and
+one lookup decides which arithmetic applies.
+
+R6's operational conclusions are unaffected: the four classes it tabulates, and
+the finding that a pack-side-only perturbation corrupts np=1 while a both-sides
+one does not, are all statements about the slot map $\sigma$ and all still hold.
+What does not hold is the sentence that `_locals` is *unchanged* by the
+function at np=1. It is changed, in the last bit, on any shared cell where
+`c - a` re-rounds. **T10 should not build a check on `_locals` being unchanged
+at np=1.**
+
+### The shared-cell path is exercised at np=1, as required
+
+Measured, from the gate log, `shared_cells` per rank:
+
+| config | np=1 | np=2 | np=3 | np=4 | np=5 | np=6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Basic (replication_depth 2) | **11** | 34 | 60 | 68 | 72 | 73 |
+| Small (replication_depth 1) | **9** | 9 | 9 | 9 | 9 | 9 |
+
+np=1 has 11 shared cells at the Basic configuration — 1 at depth 0, 8 at depth
+1 and 2 at depth 2 — and 9 at Small (1 + 8, all depth-1 cells non-leaf). The
+Basic counts grow with rank count only because the particle count is per-rank,
+so more ranks means a bigger tree and more non-leaf cells at depths $\le 2$;
+at np=6 all 64 depth-2 cells are non-leaf and the count saturates at
+$1+8+64=73$. **Nothing in the test is designed on the premise that np=1 is
+insulated from this path**, and the two-branch reference above is what makes
+that concrete rather than a claim.
+
+### Gate measurements — FarFieldContract
+
+Flux job **`f3XgCb6ZSSwy`**, tuolumne1041, Cray clang 20.0.0, spack env
+`tuolumne_trilinos`, `RelWithDebInfo`, Kokkos SERIAL, `build-tuolumne/`
+(`Canopy_ENABLE_PROFILING=OFF`), 35.09 s of CTest wall time.
+`100% tests passed, 0 tests failed out of 6`. Three test bodies x six rank
+counts, all `OK`, no `SKIPPED`.
+
+**Every rank at every rank count reported `not_bit_identical=0`.** The verdict
+the test asserts is `EXPECT_DOUBLE_EQ` (4 ULP), as T6 specifies, but the
+reference is in fact bit-exact on all 42 (rank, configuration) pairs and every
+one of the 9190 (cell, component) slots checked across them — so the exactness
+argument above is not merely within tolerance, it is tight, and a future run
+that reports a non-zero `not_bit_identical` while still passing is a signal
+that something in it has developed a hole.
+
+`fallback_pairs=0` everywhere, so no pair tripped a range guard or the count
+cap, and `m2l_pairs` equals `ilist_pairs` on every rank — the fused path
+carried every pair.
+
+| np | Basic: targets / m2l_pairs / checked (per rank) | Small: targets / m2l_pairs / checked |
+| --- | --- | --- |
+| 1 | 80 / 1200 / 178 | 54 / 610 / 138 |
+| 2 | 141,116 / 11215,10975 / 300,300 | 32,32 / 408,408 / 82,82 |
+| 3 | 197,130,129 / 26121,19861,18770 / 412,380,378 | 23,40,35 / 474,696,808 / 64,98,88 |
+| 4 | 179,118,113,109 / 24668,19081,18781,17858 / 376,372,362,354 | 35,37,41,40 / 1546,1397,1680,1537 / 88,92,100,98 |
+| 5 | 160,92,108,98,100 / 23087,16070,17681,16309,15961 / 338,328,360,340,344 | 49,47,40,34,47 / 3116,2983,2686,2354,3123 / 116,112,98,86,112 |
+| 6 | 152,80,87,79,80,91 / 21080,13940,13985,14541,13546,14120 / 322,306,320,304,306,328 | 63,53,39,49,41,62 / 6246,5096,4435,5109,4273,5957 / 146,124,98,118,100,142 |
+
+The largest single sum the reference reproduces bit-for-bit is a 197-target
+rank at np=3 carrying 26 121 pairs, i.e. individual $D(a)$ sums of a few hundred
+terms of like magnitude — which is exactly the regime the "sum in the sweep's
+order" decision exists for.
+
+### Gate measurements — the Laplace-solve gate, unchanged
+
+Same flux job **`f3XgCb6ZSSwy`**, second `ctest` invocation, 36.02 s of CTest
+wall time, `100% tests passed, 0 tests failed out of 6`.
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (reference) | (reference) | 3.2093610331931809e-07 | 4.2399302231264458e-08 |
+| 2 | 4.1994107222659022e-13 | 2.1570013757642702e-12 | 3.2093610363952985e-07 | 4.239936667274564e-08 |
+| 3 | 8.0211305411572796e-13 | 4.0353546216363242e-12 | 3.2093610299898352e-07 | 4.2399380705248681e-08 |
+| 4 | 1.114294857300434e-12 | 5.5987399483706545e-12 | 3.2093610299888352e-07 | 4.2399368624331468e-08 |
+| 5 | 9.5809726336249496e-14 | 6.4438389009577268e-13 | 3.209361028925181e-07 | 4.2399357908696204e-08 |
+| 6 | 5.688835866646797e-13 | 2.8631357246763719e-12 | 3.2093610299905848e-07 | 4.2399381662523099e-08 |
+
+**All 22 cells are character-for-character T1's table**, including the np=3
+direct-sum gradient that T5's run moved in its thirteenth figure
+(4.23993807052**48681**e-08 here, T1's value; T5 printed
+4.23993807052**33977**e-08). That is the expected outcome — T6 adds a basis and
+a test and touches no shared code — and it also **retroactively confirms T5's
+attribution** of that move to the partitioner rather than to T5's own diff.
+
+`fallback_pairs = 0`, `locals_ext = (103,28,1)`, `optab_ext = (28,49,n_ops)`,
+`a_extent = 169` and `initial_hash = 0xb6ad437608ad69b7` at every rank and rank
+count. `bitForBitArtifacts` ran and passed at np=1 rank 0 and np=2 ranks 0 and
+1 — `locals()`, the operator table, the $A_{n,m}$ table and the realized key
+list byte-identical to `tests/data/laplace_solve_P6.txt` — and `SKIPPED` at
+np 3-6 by design.
+
+`n_unique_ops` per rank: np=1 → 686; np=2 → 368, 386; np=3 → 273, 204, 329;
+np=4 → 264, 128, 234, 194; np=5 → 180, 168, 147, 217, 187 — all identical to T1.
+
+**The multijagged two-cut split landed at np=6 this run, which is a rank count
+it had not previously been seen at**, and it moved nothing printable.
+Attributed from this run's own log with no control run, per T5's procedure:
+
+| np=6 solve | rank 0 | 1 | 2 | 3 | 4 | 5 | sum |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `matchesDirectSum` (T1's cut) | 174 | 156 | 111 | 160 | 116 | 175 | 892 |
+| `crossRankAgreement` | 174 | 160 | 111 | 153 | 126 | 175 | 899 |
+
+Both printed figures still match T1 to all 17 digits, so np=6 joins np=5 (T3,
+T4) as a rank count where the split moves nothing, against np=3 (T5) where it
+moved a gradient in the thirteenth figure. The split has now been observed at
+np=3, np=5 and np=6, i.e. it is not a property of any particular rank count,
+and the np 1-2 bitwise half of the gate is unaffected because the cut over one
+or two parts is reproducible.
+
+### R3 — not measured, and why that is the right call
+
+R3 is a trait indirection deoptimizing the fused M2L kernel. **T6 changes no
+line the fused M2L kernel executes on the solid-harmonic path.** Not one file
+under `src/` was modified, so the `Canopy_Test_LaplaceSolve_MPI_SERIAL` binary's
+M2L code path is the same instruction stream T5 measured, and a
+`build-tuolumne-prof/` sample would be re-measuring T5's number with a
+different node assignment. The structural argument is total here rather than
+partial, which is stronger than any single sample of a timer that prints three
+decimals on values of 0.002-0.004 s. T5's `f3Xfk8H1YPNF` figure (0.070 s over
+24 solves) stands as the current baseline for T7.
+
+### What only running revealed
+
+- **`clang::-ffp-contract` is a real hazard between a device kernel and a host
+  reference, and it is why `m2l_accumulate` exists.** `acc += T * M` as one
+  statement is contractible to an FMA under the compiler's default
+  `-ffp-contract=on`. Nothing guarantees the same decision in `m2l_core`
+  (inside a `Kokkos::parallel_for` lambda, compiled for `gfx942` as well as
+  host) and in a plain host loop, and a single differing FMA over a few hundred
+  terms would drift past 4 ULP. `MonopoleBasis::m2l_accumulate` splits the
+  product into a named local, putting a statement boundary that
+  `-ffp-contract=on` may not cross, and both callers go through it. This was
+  written before the first build and `not_bit_identical=0` everywhere is the
+  evidence it was needed — or at least that it is sufficient.
+- **Clang reports only the FIRST failing class-scope `static_assert` per class
+  instantiation, so one inconsistent basis exercises only two of the four
+  guards.** The negative block originally declared one basis
+  (`coeff_type = double`, `scalars_per_coeff = 2`) and the build produced
+  exactly two diagnostics — `Canopy_UpwardSweep.hpp:73` and
+  `Canopy_DownwardSweep.hpp:117`, the two `sizeof` asserts — and never reached
+  the two `detail::coeff_traits` cross-checks, even though both would have
+  failed. That means a one-basis block would **not** have noticed if the two
+  traits asserts had been deleted, which is precisely the property the design
+  wants the block to have. **A second basis was added**,
+  `InconsistentComponentBasis`, with `component_scalar_type = float` and
+  `scalars_per_coeff = 2`: `sizeof(double) == 8 == 2 * sizeof(float)` so the
+  `sizeof` assert passes and the traits cross-check is the first to fail. With
+  both cases the build emits all four messages. **Any later task adding a
+  class-scope `static_assert` to a sweep must add its own case here, or the
+  block will silently stop covering it.**
+- **Both inconsistent bases are `struct X : public MonopoleBasis<...>` with one
+  or two traits redeclared, and that is deliberate rather than a shortcut.**
+  Because the *only* thing wrong with each is its changed traits, deleting the
+  four asserts makes the block compile — which is the failure signal. A
+  hand-rolled minimal bad basis would keep failing on missing members after the
+  asserts were gone and would therefore detect nothing.
+- **`m2l_translate` had to be bit-consistent with the fused path, which the
+  `Do` list does not say.** A basis could satisfy the contract with an
+  arbitrarily different fallback, but then the host reference would have to know
+  which path each pair took. `MonopoleBasis::m2l_translate` instead
+  reconstructs the same integer key from the physical geometry it is handed —
+  `w_unit = min(w_source, w_target)` is the sweep's own definition of the
+  deeper half-width; `w_target / w_source` is exactly $2^{dd}$ because every
+  half-width is the root half-width scaled by a power of two — and calls the
+  same `m2l_operator_entry`. `fallback_pairs = 0` at every rank count, so this
+  path did not in fact execute, but the test does not depend on that and the
+  consistency is what makes `fallback_pairs` a printed diagnostic rather than
+  an assertion.
+- **`NComps = 2`, not 1, and it is not cosmetic.** With
+  `num_coeffs_per_cell = 1`, `NComps = 1` would make
+  `per_cell_complex = coeffs_per_cell * NComps = 1` in
+  `allreduce_shared_locals_at_depth`, its slot expression degenerate, and any
+  slot-indexing error there invisible. `NComps = 2` gives stride 2 and puts
+  those pack/unpack loops under a real index. This matters for **T10**, which
+  rewrites exactly those loops.
+- **`Order = 0` is safe.** `grep -n '\bP\b' src/Canopy_UpwardSweep.hpp` shows
+  `max_order` reaches nothing but `build_aux_tables`, in both sweeps, so a
+  basis with no order at all can declare `max_order = 0`. The test instantiates
+  `MonopoleBasis<double, 0, 2>`.
+- **`M2L_KEY_DD_MAX`'s `float` branch was never reached**, as the task said it
+  would not be: `Scalar = double` takes the non-`float` branch
+  (`src/Canopy_DownwardSweep.hpp:333-334`) and it compiles. Left alone; it is
+  T7's.
+- **Nothing failed on the first build, and nothing failed on the first run.**
+  The only two source edits after the first successful compile were the
+  shared-cell arithmetic branch (found by reading `R6` against the code, not by
+  a failing run) and the second negative-test basis.
+- **Adding a name to `tests/CMakeLists.txt` needs `make
+  cmake_check_build_system` first.** `make -j 4 <new target>` in
+  `build-tuolumne/` fails with "No rule to make target" — make errors out
+  before it regenerates, because the target does not exist in the current
+  Makefile. `make cmake_check_build_system` regenerates against the existing
+  cache (which it preserved: `Canopy_ENABLE_PROFILING` stayed `OFF`, the
+  `MPIEXEC_*` overrides stayed put) and the target then builds.
+- **`make -j 4`, per T1's operational note.** No SIGKILL. The `tstLaplaceSolve`
+  and `tstFarFieldContract` translation units each take roughly three minutes
+  on the login node.
+- **No `clang-format` pass was run**, per `CLAUDE.md`'s "Do not clang format"
+  and commit `82b052c`.
+- **`run_cmake_tuolumne.sh` still shows as modified and is still not this
+  task's** — whole-file line-ending churn plus a mode change, predating the
+  session. `setup-repo.txt` is likewise a pre-existing untracked file. Both
+  left alone. **`tests/tstLaplaceSolve.hpp` also shows as modified, and that is
+  T5's uncommitted one-liner** (`ds.A_table()` → `ds.aux().A_table`), without
+  which `Canopy_Test_LaplaceSolve_MPI_SERIAL` does not compile at `HEAD`. It is
+  in the working tree, was needed to build the gate, and is committed with T6
+  rather than left dangling.
+
+### How to re-run the negative test
+
+Committed in this file's header comment as well, so it does not live only here:
+
+```bash
+b=build-tuolumne/tests
+d=$b/CMakeFiles/Canopy_Test_FarFieldContract_MPI_SERIAL.dir
+touch $b/SERIAL/tstFarFieldContract_SERIAL.cpp
+make -C $b Canopy_Test_FarFieldContract_MPI_SERIAL \
+  CXX_DEFINES="$(sed -n 's/^CXX_DEFINES = //p' $d/flags.make) \
+               -DCANOPY_TEST_EXPECT_COMPILE_FAILURE"
+```
+
+`make`'s command-line assignment overrides the one `flags.make` makes, so the
+`sed` re-supplies the defines the build needs and appends ours; the `touch` is
+there because changing a `-D` changes no file timestamp. This route was chosen
+over adding a CMake option because the alternative would have written a new
+cache entry into `build-tuolumne/`, which is the bitwise gate's configuration
+and which R3 rests on not moving. **Remember to rebuild the positive target
+afterwards** — the failed compile leaves the object stale.
+
+### Doc corrections made as part of T6
+
+- T6's **Reference** cited `tests/tstDownwardSweep.hpp:57` for how a test
+  instantiates a basis. That line is blank. Repointed at `:56` (the basis
+  alias, `using Kernel = LaplaceKernel<double, P_ORDER>;`) and at `:156-163`
+  (the pattern actually worth copying — construct builder, partitioner and comm
+  plan, then both sweeps and `setup()`).
+- T6's **Do** step 1 listed `sets_per_component = 1` among the traits with no
+  note that nothing reads it. Kept, with a paragraph added saying it is inert
+  and forward-looking until T10 and that the declaration must say so.
+
+### Repository state left behind
+
+- `tests/CanopyTest_MonopoleBasis.hpp` (663 lines) and
+  `tests/tstFarFieldContract.hpp` (798 lines) — new.
+- `tests/CMakeLists.txt` — one line.
+- `scripts/tuolumne/run_ctest_far_field_contract.flux` — new.
+- `tests/tstLaplaceSolve.hpp` — T5's uncommitted one-liner, carried in.
+- **No file under `src/` was modified.**
+- Log kept: `canopy-far-field-contract.f3XgCb6ZSSwy.log` (both suites).
+- Out of scope and untouched, as directed: `M2L_KEY_DD_MAX`'s `float` branch,
+  `canonicalize_key`, `key_needs_level` (T7); `unit_w` and `kernel_params` in
+  the operator builder (T9); `sets_per_component` actually doing something and
+  the shared-cell slot expression (T10); the `m2l_pre_cell` per-source-cell
+  storage gap (T3/T6 — not needed, see above); `tests/tstLaplaceKernel.hpp` and
+  `Canopy_Test_P2P_*`, which do not compile at `HEAD`; `ctest -L regression`;
+  the partitioner's non-determinism; `run_cmake_tuolumne.sh`; and
+  `setup-repo.txt`. `README.md` was not touched: no public API and no example's
+  arguments changed, and no new known issue was found.
+
+**Affects:** **T7** and **T10** — both edit
+`tests/CanopyTest_MonopoleBasis.hpp`, and three things about its shape matter.
+First, **the operator value lives in exactly one function**,
+`m2l_operator_entry(dd, ix, iy, iz)`, called by both `m2l_build_operator` and
+the host reference; T7's depth-carrying key changes what `dd` *means* to the
+sweep but not this function's signature, and if T7 does change the signature it
+must change both callers or the gate will compare an operator against a
+different operator and fail with a message that looks like a sweep bug. Second,
+**`m2l_accumulate` exists to defeat FP contraction** and must not be inlined
+back into `m2l_core`; see "What only running revealed". Third, **the negative
+`#ifdef` block covers four guards with two bases because clang stops at the
+first failing class-scope assert per instantiation** — any new sweep-side
+`static_assert` needs its own case added there. **T7** additionally: this basis
+takes the non-`float` branch of `M2L_KEY_DD_MAX` and the `float` branch is
+still unexercised; and `MonopoleBasis`'s `dd` convention is
+$F(dd) = 2^{\max(0,-dd)}$, which is `LaplaceKernel`'s $F(dd,n,j)$ at
+$n=j=0$ — so if T7 makes the key carry depth, this basis's operator is already
+depth-independent given the key and needs no change beyond whatever
+`canonicalize_key` does to the key itself. **T10** additionally, and this is
+the substantive finding: **R6's claim that `allreduce_shared_locals_at_depth`
+leaves `_locals` unchanged at np=1 is true of the slot algebra and false of the
+floating-point arithmetic** — `a + fl(fl(a+b) - a)` is not `fl(a+b)`, so the
+function does perturb `_locals` in the last bit at np=1 on any shared cell where
+the subtraction re-rounds. Do not build a T10 check on np=1 invariance of
+`_locals`. R6's four-class table and its pack-side-versus-both-sides finding are
+unaffected, since both are statements about the slot map. T10 also inherits a
+ready-made multi-component exercise of exactly the loops it rewrites:
+`FarFieldContract` runs at `NComps = 2` with `num_coeffs_per_cell = 1`, so
+`per_cell_complex` is 2 and an aliasing or truncating slot expression is
+visible; and `owner == OWNER_SHARED` is a safe predicate for "this cell goes
+through the snapshot/Allreduce path", because
+`src/Canopy_TreePartitioner.hpp:493-502` and
+`src/Canopy_CommunicationPlan.hpp:698` carry the same predicate.
+**T8** — `total_fallback_pair_count()` is 0 on all 42 (rank, configuration)
+pairs measured here, so R4's discriminator is intact for `MonopoleBasis` too,
+and its $1\times1$ operator makes it the cheapest basis to test an overflow
+policy against: at 16 bytes per key the count cap binds long before any byte
+budget. **T11** — `MonopoleBasis` is now a second `FarField` type that
+instantiates both sweeps cleanly, so T11 can use it to check that its `Solver`
+parameter really is a parameter without needing T12's Cartesian-Taylor basis to
+exist first. **T12** — the shape of `MonopoleBasis` is the template to copy;
+the two things it should keep are the single-source-of-truth operator function
+and the units-and-conventions block on the declaration.

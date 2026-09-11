@@ -566,7 +566,7 @@ template <class DS>
 void collect_a_table( const DS& ds, BitRecord& r )
 {
     auto h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                  ds.A_table() );
+                                                  ds.aux().A_table );
     r.a_bits.resize( h.extent( 0 ) );
     for ( std::size_t i = 0; i < h.extent( 0 ); ++i )
         r.a_bits[i] = bits_of( static_cast<double>( h( i ) ) );

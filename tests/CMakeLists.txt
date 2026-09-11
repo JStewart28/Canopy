@@ -48,6 +48,7 @@ set(UNIT_SERIAL_TESTS
 set(UNIT_MPI_TESTS
   CommunicationPlan
   DownwardSweep
+  FarFieldContract
   LaplaceSolve
   P2P
   SingleSolve
