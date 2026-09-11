@@ -2439,3 +2439,267 @@ parameter really is a parameter without needing T12's Cartesian-Taylor basis to
 exist first. **T12** — the shape of `MonopoleBasis` is the template to copy;
 the two things it should keep are the single-source-of-truth operator function
 and the units-and-conventions block on the declaration.
+
+## T7 — the M2L key carries depth, chosen by the basis
+
+T7 is **DONE**, and it is the first task in this document whose result is
+*both* negative and positive at once. Negative: the solid-harmonic path came
+through a five-field key and a changed hash function with **identical bit
+patterns** on all four artifacts at np 1-2, and `tests/data/laplace_solve_P6.txt`
+was not regenerated. Positive: `MonopoleBasis`, with the opposite answer to the
+same contract, realizes **4628** distinct keys where a `max_d`-zeroing twin of
+it realizes **2572** on the same tree — so the level demonstrably reaches the
+key rather than being silently dropped.
+
+Gate run flux job **`f3XhrY5oeeBZ`** (both suites, one allocation), tuolumne1015,
+Cray clang 20.0.0, `build-tuolumne/`, at `HEAD` = `79d397a`.
+
+### The contract as actually written
+
+Three members, on `LaplaceKernel` (`src/Canopy_LaplaceKernel.hpp:638-705`) and
+on `MonopoleBasis` (`tests/CanopyTest_MonopoleBasis.hpp:121-167`):
+
+```cpp
+static constexpr int  m2l_key_dd_max  = std::is_same<Scalar,float>::value ? 4 : 6;
+static constexpr bool key_needs_level = false;   // true on MonopoleBasis
+
+template <class Key>
+static Key canonicalize_key( Key k ) { k.max_d = 0; return k; }   // identity on MonopoleBasis
+```
+
+**No signature in the prompt had to change.** `m2l_build_operator` still takes
+`( int dd, int ix, int iy, int iz, const AuxType&, const TView& )` and is still
+called as `m2l_build_operator( k.dd, k.ii, k.jj, k.kk, h_aux, T_slice )`
+(`src/Canopy_DownwardSweep.hpp:1218`), so `MonopoleBasis::m2l_operator_entry`
+and its two callers were untouched and the conformance gate stayed bit-exact —
+which is what T6's **Affects** line warned was at stake.
+
+`canonicalize_key` is a **function template on the key type**, as decided:
+`M2LKey` is a nested type of `DownwardSweep<…, KernelType>`, so a basis cannot
+name it without a circular dependency. The sweep passes its own `M2LKey` and
+`Key` is deduced; no `template` disambiguator is needed at the call site
+because the argument deduces it. It is **host-only** — no
+`KOKKOS_INLINE_FUNCTION` — because the classify pass runs on host. The one
+place a disambiguator *is* needed is a test that calls it with an explicit
+argument through a dependent basis type:
+`B::template canonicalize_key<ProbeKey>( k )`.
+
+### Decisions taken as given, and how each landed
+
+- **`max_d` does not enter `collect_keys`' hash.** `tests/tstLaplaceSolve.hpp`
+  still feeds four fields, and the reference data was not regenerated. The
+  stronger check went into `bitForBitArtifacts` instead: every realized key must
+  have `max_d == 0` for the solid-harmonic basis (`:1216-1240`). That is a
+  statement about `canonicalize_key` itself rather than about a hash of a
+  constant, and it passed at all three bit-for-bit records. Both `collect_keys`
+  and the file header now carry a paragraph saying why the fifth field is
+  deliberately absent, so a later reader does not "fix" it and force a
+  re-baselining.
+- **Canonicalize exactly once, at construction** (`:1005-1010`), immediately
+  before the per-thread `kmap.find`. The serial merge (`:1124-1135`) needed **no
+  change at all**, exactly as predicted: the keys in `local_ops[t]` are already
+  canonical.
+- **`key_needs_level` has no consumer in `src/`.** Declared on both bases with a
+  comment on the declaration saying so and naming T8 as the first reader,
+  following T6's `sets_per_component` precedent.
+- **`MonopoleBasis` declares `m2l_key_dd_max = 6`**, the value the non-`float`
+  branch gave it before. `fallback_pairs` is 0 at every rank and rank count in
+  both suites, so turning the constant into a trait moved no pair. The `float`
+  branch is still unexercised.
+- **`M2L_KEY_DD_MAX` kept its name** as a sweep-scope constant, now defined as
+  `KernelType::m2l_key_dd_max` (`src/Canopy_DownwardSweep.hpp:341`). That is why
+  the `CANOPY_ENABLE_DEBUG` cross-check at `:1052` needed no edit: the site reads
+  the same identifier it always did. Only the definition moved.
+
+### The hash change is order-neutral, and the gate confirmed it
+
+Adding `mix( k.max_d )` changes bucketing in `local_k2o` and `key_to_op` and
+nothing else, because neither map is ever iterated — only `find`/`emplace`. The
+operator table's column order comes from the `local_ops[t]` vectors in
+pair-iteration order and from the serial merge order, neither of which the hash
+touches. So `op_idx` assignment, `optab_hash` and `locals()` are untouched, and
+they measured untouched: the operator-table hash and extents `(28,49,n_ops)` and
+the `locals()` hash and extents `(103,28,1)` are byte-identical to the committed
+data at np=1 rank 0 and np=2 ranks 0 and 1.
+
+### What only running revealed
+
+- **The strictly-more-keys assertion does not hold at the Basic configuration,
+  and that is a property of the dual-tree traversal rather than a bug.** The
+  first gate run (flux job **`f3XhoX9yuc5D`**) failed exactly one test:
+  `FarFieldContract.levelReachesTheKey` at np=1, `468` distinct keys **both**
+  with and without the level. Every one of the 468 level-carrying keys had
+  `max_d != 0` and every one of the 468 level-blind keys had `max_d == 0`, so
+  canonicalization was working perfectly — the two key sets were simply in
+  bijection. The reason is the tree: at ncrit 32 the np=1 tree is **89 cells**,
+  `1 + 8 + 64` at depths 0-2 and just **16** at depth 3, i.e. two parents' worth
+  of children. A same-depth pair is emitted only when its *parent* pair failed
+  the MAC, so same-depth offsets sit in a narrow shell; with only two depth-3
+  parents (not themselves a MAC-failing pair) depth 3 contributes **no**
+  same-depth pairs at all, every depth-3 pair is cross-depth, and its `dd` and
+  offset distinguish it from every depth-2 pair. `(dd, ii, jj, kk)` then
+  determines `max_d` by accident.
+
+  **The fix was the configuration, not the assertion.** `levelReachesTheKey` now
+  runs at **ncrit 4** (694 cells, real populations at depths 3 and 4 whose
+  same-depth offset shells overlap depth 2's) and the inequality is decisive:
+  4628 against 2572, with **1884** offset keys realized at more than one level
+  and a maximum of **3** levels at one offset. Two guards were added so this
+  cannot quietly regress: an `ASSERT_GT( max_levels_at_one_offset, 1u )` that
+  fails loudly if the tree ever goes flat again, and an `EXPECT_EQ` that the
+  level-blind count equals the number of distinct `(dd, ii, jj, kk)` projections
+  of the level-carrying key set — which is what proves the two runs classified
+  the same pairs. All of it is printed in the provenance line.
+
+  **This is worth inheriting.** "More levels means more keys" is true only where
+  two levels actually share an offset, and a shallow test tree does not
+  guarantee that.
+
+- **A second `DownwardSweep` can be driven over an existing fixture's tree with
+  no fixture change.** `builder`, `partitioner` and `comm_plan` are all
+  basis-independent and all taken by `const&` by both sweeps' `setup()`/
+  `execute()`, so `levelReachesTheKey` builds one `ContractFixture` and then
+  stands up an `UpwardSweep`/`DownwardSweep` pair on `LevelBlindBasis` over the
+  *same* cells, ownership and interaction lists. That is a stronger statement
+  than two fixtures on identical trees, and it needed no templating of
+  `ContractFixture`.
+
+- **The np=3 cut moved, and T5's "read it from the `ctest -V` log" procedure
+  needed one extension to attribute it.** All three np=3 solves drew
+  `(285, 189, 329)`; T1's set is `(273, 204, 329)`. Because the three bodies
+  *agreed with each other*, comparing them — T5's procedure as written — gave no
+  signal. What attributed it instead: `(285, 189, 329)` is character-for-
+  character the second cut **T5's own log already carried** at np=3, and T5's run
+  printed the same direct-sum gradient this one does,
+  `4.2399380705233977e-08`. So the cut/figure pairing was established by an
+  earlier log and this run reproduces both halves together. **No control run
+  from unmodified `HEAD` was needed, but the generalized procedure is: compare
+  the three bodies first, and if they agree, compare the cut itself against the
+  cuts earlier logs have recorded.** np=6 did split within this run —
+  `(174,156,111,160,116,175)` (T1's) and `(174,160,111,153,126,175)` (the one T6
+  recorded) — and moved nothing printable.
+
+- **Nothing failed to compile, on either attempt.** The only failure this
+  session was the one test above, and it was a configuration fact rather than a
+  code defect.
+
+- **No new sweep `static_assert` was added**, so the permanent
+  `#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block needed no new case and was
+  not re-run. Its two bases derive from `MonopoleBasis` and therefore inherit
+  the three new contract members, so it still compiles up to the four asserts it
+  targets.
+
+- **`run_cmake_tuolumne.sh` still shows as modified and is still not this
+  task's** — line-ending churn plus a mode change, predating the session.
+  `setup-repo.txt` is likewise pre-existing and untracked. Both left alone.
+
+- **No `clang-format` pass**, per `CLAUDE.md` and commit `82b052c`.
+
+### R3 — not measured, and the structural argument for why
+
+T7 changes the `M2LKey` struct, the `M2LKeyHash` function, the S3 classify pass
+and a compile-time constant. **None of them is inside `TIMER_M2L_KERNEL`'s
+scope**, which is `run_m2l_all` / `run_m2l_at_depth`. The classify pass and the
+key maps run once per interaction-list build, under
+`TIMER_ILIST_S3_CLASSIFY_PAIRS`; `canonicalize_key` is host-only and is never
+reachable from a device kernel; and `M2L_KEY_DD_MAX` is a compile-time constant
+before and after, read only by the classify pass's range guard, so no runtime
+value entered the fused kernel. The fused kernel's instruction stream is the one
+T5 measured. T5's `f3Xfk8H1YPNF` figure — 0.070 s of `M2L kernel (all depths)`
+over 24 solves — stands as the baseline for T8. R3 is not a correctness gate and
+no exit criterion depends on it; a `build-tuolumne-prof/` sample here would have
+been re-measuring T5's number on a different node.
+
+### Gate measurements
+
+`100% tests passed, 0 tests failed out of 6` for both suites. Per-test tallies:
+`bitForBitArtifacts` 3 OK / 36 SKIPPED, `crossRankAgreement` 20 OK / 2 SKIPPED,
+`matchesDirectSum` 21 OK; `localsMatchHostReferenceBasic`,
+`localsMatchHostReferenceSmall` and `l2pReturnsTheLocal` 21 OK each,
+`levelReachesTheKey` 1 OK (np=1) and SKIPPED at np 2-6 by design.
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (reference) | (reference) | 3.2093610331931809e-07 | 4.2399302231264458e-08 |
+| 2 | 4.1994107222659022e-13 | 2.1570013757642702e-12 | 3.2093610363952985e-07 | 4.239936667274564e-08 |
+| 3 | 8.0211305411572796e-13 | 4.0353546216363242e-12 | 3.2093610299898352e-07 | **4.2399380705233977e-08** |
+| 4 | 1.114294857300434e-12 | 5.5987399483706545e-12 | 3.2093610299888352e-07 | 4.2399368624331468e-08 |
+| 5 | 9.5809726336249496e-14 | 6.4438389009577268e-13 | 3.209361028925181e-07 | 4.2399357908696204e-08 |
+| 6 | 5.688835866646797e-13 | 2.8631357246763719e-12 | 3.2093610299905848e-07 | 4.2399381662523099e-08 |
+
+Twenty-one of 22 are character-for-character T1's. The bolded one is T5's value
+(T1 and T6 printed `4.23993807052`**`48681`**`e-08`), attributed above.
+
+`fallback_pairs = 0`, `locals_ext = (103,28,1)`, `optab_ext = (28,49,n_ops)`,
+`a_extent = 169` and `initial_hash = 0xb6ad437608ad69b7` at every rank and rank
+count. `n_unique_ops` per rank: np=1 → 686; np=2 → 368, 386; np=3 → 285, 189,
+329; np=4 → 264, 128, 234, 194; np=5 → 180, 168, 147, 217, 187 — np 1, 2, 4 and
+5 identical to T1.
+
+FarFieldContract: `not_bit_identical=0` and `fallback_pairs=0` on all 42
+(rank, configuration) pairs, unchanged by the per-level key — which is the
+measurement behind the claim that a level-carrying key costs no operator
+*values* for this basis, only duplicate columns.
+
+The level assertion, np=1:
+
+```
+[far-field-contract] level-reaches-key nprocs=1 rank=0 cells=694
+  n_unique_ops_with_level=4628 n_unique_ops_without=2572
+  level_carrying_keys=4628 multi_level_offsets=1884
+  max_levels_at_one_offset=3 fallback_with=0 fallback_without=0
+```
+
+### Repository state left behind
+
+- `src/Canopy_LaplaceKernel.hpp` — `m2l_key_dd_max`, `key_needs_level`,
+  `canonicalize_key`, plus `#include <type_traits>`.
+- `src/Canopy_DownwardSweep.hpp` — `M2LKey` gains `max_d`, `M2LKeyHash` mixes
+  it, `M2L_KEY_DD_MAX` reads the trait, the classify pass canonicalizes at
+  construction, and four comment blocks rewritten (the key block, the S3 header,
+  the classify-pass header, the stage-4 header).
+- `tests/CanopyTest_MonopoleBasis.hpp` — the three members with the opposite
+  answers.
+- `tests/tstLaplaceSolve.hpp` — `key_less` takes `max_d` as its leading field,
+  `dump_keys` prints it, `collect_keys` and the file header explain why the hash
+  does not, and `bitForBitArtifacts` asserts `max_d == 0`.
+- `tests/tstFarFieldContract.hpp` — `LevelBlindBasis`, `ProbeKey`,
+  `expectKeyTraitsAgree`, `testLevelReachesTheKey` and its registration.
+- Logs kept: `canopy-far-field-contract.f3XhrY5oeeBZ.log` (the gate) and
+  `canopy-far-field-contract.f3XhoX9yuc5D.log` (the shallow-tree failure, kept
+  because it is the evidence for the configuration finding above).
+- **`tests/data/laplace_solve_P6.txt` not regenerated.** `README.md` untouched:
+  no public API and no example's arguments changed, and no new known issue was
+  found. Out of scope and untouched, as directed: `M2L_KEY_OFFSET_MAX`;
+  `unit_w` and `kernel_params` (T9); `sets_per_component` and the shared-cell
+  slot expression (T10); `tests/tstLaplaceKernel.hpp` and `Canopy_Test_P2P_*`;
+  `ctest -L regression`; the partitioner; `run_cmake_tuolumne.sh`;
+  `setup-repo.txt`.
+
+**Affects:** **T8** — it inherits three things. First, `key_needs_level` is
+declared on both bases and consumed by nothing; T8 is its first reader, and the
+number it needs it for is now measured: a level-carrying basis realized
+**4628** keys where the level-blind projection is **2572**, i.e. **1.8x** on one
+694-cell tree, which is the factor `bytes_per_key * n_keys` must absorb when
+`key_needs_level` is true. Second, `M2L_OP_COUNT_CAP` is still the only cap and
+is still read at one place (`src/Canopy_DownwardSweep.hpp:1134`), unchanged by
+T7. Third, `total_fallback_pair_count()` is 0 across both suites at every rank
+count, so R4's discriminator is intact going in. **T9** — `canonicalize_key`'s
+final shape is `template <class Key> static Key canonicalize_key( Key k )`, host
+only, applied once at `src/Canopy_DownwardSweep.hpp:1005-1010`; an operator
+cache keyed on the canonicalized key can therefore key on the sweep's `M2LKey`
+by value, and the key it gets is already reduced. Note that T9's physical width
+must come from `max_d`, which for `LaplaceKernel` is **zeroed by the time the
+operator builder sees the key** — so a basis that wants `unit_w` must set
+`key_needs_level = true` and stop zeroing, and the builder must then read the
+level out of the key rather than being handed it separately, since
+`m2l_build_operator`'s signature still passes only `(dd, ii, jj, kk)`. That is
+the one place T7 constrains T9. **T10** — nothing changed in the shared-cell
+path; `FarFieldContract` still runs at `NComps = 2` with
+`num_coeffs_per_cell = 1` and now has a fourth test body, which does **not**
+touch `locals()` and so adds nothing to T10's surface. **Any later task using
+the gate** — the np 3-6 partitioner wobble has now been seen at np=3, np=5 and
+np=6, and this run adds a case T5's diagnostic procedure does not cover: all
+three bodies at a rank count can agree with *each other* and still differ from
+T1's cut. When that happens, compare the cut against the cuts earlier logs
+record before treating the figure as a finding.

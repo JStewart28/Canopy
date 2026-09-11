@@ -321,29 +321,38 @@ class DownwardSweep
     //   (ii,jj,kk) = round((c_s - c_t) / unit_w)
     // and reuse one T(Nt, Ns) per unique key.
     //
-    // Range guards (|dd|<=6, |offset|<=32) catch pathological pairs and
-    // route them to the per-pair m2l_translate fallback. Healthy MAC
-    // traversals never trip these.
-    // FP32 safety valve: with the scale-normalized T̃, the |dd|-dependent
-    // factor reaches 2^{j·|dd|} (worst j = P). For Scalar = double this
-    // is comfortable through |dd| = 6; for Scalar = float a hard cut at
-    // |dd| = 4 keeps the precision loss to ~8 bits, matching Greengard
-    // truncation error at P = 6. Pairs beyond the cut go to the per-pair
-    // fallback path.
-    static constexpr int M2L_KEY_DD_MAX =
-        std::is_same<typename KernelType::scalar_type, float>::value ? 4 : 6;
+    // The key is built in full — max_d is always emitted, with no branch —
+    // and then reduced by KernelType::canonicalize_key before it is hashed.
+    // That call is what decides whether the level survives into the key: a
+    // basis whose operators are scale-normalized (the solid-harmonic one)
+    // zeroes max_d there and collapses every depth onto one column, while a
+    // basis carrying physical operators returns the key unchanged and gets
+    // one column per (level, offset). The sweep does not know or care which;
+    // it canonicalizes once, at construction, and everything downstream —
+    // the per-thread key maps, the global key_to_op, the realized key list
+    // and the operator table's column order — sees only canonical keys.
+    //
+    // Range guards (|dd| <= KernelType::m2l_key_dd_max, |offset| <= 32) catch
+    // pathological pairs and route them to the per-pair m2l_translate
+    // fallback. Healthy MAC traversals never trip these. The |dd| bound is
+    // the basis's, not the sweep's: what makes a large depth difference
+    // unsafe is the basis's own width normalization, so the rationale and the
+    // FP32 valve live on KernelType::m2l_key_dd_max.
+    static constexpr int M2L_KEY_DD_MAX = KernelType::m2l_key_dd_max;
     static constexpr int M2L_KEY_OFFSET_MAX = 32;
     static constexpr int M2L_OP_COUNT_CAP = 32768;
 
     struct M2LKey
     {
+        int max_d;
         int dd;
         int ii;
         int jj;
         int kk;
         bool operator==( const M2LKey& o ) const noexcept
         {
-            return dd == o.dd && ii == o.ii && jj == o.jj && kk == o.kk;
+            return max_d == o.max_d && dd == o.dd && ii == o.ii &&
+                   jj == o.jj && kk == o.kk;
         }
     };
     struct M2LKeyHash
@@ -356,6 +365,7 @@ class DownwardSweep
                 h ^= static_cast<std::uint32_t>( v );
                 h *= 1099511628211ull;
             };
+            mix( k.max_d );
             mix( k.dd );
             mix( k.ii );
             mix( k.jj );
@@ -798,18 +808,26 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     // -----------------------------------------------------------------------
     // Stage 3: hash-map every (target, source) pair to a unique M2L operator
-    // key (max_d, dd, ii, jj, kk). Pairs sharing a key share an operator T,
-    // regardless of which depths target / source live at.
+    // key (max_d, dd, ii, jj, kk), reduced by KernelType::canonicalize_key.
+    // Pairs sharing a canonical key share an operator T.
+    //
+    // Whether pairs at different depths can share one is the basis's call,
+    // not the sweep's: the key is built with max_d always present, and
+    // canonicalize_key either keeps it (physical operators — one column per
+    // level) or zeroes it (scale-normalized operators — every level collapsed
+    // onto one column, which is what the solid-harmonic basis does and what
+    // keeps its table at the realized-offset count).
     //
     // Unit grid: cell at depth d, index i has center (2i+1) * half_w_d, so
     // the difference of any two centers (at any depths) is an integer
     // multiple of half_w_max_d, where max_d = max(d_t, d_s). We use that as
     // the unit length.
     //
-    // Range guards: pairs with |dd| > M2L_KEY_DD_MAX or |offset| component >
-    // M2L_KEY_OFFSET_MAX route to per-pair m2l_translate fallback. These
-    // guards exist purely to defend against pathological tree state; a
-    // healthy MAC traversal does not produce out-of-range pairs.
+    // Range guards: pairs with |dd| > M2L_KEY_DD_MAX (the basis's
+    // m2l_key_dd_max) or |offset| component > M2L_KEY_OFFSET_MAX route to
+    // per-pair m2l_translate fallback. These guards exist purely to defend
+    // against pathological tree state; a healthy MAC traversal does not
+    // produce out-of-range pairs.
     // -----------------------------------------------------------------------
 #if defined( CANOPY_ENABLE_DEBUG )
     std::vector<double> half_width_at_depth( _max_depth + 1, 0.0 );
@@ -857,6 +875,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         //   lround( (sci.center[x] - tci.center[x]) * inv_half_width_at_depth[max_d] )
         // computes in exact arithmetic, with no per-source h_dc_for_filter
         // gather and no FP rounding. Bit-identical M2LKey output by construction.
+        //
+        // max_d is emitted into the key unconditionally and the key is then
+        // handed to KernelType::canonicalize_key, exactly once, before any
+        // hash or map lookup sees it. Applying it here and nowhere else is
+        // what lets the serial merge below stay unchanged: the keys in
+        // local_ops[t] are already canonical.
         //
         // Sharded: per-thread hashmap dedup (O(N) cache-resident),
         // then a tiny serial merge over distinct keys (globally bounded by
@@ -976,7 +1000,13 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                              std::abs( jj ) <= M2L_KEY_OFFSET_MAX &&
                              std::abs( kk ) <= M2L_KEY_OFFSET_MAX )
                         {
-                            M2LKey key{ dd, ii, jj, kk };
+                            // Canonicalize once, here, before the key is
+                            // hashed. Both hash sites downstream (this
+                            // per-thread kmap and the serial merge's
+                            // key_to_op) therefore see canonical keys only;
+                            // do not apply it a second time.
+                            const M2LKey key = KernelType::canonicalize_key(
+                                M2LKey{ max_d, dd, ii, jj, kk } );
                             auto it = kmap.find( key );
                             if ( it != kmap.end() )
                             {
@@ -1148,10 +1178,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     // -----------------------------------------------------------------------
     // Stage 4: build the (Nt, Ns, n_unique_ops) operator table on host,
-    // then deep_copy to device. After scale normalization the operator
-    // depends only on (dd, ii, jj, kk); no physical width enters the
-    // builder. The realized key set under MAC = 0.5 is bounded and
-    // independent of tree depth.
+    // then deep_copy to device. One m2l_build_operator call per canonical
+    // key. No physical width enters the builder — it is handed
+    // (dd, ii, jj, kk) and nothing else — so a basis whose operator needs
+    // the absolute level must carry it through canonicalize_key and read it
+    // back out of the key here (supplying the physical width to the builder
+    // is T9's). For the solid-harmonic basis max_d is canonicalized away,
+    // so the realized key set under MAC = 0.5 is bounded and independent of
+    // tree depth.
     // -----------------------------------------------------------------------
     {
         const int Nt = KernelType::num_coeffs_per_cell;

@@ -32,6 +32,13 @@
 //   A_{n,m} table      — full bit patterns, one uint64_t per entry
 //   realized key list  — hash of the sorted keys — and n_unique_ops, full
 //
+// The key-list hash covers (dd, ii, jj, kk) and NOT the max_d field the key
+// also carries (T7). Feeding a fifth field would change every committed hash
+// in order to hash a constant zero; what max_d is worth asserting about is
+// asserted directly instead — bitForBitArtifacts requires max_d == 0 on every
+// realized key, which pins this basis's canonicalize_key rather than pinning
+// a hash of its output. See collect_keys.
+//
 // The particle set is a *global* set of 600 from seed 1234 + P, generated
 // identically on every rank and sliced contiguously, so the same physics
 // problem is solved at every rank count and the np=k-versus-np=1 comparison
@@ -242,9 +249,16 @@ inline std::string hex64( std::uint64_t v )
 // Total order on M2L keys, so the key-list hash is a function of the key
 // *set* and not of the order the classify pass discovered them in. The
 // column order of the table is separately covered by the table hash.
+//
+// max_d leads. For the solid-harmonic basis canonicalize_key zeroes it, so
+// it is constant across every realized key and this changes no ordering the
+// committed data was generated under; it is included so the comparator is a
+// total order on the whole key rather than on four of its five fields.
 template <class Key>
 inline bool key_less( const Key& a, const Key& b )
 {
+    if ( a.max_d != b.max_d )
+        return a.max_d < b.max_d;
     if ( a.dd != b.dd )
         return a.dd < b.dd;
     if ( a.ii != b.ii )
@@ -551,6 +565,16 @@ void collect_keys( const DS& ds, BitRecord& r )
     auto keys = ds.m2l_realized_keys();
     std::sort( keys.begin(), keys.end(), []( const auto& a, const auto& b )
                { return key_less( a, b ); } );
+    // FOUR FIELDS, NOT FIVE. The key carries max_d as well, but it is
+    // deliberately not fed to the hash. This function pushes each field
+    // through FNV separately, so feeding a fifth would push eight more bytes
+    // per key and change keys_hash for every record in
+    // tests/data/laplace_solve_P6.txt — forcing a regeneration of the
+    // committed reference data in order to hash a constant zero, which is
+    // exactly the silent re-baselining this harness exists to prevent.
+    // The stronger claim is asserted directly instead: bitForBitArtifacts
+    // requires max_d == 0 on every realized key for this basis, which pins
+    // canonicalize_key itself rather than pinning a hash of its output.
     Fnv1a64 f;
     for ( const auto& k : keys )
     {
@@ -616,9 +640,13 @@ void dump_keys( const DS& ds, const std::string& path )
     std::sort( keys.begin(), keys.end(), []( const auto& a, const auto& b )
                { return key_less( a, b ); } );
     std::ofstream os( path );
-    os << "# sorted realized M2L keys: dd ii jj kk\n";
+    // max_d is printed even though it is not hashed (see collect_keys), so
+    // that R2's direct list comparison can see it: a canonicalization that
+    // is not reaching the hash shows up here as a non-zero max_d column.
+    os << "# sorted realized M2L keys: max_d dd ii jj kk\n";
     for ( const auto& k : keys )
-        os << k.dd << " " << k.ii << " " << k.jj << " " << k.kk << "\n";
+        os << k.max_d << " " << k.dd << " " << k.ii << " " << k.jj << " "
+           << k.kk << "\n";
 }
 
 inline void dump_a_table( const BitRecord& r, const BitRecord& ref,
@@ -1174,6 +1202,41 @@ void testBitForBitArtifacts()
                 const std::string p = dump_path( r.nprocs, r.rank, "atable" );
                 dump_a_table( r, ref, p );
                 ADD_FAILURE() << "A_table() bit patterns written to " << p;
+            }
+
+            // --- canonicalize_key actually zeroed the level ---------------
+            // The key carries max_d (T7), and this basis's canonicalize_key
+            // zeroes it because its operators are scale-normalized and
+            // therefore depth-independent. keys_hash cannot see that — it
+            // hashes four of the five fields, so the committed data stays
+            // valid across T7 — so assert it on the realized keys directly.
+            // This is the stronger check of the two: hashing a constant zero
+            // would only prove the zero was hashed, while this proves every
+            // key the classify pass realized came out canonical, which is
+            // what keeps the operator table at one column per offset instead
+            // of one per (level, offset).
+            {
+                int n_level_carrying = 0;
+                int first_bad_max_d = 0;
+                for ( const auto& k : ds.m2l_realized_keys() )
+                {
+                    if ( k.max_d != 0 )
+                    {
+                        if ( n_level_carrying == 0 )
+                            first_bad_max_d = k.max_d;
+                        n_level_carrying++;
+                    }
+                }
+                EXPECT_EQ( 0, n_level_carrying )
+                    << "canonicalize_key did not reach the hash: "
+                    << n_level_carrying << " of "
+                    << ds.m2l_realized_keys().size()
+                    << " realized keys carry a non-zero max_d (first is "
+                    << first_bad_max_d
+                    << "). The solid-harmonic operator table would then hold "
+                       "one column per (level, offset) instead of one per "
+                       "offset "
+                    << tag;
             }
 
             // --- realized key list and n_unique_ops -----------------------

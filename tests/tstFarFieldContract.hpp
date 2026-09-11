@@ -60,6 +60,19 @@
 //     gates the FAR FIELD — M2L, L2L, L2P — which is what T6 is for.
 //
 // ---------------------------------------------------------------------------
+// THE SECOND THING THIS FILE GATES: THE LEVEL REACHES THE KEY
+//
+// T7 made the sweep's M2L key carry max_d and gave the basis the say over
+// whether it survives, through KernelType::canonicalize_key. LaplaceKernel
+// zeroes it; MonopoleBasis keeps it. The zeroing branch is covered by the
+// Laplace-solve gate pinning that its key set did not move, and the keeping
+// branch is covered here, by levelReachesTheKey: the same tree driven through
+// two sweeps whose bases differ in canonicalize_key alone must realize
+// strictly more distinct keys under the one that keeps the level. See that
+// test's own comment block for why it runs at np=1 and why it costs no
+// operator values.
+//
+// ---------------------------------------------------------------------------
 // THE DIAGNOSTIC SURFACE THIS USES, AND THE ONE IT DOES NOT
 //
 // The reference reads comm_plan.m2l_plan().interaction_lists, which is public
@@ -132,11 +145,14 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <random>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -657,6 +673,268 @@ void testL2PReturnsTheLocal( int num_particles_per_rank, int ncrit,
     EXPECT_GT( n_checked, 0 ) << "no local particle was mapped to a leaf";
 }
 
+//---------------------------------------------------------------------------//
+// THE LEVEL REACHES THE KEY — T7's positive assertion.
+//
+// The sweep's M2L key is (max_d, dd, ii, jj, kk) and is reduced by
+// KernelType::canonicalize_key before it is hashed. LaplaceKernel zeroes
+// max_d there, MonopoleBasis keeps it. Zeroing is the branch the Laplace-solve
+// gate covers, by pinning that its key set did not move; the branch that KEEPS
+// the level needs a positive measurement, or a sweep that silently dropped
+// max_d on the floor would look identical to one that honoured it.
+//
+// The measurement is m2l_n_unique_ops() on the SAME TREE under two bases that
+// differ in exactly one member: MonopoleBasis, which keeps max_d, against the
+// derived basis below, which zeroes it. Keeping the level can only split keys,
+// never merge them, so the level-carrying basis must realize STRICTLY MORE
+// distinct keys — and does so only if max_d actually survived into the hash.
+//
+// np=1 ONLY. Above one rank the tree is partitioned by Zoltan2 multijagged,
+// which src/Canopy_TreePartitioner.hpp:417-419 documents as non-deterministic,
+// so each rank's realized key set moves between runs. The two sweeps here are
+// driven over one fixture's tree, partition and communication plan, so even at
+// np > 1 they would see the same cut — but the count they produce would not be
+// reproducible, and a strict inequality on an irreproducible pair of counts is
+// not worth asserting. np=1 is where the key set is reproducible.
+//
+// THIS TEST NEEDS ITS OWN, DEEPER TREE, and that is a measured requirement
+// rather than a precaution. At the Basic configuration (ncrit 32) the np=1
+// tree is 89 cells — 1 + 8 + 64 at depths 0-2 and just 16 at depth 3, i.e.
+// two parents' worth of children — and BOTH bases realize exactly 468 keys.
+// The strict inequality genuinely does not hold there, and the reason is a
+// property of the dual-tree traversal rather than of T7: a same-depth pair is
+// emitted only when its PARENT pair failed the MAC, so same-depth offsets sit
+// in a narrow shell, and with only 16 cells at depth 3 (whose two parents are
+// not a MAC-failing pair) depth 3 contributes no same-depth pairs at all.
+// Every depth-3 pair is then cross-depth, its dd and offset distinguish it
+// from every depth-2 pair, and (dd, ii, jj, kk) determines max_d by accident.
+// Dropping ncrit to 4 puts real populations at depths 3 and 4, whose
+// same-depth offset shells overlap depth 2's, and the collision appears. The
+// key-multiplicity diagnostic below reports it, so a later configuration
+// change that quietly flattens the tree again is visible in the log rather
+// than only in a failure.
+//
+// This costs nothing in operator VALUES, which is why it can be asserted
+// alongside a bit-exact gate: m2l_operator_entry ignores max_d, so the extra
+// columns a level-carrying key produces are duplicates of one another and
+// locals() is unchanged. The level is observable in the key COUNT alone.
+//---------------------------------------------------------------------------//
+
+// MonopoleBasis with the key contract flipped to LaplaceKernel's answer, and
+// nothing else changed. Derivation is deliberate, as in the negative block
+// below: the two bases are identical in every trait and every operator, so the
+// only thing the count below can be measuring is canonicalize_key.
+struct LevelBlindBasis : public Basis
+{
+    static constexpr bool key_needs_level = false;
+
+    template <class Key>
+    static Key canonicalize_key( Key k )
+    {
+        k.max_d = 0;
+        return k;
+    }
+};
+
+// A stand-in for the sweep's nested M2LKey, which a test cannot name without
+// naming a DownwardSweep instantiation. canonicalize_key is a template on the
+// key type precisely so that any struct with these five members will do.
+struct ProbeKey
+{
+    int max_d;
+    int dd;
+    int ii;
+    int jj;
+    int kk;
+};
+
+// key_needs_level and canonicalize_key state the same fact twice, once for a
+// reader (and for T8's byte accounting) and once for the classify pass. T7
+// requires them to agree; assert it rather than trusting the declaration.
+template <class B>
+void expectKeyTraitsAgree( const char* basis_name )
+{
+    const ProbeKey a{ 3, -1, 2, -3, 4 };
+    const ProbeKey b{ 5, -1, 2, -3, 4 };
+    const ProbeKey ca = B::template canonicalize_key<ProbeKey>( a );
+    const ProbeKey cb = B::template canonicalize_key<ProbeKey>( b );
+
+    // The offset and depth-difference fields must survive canonicalization
+    // under either answer — they are what the operator builder is handed.
+    EXPECT_EQ( a.dd, ca.dd ) << basis_name << ": canonicalize_key altered dd";
+    EXPECT_EQ( a.ii, ca.ii ) << basis_name << ": canonicalize_key altered ii";
+    EXPECT_EQ( a.jj, ca.jj ) << basis_name << ": canonicalize_key altered jj";
+    EXPECT_EQ( a.kk, ca.kk ) << basis_name << ": canonicalize_key altered kk";
+
+    if ( B::key_needs_level )
+    {
+        EXPECT_EQ( a.max_d, ca.max_d )
+            << basis_name
+            << ": key_needs_level is true but canonicalize_key did not "
+               "preserve max_d";
+        EXPECT_NE( ca.max_d, cb.max_d )
+            << basis_name
+            << ": key_needs_level is true but canonicalize_key maps two "
+               "different levels onto the same key, so the level cannot "
+               "reach the operator table";
+    }
+    else
+    {
+        EXPECT_EQ( ca.max_d, cb.max_d )
+            << basis_name
+            << ": key_needs_level is false but canonicalize_key lets two "
+               "different levels through as distinct keys, so the operator "
+               "table would hold one column per (level, offset)";
+    }
+}
+
+template <class TEST_MS, class TEST_ES>
+void testLevelReachesTheKey( int num_particles_per_rank, int ncrit,
+                             int max_depth, double tolerance,
+                             int replication_depth )
+{
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    expectKeyTraitsAgree<Basis>( "MonopoleBasis" );
+    expectKeyTraitsAgree<LevelBlindBasis>( "LevelBlindBasis" );
+    EXPECT_TRUE( Basis::key_needs_level )
+        << "MonopoleBasis must keep the level, or this test compares a basis "
+           "against itself";
+    EXPECT_FALSE( LevelBlindBasis::key_needs_level );
+
+    if ( nprocs != 1 )
+        GTEST_SKIP() << "the realized key set is reproducible only at np=1; "
+                        "above one rank it moves with the multijagged cut";
+
+    // The level-carrying run: the ordinary fixture, unchanged.
+    ContractFixture<TEST_MS, TEST_ES> fix( num_particles_per_rank, ncrit,
+                                           max_depth, tolerance,
+                                           replication_depth );
+
+    // The level-blind run, over THIS FIXTURE'S tree, partition and
+    // communication plan — not over a second fixture's. All three are
+    // basis-independent and are taken by const reference, so the two sweeps
+    // below see the same cells, the same ownership and the same interaction
+    // lists, and the only difference between the two runs is the basis.
+    UpwardSweep<TEST_MS, TEST_ES, LevelBlindBasis> upward_blind(
+        MPI_COMM_WORLD );
+    upward_blind.setup( fix.builder.cells(), fix.partitioner.cell_owner_map(),
+                        fix.builder.particle_keys(), fix.num_local );
+    upward_blind.execute( Cabana::slice<Charge>( fix.particles ),
+                          Cabana::slice<Position>( fix.particles ),
+                          fix.comm_plan );
+
+    DownwardSweep<TEST_MS, TEST_ES, LevelBlindBasis> downward_blind(
+        MPI_COMM_WORLD );
+    downward_blind.setup( upward_blind, fix.num_local );
+
+    auto potential_blind = downward_blind.allocate_potential( fix.num_local );
+    auto gradient_blind = downward_blind.allocate_gradient( fix.num_local );
+    Kokkos::deep_copy( potential_blind, 0.0 );
+    Kokkos::deep_copy( gradient_blind, 0.0 );
+    downward_blind.execute( upward_blind.multipoles(),
+                            Cabana::slice<Position>( fix.particles ),
+                            potential_blind, gradient_blind,
+                            /*compute_gradient=*/true, fix.comm_plan );
+
+    const int n_with_level = fix.downward.m2l_n_unique_ops();
+    const int n_without_level = downward_blind.m2l_n_unique_ops();
+
+    EXPECT_GT( n_without_level, 0 )
+        << "the level-blind run realized no operators at all, so the "
+           "comparison below proves nothing";
+
+    // How many DISTINCT levels the busiest offset key is realized at, and how
+    // many offset keys are realized at more than one level. This is the
+    // quantity the strict inequality is really about: n_with_level exceeds
+    // n_without_level by exactly the number of extra (level, offset) pairs,
+    // so a max multiplicity of 1 means no offset was ever seen at two levels
+    // and the tree — not the key — is what made the counts equal.
+    std::map<std::array<int, 4>, std::set<int>> levels_per_offset;
+    for ( const auto& k : fix.downward.m2l_realized_keys() )
+        levels_per_offset[{ k.dd, k.ii, k.jj, k.kk }].insert( k.max_d );
+
+    std::size_t max_levels_at_one_offset = 0;
+    std::size_t n_multi_level_offsets = 0;
+    for ( const auto& kv : levels_per_offset )
+    {
+        max_levels_at_one_offset =
+            std::max( max_levels_at_one_offset, kv.second.size() );
+        if ( kv.second.size() > 1 )
+            n_multi_level_offsets++;
+    }
+
+    // The level-blind run must realize exactly the projection of the
+    // level-carrying run's key set onto (dd, ii, jj, kk). Both sweeps see the
+    // same tree, the same ownership and the same interaction lists, so any
+    // other relationship between the two counts means the two runs did not in
+    // fact classify the same pairs and the comparison below is meaningless.
+    EXPECT_EQ( levels_per_offset.size(),
+               static_cast<std::size_t>( n_without_level ) )
+        << "the level-blind run did not realize the projection of the "
+           "level-carrying run's key set, so the two runs did not classify "
+           "the same pairs";
+
+    // The tree must actually pose the question. A tree in which no offset is
+    // reached at two different depths cannot distinguish a key that carries
+    // the level from one that drops it, whatever the sweep does.
+    ASSERT_GT( max_levels_at_one_offset, 1u )
+        << "no offset key is realized at more than one level on this tree, so "
+           "a level-carrying key and a level-blind one are indistinguishable "
+           "here by construction and the assertion below would prove nothing. "
+           "The configuration has gone flat — see this test's comment block";
+
+    // The assertion T7's exit criterion names.
+    EXPECT_GT( n_with_level, n_without_level )
+        << "MonopoleBasis keeps max_d in its key and the level-blind basis "
+           "zeroes it, yet both realized the same number of distinct keys ("
+        << n_with_level << "), even though " << n_multi_level_offsets
+        << " offset keys occur at more than one level. The level is being "
+           "dropped somewhere between the classify pass and the key map";
+
+    // And the direct form of the same fact: the level-carrying run must
+    // realize keys whose max_d is non-zero, and the level-blind run must
+    // realize none. EXPECT_GT above can be satisfied by an unrelated key-set
+    // difference; this cannot.
+    int n_level_carrying = 0;
+    for ( const auto& k : fix.downward.m2l_realized_keys() )
+        if ( k.max_d != 0 )
+            n_level_carrying++;
+    EXPECT_GT( n_level_carrying, 0 )
+        << "every key MonopoleBasis realized has max_d == 0, so its identity "
+           "canonicalize_key never saw a level";
+
+    int n_blind_level_carrying = 0;
+    for ( const auto& k : downward_blind.m2l_realized_keys() )
+        if ( k.max_d != 0 )
+            n_blind_level_carrying++;
+    EXPECT_EQ( 0, n_blind_level_carrying )
+        << n_blind_level_carrying
+        << " keys survived the level-blind canonicalize_key with a non-zero "
+           "max_d, so canonicalization is not reaching the hash";
+
+    // Fallback counts stay the discriminator (R4). m2l_key_dd_max became a
+    // basis trait in T7, and a mistake there pushes pairs onto the per-pair
+    // path rather than producing a wrong answer.
+    EXPECT_EQ( 0, fix.downward.total_fallback_pair_count() );
+    EXPECT_EQ( 0, downward_blind.total_fallback_pair_count() );
+
+    std::printf( "[far-field-contract] level-reaches-key nprocs=%d rank=%d "
+                 "cells=%d n_unique_ops_with_level=%d n_unique_ops_without=%d "
+                 "level_carrying_keys=%d multi_level_offsets=%zu "
+                 "max_levels_at_one_offset=%zu fallback_with=%lld "
+                 "fallback_without=%lld\n",
+                 nprocs, rank,
+                 static_cast<int>( fix.builder.cells().size() ), n_with_level,
+                 n_without_level, n_level_carrying, n_multi_level_offsets,
+                 max_levels_at_one_offset,
+                 fix.downward.total_fallback_pair_count(),
+                 downward_blind.total_fallback_pair_count() );
+    std::fflush( stdout );
+}
+
 } // namespace FarFieldContractTest
 
 //---------------------------------------------------------------------------//
@@ -687,6 +965,20 @@ TEST( FarFieldContract, l2pReturnsTheLocal )
     FarFieldContractTest::testL2PReturnsTheLocal<TEST_MEMSPACE,
                                                  TEST_EXECSPACE>(
         /*num_particles_per_rank=*/1000, /*ncrit=*/32, /*max_depth=*/6,
+        /*tolerance=*/0.1, /*replication_depth=*/2 );
+}
+
+// ncrit 4, NOT the Basic configuration's 32. The question this test asks is
+// whether one offset can be realized at two different levels, and at ncrit 32
+// the np=1 tree is too shallow for that to happen at all — measured, see the
+// test's comment block. ncrit 4 puts real populations at depths 3 and 4 whose
+// same-depth offset shells overlap depth 2's. The body asserts the trait
+// agreement at every rank count and skips the key-count comparison above np=1.
+TEST( FarFieldContract, levelReachesTheKey )
+{
+    FarFieldContractTest::testLevelReachesTheKey<TEST_MEMSPACE,
+                                                 TEST_EXECSPACE>(
+        /*num_particles_per_rank=*/1000, /*ncrit=*/4, /*max_depth=*/6,
         /*tolerance=*/0.1, /*replication_depth=*/2 );
 }
 

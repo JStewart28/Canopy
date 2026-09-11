@@ -117,6 +117,54 @@ struct MonopoleBasis
     // One monopole in, so the operator is 1x1.
     static constexpr int m2l_num_src_coeffs = 1;
 
+    // -----------------------------------------------------------------------
+    // The M2L key contract: m2l_key_dd_max, key_needs_level,
+    // canonicalize_key. See LaplaceKernel for the full statement of what the
+    // five key integers are.
+    // -----------------------------------------------------------------------
+
+    // The |dd| range guard. 6 is the value the sweep's old hardcoded
+    // non-float branch gave every basis, and it is repeated here deliberately
+    // so that turning the constant into a trait moved no pair onto the
+    // fallback path for this basis: total_fallback_pair_count() was 0 before
+    // and must stay 0. F(dd) = 2^{max(0,-dd)} below is exact for any |dd|
+    // this admits, so nothing about this basis argues for a tighter cut.
+    static constexpr int m2l_key_dd_max = 6;
+
+    // THIS BASIS NEEDS THE LEVEL, and that is the whole point of it being
+    // true here: with LaplaceKernel at false and MonopoleBasis at true, both
+    // branches of the key contract are exercised by the test suite rather
+    // than one of them being a declaration nobody runs.
+    //
+    // NOTHING IN src/ CONSUMES THIS YET — T8's byte accounting is the first
+    // reader; see the note on LaplaceKernel::key_needs_level. It is declared
+    // now so the trait list a basis author sees is complete, and so
+    // tests/tstFarFieldContract.hpp can assert it agrees with
+    // canonicalize_key. Do not go looking for the consumer.
+    //
+    // Keeping max_d makes a per-level key, which for THIS basis produces
+    // duplicate operator columns by construction: m2l_operator_entry ignores
+    // max_d, so two keys differing only in it build identical 1x1 operators.
+    // That is deliberate and is what the strictly-more-keys assertion in
+    // tests/tstFarFieldContract.hpp measures — the level reaching the key is
+    // observable in m2l_n_unique_ops() without changing a single operator
+    // value, so the conformance gate stays bit-exact while proving the level
+    // is not silently dropped.
+    static constexpr bool key_needs_level = true;
+
+    // Identity: the key is returned unchanged, max_d and all. The mirror
+    // image of LaplaceKernel::canonicalize_key, which zeroes max_d.
+    //
+    // A function template on the key type for the reason given there: the key
+    // struct is a nested type of DownwardSweep<..., KernelType> and a basis
+    // cannot name it without a circular dependency. Host-only, not
+    // KOKKOS_INLINE_FUNCTION — the classify pass runs on host.
+    template <class Key>
+    static Key canonicalize_key( Key k )
+    {
+        return k;
+    }
+
     // NOTHING CONSUMES THIS YET. `grep -rn sets_per_component src/ tests/`
     // finds no reader: T10 is the task that raises the locals view to
     // multiple sets per component and teaches the sweeps to read this trait.

@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace Canopy
 {
@@ -632,6 +633,76 @@ struct LaplaceKernel
     // n = 0..P, m = -n..n. Some slots (|m| > n) are unused / left zero.
     // =======================================================================
     static constexpr int m2l_num_src_coeffs = ( P + 1 ) * ( P + 1 );
+
+    // =======================================================================
+    // The M2L key contract: m2l_key_dd_max, key_needs_level,
+    // canonicalize_key.
+    //
+    // The sweep builds one integer key per (target, source) pair,
+    //
+    //   key = (max_d, dd, ii, jj, kk)
+    //
+    // with max_d the deeper of the two depths, dd = d_source - d_target, and
+    // (ii, jj, kk) the center offset measured in half-widths at max_d (see
+    // the key comment in src/Canopy_DownwardSweep.hpp). Pairs sharing a key
+    // share one operator column. The three members below are how a basis says
+    // WHICH of those five integers its operator actually depends on, and how
+    // far dd may range before a pair is refused.
+    // =======================================================================
+
+    // The |dd| range guard. Pairs with |dd| > m2l_key_dd_max are refused by
+    // the sweep's classify pass and routed to the per-pair m2l_translate
+    // fallback.
+    //
+    // FP32 safety valve, and the reason this is a basis trait rather than a
+    // sweep constant: with the scale-normalized T̃ this basis builds, the
+    // |dd|-dependent residual factor reaches 2^{j·|dd|} (worst j = P). For
+    // Scalar = double that is comfortable through |dd| = 6; for
+    // Scalar = float a hard cut at |dd| = 4 keeps the precision loss to
+    // ~8 bits, matching Greengard truncation error at P = 6. Both numbers
+    // are consequences of THIS basis's width normalization, and a basis
+    // carrying physical (un-normalized) operators inherits neither.
+    static constexpr int m2l_key_dd_max =
+        std::is_same<Scalar, float>::value ? 4 : 6;
+
+    // Does this basis's operator depend on max_d, i.e. on the absolute level
+    // the pair sits at? For the solid-harmonic basis, NO: the five width
+    // normalizations make the operator a function of (dd, ii, jj, kk) alone,
+    // which is exactly what canonicalize_key below encodes by zeroing max_d.
+    //
+    // NOTHING IN src/ CONSUMES THIS YET. `grep -rn key_needs_level src/`
+    // finds no reader: T8 is the task that uses it for the operator table's
+    // byte accounting (a level-carrying basis realizes more keys, so its
+    // budget must account for occupied depth). It is declared now so that the
+    // fact canonicalize_key encodes is also stated where a reader looks for
+    // it, and so that a conformance test can assert the two agree. Do not go
+    // looking for the consumer.
+    static constexpr bool key_needs_level = false;
+
+    // Reduce a key to the form this basis's operator actually depends on.
+    // Called once, at key construction in the classify pass, BEFORE the key
+    // is hashed — so every downstream structure (the per-thread key maps, the
+    // global key_to_op, the realized key list, the operator table's column
+    // order) sees only canonical keys.
+    //
+    // This basis ZEROES max_d. Its operators are scale-normalized and
+    // therefore depth-independent given (dd, ii, jj, kk), so collapsing every
+    // level onto one key is what keeps the table at the realized-offset count
+    // rather than multiplying it by occupied tree depth. A basis with
+    // physical operators returns the key unchanged instead and must set
+    // key_needs_level = true to match.
+    //
+    // A FUNCTION TEMPLATE ON THE KEY TYPE, deliberately. The key struct is a
+    // nested type of DownwardSweep<..., KernelType>, so a basis cannot name
+    // it without a circular dependency; the sweep passes its own M2LKey and
+    // deduces Key. Host-only, not KOKKOS_INLINE_FUNCTION: the classify pass
+    // that calls it runs on host.
+    template <class Key>
+    static Key canonicalize_key( Key k )
+    {
+        k.max_d = 0;
+        return k;
+    }
 
     // =======================================================================
     // m2l_build_operator

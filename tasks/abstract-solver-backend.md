@@ -300,7 +300,7 @@ a task in this document.
 
 ## Current state
 
-Six things in this document are built. **T1 is complete** — the diagnostic
+Seven things in this document are built. **T1 is complete** — the diagnostic
 surface on the sweeps, the solve-level gate `tests/tstLaplaceSolve.hpp`, its
 committed reference data `tests/data/laplace_solve_P6.txt`, and both pinned
 tolerances (`LS_CROSS_RANK_TOL = 5.6e-10`, `LS_DIRECT_SUM_TOL = 9.63e-07`) all
@@ -322,8 +322,14 @@ both sweeps through `tests/tstFarFieldContract.hpp` at ranks 1-6 with **no
 change to any file under `src/`**, matching a host recomputation bit-for-bit,
 and the permanent `#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block rejects an
 inconsistent basis with all four sweep `static_assert` messages. The far-field
-contract is therefore a real interface rather than a rename. Nothing else
-here has been built. What follows is what is true of the repository now; the
+contract is therefore a real interface rather than a rename.
+**T7 is complete** — the M2L key is `(max_d, dd, ii, jj, kk)`, reduced once by
+a basis-supplied `canonicalize_key` before it is hashed, and `M2L_KEY_DD_MAX`
+is the basis's `m2l_key_dd_max`. `LaplaceKernel` zeroes `max_d` and reproduced
+the committed key set, operator table and `locals()` bit-for-bit at np 1-2
+without the reference data being regenerated, while `MonopoleBasis` keeps it
+and realizes strictly more distinct keys on the same tree, so both branches of
+the contract are exercised. Nothing else here has been built. What follows is what is true of the repository now; the
 tables in (b) and (c) below are the historical record of what T4 changed and
 their "Today" columns are pre-T4.
 
@@ -440,10 +446,13 @@ reasoning:*
   basis-specific. `DownwardSweep` borrowed it (`:597`) and threaded it into
   three operators (`:1164`, `:1686`, `:1738`), plus
   `src/Canopy_UpwardSweep.hpp:493`.
-- `src/Canopy_DownwardSweep.hpp:301-302` branches `M2L_KEY_DD_MAX` on
+- **Done in T7** — the line numbers below are pre-T7.
+  `src/Canopy_DownwardSweep.hpp:301-302` branched `M2L_KEY_DD_MAX` on
   `KernelType::scalar_type` being `float`, with a rationale (`:295-300`) derived
   entirely from the solid-harmonic scale normalization. For a non-homogeneous
-  kernel that rescaling does not exist and the constant is meaningless.
+  kernel that rescaling does not exist and the constant is meaningless. The
+  sweep constant is now `KernelType::m2l_key_dd_max` and the rationale lives on
+  the basis, so group (d) is closed.
 
 *(e) One is not fixable by a trait and must move:* the fused M2L inner loop,
 `src/Canopy_DownwardSweep.hpp:1496-1526`, described in
@@ -573,11 +582,15 @@ entire cost of the gate: `make Canopy_Test_LaplaceSolve_MPI_SERIAL`. And
 registered tests, so the OPENMP and HIP variants need not exist for the gate to
 run.
 
-**The key, the cap and the overflow path.** The key struct is `{dd, ii, jj, kk}`
+**The key, the cap and the overflow path.** **Done in T7** — the key struct is
+now `{max_d, dd, ii, jj, kk}`, the hash mixes all five, and the classify pass
+reduces the key through `KernelType::canonicalize_key` once, at construction,
+before any map lookup sees it. The rest of this paragraph is the pre-T7 record.
+The key struct was `{dd, ii, jj, kk}`
 (`:308-318`) with an FNV-style hash (`:319-335`). The class comment at
-`:280-294` describes the key as `(max_d, dd, ii, jj, kk)` — **the struct has no
-`max_d`; the comment is stale and the code is authoritative**. `max_d` *is*
-computed in the classify pass (`:870`) and discarded, so extending the key costs one
+`:280-294` described the key as `(max_d, dd, ii, jj, kk)` — the struct had no
+`max_d` and the comment was stale. `max_d` *was* already
+computed in the classify pass (`:870`) and discarded, so extending the key cost one
 field, one `mix()` call and no new computation. The cap is a count,
 `M2L_OP_COUNT_CAP = 32768` (`:304`); overflow assigns `op_idx = -1` with one
 warning (`:1028-1047`) and routes those pairs to the per-pair `m2l_translate`
@@ -1588,13 +1601,54 @@ repeated in the progress log.
 
 ---
 
-### T7 — The M2L key carries depth, chosen by the basis — **NOT STARTED**
+### T7 — The M2L key carries depth, chosen by the basis — **DONE**
+
+**Met.** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes 6/6 at ranks 1-6
+and `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` passes 6/6 alongside it,
+in one allocation — flux job **`f3XhrY5oeeBZ`**, at `HEAD` = `79d397a`,
+tuolumne1015, 37.4 s + 39.7 s of CTest wall. **Twenty-one of the 22 cross-rank
+and direct-sum deviations are character-for-character T1's table.** The
+twenty-second is the np=3 direct-sum gradient, `4.2399380705233977e-08` against
+T1's `4.2399380705248681e-08` — a move in the thirteenth significant figure,
+22x under `LS_DIRECT_SUM_TOL` — and it is the multijagged partitioner, not this
+change: all three np=3 solves drew the `(285, 189, 329)` cut rather than T1's
+`(273, 204, 329)`, and that is the exact cut/figure pairing T5 already recorded
+(T5's log carried both cuts at np=3 and printed this same figure). np=6 split
+two ways within this run, `(174,156,111,160,116,175)` and
+`(174,160,111,153,126,175)`, and moved nothing printable. The four bit-for-bit
+artifacts — `locals()`, the M2L operator table, the $A_{n,m}$ table and the
+realized key list — are byte-identical to `tests/data/laplace_solve_P6.txt` at
+np=1 rank 0 and np=2 ranks 0 and 1; **the reference data was not regenerated**.
+Per-test tallies: `bitForBitArtifacts` 3 OK / 36 SKIPPED, `crossRankAgreement`
+20 OK / 2 SKIPPED, `matchesDirectSum` 21 OK. `fallback_pairs` is **0** at every
+rank and rank count in both suites, so R4's discriminator is intact and the
+`m2l_key_dd_max` trait moved no pair onto the per-pair path.
+`bitForBitArtifacts` additionally asserts that every realized key has
+`max_d == 0` for the solid-harmonic basis, which pins `canonicalize_key`
+directly rather than through a hash of its output. The strictly-more-keys
+assertion holds at np=1: on one 694-cell tree, `MonopoleBasis` realizes **4628**
+distinct keys against the `max_d`-zeroing basis's **2572**, with 1884 offset
+keys realized at more than one level and a maximum of 3 levels at one offset.
+`not_bit_identical=0` on all 42 (rank, configuration) pairs of the conformance
+gate, unchanged by the per-level key.
+
+Decisions, the configuration the strictly-more-keys assertion needed, and what
+only running revealed are in
+[the progress log](abstract-solver-backend-progress-log.md#t7--the-m2l-key-carries-depth-chosen-by-the-basis).
 
 **Depends on:** T3, T6.
 
-**Fill in:** `src/Canopy_DownwardSweep.hpp:280-294` (the stale comment),
-`:301-302`, `:308-318`, `:319-335`, and the classify pass around `:866-919`;
-`tests/CanopyTest_MonopoleBasis.hpp`.
+**Fill in** (line numbers verified pre-T7; T7 shifted everything after `:341`
+in `Canopy_DownwardSweep.hpp`): `src/Canopy_DownwardSweep.hpp:311-332` (the key
+comment), `:333-334` (the `M2L_KEY_DD_MAX` `float` branch), `:338-348`
+(`struct M2LKey`), `:349-365` (`struct M2LKeyHash`), the classify pass
+`:895-995`, its comment at `:800-812`, the S3 comment at `:850-857` and the
+`M2L_KEY_DD_MAX` use inside the `CANOPY_ENABLE_DEBUG` cross-check at `:1022`;
+`src/Canopy_LaplaceKernel.hpp` (the three new contract members);
+`tests/CanopyTest_MonopoleBasis.hpp`; `tests/tstFarFieldContract.hpp` (the
+strictly-more-keys assertion, without which the exit criterion cannot be met);
+`tests/tstLaplaceSolve.hpp` (the key-list artifact — `key_less`, `dump_keys`
+and the `max_d == 0` assertion).
 
 **Reference:** `max_d` is already computed in the classify pass and discarded;
 `decode_morton` (`:51-70`) is what produces the depths.
@@ -1613,7 +1667,13 @@ repeated in the progress log.
 4. Replace the `float` branch at `:301-302` with an `m2l_key_dd_max` trait. The
    solid-harmonic basis returns today's values (4 for `float`, 6 otherwise) so the
    guard behaves identically.
-5. Fix the stale comment at `:280-294` to describe the key the code now builds.
+5. Rewrite the FP32-valve paragraph of the key comment (`:326-332`). The rest
+   of that block stops being stale the moment step 1 lands — the key really
+   does become `(max_d, dd, ii, jj, kk)`. What has to move is the valve's
+   rationale, which follows from the solid-harmonic width normalization and so
+   belongs on the basis beside the `m2l_key_dd_max` trait, plus one new
+   sentence saying the key is canonicalized before it is hashed and that the
+   basis decides whether the level survives.
 6. Raise `MonopoleBasis` to `key_needs_level = true` and identity
    `canonicalize_key`, so both branches are exercised.
 
