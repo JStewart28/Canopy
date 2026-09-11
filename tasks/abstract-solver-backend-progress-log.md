@@ -1279,3 +1279,280 @@ commits to the operator table's *shape*, and the typedef it now uses is the
 handle T9 should move behind a basis-owned `build_m2l_operators`. **T6** — see
 the `m2l_pre_cell` placement note above: the hook exists, but a basis needing
 once-per-source-cell work that outlives the team has nowhere to put it yet.
+
+## T4 — coefficient storage and MPI packing are basis-agnostic
+
+T4 is **DONE** and, like T3, the load-bearing result is negative: the
+solid-harmonic path came through with **identical bit patterns** on all four
+artifacts at np 1-2, and all 22 cross-rank and direct-sum deviations at np 1-6
+reproduce T1's pinned table to all 17 printed digits. Not one figure moved — not
+even the 9th-digit np 3-6 wobble the task warned about — so no control run from
+unmodified `HEAD` was needed. Gate run flux job **`f3XfAA99uRAw`**; R3 instrument
+flux job **`f3XfAAGBc1fm`**. Worked at `HEAD` = `ff737a2`.
+
+### Decisions taken (given, not chosen here)
+
+- **The operator table's element type follows `coeff_type`.** The basis alias is
+  now `Kokkos::View<coeff_type***, Kokkos::LayoutLeft, MemorySpace>`. For this
+  basis `coeff_type` *is* `Kokkos::complex<Scalar>`, so no bits moved; the point
+  is that the operator-table element type and the coefficient element type can no
+  longer be set independently and silently disagree, since `m2l_core` contracts
+  one against the other.
+- **`CoalescedExchangeBuffers`' `ComplexType` template parameter is renamed
+  `CoeffType`**, and nothing else in `Canopy_MpiCoalescedExchange.hpp` beyond
+  what T4's `Do` list names. In particular the local variable names
+  `per_cell_complex`, `total_complex`, `umcplx_view` and the function-local
+  `scalar_type` alias were **left alone** in all three files, deliberately: they
+  are local and renaming them would have buried the diff the gate has to
+  attribute. A later task that wants them accurate can rename them freely —
+  nothing reads them across a boundary.
+- **`component_scalar_type` is `Scalar`, not `double`.** `mpi_scalar` is chosen
+  from `sizeof(component_scalar_type)` at three sites; hardcoding `double` would
+  have sent `MPI_DOUBLE` for the basis's live `float` payloads. The Conventions
+  table's `Scalar = double` rule binds the *new* bases only.
+
+### The three traits as actually written
+
+On `LaplaceKernel`, `src/Canopy_LaplaceKernel.hpp`:
+
+```cpp
+using coeff_type = Kokkos::complex<Scalar>;
+using component_scalar_type = Scalar;
+static constexpr int scalars_per_coeff = 2;
+
+static_assert( sizeof( coeff_type ) ==
+                   scalars_per_coeff * sizeof( component_scalar_type ), ... );
+
+// basis-private spelling, retained
+using complex_type = coeff_type;
+```
+
+**`complex_type` was kept as a basis-private alias of `coeff_type` rather than
+deleted.** It has 50 uses inside `Canopy_LaplaceKernel.hpp` and most of them are
+not coefficients at all — the `Ynm` tables, the $i^k$ tables, the conjugation
+under $m \to -m$, the `i_power` return type. Renaming those to `coeff_type` would
+have made them read as storage elements, which they are not. The leak the task
+exists to close is shared code naming `Kokkos::complex`, and that is closed:
+`grep -n complex_type` returns **zero** hits in `Canopy_UpwardSweep.hpp`,
+`Canopy_DownwardSweep.hpp` and `Canopy_MpiCoalescedExchange.hpp`. A basis author
+copying `LaplaceKernel` as a template will see `coeff_type` in the contract block
+at the top and `complex_type` only inside the solid-harmonic operators, with a
+comment saying which is which.
+
+**The zero element is `coeff_type()`**, value-initialization, replacing
+`complex_type( 0.0, 0.0 )` at three sites (`_multipoles` deep_copy, `_locals`
+deep_copy, `_shared_snapshot_buf.assign`). This is bit-identical here and not
+by luck: Kokkos declares `RealType re_{}; RealType im_{};` as NSDMIs
+(`Kokkos_Complex.hpp:40-41`), so `Kokkos::complex<double>()` is `(+0.0, +0.0)`,
+the same bits `complex_type( 0.0, 0.0 )` produced. It is documented on the
+contract block as the identity element a basis must supply, which is the same
+convention T3 established for the raw-byte scratch (all-zero bytes).
+
+### The one thing the design did not anticipate: `coalesced_view_exchange` has no basis
+
+T4's `Do` item 3 says to replace `typename complex_type::value_type`
+(`Canopy_MpiCoalescedExchange.hpp:72`) "with the trait". **There is no trait
+reachable from there.** `coalesced_view_exchange` is a free function template
+whose only type inputs are `CoeffView` and `ExchBuffers`; it is handed a
+`Kokkos::View` and never a `KernelType`, and the design also requires it keep its
+signature. `ExchBuffers` is `CoalescedExchangeBuffers<coeff_type, memory_space>`
+and carries no more information than the view does.
+
+Resolved with a small traits class in the same header, `Canopy::detail`:
+
+```cpp
+template <class CoeffType>
+struct coeff_traits            // primary: a real-coefficient basis
+{
+    static_assert( std::is_floating_point<CoeffType>::value, ... );
+    using component_scalar_type = CoeffType;
+    static constexpr int scalars_per_coeff = 1;
+};
+
+template <class RealType>
+struct coeff_traits<Kokkos::complex<RealType>>
+{
+    using component_scalar_type = RealType;
+    static constexpr int scalars_per_coeff = 2;
+};
+```
+
+and the function body reads `scalar_type` and `scalars_per_coeff` from it. The
+primary template is what makes the (c) failure mode go away for real coefficients
+— the design's note that "a real `double` coefficient has no `::value_type`, so
+this function template does not compile" is now false by construction, and a
+`coeff_type` that is neither a real scalar nor `Kokkos::complex` gets a named
+`static_assert` telling the author to specialize rather than a template error
+inside MPI argument deduction.
+
+**This is a second source of truth, and it is closed with a `static_assert` in
+each sweep.** The sweeps are the only place a basis and `coalesced_view_exchange`
+meet, so each of `UpwardSweep` and `DownwardSweep` now asserts, next to its
+`coeff_type` typedef, that
+`detail::coeff_traits<coeff_type>::component_scalar_type` and
+`::scalars_per_coeff` equal the basis's own. A basis that declares
+`scalars_per_coeff = 1` for a `Kokkos::complex` coefficient — the exact way this
+duplication could rot — fails to compile with a message naming both sources.
+Each sweep also repeats the `sizeof` assert from the exit criterion, so a
+padding-bearing `coeff_type` is caught at the sweep that would mis-size the
+Allreduce as well as at the basis.
+
+### Signatures and declarations changed
+
+- `src/Canopy_LaplaceKernel.hpp` — `coeff_type`, `component_scalar_type`,
+  `scalars_per_coeff` and the `sizeof` `static_assert` added;
+  `m2l_operators_type<MemorySpace>`'s element type is `coeff_type`;
+  `complex_type` demoted to an alias of `coeff_type` with a comment scoping it
+  to the basis.
+- `src/Canopy_MpiCoalescedExchange.hpp` — `detail::coeff_traits` added (+
+  `#include <type_traits>`); `CoalescedExchangeBuffers<ComplexType, …>` →
+  `<CoeffType, …>`; the `::value_type` chain replaced by the traits;
+  `per_cell_real = scalars_per_coeff * per_cell_complex`; `umcplx_view`'s element
+  type is `coeff_type`. `coalesced_view_exchange`'s signature is unchanged, as
+  the design requires.
+- `src/Canopy_UpwardSweep.hpp` — `complex_type` typedef replaced by the three
+  traits plus two `static_assert`s (+ `#include <type_traits>`);
+  `coeff_view_type`, `_m2m_exch_bufs`, the two M2M Allreduce staging views and
+  the `_multipoles` zero-fill route through `coeff_type`; the M2M Allreduce casts
+  to `component_scalar_type*` with count `scalars_per_coeff * total_complex` and
+  picks `mpi_scalar` from `sizeof(component_scalar_type)`.
+- `src/Canopy_DownwardSweep.hpp` — the same typedef and `static_assert` block;
+  `coeff_view_type`, `_exch_bufs`, `_shared_snapshot_buf`, both shared-cell
+  Allreduce host buffers and the `_locals` zero-fill route through `coeff_type`;
+  the shared-cell Allreduce casts to `component_scalar_type*` with count
+  `scalars_per_coeff * total_complex`.
+- `tests/tstLaplaceSolve.hpp` — **not touched**, and it compiled unchanged. That
+  is part of what proves the rename changed nothing: its two `static_assert`s
+  still reach `LayoutRight` through `DownwardSweep::coeff_view_type` and
+  `LayoutLeft` through `m2l_op_table_view_type`, which is an alias of
+  `m2l_operators_type`, whose element type this task changed.
+
+### Gate measurements
+
+Flux job **`f3XfAA99uRAw`**, tuolumne2149, Cray clang 20.0.0, spack env
+`tuolumne_trilinos`, `RelWithDebInfo`, Kokkos SERIAL, `build-tuolumne/`
+(`Canopy_ENABLE_PROFILING=OFF`), 40.63 s of CTest wall time. `100% tests passed, 0 tests failed out of
+6`.
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (reference) | (reference) | 3.2093610331931809e-07 | 4.2399302231264458e-08 |
+| 2 | 4.1994107222659022e-13 | 2.1570013757642702e-12 | 3.2093610363952985e-07 | 4.239936667274564e-08 |
+| 3 | 8.0211305411572796e-13 | 4.0353546216363242e-12 | 3.2093610299898352e-07 | 4.2399380705248681e-08 |
+| 4 | 1.114294857300434e-12 | **5.5987399483706545e-12** | 3.2093610299888352e-07 | 4.2399368624331468e-08 |
+| 5 | 9.5809726336249496e-14 | 6.4438389009577268e-13 | 3.209361028925181e-07 | 4.2399357908696204e-08 |
+| 6 | 5.688835866646797e-13 | 2.8631357246763719e-12 | 3.2093610299905848e-07 | 4.2399381662523099e-08 |
+
+**Every cell is character-for-character T1's table.** `fallback_pairs = 0` and
+`locals_ext = (103,28,1)`, `a_extent = 169`, `initial_hash =
+0xb6ad437608ad69b7` at every rank and rank count. `bitForBitArtifacts` ran and
+passed at np=1 rank 0 and np=2 ranks 0 and 1 — so `locals()`, the operator table,
+the $A_{n,m}$ table and the realized key list are byte-identical to
+`tests/data/laplace_solve_P6.txt`, and no hashes needed recording — and reports
+`SKIPPED` at np 3-6 by design.
+
+`n_unique_ops` per rank at the last solve: np=1 → 686; np=2 → 368, 386;
+np=3 → 273, 204, 329; np=4 → 264, 128, 234, 194; np=6 → 174, 156, 111, 160, 116,
+175 — all identical to T1. **At np=5 the multijagged split T3 recorded reappeared
+and cost nothing measurable:** the `crossRankAgreement` solve drew 170 on rank 0
+and 177 on rank 1 while the `matchesDirectSum` solve drew T1's 180/168, yet both
+printed deviations still match T1 to all 17 digits. So the two-cut split is
+confirmed as still live on this session's nodes and is confirmed as *not*
+sufficient to move any printed figure at this configuration — which is a slightly
+stronger statement than T3 could make, since T3's final gate run happened to draw
+the T1 cut in all three solves.
+
+### R3 — measured against T3's baseline, and it did not fire again
+
+Flux job **`f3XfAAGBc1fm`**, `build-tuolumne-prof/`
+(`Canopy_ENABLE_PROFILING=ON`, `Canopy_PROFILING_LEVEL=2`), np=1 only,
+`M2L kernel (all depths)` from the `DownwardSweep::execute()` table summed over
+the 24 solves of one invocation. Neither build tree was reconfigured.
+
+| Build | flux job | M2L kernel (24 solves) | Downward sweep total | Total solve |
+| --- | --- | --- | --- | --- |
+| before T3 (unmodified) | `f3XW3XTKcr8o` / `f3XW5NgdA1y9` | 0.053 / 0.055 | 1.169 / 1.185 | 1.348 / 1.365 |
+| after T3 (the T4 baseline) | `f3XWBFwkZb6f` … `f3XWWdYC7twR` | **0.062 - 0.068** | 1.192 - 1.210 | 1.367 - 1.390 |
+| after T4 | `f3XfAA99uRAw`-era binary, `f3XfAAGBc1fm` | **0.065** | 1.205 | 1.385 |
+
+0.065 sits inside T3's post-move cluster on all three figures. The per-sample
+histogram is 8x 2 ms / 15x 3 ms / 1x 4 ms, which is a different shape from T3's
+post-move 10/8/6 at the same total — fewer 4 ms samples, more 3 ms ones — and
+clearly distinct from the pre-move 20/3/1. Since the timer prints three decimals
+on values of 0.002-0.004 s, only the summed total carries signal and the shape
+difference at a fixed sum should not be read as anything. **T4 adds nothing
+measurable**, which is
+what a compile-time trait indirection should cost: `scalars_per_coeff` is
+`static constexpr int`, `coeff_type` is a typedef, and nothing in the fused M2L
+kernel changed at all. One sample only — no repeat was run, because R3 is not a
+correctness gate and the figure is already inside a cluster established by five
+prior samples.
+
+### What only running revealed
+
+- **Nothing failed on the first build.** No compile error, no gate failure, no
+  bitwise difference. The `static_assert` cross-check between the basis traits
+  and `detail::coeff_traits` was written before the first build and passed on it.
+- **`clang-format` changed nothing.** Run with explicit `--lines=` ranges
+  covering only the touched hunks in all four headers, per the task's
+  instruction not to run `clangformat.sh` over them. The diff was already in the
+  repo style — the `std::is_same<...>` line breaks in the two sweep
+  `static_assert`s were the only thing at risk and it had already chosen the
+  format `clang-format` wanted.
+- **The four other SERIAL targets and both examples still compile**, verified
+  because these are shared headers: `Canopy_Test_UpwardSweep_MPI_SERIAL`,
+  `Canopy_Test_DownwardSweep_MPI_SERIAL`, `Canopy_Test_MultiSolve_MPI_SERIAL`,
+  `Canopy_Test_SingleSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve` — all
+  build and link clean. A repository-wide grep had already shown no user of
+  `KernelType::complex_type` outside the four headers, and the builds confirm it.
+  Not run: `Canopy_Test_LaplaceKernel_*` and `Canopy_Test_P2P_*`, which do not
+  compile at `HEAD` and are out of scope.
+- **`make -j 4` again, per T1's operational note.** No SIGKILL.
+- **`run_cmake_tuolumne.sh` shows as modified in `git status` and it is not
+  T4's.** The diff is whole-file line-ending churn plus a mode change to 755,
+  present before this session started. Left alone; it is not committed with T4.
+  `setup-repo.txt` is likewise a pre-existing untracked file.
+
+### Repository state left behind
+
+- Four headers modified, listed under "Signatures and declarations changed"
+  above. No test added, per scope. `tests/tstLaplaceSolve.hpp`,
+  `tests/data/laplace_solve_P6.txt` and `README.md` untouched.
+- Logs kept: `canopy-laplace-solve.f3XfAA99uRAw.log` (the gate),
+  `canopy-laplace-solve-prof.f3XfAAGBc1fm.log` (R3).
+- Out of scope and untouched, as directed: `sets_per_component` and the
+  shared-cell Allreduce shape (T10), the `m2l_pre_cell` per-source-cell storage
+  gap (T6), `M2L_KEY_DD_MAX`'s `float` branch and the $A_{n,m}$ table's existence
+  (group (d), T5/T7), R6's premise, `ctest -L regression` and its intermittent
+  np=3 hang, and the partitioner's non-determinism. No `regression`-suite run was
+  attempted.
+
+**Affects:** **T6** — the conformance basis's traits are now fully determined and
+need no new machinery: `coeff_type = double`, `component_scalar_type = double`,
+`scalars_per_coeff = 1` matches `detail::coeff_traits`' primary template exactly,
+so `coalesced_view_exchange`, both shared-cell Allreduces, both coefficient
+views and the operator table all work for it with **zero** further sweep changes.
+The only sweep-side obstacle left for T6 is the `m2l_pre_cell` placement gap T3
+recorded and group (d)'s two harmonic-derived values (T5). If T6 instead wants a
+blocked or mixed-width `coeff_type`, it must specialize
+`Canopy::detail::coeff_traits` for it — the primary template's `static_assert`
+says so by name. **T5** — `a_view_type` is still
+`Kokkos::View<scalar_type*, memory_space>`, i.e. the $A_{n,m}$ table is keyed on
+`KernelType::scalar_type` and **not** on `component_scalar_type`. T4 deliberately
+did not touch it: it is group (d), and for this basis the two types are the same
+`Scalar`. When T5 moves the table into the basis, it should decide which of the
+two it is a table *of* rather than inheriting the ambiguity. **T10** — the two
+loops it rewrites (`allreduce_shared_locals_at_depth`'s pack at
+`src/Canopy_DownwardSweep.hpp:1825` and unpack at `:1848`, and the snapshot
+assign at `:1773`) now index `std::vector<coeff_type>` with a `per_cell_complex`
+stride that T4 left at `coeffs_per_cell * NComps`. The MPI count is
+`scalars_per_coeff * total_complex`, so a `sets_per_component` change has exactly
+one arithmetic site to update per buffer and the byte count follows the stride
+automatically — but the *variable names* there still say `complex`, which will
+read wrong after T10 and are free to rename. T10 also inherits T1's finding that
+`crossRankAgreement` is a seven-orders-of-magnitude gate on precisely this
+dataflow, now re-exercised clean at np 2-6. **T7**, **T8**, **T9** — unaffected;
+T9 should note only that the operator table it moves behind
+`build_m2l_operators` now has element type `coeff_type`, so the basis-owned
+builder and the basis-owned coefficient type are already consistent by
+construction.

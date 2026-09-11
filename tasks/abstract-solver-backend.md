@@ -281,7 +281,7 @@ a task in this document.
 
 ## Current state
 
-Three things in this document are built. **T1 is complete** — the diagnostic
+Four things in this document are built. **T1 is complete** — the diagnostic
 surface on the sweeps, the solve-level gate `tests/tstLaplaceSolve.hpp`, its
 committed reference data `tests/data/laplace_solve_P6.txt`, and both pinned
 tolerances (`LS_CROSS_RANK_TOL = 5.6e-10`, `LS_DIRECT_SUM_TOL = 9.63e-07`) all
@@ -290,8 +290,13 @@ members and `has_mplus_symmetry` are deleted. **T3 is complete** — M2L is thre
 kernel-owned stages, `m2l_pre_cell` / `m2l_core` / `m2l_post_cell` over a
 basis-sized raw-byte scratch, and the solid-harmonic path came through
 bit-identical, so **R1 did not fire** and the narrow-abstraction fallback is not
-needed. Nothing else here has been built. What follows is what is true of the
-repository now.
+needed. **T4 is complete** — the five typedef sites of (b) and the three MPI
+packing sites of (c) route through `coeff_type` / `component_scalar_type` /
+`scalars_per_coeff`, the operator table's element type moved with them, and the
+gate reproduced T1's table to all 17 digits at every rank count. Nothing else
+here has been built. What follows is what is true of the repository now; the
+tables in (b) and (c) below are the historical record of what T4 changed and
+their "Today" columns are pre-T4.
 
 **Line numbers in this document no longer track either sweep header**, and the
 offset is not a single figure. Most citations here were written against the
@@ -312,8 +317,18 @@ current one:
 - `src/Canopy_UpwardSweep.hpp`: T1 and T3 changed nothing here, so these
   citations were exact before T2. After it: `0` up to `:207`, `-5` through
   `:416`, and **`-40` from `:417` on**.
-- `src/Canopy_MpiCoalescedExchange.hpp`: no task has touched this file, so every
-  citation to it is exact.
+- `src/Canopy_MpiCoalescedExchange.hpp`: T4 inserted `detail::coeff_traits` and
+  an include at `:23` and `:38-60`, so every citation past `:37` needs **+34 to
+  +36** added — `coalesced_view_exchange`'s signature, cited `:64-70`, is
+  `:98-104`; `view.extent(1)`/`(2)`, cited `:93-94`, is `:128-129`;
+  `per_cell_real`, cited `:96`, is `:132`. The `::value_type` chain cited at
+  `:72` no longer exists; the traits are read at `:105`.
+
+**None of those offsets account for T4**, which added the three-trait block, two
+`static_assert`s and an `#include <type_traits>` to both sweep headers and
+shifted everything after them again. They have not been re-measured, because the
+one task they would serve carries its own numbers: T5's **Fill in** list is
+verified against the working tree and is the authority for every site it names.
 
 T1's and T2's own citations were current when written, which is the post-T1
 numbering; for those, only T2's deletions apply — `-1` past `:110`, `-3` past
@@ -345,7 +360,8 @@ them. `execute()`'s own comment already records that the bridges are obsolete �
 "after step 5 every multipole/local in the pipeline is in scale-normalized form,
 so no bridges are needed" (`:2176-2179`).
 
-*(b) Five in shared code go to a `coeff_type` + `scalars_per_coeff` trait pair:*
+*(b) Five in shared code go to a `coeff_type` + `scalars_per_coeff` trait pair.*
+**Done in T4** — all five, plus the basis's `m2l_operators_type` element type:
 
 | Site | Today |
 | --- | --- |
@@ -371,7 +387,8 @@ together with `coeff_type` or the two can silently disagree — the sweep's
 `LayoutLeft` through it.
 
 *(c) Three assume complex arithmetic **structurally**, not by typedef. All three
-are MPI packing:*
+are MPI packing.* **Done in T4** — the `::value_type` chain became
+`detail::coeff_traits`, and all three `2 *` factors became `scalars_per_coeff`:
 
 | Site | The structural assumption |
 | --- | --- |
@@ -1114,7 +1131,7 @@ progress log; no exit criterion depends on this.
 
 ---
 
-### T4 — Coefficient storage and MPI packing are basis-agnostic — **NOT STARTED**
+### T4 — Coefficient storage and MPI packing are basis-agnostic — **DONE**
 
 **Depends on:** T3.
 
@@ -1166,44 +1183,149 @@ rank-count-dependent indexing this task rewrites); and a
 `static_assert` that `sizeof(coeff_type) == scalars_per_coeff * sizeof(component_scalar_type)`
 holds for the solid-harmonic basis.
 
+**Met.** Flux job **`f3XfAA99uRAw`** (tuolumne2149, Cray clang 20.0.0,
+`RelWithDebInfo`, Kokkos SERIAL, `build-tuolumne/`): `ctest -R
+Canopy_Test_LaplaceSolve_MPI_SERIAL` reports **6/6 passed**, and all 22 measured
+deviations reproduce T1's pinned table to all 17 printed digits at every rank
+count 1-6 — cross-rank 4.1994107222659022e-13 / 2.1570013757642702e-12 (np=2)
+through 5.688835866646797e-13 / 2.8631357246763719e-12 (np=6), worst
+1.114294857300434e-12 / 5.5987399483706545e-12 at np=4 against
+`LS_CROSS_RANK_TOL = 5.6e-10`; direct-sum 3.2093610331931809e-07 /
+4.2399302231264458e-08 (np=1) through 3.2093610299905848e-07 /
+4.2399381662523099e-08 (np=6) against `LS_DIRECT_SUM_TOL = 9.63e-07`. Not one
+figure moved, so the partitioner's 9th-digit np 3-6 wobble did not present this
+run and no control run was needed. `bitForBitArtifacts` ran and passed at np=1
+rank 0 and np=2 both ranks — all four artifacts, so `locals()`, the operator
+table, the $A_{n,m}$ table and the realized key list are byte-identical to
+`tests/data/laplace_solve_P6.txt` — and is SKIPPED at np 3-6 by design.
+`fallback_pairs` is 0 and `locals_ext` is `(103,28,1)` at every rank and rank
+count, so **R4**'s discriminator is intact.
+
+The three traits are `coeff_type`, `component_scalar_type` and
+`scalars_per_coeff` on `LaplaceKernel`, with `component_scalar_type = Scalar`
+rather than `double` so the basis's live `float` path keeps selecting
+`MPI_FLOAT`. `m2l_operators_type<MemorySpace>` now reads
+`Kokkos::View<coeff_type***, Kokkos::LayoutLeft, MemorySpace>`, and
+`tests/tstLaplaceSolve.hpp` compiled untouched, so its `LayoutLeft`
+`static_assert` through `m2l_op_table_view_type` still holds. The exit
+criterion's `static_assert` — `sizeof(coeff_type) == scalars_per_coeff *
+sizeof(component_scalar_type)` — sits on `LaplaceKernel` itself and is repeated
+in both sweeps. `grep -n complex_type` returns **no hit** in
+`src/Canopy_UpwardSweep.hpp`, `src/Canopy_DownwardSweep.hpp` or
+`src/Canopy_MpiCoalescedExchange.hpp`; the only surviving uses are inside
+`Canopy_LaplaceKernel.hpp`, where `complex_type` is retained as a basis-private
+alias of `coeff_type` for the solid-harmonic arithmetic.
+
+**One thing the design did not anticipate:** `coalesced_view_exchange` is handed
+a `View` and never a basis, so it cannot read `KernelType::scalars_per_coeff`
+while keeping its signature. It recovers the same two facts from a new
+`Canopy::detail::coeff_traits<CoeffType>` — primary template for a real scalar,
+specialization for `Kokkos::complex<T>` — and each sweep carries a
+`static_assert` that the traits agree with its basis's, so the two sources
+cannot silently diverge. See the progress log.
+
+**R3 re-measured against T3's baseline, not unmodified code's:** the M2L-kernel
+timer sums to **0.065 s** over the 24 solves of one np=1 invocation (flux job
+`f3XfAAGBc1fm`, `build-tuolumne-prof/`), inside T3's 0.062-0.068 s post-move
+cluster. Downward sweep 1.205 s and total solve 1.385 s are likewise inside
+T3's ranges. The trait indirection is compile-time and costs nothing further.
+
 ---
 
 ### T5 — Auxiliary tables are owned by the basis — **NOT STARTED**
 
 **Depends on:** T4.
 
-**Fill in:** `src/Canopy_UpwardSweep.hpp:233-235`, `:501-504`;
-`src/Canopy_DownwardSweep.hpp:529`, `:1099-1100`, `:1636-1639`, `:1688-1691`.
+**Fill in:** fifteen sites, verified against the working tree.
+`src/Canopy_UpwardSweep.hpp:104` (the `a_view_type` alias), `:168` (`A_table()`),
+`:202` (the `_A_table` member), `:258-259` (the `2 * P` build), `:452` (the M2M
+device capture), `:493` (the `m2m_translate` call);
+`src/Canopy_DownwardSweep.hpp:155` (`a_view_type`), `:291` (the member), `:524`
+(`A_table()`), `:597` (the borrow from the upward sweep), `:1163-1164` (the
+HostSpace mirror feeding `m2l_build_operator`), `:1663` and `:1686` (the
+M2L-fallback capture and `m2l_translate` call), `:1707` and `:1738` (the L2L
+capture and `l2l_translate` call); and `tests/tstLaplaceSolve.hpp:569`.
 
-**Reference:** `build_A_coefficients` (`src/Canopy_SphericalCoefficients.hpp:132`),
-whose `2*P` argument (`src/Canopy_UpwardSweep.hpp:235`) exists because M2L reaches
-degree $n+j$.
+**Reference:** `build_A_coefficients` (`src/Canopy_SphericalCoefficients.hpp:132-148`),
+whose `2*P` argument (`src/Canopy_UpwardSweep.hpp:259`) exists because M2L reaches
+degree $n+j$; `m2l_operators_type` (`src/Canopy_LaplaceKernel.hpp:224-226`) for the
+memory-space-parameterized alias shape this task copies.
 
 **Do:**
 
-1. Add `aux_tables_type` and `build_aux_tables(order, params) -> aux` to the
-   contract. The solid-harmonic basis returns the $A_{n,m}$ view built to $2P$; a
-   basis needing nothing returns an empty struct.
-2. Replace the `A_table` parameter with `aux` in every operator signature, and
-   delete `DownwardSweep::_A_table` (`:264`, borrowed at `:529`).
-3. Do **not** change the `2*P` argument. `m2l_build_operator` already `continue`s
-   on `A == 0` (`src/Canopy_LaplaceKernel.hpp:612-614`), so a table built one
-   degree short produces a *quietly wrong* operator rather than a crash.
+1. Add `aux_tables_type` and `build_aux_tables(order) -> aux` to the contract,
+   both **parameterized on memory space** —
+   `template <class MS> aux_tables_type<MS>` and
+   `template <class MS> static aux_tables_type<MS> build_aux_tables(int order)` —
+   matching the shape `m2l_operators_type<MemorySpace>`
+   (`src/Canopy_LaplaceKernel.hpp:224-226`) already has. The solid-harmonic basis
+   returns a struct holding the $A_{n,m}$ view built to $2P$; a basis needing
+   nothing returns an empty struct.
+
+   **Two spaces are required, not a convenience.** The three device operators
+   consume the device view, while `m2l_build_operator` is called on host against
+   a HostSpace mirror (`src/Canopy_DownwardSweep.hpp:1163-1164`). The sweep
+   therefore builds the device aux in `setup()` and builds a
+   `Kokkos::HostSpace` aux at the operator-table build, rather than mirroring
+   the device one. That is bit-identical rather than merely equal:
+   `build_A_coefficients` computes every entry on a host mirror from
+   `A_coeff<Scalar>(n, m)`, a pure function of $(n, m)$, before deep-copying, and
+   on the SERIAL backend `memory_space` *is* `Kokkos::HostSpace`.
+
+   `build_aux_tables` takes the order and nothing else. T9 adds a
+   `kernel_params` argument when it introduces that type and plumbs
+   `FmmConfig::softening` into `_downward`; until then there is nothing to pass,
+   and the solid-harmonic table depends only on the order.
+
+2. Replace the `A_table` parameter with `aux` in every operator signature.
+   `_A_table` becomes `_aux` of type `aux_tables_type<memory_space>` on **both**
+   sweeps, and `A_table()` on both (`src/Canopy_UpwardSweep.hpp:168`,
+   `src/Canopy_DownwardSweep.hpp:524`) is replaced by `aux()` returning
+   `const aux_tables_type<memory_space>&`. `DownwardSweep` keeps borrowing it
+   from the upward sweep at `:597`, as it borrows the bare view today.
+
+   **`aux()` rather than an `A_table()` re-pointed at `_aux.A_table`.** The
+   $A_{n,m}$ table is a bit-for-bit artifact of the gate, collected by
+   `collect_a_table` at `tests/tstLaplaceSolve.hpp:569`, so the accessor cannot
+   simply be deleted. An `A_table()` whose body names an aux member names a
+   solid-harmonic member in shared code, and would not compile for T6's
+   `MonopoleBasis`, whose `aux_tables_type` is an empty struct. `aux()` keeps the
+   basis-specific name in the solid-harmonic test, where it belongs: the one line
+   at `:569` becomes `ds.aux().A_table`. `tests/data/laplace_solve_P6.txt` is
+   unchanged.
+
+3. **Decide and record whether the table is of `scalar_type` or of
+   `component_scalar_type`.** `a_view_type` is
+   `Kokkos::View<scalar_type*, memory_space>` (`src/Canopy_UpwardSweep.hpp:104`,
+   `src/Canopy_DownwardSweep.hpp:155`). T4 left it on `scalar_type` deliberately
+   — for this basis the two are the same `Scalar` — so the choice is open and
+   costs nothing to make now and something to inherit later. State the reasoning
+   on the declaration and in the log.
+
+4. Do **not** change the `2*P` argument. `m2l_build_operator` already `continue`s
+   on a zero $A$ — `if ( A_npj_mmk == 0.0 ) continue;`
+   (`src/Canopy_LaplaceKernel.hpp:688-689`) — so a table built one degree short
+   produces a *quietly wrong* operator rather than a crash.
 
 **Signature changes and their callers.** Four operators lose `A_table` and gain
-`aux`: `m2m_translate` (`src/Canopy_LaplaceKernel.hpp:273-278`), called at
-`src/Canopy_UpwardSweep.hpp:501-504`; `m2l_translate` (`:373-378`), called at
-`src/Canopy_DownwardSweep.hpp:1636-1639`; `l2l_translate` (`:688-693`), called at
-`src/Canopy_DownwardSweep.hpp:1688-1691`; `m2l_build_operator` (`:516-519`),
-called at `src/Canopy_DownwardSweep.hpp:1099-1100`. `p2m_contribution` and
-`l2p_evaluate` never took it.
+`aux`: `m2m_translate` (`src/Canopy_LaplaceKernel.hpp:348-353`), called at
+`src/Canopy_UpwardSweep.hpp:493`; `m2l_translate` (`:448-453`), called at
+`src/Canopy_DownwardSweep.hpp:1686`; `l2l_translate` (`:901-906`), called at
+`src/Canopy_DownwardSweep.hpp:1738`; `m2l_build_operator` (`:591-594`), called at
+`src/Canopy_DownwardSweep.hpp:1164`. `p2m_contribution` and `l2p_evaluate` never
+took it. Each of the three device call sites is preceded by an
+`auto A_table = _A_table;` lambda capture — `src/Canopy_UpwardSweep.hpp:452`,
+`src/Canopy_DownwardSweep.hpp:1663` and `:1707` — which moves with it.
+`A_table()` has exactly two callers: `src/Canopy_DownwardSweep.hpp:597` and
+`tests/tstLaplaceSolve.hpp:569`.
 
 **Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
 [Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
 `crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6 — the
-$A_{n,m}$ artifact and its extent, compared at ranks 1-2, pin the `2*P` argument;
-and `grep -n "_A_table" src/Canopy_DownwardSweep.hpp` returns no
-hits.
+$A_{n,m}$ artifact and its extent, compared at ranks 1-2, pin the `2*P` argument
+and are read through `aux()`; and
+`grep -n "_A_table" src/Canopy_UpwardSweep.hpp src/Canopy_DownwardSweep.hpp`
+returns no hits in either sweep.
 
 ---
 

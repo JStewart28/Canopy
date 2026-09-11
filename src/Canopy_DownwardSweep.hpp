@@ -105,7 +105,35 @@ class DownwardSweep
     using memory_space = MemorySpace;
 
     using scalar_type = typename KernelType::scalar_type;
-    using complex_type = typename KernelType::complex_type;
+
+    // The basis's coefficient contract. This sweep stores, exchanges and
+    // reduces coefficients without knowing anything about them beyond these
+    // three: coeff_type is the storage element, and MPI is handed
+    // scalars_per_coeff component_scalar_type per coefficient.
+    using coeff_type = typename KernelType::coeff_type;
+    using component_scalar_type = typename KernelType::component_scalar_type;
+    static constexpr int scalars_per_coeff = KernelType::scalars_per_coeff;
+
+    static_assert( sizeof( coeff_type ) ==
+                       scalars_per_coeff * sizeof( component_scalar_type ),
+                   "DownwardSweep: the basis's coeff_type is not "
+                   "scalars_per_coeff contiguous component_scalar_type, so "
+                   "the shared-cell Allreduce would transfer the wrong byte "
+                   "count" );
+
+    // coalesced_view_exchange is handed a View and never a basis, so it
+    // recovers the same two facts from detail::coeff_traits. This is the one
+    // place a basis and that function meet, so it is where the two sources
+    // are checked against each other.
+    static_assert(
+        std::is_same<
+            typename detail::coeff_traits<coeff_type>::component_scalar_type,
+            component_scalar_type>::value &&
+            detail::coeff_traits<coeff_type>::scalars_per_coeff ==
+                scalars_per_coeff,
+        "DownwardSweep: the basis's coefficient traits disagree with "
+        "detail::coeff_traits for its coeff_type; the M2L and L2L exchanges "
+        "and the shared-cell Allreduce would pack differently" );
 
     static constexpr int coeffs_per_cell = KernelType::num_coeffs_per_cell;
     static constexpr int NComps = KernelType::num_components;
@@ -114,7 +142,7 @@ class DownwardSweep
     // within-cell coefficients contiguously and a warp writing different
     // out_idx values for one target writes consecutive bytes.
     using coeff_view_type =
-        Kokkos::View<complex_type***, Kokkos::LayoutRight, memory_space>;
+        Kokkos::View<coeff_type***, Kokkos::LayoutRight, memory_space>;
 
     // Potential output: (num_particles, NComps)
     using potential_view_type =
@@ -249,7 +277,7 @@ class DownwardSweep
     // bounded. Shared between the two calls — they run sequentially within a
     // solve (each coalesced_view_exchange completes its MPI_Waitall + fence
     // before returning), so reusing one region is safe.
-    mutable detail::CoalescedExchangeBuffers<complex_type, memory_space>
+    mutable detail::CoalescedExchangeBuffers<coeff_type, memory_space>
         _exch_bufs;
 
     // References borrowed from UpwardSweep — only valid while the
@@ -411,7 +439,7 @@ class DownwardSweep
     // M2L delta from L2L contributions inherited from prior depths.
     std::vector<int>
         _shared_snapshot_indices; // shared cell indices at current depth
-    std::vector<complex_type> _shared_snapshot_buf;
+    std::vector<coeff_type> _shared_snapshot_buf;
 
   public:
     void build_interaction_list_device(
@@ -1741,8 +1769,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
     const int nshared = static_cast<int>( _shared_snapshot_indices.size() );
     const int per_cell_complex = coeffs_per_cell * NComps;
-    _shared_snapshot_buf.assign( nshared * per_cell_complex,
-                                 complex_type( 0, 0 ) );
+    // coeff_type() is the basis's coefficient identity element.
+    _shared_snapshot_buf.assign( nshared * per_cell_complex, coeff_type() );
     if ( nshared == 0 )
         return;
 
@@ -1779,8 +1807,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     const int per_cell_complex = coeffs_per_cell * NComps;
     const int total_complex = nshared * per_cell_complex;
 
-    std::vector<complex_type> sendbuf( total_complex );
-    std::vector<complex_type> recvbuf( total_complex );
+    std::vector<coeff_type> sendbuf( total_complex );
+    std::vector<coeff_type> recvbuf( total_complex );
 
     auto h_locals =
         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, _locals );
@@ -1799,12 +1827,13 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     MPI_Datatype mpi_scalar =
-        ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
+        ( sizeof( component_scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2L_ALLREDUCE );
-        MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
-                       reinterpret_cast<scalar_type*>( recvbuf.data() ),
-                       2 * total_complex, mpi_scalar, MPI_SUM, _comm );
+        MPI_Allreduce(
+            reinterpret_cast<component_scalar_type*>( sendbuf.data() ),
+            reinterpret_cast<component_scalar_type*>( recvbuf.data() ),
+            scalars_per_coeff * total_complex, mpi_scalar, MPI_SUM, _comm );
     }
 
     // _locals[shared] = snapshot + summed delta
@@ -2005,7 +2034,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
         {
             CANOPY_SCOPED_TIMER_DETAILED(
                 Canopy::Profiling::TIMER_DN_ZERO_LOCALS );
-            Kokkos::deep_copy( _locals, complex_type( 0.0, 0.0 ) );
+            // coeff_type() is the basis's coefficient identity element.
+            Kokkos::deep_copy( _locals, coeff_type() );
             Kokkos::fence();
         }
 

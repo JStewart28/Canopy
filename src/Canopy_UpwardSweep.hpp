@@ -24,6 +24,7 @@
 
 #include <mpi.h>
 
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -60,7 +61,35 @@ class UpwardSweep
     using memory_space = MemorySpace;
 
     using scalar_type = typename KernelType::scalar_type;
-    using complex_type = typename KernelType::complex_type;
+
+    // The basis's coefficient contract. This sweep stores and exchanges
+    // coefficients without knowing anything about them beyond these three:
+    // coeff_type is the storage element, and MPI is handed
+    // scalars_per_coeff component_scalar_type per coefficient.
+    using coeff_type = typename KernelType::coeff_type;
+    using component_scalar_type = typename KernelType::component_scalar_type;
+    static constexpr int scalars_per_coeff = KernelType::scalars_per_coeff;
+
+    static_assert( sizeof( coeff_type ) ==
+                       scalars_per_coeff * sizeof( component_scalar_type ),
+                   "UpwardSweep: the basis's coeff_type is not "
+                   "scalars_per_coeff contiguous component_scalar_type, so "
+                   "the shared-cell Allreduce would transfer the wrong byte "
+                   "count" );
+
+    // coalesced_view_exchange is handed a View and never a basis, so it
+    // recovers the same two facts from detail::coeff_traits. This is the one
+    // place a basis and that function meet, so it is where the two sources
+    // are checked against each other.
+    static_assert(
+        std::is_same<
+            typename detail::coeff_traits<coeff_type>::component_scalar_type,
+            component_scalar_type>::value &&
+            detail::coeff_traits<coeff_type>::scalars_per_coeff ==
+                scalars_per_coeff,
+        "UpwardSweep: the basis's coefficient traits disagree with "
+        "detail::coeff_traits for its coeff_type; the M2M exchange and the "
+        "shared-cell Allreduce would pack differently" );
 
     static constexpr int P = KernelType::max_order;
     static constexpr int coeffs_per_cell = KernelType::num_coeffs_per_cell;
@@ -70,7 +99,7 @@ class UpwardSweep
     // LayoutRight so within-cell coefficient traversals are contiguous —
     // matches what M2L_fused needs for coalesced reads/writes.
     using coeff_view_type =
-        Kokkos::View<complex_type***, Kokkos::LayoutRight, memory_space>;
+        Kokkos::View<coeff_type***, Kokkos::LayoutRight, memory_space>;
 
     using a_view_type = Kokkos::View<scalar_type*, memory_space>;
 
@@ -176,7 +205,7 @@ class UpwardSweep
 
     // Persistent staging buffers for the M2M multipole exchange, reused
     // every solve so the CXI NIC registration cache stays bounded.
-    mutable detail::CoalescedExchangeBuffers<complex_type, memory_space>
+    mutable detail::CoalescedExchangeBuffers<coeff_type, memory_space>
         _m2m_exch_bufs;
 
     std::vector<std::vector<int>> _leaves_at_depth_local;
@@ -492,7 +521,7 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // Bytes per cell for all components
     const int per_cell_complex = coeffs_per_cell * NComps;
     MPI_Datatype mpi_scalar =
-        ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
+        ( sizeof( component_scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
 
     // Allreduce shared cells — single device-side buffer, GPU-direct.
     if ( !shared_cell_indices.empty() )
@@ -512,11 +541,11 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
             Kokkos::deep_copy( d_idx, h_idx );
         }
 
-        Kokkos::View<complex_type*, memory_space> sendbuf(
+        Kokkos::View<coeff_type*, memory_space> sendbuf(
             Kokkos::view_alloc( "m2m_allreduce_send",
                                 Kokkos::WithoutInitializing ),
             total_complex );
-        Kokkos::View<complex_type*, memory_space> recvbuf(
+        Kokkos::View<coeff_type*, memory_space> recvbuf(
             Kokkos::view_alloc( "m2m_allreduce_recv",
                                 Kokkos::WithoutInitializing ),
             total_complex );
@@ -538,10 +567,11 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::
 
         {
             CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_M2M_ALLREDUCE );
-            MPI_Allreduce( reinterpret_cast<scalar_type*>( sendbuf.data() ),
-                           reinterpret_cast<scalar_type*>( recvbuf.data() ),
-                           static_cast<int>( 2 * total_complex ), mpi_scalar,
-                           MPI_SUM, _comm );
+            MPI_Allreduce(
+                reinterpret_cast<component_scalar_type*>( sendbuf.data() ),
+                reinterpret_cast<component_scalar_type*>( recvbuf.data() ),
+                static_cast<int>( scalars_per_coeff * total_complex ),
+                mpi_scalar, MPI_SUM, _comm );
         }
 
         Kokkos::parallel_for(
@@ -621,7 +651,8 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
     CANOPY_RESET_TIMERS();
     {
         CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_UPWARD_TOTAL );
-        Kokkos::deep_copy( _multipoles, complex_type( 0.0, 0.0 ) );
+        // coeff_type() is the basis's coefficient identity element.
+        Kokkos::deep_copy( _multipoles, coeff_type() );
 
         for ( int d = 0; d <= _max_depth; d++ )
             if ( !_leaves_at_depth_local[d].empty() )

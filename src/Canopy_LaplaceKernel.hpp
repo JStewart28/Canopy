@@ -152,7 +152,49 @@ template <class Scalar, int P, int NComps = 1>
 struct LaplaceKernel
 {
     using scalar_type = Scalar;
-    using complex_type = Kokkos::complex<Scalar>;
+
+    // -----------------------------------------------------------------------
+    // The coefficient contract. Shared code (UpwardSweep, DownwardSweep,
+    // coalesced_view_exchange) describes multipole/local storage and its MPI
+    // packing through these three members and never through
+    // Kokkos::complex:
+    //
+    //   coeff_type            - the element type of multipole/local storage.
+    //                           The identity element is value-initialization,
+    //                           coeff_type(), which for this basis is
+    //                           (+0.0, +0.0).
+    //   component_scalar_type - the real scalar MPI sees. It is Scalar, not
+    //                           double: this basis carries a live float path
+    //                           and the MPI datatype is selected from
+    //                           sizeof(component_scalar_type) at three sites.
+    //   scalars_per_coeff     - how many contiguous component_scalar_type
+    //                           make up one coeff_type. 2 here; 1 for a
+    //                           real-coefficient basis.
+    //
+    // MPI is handed (reinterpret_cast<component_scalar_type*>(coeff_ptr),
+    // scalars_per_coeff * n_coeffs), so the contract a basis signs by
+    // supplying these is that coeff_type is exactly scalars_per_coeff
+    // contiguous component_scalar_type with no padding. The static_assert
+    // below is that contract, checked at instantiation.
+    // -----------------------------------------------------------------------
+    using coeff_type = Kokkos::complex<Scalar>;
+    using component_scalar_type = Scalar;
+    static constexpr int scalars_per_coeff = 2;
+
+    static_assert( sizeof( coeff_type ) ==
+                       scalars_per_coeff * sizeof( component_scalar_type ),
+                   "LaplaceKernel: coeff_type is not scalars_per_coeff "
+                   "contiguous component_scalar_type, so the MPI packing in "
+                   "coalesced_view_exchange and in the two shared-cell "
+                   "reductions would transfer the wrong byte count" );
+
+    // The basis-private spelling of coeff_type, used throughout the
+    // solid-harmonic arithmetic below, where the quantities really are
+    // complex numbers and several of them (Ynm tables, i^k tables,
+    // conjugation under m -> -m) are not coefficients at all. Shared code
+    // must use coeff_type; this name is retained only so the solid-harmonic
+    // operators keep reading as complex arithmetic.
+    using complex_type = coeff_type;
 
     static constexpr int max_order = P;
     static constexpr int num_coeffs_per_cell = ( P + 1 ) * ( P + 2 ) / 2;
@@ -175,9 +217,13 @@ struct LaplaceKernel
     // the sweep supplies its own. Spell it
     //     typename KernelType::template m2l_operators_type<memory_space>
     // -----------------------------------------------------------------------
+    // Element type is coeff_type, not complex_type: the operator-table
+    // element type and the coefficient element type cannot be chosen
+    // independently and silently disagree, since m2l_core contracts one
+    // against the other.
     template <class MemorySpace>
     using m2l_operators_type =
-        Kokkos::View<complex_type***, Kokkos::LayoutLeft, MemorySpace>;
+        Kokkos::View<coeff_type***, Kokkos::LayoutLeft, MemorySpace>;
 
     // One half of the M2L team scratch, viewed as a scalar array. See
     // m2l_scratch_bytes for the layout and for why the real/imag split is

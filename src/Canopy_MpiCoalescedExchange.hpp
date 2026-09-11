@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <map>
+#include <type_traits>
 #include <vector>
 
 namespace Canopy
@@ -27,16 +28,48 @@ namespace Canopy
 namespace detail
 {
 
+// The real-scalar decomposition of a coefficient element, for MPI's benefit:
+// MPI wants a (count, datatype) pair in real scalars, so it needs to know
+// that one coefficient is scalars_per_coeff contiguous
+// component_scalar_type.
+//
+// This mirrors the basis contract members of the same names
+// (KernelType::component_scalar_type, KernelType::scalars_per_coeff) and
+// exists separately only because coalesced_view_exchange is handed a View and
+// never a basis. The two are cross-checked by a static_assert in each sweep,
+// which is the only place a basis and this function meet.
+//
+// The primary template covers a real-coefficient basis. A basis whose
+// coeff_type is neither a real scalar nor Kokkos::complex must specialize
+// this alongside declaring its own traits.
+template <class CoeffType>
+struct coeff_traits
+{
+    static_assert( std::is_floating_point<CoeffType>::value,
+                   "coeff_traits: no real-scalar decomposition known for this "
+                   "coeff_type. Specialize Canopy::detail::coeff_traits for "
+                   "it, or the MPI packing cannot size its transfers" );
+    using component_scalar_type = CoeffType;
+    static constexpr int scalars_per_coeff = 1;
+};
+
+template <class RealType>
+struct coeff_traits<Kokkos::complex<RealType>>
+{
+    using component_scalar_type = RealType;
+    static constexpr int scalars_per_coeff = 2;
+};
+
 // Persistent, grow-only staging buffers for coalesced_view_exchange(). One
-// stable registered region per direction (complex data buffer + int pack
+// stable registered region per direction (coefficient data buffer + int pack
 // index), reused across solve() calls so the CXI NIC registration cache does
 // not churn. Hold one instance per exchanging object (UpwardSweep,
 // DownwardSweep) and pass it into every coalesced_view_exchange() call.
-template <class ComplexType, class MemorySpace>
+template <class CoeffType, class MemorySpace>
 struct CoalescedExchangeBuffers
 {
-    RegisteredBufferPool<ComplexType, MemorySpace> send_pool;
-    RegisteredBufferPool<ComplexType, MemorySpace> recv_pool;
+    RegisteredBufferPool<CoeffType, MemorySpace> send_pool;
+    RegisteredBufferPool<CoeffType, MemorySpace> recv_pool;
     RegisteredBufferPool<int, MemorySpace> send_idx_pool;
     RegisteredBufferPool<int, MemorySpace> recv_idx_pool;
 };
@@ -68,8 +101,10 @@ void coalesced_view_exchange(
     const std::map<int, std::vector<int>>& recv_cells_by_peer_in,
     bool accumulate_on_recv, ExchBuffers& bufs )
 {
-    using complex_type = typename CoeffView::non_const_value_type;
-    using scalar_type = typename complex_type::value_type;
+    using coeff_type = typename CoeffView::non_const_value_type;
+    using traits_type = coeff_traits<coeff_type>;
+    using scalar_type = typename traits_type::component_scalar_type;
+    static constexpr int scalars_per_coeff = traits_type::scalars_per_coeff;
     using memory_space = typename CoeffView::memory_space;
     using execution_space = typename CoeffView::execution_space;
 
@@ -93,7 +128,8 @@ void coalesced_view_exchange(
     const int coeffs_per_cell = static_cast<int>( view.extent( 1 ) );
     const int NComps = static_cast<int>( view.extent( 2 ) );
     const int per_cell_complex = coeffs_per_cell * NComps;
-    const int per_cell_real = 2 * per_cell_complex;
+    // Real-scalar count per cell, which is what MPI is given.
+    const int per_cell_real = scalars_per_coeff * per_cell_complex;
     MPI_Datatype mpi_scalar =
         ( sizeof( scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
 
@@ -105,7 +141,7 @@ void coalesced_view_exchange(
     // call so the CXI NIC registration footprint stays bounded.
     using umint_view = Kokkos::View<int*, memory_space,
                                     Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    using umcplx_view = Kokkos::View<complex_type*, memory_space,
+    using umcplx_view = Kokkos::View<coeff_type*, memory_space,
                                      Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
     std::vector<umint_view> send_idx( n_send_peers );
