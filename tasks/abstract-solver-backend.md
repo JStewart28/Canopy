@@ -242,7 +242,7 @@ a task in this document.
 | Test tier for new tests | `unit` | The `regression` tier is the ship gate and holds only `MultiSolve` (`tests/CMakeLists.txt:60-62`), and no task here runs it — see [Deliberate deviations](#deliberate-deviations). Promoting anything into it requires confirming with the user first, per the repository's own rule. |
 | New test registration | add the name to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:48-57`) or `UNIT_SERIAL_TESTS` (`:36-39`) | Target becomes `Canopy_Test_<Name>_MPI_<DEVICE>`, tests `..._np_<N>` for `N` in 1-6. |
 | Build command | `make -j <N> <target>` for exactly the target(s) the task's exit criterion names, in whichever build tree the step is using — never a bare `make` | A whole-tree build compiles 33 test executables and the two examples, and cannot exit 0 in any case because two of those targets do not compile — see [Current state](#current-state). "Rebuild" anywhere below means rebuilding the named targets, and nothing else. Scope the build with the target argument and **not** by reconfiguring `Canopy_TEST_DEVICES` in the committed `build-tuolumne/`: that tree is the bitwise gate's configuration, and R3 rests on it not moving. |
-| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve` — built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. T11 is the only task whose criterion is about other callers compiling, which is why it is the only one that reaches beyond the two gate targets. |
+| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T10 additionally: `Canopy_Test_DownwardSweep_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve`. The last four are built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. The extras are the consumers that reach past `Solver` into what a task changes: `tests/tstDownwardSweep.hpp` reads `downward.locals()` at `:174`, `:265`, `:364` and `:376`, the view T10 reshapes, and T11 changes `Solver` itself, which `tests/tstMultiSolve.hpp` and the two examples instantiate. Nothing else in `tests/` couples that tightly — `tstUpwardSweep.hpp` and `tstSingleSolve.hpp` instantiate the sweeps but call none of the operators these tasks touch, and `tstMultiSolve.hpp`'s `m2l_translate` mentions are all comments — so no other task compiles a consumer. |
 | Reference data | one committed file, `tests/data/laplace_solve_P6.txt` | Three bit-for-bit records — `(nprocs, rank)` of `(1,0)`, `(2,0)`, `(2,1)` — plus one np=1 field record in canonical `GlobalId` order and a hash of the initial global particle set. The particle set is a fixed global set of $N_{\rm total} = 600$ from seed `1234 + P`, identical at every rank count, which is what makes the np=$k$-versus-np=1 comparison definable at all. The committed drift check hashes that *initial* set and not the state the field record is taken at: the solve drives the particles, so their positions at the last step are not bit-identical across rank counts. |
 | Test naming | `tests/tstLaplaceSolve.hpp` for the solve-level gate, `tests/tstLaplaceKernel.hpp` for the per-operator kernel tests | `Canopy_add_tests` maps a name to `tst<NAME>.hpp` and to `Canopy_Test_<NAME>_MPI_<DEVICE>` (`cmake/test_harness/test_harness.cmake:104-112`), so the file name, the `tests/CMakeLists.txt` entry and every exit criterion below move together. |
 | Bit-for-bit artifact form | 64-bit hash plus extents for `locals()` and the operator table; full bit patterns for the $A_{n,m}$ table and `n_unique_ops` | The operator table costs $N_t N_s \cdot 16 = 28\cdot49\cdot16$, 21.4 KB per key at $P=6$; committing it in full is not affordable. A hash over the raw bytes is exactly as sensitive to a bitwise change and still attributes a failure to one artifact, which is all any exit criterion here asks. Hashes are computed with the in-repo FNV-1a so a committed value depends on no library version. |
@@ -269,7 +269,12 @@ a task in this document.
   `KOKKOS_INLINE_FUNCTION` that reaches host-only code — is not caught by any
   exit criterion here. A task that changes device-side code may additionally
   build `Canopy_Test_LaplaceSolve_MPI_HIP` to check that it compiles; no exit
-  criterion requires it, and no exit criterion runs it.
+  criterion requires it, and no exit criterion runs it. This is the failure mode
+  that left `Canopy_Test_LaplaceKernel_*` and `Canopy_Test_P2P_*` broken
+  ([Current state](#current-state)) — a signature drifted and the target that
+  called it was never compiled again — which is why the consumers that do couple
+  tightly are named per task in the [Conventions](#conventions) row rather than
+  left to a whole-tree build to catch.
 - **The operator-count cap is retained alongside the byte budget.** T8 makes the
   cap a memory budget, but keeps `M2L_OP_COUNT_CAP` (`:304`) as a floor:
   `effective_cap = min(M2L_OP_COUNT_CAP, byte_budget / bytes_per_key)`. A pure
@@ -1433,33 +1438,68 @@ the sweeps directly, without going through `Solver`.
    `scalars_per_coeff = 1`, `num_coeffs_per_cell = 1`,
    `m2l_num_src_coeffs = 1`, `sets_per_component = 1`,
    `aux_tables_type` = empty struct.
-2. Its operators: P2M sums charge; M2M sums children; M2L is
-   $L^A \mathrel{+}= q^B / |c_A - c_B|$ against a one-entry operator table;
-   `m2l_pre_cell` and `m2l_post_cell` are no-ops; L2L copies the parent's local
-   to each child; L2P returns the local as the potential and zero as the
-   gradient. Every one of these is exactly reproducible on host.
+2. Its operators: P2M sums charge; M2M sums children; M2L contracts the source
+   monopole against a one-entry operator table; `m2l_pre_cell` and
+   `m2l_post_cell` are no-ops; L2L copies the parent's local to each child; L2P
+   returns the local as the potential and zero as the gradient. Every one of
+   these is exactly reproducible on host.
+
+   **The M2L operator is scale-normalized and dimensionless**, because
+   `m2l_build_operator( int dd, int ix, int iy, int iz, const AuxType& aux, const TView& T_out )`
+   (`src/Canopy_LaplaceKernel.hpp:662-665`) receives integers only. Its offset
+   is $(ii,jj,kk) = \mathrm{round}\!\big((c_s - c_t)/w_{\rm unit}\big)$ with
+   $w_{\rm unit}$ the half-width at the deeper of the two depths
+   (`src/Canopy_DownwardSweep.hpp:312-322`), so the single table entry is
+   $1/\lVert(ix,iy,iz)\rVert$ — the offset measured in deeper-cell half-widths,
+   carrying no physical length. `dd`, the signed depth difference, is the second
+   half of the convention and the basis must state how it handles it, as the
+   solid-harmonic builder states its own $F(dd, n, j)$ residual factor
+   (`src/Canopy_LaplaceKernel.hpp:656-661`). Write the whole convention on the
+   declaration, per the [Conventions](#conventions) row on units.
+
+   A dimensionless local is sufficient: this basis is a fixture whose gate is
+   `locals()` against a host recomputation of the same quantity, not accuracy
+   against a physical potential, and the comparison is exact precisely because
+   the host reference evaluates the identical expression. **Do not reach for a
+   physical length here.** Supplying $w_{\rm unit}$ and `kernel_params` to the
+   operator builder is T9's, and pulling it forward would put a shared-code
+   signature change inside a task that otherwise touches only `tests/`.
 3. Write `tstFarFieldContract.hpp` driving `UpwardSweep`/`DownwardSweep` with it
    and comparing `locals()` against a host computation of the same sum over the
    same interaction list, at `EXPECT_DOUBLE_EQ`.
-4. Add a negative test: a basis declaring
-   `sizeof(coeff_type) != scalars_per_coeff * sizeof(component_scalar_type)`
-   must fail to compile. Guard it behind a
-   `#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block and document in the header
-   how to run it by hand, since CTest cannot assert a compile failure here.
+4. Add the negative test: a basis declaring
+   `sizeof(coeff_type) != scalars_per_coeff * sizeof(component_scalar_type)` —
+   `coeff_type = Scalar` with `scalars_per_coeff = 2` is the shortest such
+   declaration — must fail to compile. What it tests is the guard **the sweeps**
+   carry, not the basis's own: each of `UpwardSweep`
+   (`src/Canopy_UpwardSweep.hpp:73-78`, `:84-92`) and `DownwardSweep`
+   (`src/Canopy_DownwardSweep.hpp:117-122`, `:128-136`) asserts both the
+   `sizeof` relation and that `detail::coeff_traits<coeff_type>` agrees with the
+   basis's declared traits, so an inconsistent basis cannot instantiate a sweep
+   at all. Guard the declaration behind a
+   `#ifdef CANOPY_TEST_EXPECT_COMPILE_FAILURE` block, name those asserts in the
+   block's comment, and document in the header how to run it by hand, since
+   CTest cannot assert a compile failure here.
+
+   **The block is permanent, and nothing is applied to `MonopoleBasis` and
+   reverted.** A perturbation that is applied once, observed and undone leaves
+   nothing a later session can re-run; a committed `#ifdef` block does, and it
+   fails loudly if someone deletes one of the four asserts.
 
 **Exit criterion:** `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` passes at
 ranks 1-6; the Laplace-solve gate still passes all three checks
-(`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`); and deliberately breaking one
-trait on `MonopoleBasis` — set
-`scalars_per_coeff = 2` while leaving `coeff_type = Scalar` — makes the
-conformance test fail rather than pass with wrong numbers. Restore it before
-finishing.
+(`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`); and building
+`Canopy_Test_FarFieldContract_MPI_SERIAL` with `-DCANOPY_TEST_EXPECT_COMPILE_FAILURE`
+fails with a diagnostic **quoting one of the four sweep `static_assert`
+messages** of step 4. The quoted message is the load-bearing half: a build that
+fails with any other template error has not established that the guard is what
+rejected the basis, and would still fail after the assert was deleted.
 
 ---
 
 ### T7 — The M2L key carries depth, chosen by the basis — **NOT STARTED**
 
-**Depends on:** T3.
+**Depends on:** T3, T6.
 
 **Fill in:** `src/Canopy_DownwardSweep.hpp:280-294` (the stale comment),
 `:301-302`, `:308-318`, `:319-335`, and the classify pass around `:866-919`;
@@ -1654,6 +1694,10 @@ catches a pack/unpack disagreement everywhere, aliasing at np 1-2 through
 sets checked, failing if set 1 is replaced by a copy of set 0, and with the
 step-5 slot-coverage assertion holding at every rank count — verified by
 deliberately shortening the packed slot range so it fails, then restoring it.
+Additionally `make Canopy_Test_DownwardSweep_MPI_SERIAL` exits 0: that test
+reads `downward.locals()` directly (`tests/tstDownwardSweep.hpp:174`, `:265`,
+`:364`, `:376`) and so is the one consumer this task's reshape can break. It is
+built to compile and is not run; it carries `unit`, not `regression`.
 
 ---
 
