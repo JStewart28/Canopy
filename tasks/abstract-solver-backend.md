@@ -242,7 +242,7 @@ a task in this document.
 | Test tier for new tests | `unit` | The `regression` tier is the ship gate and holds only `MultiSolve` (`tests/CMakeLists.txt:60-62`), and no task here runs it — see [Deliberate deviations](#deliberate-deviations). Promoting anything into it requires confirming with the user first, per the repository's own rule. |
 | New test registration | add the name to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:48-57`) or `UNIT_SERIAL_TESTS` (`:36-39`) | Target becomes `Canopy_Test_<Name>_MPI_<DEVICE>`, tests `..._np_<N>` for `N` in 1-6. |
 | Build command | `make -j <N> <target>` for exactly the target(s) the task's exit criterion names, in whichever build tree the step is using — never a bare `make` | A whole-tree build compiles 33 test executables and the two examples, and cannot exit 0 in any case because two of those targets do not compile — see [Current state](#current-state). "Rebuild" anywhere below means rebuilding the named targets, and nothing else. Scope the build with the target argument and **not** by reconfiguring `Canopy_TEST_DEVICES` in the committed `build-tuolumne/`: that tree is the bitwise gate's configuration, and R3 rests on it not moving. |
-| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T8, T9, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T9 and T10 additionally: `Canopy_Test_DownwardSweep_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve`. T9 **runs** both of its extras; T10's `DownwardSweep` and all three of T11's are built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. The extras are the consumers that reach past `Solver` into what a task changes: `tests/tstDownwardSweep.hpp` reads `downward.locals()` at `:174`, `:265`, `:364` and `:376`, the view T10 reshapes, and T11 changes `Solver` itself, which `tests/tstMultiSolve.hpp` and the two examples instantiate. T8 is on the `FarFieldContract` list for a different reason than T6, T7, T10 and T11: it adds two contract members the sweeps read, so `MonopoleBasis` must declare them or that target stops compiling, and its `EscalateToP2P` rejection is a case in that test's permanent negative-compile block. **T9 is the one task that runs its extras rather than merely compiling them.** It replaces `m2l_build_operator` and extends `build_aux_tables`, both of which `MonopoleBasis` implements (`tests/CanopyTest_MonopoleBasis.hpp:552-557`, `:247`) and one of which shares its operator value with that test's host reference (`tests/tstFarFieldContract.hpp:444`), so a signature change there moves a bit-exact gate and has to be re-run rather than re-compiled. And T9's own exit criterion lives in `tests/tstDownwardSweep.hpp` — `DownwardSweepCaching.rebuildsAfterInvalidate` is the only test that invalidates the interaction list without repartitioning, which `Solver` cannot do at all because `downward()` is `const` (`src/Canopy_Solver.hpp:504`). Nothing else in `tests/` couples that tightly — `tstUpwardSweep.hpp` and `tstSingleSolve.hpp` instantiate the sweeps but call none of the operators these tasks touch, and `tstMultiSolve.hpp`'s `m2l_translate` mentions are all comments — so no other task compiles a consumer. |
+| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T8, T9, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T9 and T10 additionally: `Canopy_Test_DownwardSweep_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve`. T9 and T10 **run** their extras; all three of T11's are built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. The extras are the consumers that reach past `Solver` into what a task changes: `tests/tstDownwardSweep.hpp` reads `downward.locals()` at `:175`, `:266`, `:365` and `:377`, the view T10 reshapes, and T11 changes `Solver` itself, which `tests/tstMultiSolve.hpp` and the two examples instantiate. T8 is on the `FarFieldContract` list for a different reason than T6, T7, T10 and T11: it adds two contract members the sweeps read, so `MonopoleBasis` must declare them or that target stops compiling, and its `EscalateToP2P` rejection is a case in that test's permanent negative-compile block. **T9 and T10 run their extras rather than merely compiling them**, and for the same reason in both cases: each changes something a consumer reads rather than merely something it names. T9 replaces `m2l_build_operator` and extends `build_aux_tables`, both of which `MonopoleBasis` implements (`tests/CanopyTest_MonopoleBasis.hpp:552-557`, `:247`) and one of which shares its operator value with that test's host reference (`tests/tstFarFieldContract.hpp:444`), so a signature change there moves a bit-exact gate and has to be re-run rather than re-compiled. And T9's own exit criterion lives in `tests/tstDownwardSweep.hpp` — `DownwardSweepCaching.rebuildsAfterInvalidate` is the only test that invalidates the interaction list without repartitioning, which `Solver` cannot do at all because `downward()` is `const` (`src/Canopy_Solver.hpp:504`). T10 reshapes the view those four `tstDownwardSweep.hpp` sites read, and a reshape that compiles while returning the wrong slot is precisely what a compile-only check cannot see; the suite is known green at all six rank counts (T9), so running it attributes a failure rather than raising one of unknown provenance. Nothing else in `tests/` couples that tightly — `tstUpwardSweep.hpp` and `tstSingleSolve.hpp` instantiate the sweeps but call none of the operators these tasks touch, and `tstMultiSolve.hpp`'s `m2l_translate` mentions are all comments — so no other task compiles a consumer. |
 | Reference data | one committed file, `tests/data/laplace_solve_P6.txt` | Three bit-for-bit records — `(nprocs, rank)` of `(1,0)`, `(2,0)`, `(2,1)` — plus one np=1 field record in canonical `GlobalId` order and a hash of the initial global particle set. The particle set is a fixed global set of $N_{\rm total} = 600$ from seed `1234 + P`, identical at every rank count, which is what makes the np=$k$-versus-np=1 comparison definable at all. The committed drift check hashes that *initial* set and not the state the field record is taken at: the solve drives the particles, so their positions at the last step are not bit-identical across rank counts. |
 | Test naming | `tests/tstLaplaceSolve.hpp` for the solve-level gate, `tests/tstLaplaceKernel.hpp` for the per-operator kernel tests | `Canopy_add_tests` maps a name to `tst<NAME>.hpp` and to `Canopy_Test_<NAME>_MPI_<DEVICE>` (`cmake/test_harness/test_harness.cmake:104-112`), so the file name, the `tests/CMakeLists.txt` entry and every exit criterion below move together. |
 | Bit-for-bit artifact form | 64-bit hash plus extents for `locals()` and the operator table; full bit patterns for the $A_{n,m}$ table and `n_unique_ops` | The operator table costs $N_t N_s \cdot 16 = 28\cdot49\cdot16$, 21.4 KB per key at $P=6$; committing it in full is not affordable. A hash over the raw bytes is exactly as sensitive to a bitwise change and still attributes a failure to one artifact, which is all any exit criterion here asks. Hashes are computed with the in-repo FNV-1a so a committed value depends on no library version. |
@@ -370,11 +370,11 @@ current one:
 **None of those offsets account for T4**, which added the three-trait block, two
 `static_assert`s and an `#include <type_traits>` to both sweep headers and
 shifted everything after them again. They have not been re-measured, because the
-two tasks they would serve carry their own numbers: T5's and **T9's** **Fill
-in** lists are verified against the working tree and are the authority for
-every site they name. **T10's and T11's are not**, and this task sequence has
-not re-measured the offsets for them either — so both should locate every site
-by symbol rather than by the numbers their entries quote.
+tasks they would serve carry their own numbers: T5's, **T9's** and **T10's**
+**Fill in** lists are verified against the working tree and are the authority
+for every site they name. **T11's is not**, and this task sequence has not
+re-measured the offsets for it either — so it should locate every site by
+symbol rather than by the numbers its entry quotes.
 
 T1's and T2's own citations were current when written, which is the post-T1
 numbering; for those, only T2's deletions apply — `-1` past `:110`, `-3` past
@@ -2044,21 +2044,35 @@ change and compare failure sets rather than requiring green.
 
 **Depends on:** T6, T4.
 
-**Fill in:** `src/Canopy_DownwardSweep.hpp:534`, `:1723-1740`, `:1760-1802`;
-`tests/CanopyTest_MonopoleBasis.hpp`.
+**Fill in:** eleven sites, verified against the working tree.
+`src/Canopy_DownwardSweep.hpp:950` (the `_locals` allocation), `:2263-2307`
+(`snapshot_shared_locals_at_depth` — `per_cell_complex` at `:2289`, the pack
+nest at `:2299-2305`), `:2309-2371` (`allreduce_shared_locals_at_depth` —
+`per_cell_complex` at `:2325`, the pack nest at `:2337-2344`, the unpack nest at
+`:2360-2367`); `src/Canopy_LaplaceKernel.hpp` (the `sets_per_component`
+declaration, which this basis does not yet carry);
+`tests/CanopyTest_MonopoleBasis.hpp:210` (the trait), `:291`
+(`m2l_scratch_bytes`, which sizes the accumulator and must grow with the set
+count), `:646` (`m2l_core`), `:684` (`m2l_post_cell`), `:723`
+(`l2l_translate`) and `:766` (`l2p_evaluate`); and `tests/tstFarFieldContract.hpp` — the host reference
+indexes `D` and `L_ref` by `cell * NC + c` (`:407`, `:422-447`, `:511-541`,
+`:575-577`), asserts `locals().extent(2) == NC` at `:557`, and reads the same
+shape again in `l2pReturnsTheLocal` (`:638-663`).
 
 **Reference:** `coalesced_view_exchange` already reads `view.extent(2)`
-(`src/Canopy_MpiCoalescedExchange.hpp:94`) and needs nothing. Only the allocation
-and the two hand-rolled Allreduce loops change.
+(`src/Canopy_MpiCoalescedExchange.hpp:129`) and needs nothing, and the sweep
+hands every basis operator a `Kokkos::subview( locals, cell, ALL, ALL )`
+(`src/Canopy_DownwardSweep.hpp:2108`, `:2254`, `:2511`), so the third extent is
+the basis's business at every device call site. Only the allocation, the three
+hand-rolled shared-cell loops and the basis's own slot arithmetic change.
 
 **Do:**
 
 1. Add `sets_per_component` as a `constexpr int` to the contract, 1 for the
    solid-harmonic basis.
-2. Change the `_locals` allocation (`:534`) third extent from `NComps` to
-   `NComps * sets_per_component`, and the same in the snapshot pack (`:1723-1740`,
-   `per_cell_complex` at `:1724`) and the Allreduce pack/unpack (`:1760-1802`,
-   `per_cell_complex` at `:1760`).
+2. Change the `_locals` allocation (`:950`) third extent from `NComps` to
+   `NComps * sets_per_component`, and the same in the snapshot pack (`:2289`)
+   and the Allreduce pack/unpack (`:2325`).
 
    **Give the three loops one slot expression rather than three running
    counters.** The snapshot pack, the Allreduce pack and the Allreduce unpack each
@@ -2067,10 +2081,34 @@ and the two hand-rolled Allreduce loops change.
    `shared_slot(i, ci, c, s) -> int`, used by all three and stating its own
    flattening order on the declaration, removes that class by construction — see
    R6, where it is the most loudly-caught class but also the easiest not to write.
-3. Raise `MonopoleBasis` to `sets_per_component = 2`, where set 0 is the monopole
-   potential and set 1 is a **deliberately distinct** quantity — the monopole
-   scaled by the cell half-width. A packing bug that aliases the two sets is
-   invisible if they hold the same numbers.
+3. Raise `MonopoleBasis` to `sets_per_component = 2`, where set 0 is the
+   monopole contraction it computes today and set 1 is the same contraction
+   against the **squared** operator entry: set 0 accumulates $T\,M$ and set 1
+   accumulates $T^2 M$ over the same interaction list. A packing bug that
+   aliases the two sets is invisible if they hold the same numbers, so the
+   *delta* the Allreduce carries must differ between them and not merely the
+   value that accumulates into `_locals` afterwards.
+
+   **The distinguishing factor has to be reachable from the stages that write
+   `_locals`, and a length is not.** `m2l_core` receives
+   `(team, M_full, source_cell, ops, op_idx, scratch)` and `m2l_post_cell`
+   receives `(team, scratch, L_out, target_cell, ops)`
+   (`tests/CanopyTest_MonopoleBasis.hpp:646`, `:684`), so neither knows a
+   half-width; only `l2l_translate` and `l2p_evaluate` are handed one
+   (`:723`, `:766`), and `build_aux_tables` takes `kernel_params` but no
+   `unit_w`. The operator entry is reachable — it is `ops(out_idx, 0, op_idx)` —
+   and it varies per key, so $T^2$ is distinct per pair and therefore per cell,
+   and it is exactly reproducible in the host reference because both paths reach
+   it through the one `m2l_operator_entry`. Square it inside `m2l_accumulate`'s
+   discipline: a named local for the product, so `-ffp-contract=on` cannot
+   contract one path and not the other.
+
+   **Do not widen the operator column to carry the second set.**
+   `_m2l_op_table` and `_m2l_op_cache` share the shape
+   `(num_coeffs_per_cell, m2l_num_src_coeffs, n_ops)`
+   (`src/Canopy_DownwardSweep.hpp:656`), and a set dimension there would have to
+   move both *and* enter the cache key, or a cached column survives a change of
+   shape. The set count belongs to the locals view alone.
 4. Extend the conformance test to check both sets independently across the
    shared-cell Allreduce, at ranks 1-6 — shared cells exist at np=1 too (R6).
 5. **Assert that the slot map is a bijection onto the full slot range**, in the
@@ -2092,10 +2130,14 @@ catches a pack/unpack disagreement everywhere, aliasing at np 1-2 through
 sets checked, failing if set 1 is replaced by a copy of set 0, and with the
 step-5 slot-coverage assertion holding at every rank count — verified by
 deliberately shortening the packed slot range so it fails, then restoring it.
-Additionally `make Canopy_Test_DownwardSweep_MPI_SERIAL` exits 0: that test
-reads `downward.locals()` directly (`tests/tstDownwardSweep.hpp:174`, `:265`,
-`:364`, `:376`) and so is the one consumer this task's reshape can break. It is
-built to compile and is not run; it carries `unit`, not `regression`.
+Additionally `ctest -R Canopy_Test_DownwardSweep_MPI_SERIAL` passes at ranks
+1-6: that test reads `downward.locals()` directly
+(`tests/tstDownwardSweep.hpp:175`, `:266`, `:365`, `:377`) and so is the one
+consumer this task's reshape can break. It is **run** rather than compiled
+because the suite is known green at all six rank counts (T9), so a failure is
+attributable rather than ambiguous, and because a reshape that compiles and
+returns the wrong slot is exactly what a compile-only check cannot see. It
+carries `unit`, not `regression`.
 
 ---
 
@@ -2291,26 +2333,35 @@ check. Its cache is cleared whenever `kernel_params` changes, so the persistence
 claim is scoped to a fixed kernel. Any basis whose operator depends on particle
 positions must declare so and opt out of the cache.
 
-**R6 — `sets_per_component != 1` breaks the shared-cell Allreduce.** The two
-hand-rolled pack/unpack loops (`:1774-1779`, `:1796-1801`) index by a running
-counter, which is easy to get wrong when a third factor enters.
+**R6 — `sets_per_component != 1` breaks the shared-cell Allreduce.** The three
+hand-rolled loops — the snapshot pack (`:2299-2305`), the Allreduce pack
+(`:2337-2344`) and its unpack (`:2360-2367`) — index by a running counter,
+which is easy to get wrong when a third factor enters.
 
 **Shared cells are not a multi-rank phenomenon.** A cell is shared when
 `depth <= _replication_depth && !is_leaf` (`src/Canopy_CommunicationPlan.hpp:698`)
 — a function of the tree alone, with no rank-count condition — and
 `allreduce_shared_locals_at_depth` is called unconditionally
-(`src/Canopy_DownwardSweep.hpp:2050`), returning early only on `nshared == 0`
-(`:1776-1777`). At the frozen configuration np=1 has 1 shared cell at depth 0, 8
+(`src/Canopy_DownwardSweep.hpp:2598`), returning early only on `nshared == 0`
+(`:2322-2323`). At the frozen configuration np=1 has 1 shared cell at depth 0, 8
 at depth 1 and 3-4 at depth 2 — the same counts as np=2.
 
-**What np=1 does instead is make the function an exact identity, structurally.**
-At one rank `MPI_Allreduce` copies send to recv, so the unpack computes
-`Snap[k] + (L(j) - Snap[k])`, which is `L(j)`. The snapshot terms cancel whatever
-they hold, and the slot expression `k` cancels with itself however wrong it is.
-So at np=1 `_locals` is unchanged by this function **whenever its own pack and
-unpack agree** — this does not depend on the snapshot being zero, and it is why
-the pack-side-only perturbation T1 ran does corrupt np=1 while a both-sides one
-does not.
+**What np=1 does instead is make the function an identity in the slot algebra,
+and not in the arithmetic.** At one rank `MPI_Allreduce` copies send to recv, so
+the unpack computes `Snap[k] + (L(j) - Snap[k])`. The snapshot terms cancel
+whatever they hold and the slot expression `k` cancels with itself however wrong
+it is, so at np=1 no *coefficient* ends up in the wrong place **whenever the
+function's own pack and unpack agree** — this does not depend on the snapshot
+being zero, and it is why the pack-side-only perturbation T1 ran does corrupt
+np=1 while a both-sides one does not.
+
+**The value does move, in the last bit.** Writing $a$ for the snapshot and $b$
+for the M2L delta, the sweep computes $a + \mathrm{fl}(\mathrm{fl}(a+b) - a)$,
+and the subtraction re-rounds, so that is not $\mathrm{fl}(a+b)$ in general
+(measured in T6, whose host reference needs a separate branch for shared targets
+because of it). **So no check may rest on `_locals` being bit-unchanged by this
+function at np=1** — the invariance is over which slot holds which coefficient,
+not over the bits in it.
 
 Let $\sigma$ be the slot map the loops actually realize. Four classes follow, and
 they are not equally dangerous:
@@ -2319,12 +2370,12 @@ they are not equally dangerous:
 | --- | --- | --- | --- |
 | pack and unpack disagree | broken | broken | everything, by seven orders of magnitude — a one-slot rotation of the pack side alone measures $2.6\times10^{-2}$ against a $5.6\times10^{-10}$ cross-rank and a $9.63\times10^{-7}$ direct-sum tolerance |
 | **aliasing** — $\sigma$ not injective | slot $A$ receives $L(B)$ | broken | `bitForBitArtifacts` at np 1-2 |
-| **truncation** — the slot range misses a set | identity, correct | that set's M2L delta is never summed across ranks | `crossRankAgreement` at np 2-6 |
-| $\sigma$ a bijection, applied consistently | identity | residue $(P-1)\big(S[j] - S[\sigma(j)]\big)$, and $S \equiv 0$ | nothing |
+| **truncation** — the slot range misses a set | correct, to the re-rounding above | that set's M2L delta is never summed across ranks | `crossRankAgreement` at np 2-6 |
+| $\sigma$ a bijection, applied consistently | correct, to the re-rounding above | residue $(P-1)\big(S[j] - S[\sigma(j)]\big)$, and $S \equiv 0$ | nothing |
 
 **The one invisible class is also the one that does not matter.** A bijection
 applied uniformly is an arbitrary internal relabeling: `_shared_snapshot_buf`
-(`src/Canopy_DownwardSweep.hpp:414`) is private and read only by these two
+(`src/Canopy_DownwardSweep.hpp:748`) is private and read only by these two
 functions, so no correctness claim rests on which slot holds which coefficient.
 The two classes that corrupt an answer — aliasing and truncation, which are the
 likely slips when a third factor enters — are each already covered, one at np=1
@@ -2345,8 +2396,8 @@ by all three loops, so "pack and unpack disagree" cannot be written; and a
 slot-coverage assertion that $\sigma$ is a bijection onto the full slot range,
 which is what separates the inert relabeling from aliasing and truncation. Do not
 reach for a perturbation meant to fail at np ≥ 2 while sparing np=1 — no slot
-offset behaves that way, for the identity reason above. Do not pin the exchange
-buffer's bytes as a further bit-for-bit artifact either: it would lock an internal
+offset behaves that way, for the slot-cancellation reason above. Do not pin the
+exchange buffer's bytes as a further bit-for-bit artifact either: it would lock an internal
 ordering that T10 legitimately changes, so it would fire on T10 by construction,
 be re-baselined, and catch nothing.
 
