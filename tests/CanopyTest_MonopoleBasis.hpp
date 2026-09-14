@@ -60,11 +60,18 @@ namespace CanopyTest
 //     a single monopole coefficient has no n-dependent conditioning problem to
 //     normalize away.
 //
-//   * LOCAL. L(cell, 0, c) is the scale-normalized monopole potential, and is
-//     likewise dimensionless: it is the sum of source charges each divided by
-//     the separation *measured in deeper-cell half-widths*, not by a physical
-//     length. It carries no 1/length factor, so it is not a physical
-//     potential and must not be compared against one.
+//   * LOCAL. L(cell, 0, comp_set_slot(c, 0)) is the scale-normalized
+//     monopole potential, and is likewise dimensionless: it is the sum of
+//     source charges each divided by the separation *measured in deeper-cell
+//     half-widths*, not by a physical length. It carries no 1/length factor,
+//     so it is not a physical potential and must not be compared against one.
+//
+//   * SETS. The locals view's third extent is
+//     num_components * sets_per_component and this basis declares TWO sets:
+//     comp_set_slot(c, 0) holds the contraction above, comp_set_slot(c, 1)
+//     the same contraction against the SQUARED operator entry. Set 1 is a
+//     conformance probe on the shared-cell slot map, not a second physical
+//     answer — see sets_per_component. The MULTIPOLE has no set axis.
 //
 //   * L2P returns L unchanged as the potential and zero as the gradient. The
 //     particle's offset inside its leaf is ignored: a monopole local is
@@ -201,13 +208,68 @@ struct MonopoleBasis
     static constexpr Canopy::M2LOverflow m2l_overflow_policy =
         Canopy::M2LOverflow::PerPairTranslate;
 
-    // NOTHING CONSUMES THIS YET. `grep -rn sets_per_component src/ tests/`
-    // finds no reader: T10 is the task that raises the locals view to
-    // multiple sets per component and teaches the sweeps to read this trait.
-    // It is declared now so the trait list here is the complete one a basis
-    // author sees, and so T10's diff is a change of value rather than an
-    // addition. Do not go looking for the consumer.
-    static constexpr int sets_per_component = 1;
+    // =======================================================================
+    // sets_per_component — TWO for this basis, and the second set exists to
+    // be told apart from the first.
+    //
+    // The locals view's third extent is num_components * sets_per_component
+    // and the flattening is comp_set_slot(c, s) = c * sets_per_component + s
+    // (component-major, set-minor), which is DownwardSweep::shared_slot's
+    // (c, s) factor spelled the same way. Every slot expression in this file
+    // goes through comp_set_slot; none open-codes it.
+    //
+    // WHAT THE TWO SETS HOLD. Over the same interaction list, with T the
+    // operator entry for the pair and M the source multipole:
+    //
+    //     set 0:  L += T   * M     the monopole contraction, as before T10
+    //     set 1:  L += T^2 * M     the same contraction against T squared
+    //
+    // A packing bug that ALIASES the two sets is invisible if they hold the
+    // same numbers, so the two must differ in the DELTA the shared-cell
+    // Allreduce carries and not merely in the value that accumulates
+    // afterwards. T varies per key, so T^2 differs from T per pair and
+    // therefore per cell, and the difference is present in the M2L delta
+    // itself. tests/tstFarFieldContract.hpp asserts the two sets are not
+    // equal, so replacing set 1 by a copy of set 0 fails the gate even
+    // though the host reference would follow the change (both go through
+    // m2l_set_operator).
+    //
+    // WHY THE OPERATOR ENTRY AND NOT A LENGTH. The distinguishing factor has
+    // to be reachable from the stages that WRITE the locals view. m2l_core
+    // is handed (team, M_full, source_cell, ops, op_idx, scratch) and
+    // m2l_post_cell (team, scratch, L_out, target_cell, ops); neither knows
+    // a half-width, and build_aux_tables takes no unit_w. ops(0, 0, op_idx)
+    // is reachable from m2l_core, varies per key, and is exactly
+    // reproducible in the host reference because both paths reach it through
+    // the one m2l_operator_entry.
+    //
+    // Set 1 is a conformance probe and not a second physical answer: L2P
+    // returns set 0 alone. See l2p_evaluate.
+    // =======================================================================
+    static constexpr int sets_per_component = 2;
+
+    // Slots one component occupies in the locals view and in the M2L
+    // accumulator: NComps * sets_per_component, the view's third extent.
+    static constexpr int num_comp_slots = NComps * sets_per_component;
+
+    // (component, set) -> the locals view's third index, and the (c, s)
+    // factor of the M2L accumulator slot. Component-major, set-minor —
+    // identical to DownwardSweep::shared_slot's, which is what makes the
+    // shared-cell round trip put a set's coefficient back in its own slot.
+    KOKKOS_INLINE_FUNCTION
+    static constexpr int comp_set_slot( int c, int s )
+    {
+        return c * sets_per_component + s;
+    }
+
+    // The accumulator slot for (coefficient, component, set), over the
+    // scratch array m2l_scratch_bytes sizes. Same nesting as the locals
+    // view: coefficient major, then component, then set.
+    KOKKOS_INLINE_FUNCTION
+    static constexpr int acc_slot( int out_idx, int c, int s )
+    {
+        return out_idx * num_comp_slots + comp_set_slot( c, s );
+    }
 
     // -----------------------------------------------------------------------
     // The M2L operator set. Same shape and layout contract as the
@@ -270,17 +332,22 @@ struct MonopoleBasis
     // m2l_scratch_bytes
     //
     // Per-team M2L scratch this basis needs, in bytes: one contiguous
-    // scalar_type array of num_coeffs_per_cell * n_comps entries, holding the
-    // target local accumulator. The real/imag split the solid-harmonic basis
-    // needs has no analogue here — the coefficient is real.
+    // scalar_type array of
+    // num_coeffs_per_cell * n_comps * sets_per_component entries, holding
+    // the target local accumulator, indexed by acc_slot. The real/imag split
+    // the solid-harmonic basis needs has no analogue here — the coefficient
+    // is real.
     //
-    // MUST STAY constexpr. The sweep assigns it to a `constexpr size_t`
-    // (src/Canopy_DownwardSweep.hpp:1562) and every extent inside the three
-    // stages is derived from it; making it a runtime value is R3 (a trait
-    // indirection deoptimizing the fused kernel) with no correctness signal
-    // to catch it. n_comps is a parameter only so the sweep can size scratch
-    // without reaching into this basis's template arguments; it is only ever
-    // passed num_components.
+    // THE SET COUNT ENTERS HERE and must not make this a runtime value. The
+    // sweep assigns it to a `constexpr size_t`
+    // (src/Canopy_DownwardSweep.hpp:2068) and derives the TeamVectorRange
+    // zero-fill bound from it (:2091); sets_per_component is a
+    // `static constexpr int` on this class, so the product stays a constant
+    // expression. Making it runtime is R3 (a trait indirection deoptimizing
+    // the fused kernel) with no correctness signal to catch it. n_comps is a
+    // parameter only so the sweep can size scratch without reaching into
+    // this basis's template arguments; it is only ever passed
+    // num_components.
     //
     // The sweep hands the stages raw, zero-filled bytes and relies on
     // all-zero bytes being this basis's accumulator identity. That holds
@@ -291,7 +358,9 @@ struct MonopoleBasis
     static constexpr std::size_t m2l_scratch_bytes( int n_comps )
     {
         return static_cast<std::size_t>( num_coeffs_per_cell ) *
-               static_cast<std::size_t>( n_comps ) * sizeof( scalar_type );
+               static_cast<std::size_t>( n_comps ) *
+               static_cast<std::size_t>( sets_per_component ) *
+               sizeof( scalar_type );
     }
 
     // Round half away from zero, matching the std::lround the sweep's
@@ -374,6 +443,35 @@ struct MonopoleBasis
     }
 
     // =======================================================================
+    // m2l_set_operator — THE operator value set `s` contracts against, and
+    // the single source of truth for it, exactly as m2l_operator_entry is
+    // for T itself.
+    //
+    //   set 0:  T
+    //   set 1:  T^2
+    //
+    // Both the device path (m2l_core, m2l_translate) and the host reference
+    // in tests/tstFarFieldContract.hpp call THIS function, which is why the
+    // gate on set 1 is bit-exact and not merely inside EXPECT_DOUBLE_EQ's
+    // 4 ULP.
+    //
+    // The square goes into a NAMED LOCAL for the same reason m2l_accumulate
+    // splits its product into one: under the default -ffp-contract=on
+    // nothing guarantees that a device compilation and a plain host loop
+    // make the same contraction decision, and one differing FMA over a few
+    // hundred terms drifts past 4 ULP. Squaring in its own statement, in one
+    // function both callers reach, removes the question.
+    // =======================================================================
+    KOKKOS_INLINE_FUNCTION
+    static scalar_type m2l_set_operator( scalar_type T, int s )
+    {
+        if ( s == 0 )
+            return T;
+        const scalar_type T2 = T * T;
+        return T2;
+    }
+
+    // =======================================================================
     // m2l_accumulate — the single multiply-accumulate step of this basis's
     // M2L, factored out so that m2l_core and the host reference in
     // tests/tstFarFieldContract.hpp cannot drift apart.
@@ -431,6 +529,9 @@ struct MonopoleBasis
     //
     //   M^parent(0, c) += M^child(0, c)
     //
+    // The multipole view has NO set axis — sets are a downward-pass quantity
+    // — so this operator is untouched by sets_per_component.
+    //
     // Charge is conserved under aggregation, so the translation is the
     // identity and both widths and the offset are ignored. Parameters mirror
     // LaplaceKernel::m2m_translate (src/Canopy_LaplaceKernel.hpp:411).
@@ -469,7 +570,8 @@ struct MonopoleBasis
     // (src/Canopy_DownwardSweep.hpp:1662), in which case no operator column
     // exists for it.
     //
-    //   L^target(0, c) += T(dd, ix, iy, iz) * M^source(0, c)
+    //   L^target(0, comp_set_slot(c, s))
+    //       += m2l_set_operator(T(dd, ix, iy, iz), s) * M^source(0, c)
     //
     // This reconstructs the SAME integer key from the physical geometry it is
     // handed and evaluates the SAME m2l_operator_entry, so the fused and
@@ -532,10 +634,16 @@ struct MonopoleBasis
             {
                 for ( int c = 0; c < NComps; c++ )
                 {
-                    Scalar contrib = static_cast<Scalar>( 0 );
-                    m2l_accumulate( contrib, T,
-                                    M_full( source_cell, out_idx, c ) );
-                    Kokkos::atomic_add( &L_target_out( out_idx, c ), contrib );
+                    const Scalar m = M_full( source_cell, out_idx, c );
+                    for ( int st = 0; st < sets_per_component; st++ )
+                    {
+                        Scalar contrib = static_cast<Scalar>( 0 );
+                        m2l_accumulate( contrib, m2l_set_operator( T, st ),
+                                        m );
+                        Kokkos::atomic_add(
+                            &L_target_out( out_idx, comp_set_slot( c, st ) ),
+                            contrib );
+                    }
                 }
             } );
     }
@@ -629,7 +737,11 @@ struct MonopoleBasis
     // =======================================================================
     // m2l_core — the per-pair apply.
     //
-    //   acc(out_idx, c) += ops(out_idx, 0, op_idx) * M(source_cell, out_idx, c)
+    //   acc(out_idx, c, s) += m2l_set_operator(ops(out_idx, 0, op_idx), s)
+    //                         * M(source_cell, out_idx, c)
+    //
+    // i.e. T*M into set 0 and T^2*M into set 1, over the same interaction
+    // list and off the same source multipole. See sets_per_component.
     //
     // The operator set is reached only through op_idx, so the sweep never
     // indexes it. The accumulation runs in the order the sweep walks the
@@ -649,7 +761,7 @@ struct MonopoleBasis
     {
         using acc_type =
             m2l_accumulator_type<typename ScratchView::memory_space>;
-        constexpr int n_acc = num_coeffs_per_cell * NComps;
+        constexpr int n_acc = num_coeffs_per_cell * num_comp_slots;
         scalar_type* acc_base =
             reinterpret_cast<scalar_type*>( scratch.data() );
         acc_type team_acc( acc_base, n_acc );
@@ -661,9 +773,10 @@ struct MonopoleBasis
                 const scalar_type T = ops( out_idx, 0, op_idx );
                 for ( int c = 0; c < NComps; c++ )
                 {
-                    const int slot = out_idx * NComps + c;
-                    m2l_accumulate( team_acc( slot ), T,
-                                    M_full( source_cell, out_idx, c ) );
+                    const scalar_type m = M_full( source_cell, out_idx, c );
+                    for ( int st = 0; st < sets_per_component; st++ )
+                        m2l_accumulate( team_acc( acc_slot( out_idx, c, st ) ),
+                                        m2l_set_operator( T, st ), m );
                 }
             } );
     }
@@ -688,7 +801,7 @@ struct MonopoleBasis
 
         using acc_type =
             m2l_accumulator_type<typename ScratchView::memory_space>;
-        constexpr int n_acc = num_coeffs_per_cell * NComps;
+        constexpr int n_acc = num_coeffs_per_cell * num_comp_slots;
         scalar_type* acc_base =
             reinterpret_cast<scalar_type*>( scratch.data() );
         acc_type team_acc( acc_base, n_acc );
@@ -698,17 +811,17 @@ struct MonopoleBasis
             [&]( const int out_idx )
             {
                 for ( int c = 0; c < NComps; c++ )
-                {
-                    const int slot = out_idx * NComps + c;
-                    L_out( target_cell, out_idx, c ) += team_acc( slot );
-                }
+                    for ( int st = 0; st < sets_per_component; st++ )
+                        L_out( target_cell, out_idx,
+                               comp_set_slot( c, st ) ) +=
+                            team_acc( acc_slot( out_idx, c, st ) );
             } );
     }
 
     // =======================================================================
     // L2L: copy the parent's local into each child.
     //
-    //   L^child(0, c) += L^parent(0, c)
+    //   L^child(0, slot) += L^parent(0, slot),  every (component, set) slot
     //
     // A monopole local is constant over its cell, so the restriction to a
     // child is the identity and both widths and the offset are ignored.
@@ -732,20 +845,23 @@ struct MonopoleBasis
         (void)w_parent;
         (void)aux;
 
+        // Every set telescopes the same way — L2L is the identity for each
+        // of them independently — so this walks the flat slot range rather
+        // than the (component, set) pair.
         Kokkos::parallel_for(
             Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
             [&]( const int out_idx )
             {
-                for ( int c = 0; c < NComps; c++ )
-                    L_child_out( out_idx, c ) +=
-                        L_full( parent_cell, out_idx, c );
+                for ( int slot = 0; slot < num_comp_slots; slot++ )
+                    L_child_out( out_idx, slot ) +=
+                        L_full( parent_cell, out_idx, slot );
             } );
     }
 
     // =======================================================================
     // L2P: the local IS the potential; the gradient is zero.
     //
-    //   phi_out[c]       = L(leaf_cell, 0, c)
+    //   phi_out[c]       = L(leaf_cell, 0, comp_set_slot(c, 0))
     //   grad_out(c, dim) = 0
     //
     // = rather than += : the sweep accumulates phi_out into its own output
@@ -772,8 +888,13 @@ struct MonopoleBasis
         (void)dz;
         (void)w_self;
 
+        // SET 0 ONLY. Set 1 is the T^2 conformance probe (see
+        // sets_per_component); it is not a second physical answer and the
+        // sweep's potential output has no set axis to put it in.
+        // tests/tstFarFieldContract.hpp reads set 1 out of locals()
+        // directly, which is where it is checked.
         for ( int c = 0; c < NComps; c++ )
-            phi_out[c] = L_full( leaf_cell, 0, c );
+            phi_out[c] = L_full( leaf_cell, 0, comp_set_slot( c, 0 ) );
 
         if ( compute_gradient )
         {

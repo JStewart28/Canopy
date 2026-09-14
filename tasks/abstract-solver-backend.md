@@ -2063,7 +2063,57 @@ change and compare failure sets rather than requiring green.
 
 ---
 
-### T10 — Locals carry multiple sets per component — **NOT STARTED**
+### T10 — Locals carry multiple sets per component — **DONE**
+
+**Met.** `sets_per_component` is a contract member on both bases — 1 on
+`LaplaceKernel`, 2 on `MonopoleBasis` — the locals view's third extent is
+`NComps * sets_per_component`, and all three shared-cell loops index through
+one `DownwardSweep::shared_slot( i, ci, c, s )` whose flattening order is
+`c * sets_per_component + s`, stated on its declaration. At
+`sets_per_component == 1` that collapses to `c` exactly, so the solid-harmonic
+shapes are unchanged by construction. Verified at `HEAD`
+`262f33574b58fb4a91b103c8556dde5f5fbc8046` (working tree; the change is not yet
+committed), Cray clang 20.0.0, `build-tuolumne/` unreconfigured.
+
+Flux job **`f3YGoLLVokLP`** (the gate) and **`f3YH7EEJ9zdd`** (the verification
+run after both perturbations were reverted and the negative-compile build's
+object was rebuilt): `100% tests passed, 0 tests failed out of 6` for
+`Canopy_Test_LaplaceSolve_MPI_SERIAL`, `Canopy_Test_FarFieldContract_MPI_SERIAL`
+and `Canopy_Test_DownwardSweep_MPI_SERIAL` in both jobs — the full Laplace-solve
+gate (bit-for-bit at ranks 1-2, `crossRankAgreement` at 2-6, `matchesDirectSum`
+at 1-6), the conformance gate at ranks 1-6 with both sets checked, and the
+`locals()`-reading DownwardSweep suite at ranks 1-6.
+
+**The committed bit patterns matched with no regeneration.**
+`tests/data/laplace_solve_P6.txt` was not touched and neither was the
+frozen-configuration block in `tests/tstLaplaceSolve.hpp`; `bitForBitArtifacts`
+passed at np 1-2 against the committed hashes, with `locals_ext = (103,28,1)`,
+`optab_ext = (28,49,n_ops)`, `a_extent = 169` and
+`initial_hash = 0xb6ad437608ad69b7` at every rank and rank count. `n_unique_ops`
+per rank: np=1 → 686; np=2 → 368, 386; np=3 → 273, 204, 329; np=4 → 264, 128,
+234, 194; np=5 → 180, 168, 147, 217, 187; np=6 → 174, 156, 111, 160, 116, 175 —
+every one identical to T1's and T8's. `fallback_pairs = 0` throughout, so R4's
+discriminator is intact. The verification run reproduces **all 22** cells of
+T8's cross-rank/direct-sum table to all 17 digits; the gate run reproduces 21
+and moves the np=5 pair, attributed to the partitioner by step 1 of
+[the bit-for-bit gate](#the-bit-for-bit-gate)'s procedure — `matchesDirectSum`
+and `crossRankAgreement` drew two different np=5 cuts inside that one job, and
+the two jobs drew them in opposite order. No control run.
+
+On the conformance side `locals().extent(2)` is 4 (`NComps = 2`,
+`sets_per_component = 2`), `not_bit_identical = 0` at every rank and both
+configurations, and the step-5 slot-coverage assertion holds everywhere: the
+snapshot pack, the Allreduce pack and the Allreduce unpack each wrote exactly
+`nshared * coeffs_per_cell * NComps * sets_per_component` slots, with
+`slot_aliased = 0` and `slot_unwritten = 0` — 44/136/240/272/288/292 at np 1-6
+on the Basic configuration and 36 at every rank count on Small. Both deliberate
+perturbations were run and reverted: replacing set 1 by a copy of set 0
+(`f3YGuJdJY2Aj`) failed 6/6, entirely on the set-difference assertion and with
+**no** value comparison failing; shortening the Allreduce pack's slot range by
+one set (`f3YH266i2baf`) failed 6/6 on the coverage assertions at every rank
+count, including at np=1 Small where the value comparison saw nothing at all.
+Details, signatures and the measured totals are in the `## T10` section of
+[the progress log](abstract-solver-backend-progress-log.md).
 
 **Depends on:** T6, T4.
 

@@ -24,16 +24,19 @@
 // WHAT THE REFERENCE IS, AND WHY IT SUMS IN THE ORDER IT DOES
 //
 // For MonopoleBasis the whole downward pipeline collapses to a telescoping
-// sum. Writing D(a) for the M2L delta accumulated at cell a,
+// sum. Writing D(a, set) for the M2L delta accumulated at cell a in set
+// `set`, and T for the operator entry of a pair,
 //
-//     D(a) = sum over s in ilist(a) of  T(key(a, s)) * M(s)
+//     D(a, set) = sum over p in ilist(a) of  Op(T(key(a, p)), set) * M(p)
 //
-// L2L copies a parent's local to each child, so the value the sweep leaves in
-// locals() is
+// with Op = MonopoleBasis::m2l_set_operator: T for set 0 and T^2 for set 1.
+// L2L copies a parent's local to each child in every set, so the value the
+// sweep leaves in locals() is
 //
-//     L(t) = D(t) + L(parent(t)),      L(root) = D(root)
+//     L(t, set) = D(t, set) + L(parent(t), set),   L(root, set) = D(root, set)
 //
-// and the reference below evaluates exactly that, root-downward.
+// and the reference below evaluates exactly that, root-downward, over the
+// flat slot range.
 //
 // Three things make the comparison EXACT rather than merely close, and all
 // three are load-bearing:
@@ -49,15 +52,40 @@
 //     (src/Canopy_CommunicationPlan.hpp:481). So the reference iterates that
 //     vector as-is.
 //
-//  2. The operator value and the multiply-accumulate step are not duplicated.
-//     Both go through MonopoleBasis::m2l_operator_entry and
-//     MonopoleBasis::m2l_accumulate, the same functions the device kernel
-//     calls.
+//  2. The operator value, the per-set operator and the multiply-accumulate
+//     step are not duplicated. All three go through
+//     MonopoleBasis::m2l_operator_entry, ::m2l_set_operator and
+//     ::m2l_accumulate, the same functions the device kernel calls. Nor is
+//     the (component, set) flattening: both sides call
+//     MonopoleBasis::comp_set_slot.
 //
 //  3. The reference takes the UPWARD sweep's output as given. It mirrors
 //     upward.multipoles() rather than recomputing P2M and M2M, so no
 //     assumption about particle or child iteration order enters. This test
 //     gates the FAR FIELD — M2L, L2L, L2P — which is what T6 is for.
+//
+// ---------------------------------------------------------------------------
+// THE THIRD THING THIS FILE GATES: THE SHARED-CELL SLOT MAP
+//
+// MonopoleBasis carries sets_per_component = 2, so locals() has a third
+// extent of num_components * sets_per_component = 4 and the shared-cell
+// snapshot / Allreduce buffers carry four slots per coefficient per cell
+// rather than two. Two things are asserted about that, at every rank count:
+//
+//  * BOTH SETS are compared against the reference independently, and the two
+//    are required to hold DIFFERENT numbers. Set 1 accumulating T^2*M where
+//    set 0 accumulates T*M is what makes an aliasing slot map visible;
+//    replacing set 1 by a copy of set 0 moves the reference with it and is
+//    caught by the difference check alone.
+//
+//  * SLOT COVERAGE. DownwardSweep::shared_slot is the one slot expression
+//    all three shared-cell loops use, and the sweep marks what each of them
+//    writes. This test requires each loop to cover
+//    nshared * coeffs_per_cell * NComps * sets_per_component slots exactly
+//    once — a bijection onto the full range, which separates aliasing and
+//    truncation (the two R6 classes that corrupt an answer) from an inert
+//    relabeling (the one that does not). It needs no reference data and
+//    holds at np=1 too, since shared cells are a property of the tree.
 //
 // ---------------------------------------------------------------------------
 // THE SECOND THING THIS FILE GATES: THE LEVEL REACHES THE KEY
@@ -120,12 +148,13 @@
 // sed re-supplies the defines the build needs and appends ours. `touch` is
 // there because changing a -D does not change any file timestamp.)
 //
-// Expect a diagnostic quoting one of the five sweep static_asserts:
-//   src/Canopy_UpwardSweep.hpp:73-78    sizeof relation
-//   src/Canopy_UpwardSweep.hpp:84-92    agreement with detail::coeff_traits
-//   src/Canopy_DownwardSweep.hpp:117-122  sizeof relation
-//   src/Canopy_DownwardSweep.hpp:128-136  agreement with detail::coeff_traits
-//   src/Canopy_DownwardSweep.hpp:433-442  the M2LOverflow::EscalateToP2P
+// Expect a diagnostic quoting one of the six sweep static_asserts:
+//   src/Canopy_UpwardSweep.hpp:74-79      sizeof relation
+//   src/Canopy_UpwardSweep.hpp:85-93      agreement with detail::coeff_traits
+//   src/Canopy_DownwardSweep.hpp:124-129  sizeof relation
+//   src/Canopy_DownwardSweep.hpp:135-143  agreement with detail::coeff_traits
+//   src/Canopy_DownwardSweep.hpp:154-158  sets_per_component >= 1
+//   src/Canopy_DownwardSweep.hpp:572-581  the M2LOverflow::EscalateToP2P
 //                                         rejection
 // A build that fails with any other template error has not established that
 // the guard is what rejected the basis.
@@ -191,7 +220,10 @@ enum FieldIdx
 // degenerate, so a slot-indexing error there would be invisible. Two
 // components give a stride of 2 and put the pack/unpack loops of
 // allreduce_shared_locals_at_depth under a real index (see R6 in the design
-// document, and T10, which changes those loops).
+// document). Since T10 the basis also carries sets_per_component = 2, so the
+// slot expression `ci * (NComps * sets) + c * sets + s` has a non-trivial
+// factor at every one of its three levels and no wrong nesting of the three
+// collapses to the right answer.
 static constexpr int BASIS_ORDER = 0;
 static constexpr int BASIS_NCOMPS = 2;
 using Basis = CanopyTest::MonopoleBasis<double, BASIS_ORDER, BASIS_NCOMPS>;
@@ -404,7 +436,15 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
     // and the Allreduce that follows adds exact zeros to it. That is why a
     // SUM over ranks here is bit-exact rather than a reassociation.
     // ----------------------------------------------------------------------
-    std::vector<double> D( static_cast<std::size_t>( n_cells ) * NC, 0.0 );
+    // NCS slots per cell: one per (component, set) pair, flattened by
+    // Basis::comp_set_slot, which is DownwardSweep::shared_slot's (c, s)
+    // factor and the locals view's third index. The reference uses the
+    // basis's own function rather than open-coding c * NSETS + s, so a
+    // change of flattening order moves both sides together or neither.
+    constexpr int NSETS = Basis::sets_per_component;
+    constexpr int NCS = NC * NSETS;
+
+    std::vector<double> D( static_cast<std::size_t>( n_cells ) * NCS, 0.0 );
     long long n_pairs_local = 0;
     std::size_t n_targets_local = 0;
 
@@ -420,32 +460,41 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
         n_pairs_local += static_cast<long long>( kv.second.size() );
 
         for ( int c = 0; c < NC; c++ )
-        {
-            double acc = 0.0;
-            // As-is: this vector's order is the sweep's CSR walk order.
-            for ( const auto& src : kv.second )
+            for ( int st = 0; st < NSETS; st++ )
             {
-                const int s_idx = src.second;
-                const int d_s = cells[s_idx].depth;
-                const int dd = d_s - d_t;
-                const int max_d = ( d_s > d_t ) ? d_s : d_t;
-                const double inv_unit_w = 1.0 / half_width_at_depth[max_d];
-                const int ii = static_cast<int>( std::lround(
-                    ( cells[s_idx].center[0] - cells[t_idx].center[0] ) *
-                    inv_unit_w ) );
-                const int jj = static_cast<int>( std::lround(
-                    ( cells[s_idx].center[1] - cells[t_idx].center[1] ) *
-                    inv_unit_w ) );
-                const int kk = static_cast<int>( std::lround(
-                    ( cells[s_idx].center[2] - cells[t_idx].center[2] ) *
-                    inv_unit_w ) );
+                double acc = 0.0;
+                // As-is: this vector's order is the sweep's CSR walk order,
+                // and the device kernel walks it once per pair accumulating
+                // into every set, so each set sees this same order.
+                for ( const auto& src : kv.second )
+                {
+                    const int s_idx = src.second;
+                    const int d_s = cells[s_idx].depth;
+                    const int dd = d_s - d_t;
+                    const int max_d = ( d_s > d_t ) ? d_s : d_t;
+                    const double inv_unit_w = 1.0 / half_width_at_depth[max_d];
+                    const int ii = static_cast<int>( std::lround(
+                        ( cells[s_idx].center[0] - cells[t_idx].center[0] ) *
+                        inv_unit_w ) );
+                    const int jj = static_cast<int>( std::lround(
+                        ( cells[s_idx].center[1] - cells[t_idx].center[1] ) *
+                        inv_unit_w ) );
+                    const int kk = static_cast<int>( std::lround(
+                        ( cells[s_idx].center[2] - cells[t_idx].center[2] ) *
+                        inv_unit_w ) );
 
-                Basis::m2l_accumulate(
-                    acc, Basis::m2l_operator_entry( dd, ii, jj, kk ),
-                    h_M( s_idx, 0, c ) );
+                    // Both the operator entry and the per-set operator come
+                    // from the basis, so set 1's T^2 is the same statement
+                    // sequence here and in m2l_core.
+                    const double T =
+                        Basis::m2l_operator_entry( dd, ii, jj, kk );
+                    Basis::m2l_accumulate( acc,
+                                           Basis::m2l_set_operator( T, st ),
+                                           h_M( s_idx, 0, c ) );
+                }
+                D[static_cast<std::size_t>( t_idx ) * NCS +
+                  Basis::comp_set_slot( c, st )] = acc;
             }
-            D[static_cast<std::size_t>( t_idx ) * NC + c] = acc;
-        }
     }
 
     if ( nprocs > 1 )
@@ -508,7 +557,12 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
         return ( it != owner_map.end() ) ? it->second : OWNER_SHARED;
     };
 
-    std::vector<double> L_ref( static_cast<std::size_t>( n_cells ) * NC, 0.0 );
+    // Every set telescopes independently and through the same two branches:
+    // L2L is the identity on each slot, and the shared-cell round trip packs
+    // and unpacks each slot with the same expression. So the loop below is
+    // over the flat slot range, not over (component, set).
+    std::vector<double> L_ref( static_cast<std::size_t>( n_cells ) * NCS,
+                               0.0 );
     int n_shared_cells = 0;
     for ( int i : by_depth )
     {
@@ -518,13 +572,14 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
         if ( is_shared )
             n_shared_cells++;
 
-        for ( int c = 0; c < NC; c++ )
+        for ( int slot = 0; slot < NCS; slot++ )
         {
             const double parent_val =
                 ( pit != key_to_idx.end() )
-                    ? L_ref[static_cast<std::size_t>( pit->second ) * NC + c]
+                    ? L_ref[static_cast<std::size_t>( pit->second ) * NCS +
+                            slot]
                     : 0.0;
-            const double Dv = D[static_cast<std::size_t>( i ) * NC + c];
+            const double Dv = D[static_cast<std::size_t>( i ) * NCS + slot];
 
             double out;
             if ( !is_shared )
@@ -538,7 +593,7 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
                 const double delta = post_m2l - a;
                 out = a + delta;
             }
-            L_ref[static_cast<std::size_t>( i ) * NC + c] = out;
+            L_ref[static_cast<std::size_t>( i ) * NCS + slot] = out;
         }
     }
 
@@ -554,7 +609,10 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
     ASSERT_EQ( static_cast<int>( h_L.extent( 0 ) ), n_cells );
     ASSERT_EQ( static_cast<int>( h_L.extent( 1 ) ),
                Basis::num_coeffs_per_cell );
-    ASSERT_EQ( static_cast<int>( h_L.extent( 2 ) ), NC );
+    ASSERT_EQ( static_cast<int>( h_L.extent( 2 ) ), NCS )
+        << "locals()'s third extent is not num_components * "
+           "sets_per_component; the sweep and the basis disagree on how many "
+           "sets the locals view carries";
 
     // The verdict is EXPECT_DOUBLE_EQ (4 ULP), as T6 specifies. Bit-identity
     // is the stronger claim the reference is built to support, so it is
@@ -566,6 +624,15 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
     int n_checked = 0;
     int n_not_bit_identical = 0;
     double max_abs_ref = 0.0;
+    // How far apart the two sets are on the cells this rank checks. Set 1
+    // accumulates T^2*M where set 0 accumulates T*M, so this is strictly
+    // positive on any tree with a MAC-admissible pair — and is zero exactly
+    // when set 1 has become a copy of set 0, which the comparison above
+    // cannot see, because the host reference would have followed the change
+    // through m2l_set_operator. This is the assertion that makes the second
+    // set load-bearing rather than decorative.
+    double max_set_delta = 0.0;
+    double max_shared_set_delta = 0.0;
     for ( int i = 0; i < n_cells; i++ )
     {
         const int owner = owner_of_cell( cells[i].key );
@@ -574,26 +641,44 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
 
         for ( int c = 0; c < NC; c++ )
         {
-            const double ref = L_ref[static_cast<std::size_t>( i ) * NC + c];
-            const double got = h_L( i, 0, c );
-            max_abs_ref = std::max( max_abs_ref, std::abs( ref ) );
-            n_checked++;
-
-            if ( ref == got )
+            const double set0 = h_L( i, 0, Basis::comp_set_slot( c, 0 ) );
+            for ( int st = 1; st < NSETS; st++ )
             {
-                EXPECT_DOUBLE_EQ( got, ref );
-                continue;
+                const double d = std::abs(
+                    h_L( i, 0, Basis::comp_set_slot( c, st ) ) - set0 );
+                max_set_delta = std::max( max_set_delta, d );
+                if ( owner == OWNER_SHARED )
+                    max_shared_set_delta =
+                        std::max( max_shared_set_delta, d );
             }
-            n_not_bit_identical++;
-            if ( n_not_bit_identical <= 8 )
-                EXPECT_DOUBLE_EQ( got, ref )
-                    << "locals() disagrees with the host reference at cell "
-                    << i << " (key " << cells[i].key << ", depth "
-                    << cells[i].depth << ", owner " << owner
-                    << ") component " << c;
-            else
-                EXPECT_DOUBLE_EQ( got, ref );
         }
+
+        for ( int c = 0; c < NC; c++ )
+            for ( int st = 0; st < NSETS; st++ )
+            {
+                const int slot = Basis::comp_set_slot( c, st );
+                const double ref =
+                    L_ref[static_cast<std::size_t>( i ) * NCS + slot];
+                const double got = h_L( i, 0, slot );
+                max_abs_ref = std::max( max_abs_ref, std::abs( ref ) );
+                n_checked++;
+
+                if ( ref == got )
+                {
+                    EXPECT_DOUBLE_EQ( got, ref );
+                    continue;
+                }
+                n_not_bit_identical++;
+                if ( n_not_bit_identical <= 8 )
+                    EXPECT_DOUBLE_EQ( got, ref )
+                        << "locals() disagrees with the host reference at "
+                           "cell "
+                        << i << " (key " << cells[i].key << ", depth "
+                        << cells[i].depth << ", owner " << owner
+                        << ") component " << c << " set " << st;
+                else
+                    EXPECT_DOUBLE_EQ( got, ref );
+            }
     }
 
     // The reference must be non-trivial, or an all-zero locals() would pass.
@@ -605,6 +690,73 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
            "nothing; the M2L interaction lists are probably empty";
     EXPECT_GT( n_checked, 0 ) << "no cell on this rank was checked";
 
+    // ----------------------------------------------------------------------
+    // The two sets must hold different numbers, everywhere it matters.
+    //
+    // A slot map that ALIASES the two sets is invisible if they agree, and
+    // the comparison above cannot see it either: both the device path and
+    // the reference reach the per-set operator through
+    // Basis::m2l_set_operator, so replacing set 1 by a copy of set 0 moves
+    // both sides together and every EXPECT_DOUBLE_EQ above still passes.
+    // This is the check that fails instead.
+    //
+    // Strictly positive by construction on any tree with a MAC-admissible
+    // pair: set 0 accumulates T*M and set 1 accumulates T^2*M, and every
+    // MAC-admissible T is 1/||offset|| times a power of two with
+    // ||offset|| >= 2, so T != 1 and the two sums differ.
+    // ----------------------------------------------------------------------
+    double global_max_set_delta = 0.0;
+    MPI_Allreduce( &max_set_delta, &global_max_set_delta, 1, MPI_DOUBLE,
+                   MPI_MAX, MPI_COMM_WORLD );
+    EXPECT_GT( global_max_set_delta, 0.0 )
+        << "set 1 of locals() equals set 0 everywhere. Set 1 accumulates "
+           "T^2*M and set 0 accumulates T*M over the same interaction list, "
+           "so they cannot agree unless the sets have been aliased onto one "
+           "slot or set 1 has been replaced by a copy of set 0";
+
+    double global_max_shared_set_delta = 0.0;
+    MPI_Allreduce( &max_shared_set_delta, &global_max_shared_set_delta, 1,
+                   MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD );
+
+    // ----------------------------------------------------------------------
+    // SLOT COVERAGE — the shared-cell slot map is a bijection onto the full
+    // slot range, and all three loops realize it (R6, T10 step 5).
+    //
+    // The sweep marks each buffer slot as each of its three shared-cell
+    // loops writes it, and reports the totals. This separates the two R6
+    // classes that corrupt an answer from the one that does not:
+    //
+    //   aliasing   - a slot written twice by one loop; the other slot it
+    //                should have covered is then unwritten too.
+    //   truncation - a slot in range that no loop wrote, e.g. a pack nest
+    //                whose set bound is short.
+    //
+    // and an inert relabeling — a bijection applied consistently — passes,
+    // as it should: _shared_snapshot_buf is private to those two functions
+    // and no correctness claim rests on which slot holds which coefficient.
+    //
+    // It needs no reference data and holds at every rank count. Shared cells
+    // are a property of the tree, not the rank count, so `expected` is
+    // non-zero at np=1 as well.
+    // ----------------------------------------------------------------------
+    const long long slot_expected = fix.downward.shared_slot_expected();
+    EXPECT_GT( slot_expected, 0 )
+        << "no shared-cell slot was packed at all, so the coverage assertions "
+           "below are vacuous; shared cells exist at every rank count at this "
+           "configuration";
+    EXPECT_EQ( slot_expected, fix.downward.shared_snapshot_writes() )
+        << "the snapshot pack did not cover the slot range exactly once";
+    EXPECT_EQ( slot_expected, fix.downward.shared_pack_writes() )
+        << "the Allreduce pack did not cover the slot range exactly once";
+    EXPECT_EQ( slot_expected, fix.downward.shared_unpack_writes() )
+        << "the Allreduce unpack did not cover the slot range exactly once";
+    EXPECT_EQ( 0, fix.downward.shared_slot_aliased() )
+        << "a shared-cell slot was written twice by one pass, or written out "
+           "of range: the slot map is not injective";
+    EXPECT_EQ( 0, fix.downward.shared_slot_unwritten() )
+        << "a shared-cell slot in range was never written: the slot map is "
+           "not onto, so that set's M2L delta is not summed across ranks";
+
     // Provenance for the job log. total_fallback_pair_count() is printed, not
     // asserted: MonopoleBasis::m2l_translate reconstructs the same integer key
     // and calls the same m2l_operator_entry as the fused path, so a pair that
@@ -613,11 +765,22 @@ void testLocalsMatchHostReference( int num_particles_per_rank, int ncrit,
     std::printf( "[far-field-contract] nprocs=%d rank=%d cells=%d "
                  "targets=%zu ilist_pairs=%lld m2l_pairs=%lld "
                  "fallback_pairs=%lld shared_cells=%d checked=%d "
-                 "not_bit_identical=%d max_abs_ref=%.17e\n",
+                 "not_bit_identical=%d max_abs_ref=%.17e "
+                 "sets=%d locals_ext=(%zu,%zu,%zu) "
+                 "slot_expected=%lld snap_writes=%lld pack_writes=%lld "
+                 "unpack_writes=%lld slot_aliased=%lld slot_unwritten=%lld "
+                 "max_set_delta=%.17e max_shared_set_delta=%.17e\n",
                  nprocs, rank, n_cells, n_targets_local, n_pairs_local,
                  fix.downward.total_m2l_pair_count(),
                  fix.downward.total_fallback_pair_count(), n_shared_cells,
-                 n_checked, n_not_bit_identical, global_max_ref );
+                 n_checked, n_not_bit_identical, global_max_ref, NSETS,
+                 h_L.extent( 0 ), h_L.extent( 1 ), h_L.extent( 2 ),
+                 slot_expected, fix.downward.shared_snapshot_writes(),
+                 fix.downward.shared_pack_writes(),
+                 fix.downward.shared_unpack_writes(),
+                 fix.downward.shared_slot_aliased(),
+                 fix.downward.shared_slot_unwritten(), global_max_set_delta,
+                 global_max_shared_set_delta );
     std::fflush( stdout );
 }
 
@@ -662,7 +825,10 @@ void testL2PReturnsTheLocal( int num_particles_per_rank, int ncrit,
         n_checked++;
         for ( int c = 0; c < NC; c++ )
         {
-            EXPECT_DOUBLE_EQ( h_phi( p, c ), h_L( cidx, 0, c ) )
+            // SET 0. l2p_evaluate reads comp_set_slot(c, 0); set 1 is the
+            // T^2 conformance probe and the potential view has no set axis.
+            EXPECT_DOUBLE_EQ( h_phi( p, c ),
+                              h_L( cidx, 0, Basis::comp_set_slot( c, 0 ) ) )
                 << "L2P did not return the leaf's local at particle " << p
                 << " component " << c;
             for ( int d = 0; d < 3; d++ )
@@ -987,32 +1153,36 @@ TEST( FarFieldContract, levelReachesTheKey )
 //---------------------------------------------------------------------------//
 // PERMANENT NEGATIVE TEST — this block must not compile.
 //
-// Three bases, each MonopoleBasis with one or two traits changed, and each
+// Four bases, each MonopoleBasis with one or two traits changed, and each
 // instantiated on the sweep(s) that guard the trait it breaks. Between them
-// they hit all five guards; see the per-case comments below for why one basis
+// they hit all six guards; see the per-case comments below for why one basis
 // is not enough.
 //
 // WHAT IS BEING TESTED IS THE GUARD THE SWEEPS CARRY, not MonopoleBasis's own
-// assert. The five asserts are:
+// assert. The six asserts are:
 //
-//   src/Canopy_UpwardSweep.hpp:73-78     "UpwardSweep: the basis's coeff_type
+//   src/Canopy_UpwardSweep.hpp:74-79     "UpwardSweep: the basis's coeff_type
 //                                         is not scalars_per_coeff contiguous
 //                                         component_scalar_type, ..."
-//   src/Canopy_UpwardSweep.hpp:84-92     "UpwardSweep: the basis's coefficient
+//   src/Canopy_UpwardSweep.hpp:85-93     "UpwardSweep: the basis's coefficient
 //                                         traits disagree with
 //                                         detail::coeff_traits ..."
-//   src/Canopy_DownwardSweep.hpp:117-122 the DownwardSweep sizeof analogue
-//   src/Canopy_DownwardSweep.hpp:128-136 the DownwardSweep traits analogue
-//   src/Canopy_DownwardSweep.hpp:433-442 "this basis selects
+//   src/Canopy_DownwardSweep.hpp:124-129 the DownwardSweep sizeof analogue
+//   src/Canopy_DownwardSweep.hpp:135-143 the DownwardSweep traits analogue
+//   src/Canopy_DownwardSweep.hpp:154-158 "the basis declares
+//                                         sets_per_component < 1, so its
+//                                         locals view would have a degenerate
+//                                         third extent ..."
+//   src/Canopy_DownwardSweep.hpp:572-581 "this basis selects
 //                                         M2LOverflow::EscalateToP2P, and the
 //                                         escalation path is unimplemented"
 //
-// and all five are at class scope, so naming a sweep type completely — which
+// and all six are at class scope, so naming a sweep type completely — which
 // the sizeof() calls below do — is enough to fire them. An inconsistent basis
 // cannot instantiate a sweep at all.
 //
 // DERIVATION IS DELIBERATE, not a shortcut. Because the ONLY thing wrong with
-// each basis below is its one or two changed traits, deleting the five
+// each basis below is its one or two changed traits, deleting the six
 // asserts would make this block COMPILE — the sweeps would instantiate
 // happily and then mis-size an MPI count at runtime. A hand-rolled minimal
 // bad basis would keep failing on missing members after the asserts were
@@ -1075,6 +1245,28 @@ struct EscalateToP2PBasis
         Canopy::M2LOverflow::EscalateToP2P;
 };
 
+// Case D — declares no coefficient sets at all. Every other trait is
+// MonopoleBasis's, so Cases A and B's four coefficient guards pass and Case
+// C's overflow guard passes, and the sets guard is the first assert reached.
+// Targets the DownwardSweep sets_per_component guard.
+//
+// CASE D NEEDS ITS OWN BASIS, for the same reason Cases B and C do: clang
+// reports only the FIRST failing class-scope static_assert per class
+// instantiation, so folding this into any basis above would put it behind
+// that basis's failure and it would never be reached. UpwardSweep is not
+// instantiated on it — sets are a downward-pass quantity, the multipole view
+// has no set axis, and only DownwardSweep carries the guard.
+//
+// zero, not a negative number, because zero is the reachable mistake: a
+// basis author copying MonopoleBasis's shape and value-initializing the
+// trait gets a locals view with a third extent of 0 and every local read out
+// of bounds, with nothing else wrong to notice.
+struct ZeroSetsBasis
+    : public CanopyTest::MonopoleBasis<double, BASIS_ORDER, BASIS_NCOMPS>
+{
+    static constexpr int sets_per_component = 0;
+};
+
 using InconsistentUpwardA =
     UpwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, InconsistentCoeffBasis>;
 using InconsistentDownwardA =
@@ -1085,6 +1277,8 @@ using InconsistentDownwardB =
     DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, InconsistentComponentBasis>;
 using EscalatingDownwardC =
     DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, EscalateToP2PBasis>;
+using ZeroSetsDownwardD =
+    DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, ZeroSetsBasis>;
 
 // sizeof() requires a complete type, which instantiates the class body and
 // therefore the static_asserts in it.
@@ -1092,28 +1286,34 @@ static_assert( sizeof( InconsistentUpwardA ) > 0,
                "CANOPY_TEST_EXPECT_COMPILE_FAILURE: UpwardSweep accepted a "
                "basis whose coeff_type is not scalars_per_coeff contiguous "
                "component_scalar_type. Its sizeof static_assert "
-               "(Canopy_UpwardSweep.hpp:73-78) has been deleted." );
+               "(Canopy_UpwardSweep.hpp:74-79) has been deleted." );
 static_assert( sizeof( InconsistentDownwardA ) > 0,
                "CANOPY_TEST_EXPECT_COMPILE_FAILURE: DownwardSweep accepted a "
                "basis whose coeff_type is not scalars_per_coeff contiguous "
                "component_scalar_type. Its sizeof static_assert "
-               "(Canopy_DownwardSweep.hpp:117-122) has been deleted." );
+               "(Canopy_DownwardSweep.hpp:124-129) has been deleted." );
 static_assert( sizeof( InconsistentUpwardB ) > 0,
                "CANOPY_TEST_EXPECT_COMPILE_FAILURE: UpwardSweep accepted a "
                "basis whose traits disagree with detail::coeff_traits. Its "
                "coeff_traits cross-check static_assert "
-               "(Canopy_UpwardSweep.hpp:84-92) has been deleted." );
+               "(Canopy_UpwardSweep.hpp:85-93) has been deleted." );
 static_assert( sizeof( InconsistentDownwardB ) > 0,
                "CANOPY_TEST_EXPECT_COMPILE_FAILURE: DownwardSweep accepted a "
                "basis whose traits disagree with detail::coeff_traits. Its "
                "coeff_traits cross-check static_assert "
-               "(Canopy_DownwardSweep.hpp:128-136) has been deleted." );
+               "(Canopy_DownwardSweep.hpp:135-143) has been deleted." );
 static_assert( sizeof( EscalatingDownwardC ) > 0,
                "CANOPY_TEST_EXPECT_COMPILE_FAILURE: DownwardSweep accepted a "
                "basis selecting M2LOverflow::EscalateToP2P. No path exists to "
                "hand an overflowing M2L pair to the direct sum, so its "
                "m2l_overflow_policy static_assert has been deleted and such a "
                "basis now silently produces a partial far field." );
+static_assert( sizeof( ZeroSetsDownwardD ) > 0,
+               "CANOPY_TEST_EXPECT_COMPILE_FAILURE: DownwardSweep accepted a "
+               "basis declaring sets_per_component = 0. Its locals view would "
+               "have a third extent of zero and every local coefficient read "
+               "would be out of bounds, so its sets_per_component "
+               "static_assert has been deleted." );
 
 } // namespace FarFieldContractTest
 #endif // CANOPY_TEST_EXPECT_COMPILE_FAILURE

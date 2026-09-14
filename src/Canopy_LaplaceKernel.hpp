@@ -203,6 +203,32 @@ struct LaplaceKernel
     static constexpr int num_components = NComps;
 
     // -----------------------------------------------------------------------
+    // sets_per_component — how many independent coefficient SETS the downward
+    // sweep's locals view carries for each component.
+    //
+    // The locals view's third extent is num_components * sets_per_component,
+    // and the flattening of (component, set) onto that extent is
+    //
+    //     slot = c * sets_per_component + s
+    //
+    // component-major, set-minor. That order is not a free choice: it is the
+    // one DownwardSweep::shared_slot uses for the shared-cell snapshot and
+    // Allreduce, and every basis slot expression must agree with it or a
+    // coefficient lands in another set's slot.
+    //
+    // A set is an independent quantity accumulated over the SAME interaction
+    // list — a second local produced by a different operator, not a second
+    // component and not a second coefficient. The multipole view has no set
+    // axis: sets are a property of the downward pass alone.
+    //
+    // 1 for this basis. The solid-harmonic local is one set of
+    // (P+1)(P+2)/2 coefficients per component, and at 1 the flattening above
+    // collapses to `c` exactly, so the third extent and every index
+    // expression are what they were before this trait existed.
+    // -----------------------------------------------------------------------
+    static constexpr int sets_per_component = 1;
+
+    // -----------------------------------------------------------------------
     // The M2L operator set. Opaque to the sweep, which stores one of these,
     // hands it back to m2l_pre_cell / m2l_core / m2l_post_cell and never
     // indexes it — the only thing the sweep says about an operator is the

@@ -86,7 +86,11 @@ decode_morton( MortonKey k, int& d, int& ix, int& iy, int& iz )
 //   3. L2P: evaluate local expansion at each particle, producing
 //           potential and (optionally) gradient.
 //
-// Storage is (num_cells, coeffs_per_cell, NComps) matching UpwardSweep.
+// Storage is (num_cells, coeffs_per_cell, NComps * sets_per_component).
+// The first two extents match UpwardSweep; the third does not, because a
+// set is a downward-pass quantity and the multipole view has no set axis.
+// At sets_per_component == 1 — every basis in src/ — the third extent is
+// NComps and the two views have the same shape, as they always did.
 //
 // Output:
 //   potential(particle_idx, comp_idx)
@@ -140,6 +144,24 @@ class DownwardSweep
 
     static constexpr int coeffs_per_cell = KernelType::num_coeffs_per_cell;
     static constexpr int NComps = KernelType::num_components;
+
+    // How many independent coefficient sets the basis keeps per component in
+    // the locals view. See KernelType::sets_per_component for what a set is;
+    // see shared_slot below for the (component, set) flattening, which this
+    // sweep and every basis slot expression must spell the same way.
+    static constexpr int sets_per_component = KernelType::sets_per_component;
+
+    static_assert( sets_per_component >= 1,
+                   "DownwardSweep: the basis declares sets_per_component < 1, "
+                   "so its locals view would have a degenerate third extent "
+                   "and every local coefficient read would be out of bounds" );
+
+    // The locals view's third extent: one slot per (component, set) pair.
+    // Collapses to NComps at sets_per_component == 1.
+    static constexpr int NCompSlots = NComps * sets_per_component;
+
+    // Slots one shared cell contributes to the snapshot / Allreduce buffers.
+    static constexpr int shared_slots_per_cell = coeffs_per_cell * NCompSlots;
 
     // Local coefficient storage. LayoutRight so a single thread can scan
     // within-cell coefficients contiguously and a warp writing different
@@ -747,6 +769,54 @@ class DownwardSweep
         _shared_snapshot_indices; // shared cell indices at current depth
     std::vector<coeff_type> _shared_snapshot_buf;
 
+    // Shared-cell slot coverage, accumulated over the shared depths of one
+    // execute() and reset at its top. Surfaced by shared_slot_expected() and
+    // the five counters beside it; see the comment there for the property
+    // they state.
+    long long _shared_slot_expected = 0;
+    long long _shared_snapshot_writes = 0;
+    long long _shared_pack_writes = 0;
+    long long _shared_unpack_writes = 0;
+    long long _shared_slot_aliased = 0;
+    long long _shared_slot_unwritten = 0;
+
+    // One pass of the shared-cell nest marks its writes here, one byte per
+    // slot of the current depth's buffer; note_shared_slot() sets a byte and
+    // tally_shared_slots() reads the marks back. Kept as a member so the
+    // three loops of one depth do not each allocate.
+    std::vector<unsigned char> _shared_slot_marks;
+
+    // Record that a shared-cell loop wrote buffer slot `k`, and count the
+    // two ways shared_slot can be wrong: out of range, and already written
+    // by this same pass (aliasing). `writes` is the per-loop write counter.
+    // The bounds test also keeps the marking itself memory-safe when the
+    // slot expression is broken.
+    void note_shared_slot( int k, long long& writes )
+    {
+        writes++;
+        const std::size_t n = _shared_slot_marks.size();
+        if ( k < 0 || static_cast<std::size_t>( k ) >= n )
+        {
+            _shared_slot_aliased++; // out of range: counted with aliasing,
+            return;                 // both mean "not a bijection onto [0,n)"
+        }
+        if ( _shared_slot_marks[k] )
+            _shared_slot_aliased++;
+        _shared_slot_marks[k] = 1;
+    }
+
+    // Close out one pass: count the slots it left unwritten and clear the
+    // marks for the next pass.
+    void tally_shared_slots()
+    {
+        for ( unsigned char& m : _shared_slot_marks )
+        {
+            if ( !m )
+                _shared_slot_unwritten++;
+            m = 0;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // _grow_m2l_op_cache(): make sure the operator cache can hold `needed`
     // columns, preserving the ones it already holds.
@@ -866,6 +936,74 @@ class DownwardSweep
         return static_cast<int>( _m2l_realized_keys.size() );
     }
 
+    // -----------------------------------------------------------------------
+    // shared_slot — THE slot map of the shared-cell exchange buffers.
+    //
+    //     shared_slot(i, ci, c, s)
+    //         = i * shared_slots_per_cell
+    //           + ci * NCompSlots
+    //           + c * sets_per_component + s
+    //
+    // FLATTENING ORDER, stated here because it is not recoverable from the
+    // call sites and because three loops have to agree on it:
+    //   i  - index into _shared_snapshot_indices, i.e. the i-th shared cell
+    //        at the current depth, NOT a cell index. 0 <= i < nshared.
+    //   ci - coefficient index within the cell. 0 <= ci < coeffs_per_cell.
+    //        Major over (c, s), as the locals view's LayoutRight second
+    //        extent is.
+    //   c  - component. 0 <= c < NComps. Major over s.
+    //   s  - set. 0 <= s < sets_per_component. Minor, so
+    //        `c * sets_per_component + s` is exactly the locals view's third
+    //        index and the two agree by construction rather than by comment.
+    //
+    // The image is [0, nshared * shared_slots_per_cell), and the map is a
+    // bijection onto it. That is asserted at run time rather than argued:
+    // the three loops below mark what they write and the four counters under
+    // "Shared-cell slot coverage" report the result.
+    //
+    // ALL THREE shared-cell loops call this — the snapshot pack, the
+    // Allreduce pack and the Allreduce unpack. Each used to carry its own
+    // `idx++` running counter over the same nest, which is the R6 failure
+    // class "pack and unpack disagree"; one expression removes it by
+    // construction. Host-only: all three loops run on host.
+    // -----------------------------------------------------------------------
+    static int shared_slot( int i, int ci, int c, int s )
+    {
+        return i * shared_slots_per_cell + ci * NCompSlots +
+               c * sets_per_component + s;
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared-cell slot coverage (R6).
+    //
+    // Reset at the top of every execute() and accumulated over that solve's
+    // shared depths. The property they state together is that shared_slot is
+    // a BIJECTION onto [0, nshared * shared_slots_per_cell) and that all
+    // three loops realize it over the full range:
+    //
+    //   shared_slot_expected()  > 0                       non-vacuous
+    //   shared_snapshot_writes() == shared_slot_expected()
+    //   shared_pack_writes()     == shared_slot_expected()
+    //   shared_unpack_writes()   == shared_slot_expected()
+    //   shared_slot_aliased()   == 0    no slot written twice by one loop
+    //   shared_slot_unwritten() == 0    no slot left unwritten by a loop
+    //
+    // Aliasing and truncation are the two R6 classes that corrupt an answer;
+    // these separate them from an inert relabeling, which nothing needs to
+    // catch. Asserted by tests/tstFarFieldContract.hpp at every rank count.
+    // Counting is host-side and O(slots) against an MPI_Allreduce and a
+    // whole-view device-to-host copy, so it is not a measurable cost.
+    // -----------------------------------------------------------------------
+    long long shared_slot_expected() const { return _shared_slot_expected; }
+    long long shared_snapshot_writes() const
+    {
+        return _shared_snapshot_writes;
+    }
+    long long shared_pack_writes() const { return _shared_pack_writes; }
+    long long shared_unpack_writes() const { return _shared_unpack_writes; }
+    long long shared_slot_aliased() const { return _shared_slot_aliased; }
+    long long shared_slot_unwritten() const { return _shared_slot_unwritten; }
+
     // The basis's auxiliary tables, borrowed from the UpwardSweep at
     // setup(). Empty before setup(). Shared code must not name a member of
     // this struct — a basis whose aux_tables_type is empty has none.
@@ -947,7 +1085,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
 
     const int num_cells = _device_cells.extent( 0 );
 
-    _locals = coeff_view_type( "locals", num_cells, coeffs_per_cell, NComps );
+    // Third extent is NCompSlots = NComps * sets_per_component, flattened
+    // as c * sets_per_component + s. See shared_slot.
+    _locals =
+        coeff_view_type( "locals", num_cells, coeffs_per_cell, NCompSlots );
 
     // We need particle_cell_idx too. It's private in UpwardSweep, but
     // we can rebuild it from the key-to-idx map and particle keys. A
@@ -2286,23 +2427,31 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     }
 
     const int nshared = static_cast<int>( _shared_snapshot_indices.size() );
-    const int per_cell_complex = coeffs_per_cell * NComps;
+    const int total_slots = nshared * shared_slots_per_cell;
     // coeff_type() is the basis's coefficient identity element.
-    _shared_snapshot_buf.assign( nshared * per_cell_complex, coeff_type() );
+    _shared_snapshot_buf.assign( total_slots, coeff_type() );
     if ( nshared == 0 )
         return;
+
+    _shared_slot_expected += total_slots;
+    _shared_slot_marks.assign( total_slots, 0 );
 
     auto h_locals =
         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, _locals );
     for ( int i = 0; i < nshared; i++ )
     {
         const int cidx = _shared_snapshot_indices[i];
-        int idx = 0;
         for ( int ci = 0; ci < coeffs_per_cell; ci++ )
             for ( int c = 0; c < NComps; c++ )
-                _shared_snapshot_buf[i * per_cell_complex + ( idx++ )] =
-                    h_locals( cidx, ci, c );
+                for ( int st = 0; st < sets_per_component; st++ )
+                {
+                    const int k = shared_slot( i, ci, c, st );
+                    note_shared_slot( k, _shared_snapshot_writes );
+                    _shared_snapshot_buf[k] =
+                        h_locals( cidx, ci, c * sets_per_component + st );
+                }
     }
+    tally_shared_slots();
 }
 
 template <class MemorySpace, class ExecutionSpace, class KernelType>
@@ -2322,11 +2471,12 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     if ( nshared == 0 )
         return;
 
-    const int per_cell_complex = coeffs_per_cell * NComps;
-    const int total_complex = nshared * per_cell_complex;
+    const int total_slots = nshared * shared_slots_per_cell;
 
-    std::vector<coeff_type> sendbuf( total_complex );
-    std::vector<coeff_type> recvbuf( total_complex );
+    std::vector<coeff_type> sendbuf( total_slots );
+    std::vector<coeff_type> recvbuf( total_slots );
+
+    _shared_slot_marks.assign( total_slots, 0 );
 
     auto h_locals =
         Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace{}, _locals );
@@ -2335,14 +2485,18 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     for ( int i = 0; i < nshared; i++ )
     {
         const int cidx = _shared_snapshot_indices[i];
-        int idx = 0;
         for ( int ci = 0; ci < coeffs_per_cell; ci++ )
             for ( int c = 0; c < NComps; c++ )
-            {
-                const int k = i * per_cell_complex + ( idx++ );
-                sendbuf[k] = h_locals( cidx, ci, c ) - _shared_snapshot_buf[k];
-            }
+                for ( int st = 0; st < sets_per_component; st++ )
+                {
+                    const int k = shared_slot( i, ci, c, st );
+                    note_shared_slot( k, _shared_pack_writes );
+                    sendbuf[k] =
+                        h_locals( cidx, ci, c * sets_per_component + st ) -
+                        _shared_snapshot_buf[k];
+                }
     }
+    tally_shared_slots();
 
     MPI_Datatype mpi_scalar =
         ( sizeof( component_scalar_type ) == 8 ) ? MPI_DOUBLE : MPI_FLOAT;
@@ -2351,21 +2505,24 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         MPI_Allreduce(
             reinterpret_cast<component_scalar_type*>( sendbuf.data() ),
             reinterpret_cast<component_scalar_type*>( recvbuf.data() ),
-            scalars_per_coeff * total_complex, mpi_scalar, MPI_SUM, _comm );
+            scalars_per_coeff * total_slots, mpi_scalar, MPI_SUM, _comm );
     }
 
     // _locals[shared] = snapshot + summed delta
     for ( int i = 0; i < nshared; i++ )
     {
         const int cidx = _shared_snapshot_indices[i];
-        int idx = 0;
         for ( int ci = 0; ci < coeffs_per_cell; ci++ )
             for ( int c = 0; c < NComps; c++ )
-            {
-                const int k = i * per_cell_complex + ( idx++ );
-                h_locals( cidx, ci, c ) = _shared_snapshot_buf[k] + recvbuf[k];
-            }
+                for ( int st = 0; st < sets_per_component; st++ )
+                {
+                    const int k = shared_slot( i, ci, c, st );
+                    note_shared_slot( k, _shared_unpack_writes );
+                    h_locals( cidx, ci, c * sets_per_component + st ) =
+                        _shared_snapshot_buf[k] + recvbuf[k];
+                }
     }
+    tally_shared_slots();
 
     Kokkos::deep_copy( _locals, h_locals );
 }
@@ -2559,6 +2716,15 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::execute(
 
         // Stash the multipoles for the M2L kernel
         _m2l_multipoles_view = multipoles;
+
+        // Shared-cell slot coverage is per-solve, so a caller re-executing
+        // reads this solve's numbers and not the sum over every solve.
+        _shared_slot_expected = 0;
+        _shared_snapshot_writes = 0;
+        _shared_pack_writes = 0;
+        _shared_unpack_writes = 0;
+        _shared_slot_aliased = 0;
+        _shared_slot_unwritten = 0;
 
         // Build device-side interaction list if dirty. The function
         // early-returns when clean, so the timer just measures the

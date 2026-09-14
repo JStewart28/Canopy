@@ -3548,3 +3548,444 @@ attribution procedure decisive on its own. The np=5 cross-rank pair has now
 taken the same two values across four runs of three different HEADs; treat
 either as the reference. And the DownwardSweep suite is now known green at
 ranks 1-6 on this machine, which no earlier log could say.
+
+## T10 — locals carry multiple sets per component
+
+T10 is **DONE**. The downward sweep's locals view now has a third extent of
+`NComps * sets_per_component`, all three shared-cell loops index it through one
+`shared_slot` expression, and the conformance basis runs at two sets so that an
+aliasing or truncating slot map is visible in the numbers rather than only in
+the code.
+
+### Decisions taken as given, and how each landed
+
+- **The flattening order is `c * sets_per_component + s`**, applied identically
+  in the `_locals` third extent, in `DownwardSweep::shared_slot` and in
+  `MonopoleBasis::comp_set_slot`. It landed as written and needed no
+  measurement to justify: at `sets_per_component == 1` the expression is
+  literally `c`, the third extent is literally `NComps`, and the three
+  shared-cell nests degenerate to the pre-T10 `idx++` sequence term for term.
+  The order is stated on `shared_slot`'s declaration, per the Conventions row
+  on units and conventions, and restated on `LaplaceKernel::sets_per_component`
+  and `MonopoleBasis::comp_set_slot` so a basis author meets it wherever they
+  enter.
+- **No stash-and-rebuild control run for the np 3-6 wobble.** Not needed, and
+  the reason is sharper than "the procedure says so" — see "The np=5 wobble"
+  below, where step 1 of the three-step procedure is decisive twice over.
+- **The renames T4 left available were taken.** `per_cell_complex` and
+  `total_complex` in the two shared-cell functions are gone: the per-cell
+  figure is now the class-scope `shared_slots_per_cell` and the per-depth one a
+  function-local `total_slots`. Both read wrong once a set count enters, and
+  T4's `Affects:` line had already flagged them. Nothing else in either header
+  was renamed. There is no function-local `scalar_type` alias left in those two
+  functions — T4 had already replaced it with the class-scope
+  `component_scalar_type`.
+
+### `shared_slot`, and every signature that changed with it
+
+On `DownwardSweep` (`src/Canopy_DownwardSweep.hpp`), all new and all public
+except where noted:
+
+```cpp
+// class scope, beside coeffs_per_cell / NComps
+static constexpr int sets_per_component   = KernelType::sets_per_component;
+static constexpr int NCompSlots           = NComps * sets_per_component;
+static constexpr int shared_slots_per_cell = coeffs_per_cell * NCompSlots;
+static_assert( sets_per_component >= 1, ... );          // class scope
+
+//   shared_slot(i, ci, c, s)
+//     = i * shared_slots_per_cell + ci * NCompSlots + c * sets_per_component + s
+// i  = index into _shared_snapshot_indices (the i-th shared cell at this
+//      depth), NOT a cell index
+// ci = coefficient, major over (c, s)
+// c  = component, major over s
+// s  = set, minor — so `c * sets_per_component + s` IS the locals view's
+//      third index
+static int shared_slot( int i, int ci, int c, int s );   // host only
+
+// slot-coverage diagnostics, reset at the top of every execute()
+long long shared_slot_expected() const;    // sum over depths of
+                                           // nshared * shared_slots_per_cell
+long long shared_snapshot_writes() const;
+long long shared_pack_writes() const;
+long long shared_unpack_writes() const;
+long long shared_slot_aliased() const;
+long long shared_slot_unwritten() const;
+
+// private
+void note_shared_slot( int k, long long& writes );
+void tally_shared_slots();
+std::vector<unsigned char> _shared_slot_marks;
+long long _shared_slot_expected, _shared_snapshot_writes, _shared_pack_writes,
+          _shared_unpack_writes, _shared_slot_aliased, _shared_slot_unwritten;
+```
+
+`shared_slot` is host-only and not `KOKKOS_INLINE_FUNCTION`: all three callers
+are host loops around a `create_mirror_view_and_copy`, and the device path
+never sees the exchange buffers at all.
+
+Elsewhere:
+
+- `LaplaceKernel::sets_per_component` — new, 1, with the flattening order and
+  the meaning of "set" on the declaration.
+- `MonopoleBasis::sets_per_component` — 1 → **2**; `num_comp_slots`,
+  `comp_set_slot( c, s )`, `acc_slot( out_idx, c, s )` and
+  `m2l_set_operator( T, s )` new; `m2l_scratch_bytes` gains the
+  `sets_per_component` factor and stays `constexpr`; `m2l_core`,
+  `m2l_post_cell`, `m2l_translate`, `l2l_translate` and `l2p_evaluate` index
+  through `comp_set_slot`/`acc_slot`. `m2l_operator_entry` and
+  `m2l_accumulate` are **untouched**, and `m2l_accumulate` was not inlined back
+  into `m2l_core`.
+- `tests/tstFarFieldContract.hpp` — `D` and `L_ref` are slot-indexed
+  (`cell * NCS + comp_set_slot(c, s)`), the extent assertion is against
+  `NC * sets_per_component`, the comparison runs over both sets, and two new
+  assertion groups were added (the set-difference check and the six
+  slot-coverage checks). `LevelBlindBasis`, `ProbeKey`, `expectKeyTraitsAgree`
+  and `testLevelReachesTheKey` are unchanged. A fourth negative-compile basis,
+  `ZeroSetsBasis`, was added.
+- **`m2l_scratch_bytes` stayed `constexpr` and R3 did not fire.**
+  `sets_per_component` is a `static constexpr int` on the basis, so
+  `src/Canopy_DownwardSweep.hpp:2068`'s `constexpr size_t scratch_bytes` and
+  the `TeamVectorRange` bound derived from it at `:2091` are still constant
+  expressions. Nothing in the fused kernel became a runtime value.
+
+### The negative-compile block needed a fourth basis
+
+T10 adds the first new sweep `static_assert` since T8, so T6's rule applied
+again: `ZeroSetsBasis` derives from `MonopoleBasis` and changes **only**
+`sets_per_component`, to 0 rather than a negative number because 0 is the
+reachable mistake — a basis author copying this shape and value-initializing
+the trait gets a locals view with a third extent of zero and every local read
+out of bounds, with nothing else wrong to notice. Cases A and B's four
+coefficient guards and Case C's overflow guard all pass on it, so the sets
+guard is the first assert reached. Only `DownwardSweep` is instantiated on it:
+the multipole view has no set axis and `UpwardSweep` carries no such guard.
+
+**Run, not merely written.** The by-hand build (the command is in that file's
+header comment) emits **six** diagnostics, one per guard, and the new one reads
+
+```
+src/Canopy_DownwardSweep.hpp:154:20: error: static assertion failed due to
+requirement 'sets_per_component >= 1': DownwardSweep: the basis declares
+sets_per_component < 1, so its locals view would have a degenerate third
+extent and every local coefficient read would be out of bounds
+```
+
+The other five fire at `Canopy_UpwardSweep.hpp:74` and `:86` and
+`Canopy_DownwardSweep.hpp:124`, `:136` and `:573`; the line numbers quoted in
+that file's header comment and in its five `static_assert` messages were
+updated to these measured values. The positive target was rebuilt afterwards
+and both suites re-run (`f3YH7EEJ9zdd`), so the committed binaries are known
+good.
+
+### Why the second set is `T^2` and not something simpler
+
+The set has to differ in the **delta the Allreduce carries**, not merely in the
+value that accumulates into `_locals` afterwards, or an aliasing slot map is
+invisible. The only per-pair quantity reachable from the stages that write
+`_locals` is the operator entry: `m2l_core` is handed
+`(team, M_full, source_cell, ops, op_idx, scratch)` and `m2l_post_cell`
+`(team, scratch, L_out, target_cell, ops)`, neither of which knows a width, and
+`build_aux_tables` takes no `unit_w`. `ops(0, 0, op_idx)` varies per key, so
+`T^2` differs from `T` per pair and therefore per cell, and it is exactly
+reproducible in the host reference because both paths reach it through the one
+`m2l_operator_entry` and then the one `m2l_set_operator`. The square goes into
+its own named local for the same `-ffp-contract=on` reason `m2l_accumulate`
+splits its product into one.
+
+The operator table was **not** widened: `_m2l_op_table` and `_m2l_op_cache`
+still share `(num_coeffs_per_cell, m2l_num_src_coeffs, n_ops)`, and the set
+count lives on the locals view alone. T9's warning that a set dimension there
+would have to move both structures *and* enter the cache key therefore never
+came due.
+
+### What only running revealed
+
+- **Nothing failed on the first build and nothing failed on the first run.**
+  All three targets compiled clean on the first attempt and the first gate job
+  passed 6/6 on all three suites. The only source edits after that were the two
+  deliberate perturbations, their reverts, and the measured line numbers in the
+  negative block's comments.
+- **The value comparison genuinely cannot catch "set 1 is a copy of set 0",
+  and the perturbation proved it rather than merely illustrating it.** Because
+  the host reference reaches the per-set operator through the same
+  `m2l_set_operator` the device kernel does, replacing set 1 by a copy of set 0
+  moves both sides together. In the perturbed run **all 42 failures were the
+  set-difference assertion and not one `EXPECT_DOUBLE_EQ` failed** — even
+  though `not_bit_identical` rose from 0 to 100/60/160 (last-bit differences
+  inside 4 ULP, an artifact of the perturbed build's contraction decisions, not
+  of the delivered code). Single-source-of-truth for the operator is what makes
+  the gate bit-exact and is also exactly what blinds it to this class; the
+  difference check is the only thing that sees it.
+- **The coverage assertion catches truncation where the reference comparison is
+  completely blind.** Shortening the Allreduce pack's set range produced, at
+  np=1 on the Small configuration, `not_bit_identical = 0` and **zero** value
+  failures — because that configuration's shared cells sit at depths 0 and 1
+  where no pair is MAC-admissible, so the dropped set-1 delta is zero — while
+  `pack_writes` read 18 against `slot_expected` 36 and the coverage assertions
+  fired. That is R6's "truncation" row demonstrated at the one place the
+  four-class table says nothing catches it.
+- **`max_shared_set_delta` is 0 at the Small configuration at every rank
+  count, and that is correct rather than a defect.** `replication_depth = 1`
+  puts every shared cell at depth 0 or 1, and no pair is MAC-admissible there
+  under theta = 0.5, so both sets' shared-cell deltas are zero. It is printed
+  and **not** asserted for exactly this reason; the assertion is on the global
+  set difference, which is non-zero at every rank count and both
+  configurations. A later task tightening this must not promote the shared-cell
+  figure to an assertion without changing `replication_depth`.
+- **`bitForBitArtifacts` does not solve at np >= 3** — it `GTEST_SKIP`s before
+  building a fixture — so a np >= 3 rank count shows **three** default-budget
+  `[laplace-solve]` groups, not four: `crossRankAgreement`,
+  `matchesDirectSum`, and `opTableByteBudget`'s wide solve, in that order,
+  each terminated by its own summary line. Step 1 of the attribution procedure
+  needs that mapping to name which body drew which cut, and it is not obvious
+  from the interleaved `-V` log.
+- **`make -j 4`, per T1's operational note.** No SIGKILL. Three targets from
+  cold took 7 minutes; one test translation unit is roughly 3.5 minutes.
+- **`build-tuolumne/` was not reconfigured**, and `CANOPY_ENABLE_DEBUG` is
+  `OFF` there. That is why the slot-coverage instrumentation is unconditional
+  rather than `#ifdef`-guarded: the exit criterion requires the assertion to
+  hold *at every rank count* in that build tree, and a debug-gated check would
+  have compiled to nothing. The cost is one `std::vector<unsigned char>` and
+  one pass per shared depth, against an `MPI_Allreduce` and a whole-view
+  device-to-host copy in the same function.
+- **No `clang-format` pass**, per `CLAUDE.md`.
+- **`git checkout <file>` is the wrong way to revert a perturbation** in an
+  uncommitted working tree: reverting perturbation A that way took
+  `tests/CanopyTest_MonopoleBasis.hpp` back to `HEAD` and discarded every T10
+  edit in it, which had to be reapplied. Revert a perturbation by inverting the
+  edit, not by reaching for `HEAD`, until the task's own work is committed.
+
+### Gate measurements — the Laplace-solve gate
+
+Flux jobs **`f3YGoLLVokLP`** (gate) and **`f3YH7EEJ9zdd`** (verification, after
+both perturbations were reverted), `build-tuolumne/`
+(`Canopy_ENABLE_PROFILING=OFF`), Kokkos SERIAL, tuolumne1018, Cray clang
+20.0.0. `100% tests passed, 0 tests failed out of 6` for all three suites in
+both jobs.
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (skipped) | (skipped) | 3.2093610331931809e-07 | 4.2399302231264458e-08 |
+| 2 | 4.1994107222659022e-13 | 2.1570013757642702e-12 | 3.2093610363952985e-07 | 4.239936667274564e-08 |
+| 3 | 8.0211305411572796e-13 | 4.0353546216363242e-12 | 3.2093610299898352e-07 | 4.2399380705248681e-08 |
+| 4 | 1.114294857300434e-12 | 5.5987399483706545e-12 | 3.2093610299888352e-07 | 4.2399368624331468e-08 |
+| 5 | 9.5809726336249496e-14 | 6.4438389009577268e-13 | 3.209361028925181e-07 | 4.2399357908696204e-08 |
+| 6 | 5.688835866646797e-13 | 2.8631357246763719e-12 | 3.2093610299905848e-07 | 4.2399381662523099e-08 |
+
+That is the **verification** run, and **all 22 cells are character-for-character
+T8's and T1's**. `locals_ext = (103,28,1)`, `optab_ext = (28,49,n_ops)`,
+`a_extent = 169`, `initial_hash = 0xb6ad437608ad69b7`, `op_cap = 32768`,
+`fallback_pairs = 0` at every rank and rank count, and the per-rank
+`n_unique_ops` set is T1's exactly (np=1 → 686; np=2 → 368, 386; np=3 → 273,
+204, 329; np=4 → 264, 128, 234, 194; np=5 → 180, 168, 147, 217, 187; np=6 →
+174, 156, 111, 160, 116, 175). The `opTableByteBudget` body's tight-budget
+figures also reproduce T8's: cap 64, `ops = 64`, fallback 1428 at np=1 and
+639/587, 350/269/478, 336/148/238/202, 162/137/153/196/189,
+148/123/102/143/52/166 at np 2-6.
+
+### The np=5 wobble, attributed at step 1 and without a control run
+
+The **gate** run reproduces 21 of those 22 cells and moves the np=5 pair:
+
+| run | np=5 cross-rank pot | np=5 direct-sum pot |
+| --- | --- | --- |
+| `f3YH7EEJ9zdd` (and T8, T1) | 9.5809726336249496e-14 | 3.209361028925181e-07 |
+| `f3YGoLLVokLP` | 3.3416042637542698e-13 | 3.2093610310582619e-07 |
+
+**Step 1 of the three-step procedure is decisive on its own, twice.** In
+`f3YGoLLVokLP` the three default-budget np=5 solves did not agree with each
+other: `crossRankAgreement` and `opTableByteBudget` drew
+`(180, 168, 147, 217, 187)` while `matchesDirectSum` drew
+`(170, 177, 147, 217, 187)`. In `f3YH7EEJ9zdd`, over the *same binary*, the two
+cuts appear again and in the **opposite** assignment — `crossRankAgreement` on
+`(170, 177, …)` and `matchesDirectSum` on `(180, 168, …)`. Two bodies of one
+job over one binary drawing two different cuts, and two jobs of one binary
+swapping which body draws which, is the multijagged non-determinism measured
+directly; no source change can produce it. Step 2 agrees independently: the
+figure `3.2093610310582619e-07` is already recorded in this document's
+**bit-for-bit gate** section as the np=5 direct-sum value paired with exactly
+this `(170, 177)` split.
+
+Both cross-rank values are three orders under `LS_CROSS_RANK_TOL = 5.6e-10` and
+both direct-sum values three times under `LS_DIRECT_SUM_TOL = 9.63e-07`. The
+np 1-2 bitwise half of the gate is unaffected in both jobs.
+
+**A note for later tasks on the cut-to-value pairing.** T8 recorded the np=5
+cross-rank pair 9.58e-14 / 3.34e-13 as moving while the reported cut stayed
+`(180, 168, 147, 217, 187)`. Here 3.34e-13 came from a body that drew
+`(180, 168, …)` and 9.58e-14 from one that drew `(170, 177, …)`, i.e. the
+pairing is not stable either way. That is consistent with T8's third step
+rather than a contradiction of it — the five-integer key count is a
+fingerprint of a 600-particle assignment and does not determine the partition,
+and the cross-rank max is reassociation-dominated. Do not treat a cut as a
+predictor of the cross-rank figure.
+
+### Gate measurements — FarFieldContract, and the slot-coverage totals
+
+`locals_ext` is `(n_cells, 1, 4)` at every rank count and both configurations:
+`num_coeffs_per_cell = 1`, `NComps = 2`, `sets_per_component = 2`.
+`not_bit_identical = 0` and `fallback_pairs = 0` everywhere, so the exactness
+argument in that file's header survives the second set and R4's discriminator
+is intact for this basis too.
+
+Slot coverage, Basic configuration (1000 particles/rank, ncrit 32,
+`replication_depth` 2). `slot_expected` is
+`sum over depths of nshared * coeffs_per_cell * NComps * sets_per_component`,
+i.e. `4 * shared_cells` here, and each of the three loops wrote exactly that
+many slots:
+
+| np | shared_cells | slot_expected | snap / pack / unpack writes | aliased | unwritten |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 11 | 44 | 44 / 44 / 44 | 0 | 0 |
+| 2 | 34 | 136 | 136 / 136 / 136 | 0 | 0 |
+| 3 | 60 | 240 | 240 / 240 / 240 | 0 | 0 |
+| 4 | 68 | 272 | 272 / 272 / 272 | 0 | 0 |
+| 5 | 72 | 288 | 288 / 288 / 288 | 0 | 0 |
+| 6 | 73 | 292 | 292 / 292 / 292 | 0 | 0 |
+
+Small configuration (200 particles/rank, ncrit 16, `replication_depth` 1):
+9 shared cells and `slot_expected = 36` at **every** rank count, again covered
+exactly once by all three loops with no aliasing and nothing unwritten.
+
+Set separation, `max |L(set 1) - L(set 0)|` over the cells each rank checks,
+reduced with `MPI_MAX`:
+
+| np | Basic, all checked cells | Basic, shared cells only | Small, all checked cells |
+| --- | --- | --- | --- |
+| 1 | 2.59341854299083181e+01 | 5.16159478179159859e-01 | 5.01893368862655187e+00 |
+| 2 | 9.79660306654074020e+01 | 3.33740871150566605e+01 | 1.04426809537041496e+01 |
+| 3 | 1.77336080590497659e+02 | 7.79344169713984343e+01 | 1.99378741757693874e+01 |
+| 4 | 2.37684557672832796e+02 | 1.25746144066579362e+02 | 3.39070120401973654e+01 |
+| 5 | 2.97760057991338272e+02 | 1.70497565335771753e+02 | 4.96867243975121653e+01 |
+| 6 | 3.57123920368927486e+02 | 2.04481853905169999e+02 | 6.60114454595808979e+01 |
+
+The Small column's shared-cell figure is 0 at every rank count, for the
+`replication_depth = 1` reason above, and is printed rather than asserted.
+`levelReachesTheKey` is unchanged and still reports 4628 keys with the level
+against 2572 without, `max_levels_at_one_offset = 3`, `multi_level_offsets =
+1884` — identical to T7's and T8's.
+
+### Perturbation 1 — set 1 replaced by a copy of set 0
+
+`MonopoleBasis::m2l_set_operator` changed to `return T` for every set, so set 1
+holds set 0's numbers. Flux job **`f3YGuJdJY2Aj`**,
+`Canopy_Test_FarFieldContract_MPI_SERIAL` only.
+
+`0% tests passed, 6 tests failed out of 6`. **All 42 failures are the
+set-difference assertion** (`tests/tstFarFieldContract.hpp:710`,
+`EXPECT_GT( global_max_set_delta, 0.0 )`, actual 0), two bodies at each of the
+21 (rank, rank-count) pairs. `l2pReturnsTheLocal` and `levelReachesTheKey`
+passed. `max_set_delta` read exactly 0 at every rank count and both
+configurations. Slot coverage was **clean** throughout — `slot_expected ==
+snap_writes == pack_writes == unpack_writes`, `aliased = 0`, `unwritten = 0` —
+which is correct: this perturbation changes what a set *holds*, not where it
+goes. Reverted and rebuilt.
+
+### Perturbation 2 — the packed slot range shortened by one set
+
+`allreduce_shared_locals_at_depth`'s pack nest changed from
+`st < sets_per_component` to `st < 1`, so set 1's M2L delta is never packed.
+Deliberately chosen to be a no-op for `LaplaceKernel`, whose
+`sets_per_component` is 1. Flux job **`f3YH266i2baf`**,
+`Canopy_Test_FarFieldContract_MPI_SERIAL` only.
+
+`0% tests passed, 6 tests failed out of 6`, with `pack_writes` exactly half of
+`slot_expected` and `slot_unwritten` the other half at every rank count and
+both configurations (18/36, 22/44, 68/136, …). Failures:
+
+| assertion | count |
+| --- | --- |
+| `shared_pack_writes() == slot_expected` (`:748`) | 42 |
+| `shared_slot_unwritten() == 0` (`:755`) | 42 |
+| `EXPECT_DOUBLE_EQ( got, ref )` (`:672`, `:679`) | 6390 |
+
+`snap_writes` and `unpack_writes` stayed exact, and `slot_aliased` stayed 0 —
+so the counters name the truncated loop rather than merely reporting that
+something is wrong.
+
+**The decisive cell is np=1 on the Small configuration**, where the body
+recorded `not_bit_identical = 0` and produced **no** value-comparison failure
+at all, and the two coverage assertions fired alone. Its shared cells are at
+depths 0 and 1 where no pair is MAC-admissible, so the delta that was dropped
+was identically zero and the reference could not see the truncation. That is
+the R6 case the four-class table leaves to nothing, caught. Reverted and
+rebuilt, and the verification run above confirms the tree is clean.
+
+### Repository state left behind
+
+- `src/Canopy_LaplaceKernel.hpp` — `sets_per_component = 1` plus its
+  declaration comment. Nothing else.
+- `src/Canopy_DownwardSweep.hpp` — the three class-scope constants and the
+  `static_assert`, `shared_slot`, the six coverage accessors, the two private
+  helpers and seven private members, the `_locals` third extent, the three
+  rewritten shared-cell nests, the per-solve counter reset in `execute()`, and
+  the class header comment's storage line.
+- `tests/CanopyTest_MonopoleBasis.hpp` — as listed under "signatures" above.
+- `tests/tstFarFieldContract.hpp` — as listed above, plus three header comment
+  blocks (the reference statement, the new "third thing this file gates"
+  section, and the negative block's guard list with its measured line numbers).
+- `scripts/tuolumne/run_ctest_t10.flux` — new, untracked, `--time-limit=8`.
+  **The walltime matters operationally:** the first submission at
+  `--time-limit=20` sat in `SCHED` for over twenty minutes behind another
+  user's 16-node `pdebug` job; resubmitted at 8 minutes it backfilled
+  immediately, as did every later job. All three suites complete in about two
+  minutes. The two perturbation scripts were derived from it in `/tmp` and are
+  not committed.
+- Logs kept: `canopy-t10.f3YGoLLVokLP.log` (the gate),
+  `canopy-t10-pertA.f3YGuJdJY2Aj.log`, `canopy-t10-pertB.f3YH266i2baf.log`,
+  `canopy-t10-verify.f3YH7EEJ9zdd.log`.
+- **`tests/data/laplace_solve_P6.txt` not regenerated**, and the
+  frozen-configuration block in `tests/tstLaplaceSolve.hpp` untouched — that
+  file was not edited at all. `README.md` untouched: no public API and no
+  example's arguments changed, and no new known issue was found.
+- Out of scope and untouched, as directed: `tests/tstLaplaceKernel.hpp` and
+  `Canopy_Test_P2P_*`, which do not compile at `HEAD`; `ctest -L regression`;
+  the partitioner's non-determinism; the `Solver` template parameter (T11);
+  `run_cmake_tuolumne.sh` (still whole-file line-ending churn plus a mode
+  change, predating this session); `setup-repo.txt`; and T8's and T9's three
+  untracked `scripts/tuolumne/*.flux` files.
+
+**Affects:** **T11** — it inherits three things. First, **the contract a
+`FarField` type must satisfy now includes `sets_per_component`**, a
+`static constexpr int` of at least 1, and a basis that omits it does not
+compile at all (no member) while one that declares 0 is rejected by the
+`DownwardSweep` guard with a named message. `MonopoleBasis` is the template for
+a multi-set basis and `LaplaceKernel` for a single-set one; the flattening
+order `c * sets_per_component + s` is part of the contract and not an
+implementation detail, because `shared_slot` and every basis slot expression
+have to spell it the same way. Second, **the negative-compile block now has
+four bases** covering six guards, and T10 was the task that added the sixth —
+so T11, if it adds any class-scope `static_assert` to a sweep (a `FarField`
+conformance check on the template template parameter is the obvious candidate),
+needs its own case there or clang's one-assert-per-instantiation rule will hide
+it behind an existing basis. Third, `Canopy_Test_DownwardSweep_MPI_SERIAL`
+compiled and ran green at ranks 1-6 against the reshaped locals view, and
+`tests/tstDownwardSweep.hpp` needed **no** change — its four `locals()` sites
+index `h_L( c, idx, 0 )` and `LaplaceKernel` is at one set, so the reshape is
+invisible to them. That is the concrete evidence that a
+`sets_per_component == 1` basis is source-compatible with every existing
+consumer, which is what T11's "existing callers unchanged" rests on.
+**T12** — the shape to copy is now `MonopoleBasis` *plus* four members it did
+not have before T10: `sets_per_component`, `comp_set_slot`, `acc_slot` and a
+per-set operator selector. Three properties of that shape are load-bearing and
+should survive the copy. (a) **Every slot expression goes through a named
+function**; nothing open-codes `c * sets + s`, which is what let the host
+reference and the device kernel be checked against each other rather than
+merely written to agree. (b) **The per-set operator is a single source of
+truth**, like `m2l_operator_entry` — and T10 measured the consequence: because
+both paths reach it, a *value* comparison cannot catch a set collapsing onto
+another, and a separate difference assertion is required. A Cartesian-Taylor
+basis whose sets are genuine derivative orders will not have this problem in
+the same form, but it will have the dual one — if two orders can coincide on
+some geometry, the difference check needs a tolerance or a different witness.
+(c) **`m2l_scratch_bytes` must keep the set count as a compile-time factor**;
+it is the one place where a set count could turn a `constexpr` into a runtime
+value and fire R3 silently. **Any later task using the gate** — the np=5
+partitioner wobble has now been seen with the two cuts assigned to *opposite*
+test bodies in two runs of one binary, so step 1 of the attribution procedure
+is decisive without step 2, and the cut is confirmed not to predict the
+cross-rank figure. Also worth knowing before reading a `-V` log:
+`bitForBitArtifacts` skips without solving at np >= 3, so a np >= 3 rank count
+prints three default-budget `[laplace-solve]` groups and not four, in the order
+`crossRankAgreement`, `matchesDirectSum`, `opTableByteBudget`.
