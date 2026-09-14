@@ -13,6 +13,7 @@
 #define CANOPY_UPWARD_SWEEP_HPP
 
 #include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_FarFieldContract.hpp"
 #include "Canopy_MpiCoalescedExchange.hpp"
 #include "Canopy_Profiling.hpp"
 #include "Canopy_SphericalCoefficients.hpp"
@@ -169,6 +170,38 @@ class UpwardSweep
         return ( it != _key_to_cell_idx.end() ) ? it->second : -1;
     }
 
+    // -----------------------------------------------------------------------
+    // set_m2l_kernel_params()
+    //
+    // The kernel's physical parameters, handed to the basis when setup()
+    // builds its auxiliary tables. softening is a LENGTH epsilon and the
+    // kernel's b is epsilon^2; see Canopy_FarFieldContract.hpp for the whole
+    // units statement.
+    //
+    // CALL BEFORE setup(). The tables are built there and nowhere else, so a
+    // value set afterwards reaches nothing until the next setup(). There is
+    // no dirty flag on this class to make that automatic.
+    //
+    // THIS SWEEP AND DownwardSweep MUST BE GIVEN THE SAME PARAMETERS. The
+    // device aux tables are built here and borrowed by DownwardSweep::setup;
+    // the downward sweep builds its own HostSpace aux for the operator table.
+    // For a basis whose tables depend on the kernel, setting one sweep and not
+    // the other would put two different tables into one solve. Solver sets
+    // both, at the two sites where the softening is decided.
+    //
+    // Defaulted, so a test that drives the sweeps directly and never sees an
+    // FmmConfig runs at an unsoftened zero and is unaffected.
+    // -----------------------------------------------------------------------
+    void set_m2l_kernel_params( const M2LKernelParams& params )
+    {
+        _m2l_kernel_params = params;
+    }
+
+    const M2LKernelParams& m2l_kernel_params() const
+    {
+        return _m2l_kernel_params;
+    }
+
     // Access the basis's auxiliary tables (shared with DownwardSweep).
     // Empty before setup().
     const aux_tables_type& aux() const { return _aux; }
@@ -226,6 +259,12 @@ class UpwardSweep
     int _num_local_particles;
     int _max_depth;
 
+    // The kernel's physical parameters, handed to build_aux_tables in
+    // setup(). Set through set_m2l_kernel_params(); the default is an
+    // unsoftened kernel, which is what a sweep driven directly by a test
+    // runs at.
+    M2LKernelParams _m2l_kernel_params;
+
   public:
     void build_particle_cell_idx(
         const Kokkos::View<MortonKey*, memory_space>& particle_keys,
@@ -263,7 +302,8 @@ void UpwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     // Whether any table is needed, and how far it must extend, is the
     // basis's business — the solid-harmonic basis builds A_{n,m} to 2*P
     // here because M2L reaches degree n+j.
-    _aux = KernelType::template build_aux_tables<memory_space>( P );
+    _aux = KernelType::template build_aux_tables<memory_space>(
+        P, _m2l_kernel_params );
 
     _key_to_cell_idx.clear();
     _key_to_cell_idx.reserve( num_cells );

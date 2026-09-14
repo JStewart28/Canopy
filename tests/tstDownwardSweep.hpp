@@ -25,6 +25,7 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <random>
 #include <vector>
@@ -1271,6 +1272,16 @@ void testRebuildsAfterInvalidate()
         fix.downward.interaction_list_build_count();
     EXPECT_EQ( build_count_after_first, 1 );
 
+    // The persistent operator cache after the first build: one column per
+    // realized canonical key, and every one of them a miss, since the cache
+    // started empty.
+    const int cache_size_after_first = fix.downward.m2l_op_cache_size();
+    const long long keys_built_after_first =
+        fix.downward.m2l_op_keys_built_count();
+    EXPECT_GT( cache_size_after_first, 0 );
+    EXPECT_EQ( keys_built_after_first,
+               static_cast<long long>( cache_size_after_first ) );
+
     fix.downward.invalidate_interaction_list();
 
     auto pot2 = fix.downward.allocate_potential( fix.num_local );
@@ -1282,6 +1293,33 @@ void testRebuildsAfterInvalidate()
     EXPECT_EQ( fix.downward.interaction_list_build_count(),
                build_count_after_first + 1 );
 
+    // THE OPERATOR CACHE IS THE POINT OF THIS ADDITION. The interaction list
+    // was rebuilt — the assertion above says so — but the tree did not change,
+    // so every canonical key the rebuild realized was already in the cache and
+    // KernelType::build_m2l_operators must not have been called again. A cache
+    // that silently rebuilt everything would be invisible in every other
+    // number this class exposes, including a bit-for-bit comparison of the
+    // operator table, because it would rebuild the same bits.
+    //
+    // This is where the split T9 introduced is actually measured: the per-tree
+    // key -> op_idx map is rebuilt on the dirty flag, the geometry-keyed
+    // operator cache is not.
+    EXPECT_EQ( fix.downward.m2l_op_keys_built_count(), keys_built_after_first );
+    EXPECT_EQ( fix.downward.m2l_op_cache_size(), cache_size_after_first );
+
+    int caching_rank = 0;
+    MPI_Comm_rank( MPI_COMM_WORLD, &caching_rank );
+    std::printf( "[downward-caching] rank %d builds=%d cache_keys=%d "
+                 "keys_built=%lld\n",
+                 caching_rank, fix.downward.interaction_list_build_count(),
+                 fix.downward.m2l_op_cache_size(),
+                 fix.downward.m2l_op_keys_built_count() );
+    std::fflush( stdout );
+
+    // ...and the potential is unchanged across the re-solve. Together with the
+    // zero-rebuild assertion above, this is the check that a PERSISTING cache
+    // has not gone stale: a cached operator that no longer matched the tree
+    // would move the field here while the counters stayed silent.
     auto h1 = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), pot1 );
     auto h2 = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), pot2 );
     for ( int p = 0; p < fix.num_local; p++ )

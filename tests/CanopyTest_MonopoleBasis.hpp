@@ -70,13 +70,14 @@ namespace CanopyTest
 //     particle's offset inside its leaf is ignored: a monopole local is
 //     constant over the cell.
 //
-// The reason the local is dimensionless is the M2L operator builder's
-// signature. m2l_build_operator receives integers only — no width and no
-// kernel parameters — so the only length scale available to it is the implied
-// unit of its integer offset. Supplying w_unit and kernel_params to the
-// builder is T9's; a physical local is not reachable here, and this basis's
-// gate is locals() against a host recomputation of the same expression, not
-// accuracy against a physical potential.
+// The local is dimensionless BY CHOICE, and after T9 that choice is visible
+// rather than forced. build_m2l_operators is now handed the per-level unit
+// half-widths and the kernel parameters, so a physical operator IS reachable
+// here — this basis declines it. Its gate is locals() against a host
+// recomputation of the same expression, and that recomputation goes through
+// m2l_operator_entry, which takes integers; introducing a length would make
+// every operator a function of the drifting bounding box and buy this fixture
+// nothing. See build_m2l_operators below.
 // ============================================================================
 
 template <class Scalar, int Order, int NComps = 1>
@@ -243,10 +244,18 @@ struct MonopoleBasis
 
     // Host function, not device-callable, matching the Conventions row on
     // host-side construction — even though this one allocates nothing.
+    //
+    // `kernel_params` is the kernel's physical parameters (the softening
+    // LENGTH epsilon; the kernel's b is epsilon^2 — see
+    // src/Canopy_FarFieldContract.hpp). It is in the signature so a basis
+    // whose tables depend on the kernel can build them; this basis has no
+    // tables at all and ignores it, as it ignores the order.
     template <class MemorySpace>
-    static aux_tables_type<MemorySpace> build_aux_tables( int order )
+    static aux_tables_type<MemorySpace>
+    build_aux_tables( int order, const Canopy::M2LKernelParams& kernel_params )
     {
         (void)order;
+        (void)kernel_params;
         return {};
     }
 
@@ -303,7 +312,7 @@ struct MonopoleBasis
     //
     //   T(dd, ix, iy, iz) = F(dd) / || (ix, iy, iz) ||
     //
-    // Key convention, the same one m2l_build_operator is handed
+    // Key convention, the same one build_m2l_operators is handed
     // (src/Canopy_DownwardSweep.hpp:312-322):
     //   dd           = d_source - d_target, the signed depth difference,
     //                  range-guarded to |dd| <= M2L_KEY_DD_MAX by the sweep.
@@ -338,7 +347,7 @@ struct MonopoleBasis
     // and every F is an exact power of two, so the repeated doubling below is
     // exact in binary64 rather than merely accurate.
     //
-    // Both m2l_build_operator and the host reference in
+    // Both build_m2l_operators and the host reference in
     // tests/tstFarFieldContract.hpp call THIS function. That is what makes
     // the test's EXPECT_DOUBLE_EQ exact rather than merely close, and it is
     // why the expression must not be duplicated anywhere.
@@ -532,28 +541,62 @@ struct MonopoleBasis
     }
 
     // =======================================================================
-    // m2l_build_operator — fill the 1x1 operator for one canonicalized key.
+    // build_m2l_operators — fill the 1x1 operator of every canonical key the
+    // sweep's persistent cache is missing.
     //
-    // Parameters mirror LaplaceKernel::m2l_build_operator
-    // (src/Canopy_LaplaceKernel.hpp:664) positionally. The whole key/dd
-    // convention is on m2l_operator_entry above; this function is only the
-    // placement of that one value into the table the sweep allocated
-    // WithoutInitializing, so it must write every entry, which at (1, 1) it
-    // trivially does.
+    // Parameters mirror LaplaceKernel::build_m2l_operators
+    // (src/Canopy_LaplaceKernel.hpp) positionally, and the full statement of
+    // each is there. In brief:
     //
-    // KOKKOS_INLINE_FUNCTION static, mirroring LaplaceKernel, even though the
-    // sweep only ever calls it on host over a Kokkos::HostSpace table inside
-    // its stage-4 build. (The Conventions row that requires a plain static
-    // member is about T9's host-side build_m2l_operators, which allocates and
-    // may call LAPACK; this is the per-key fill.)
+    //   keys[0..n_keys)  canonical keys, column j of `ops` being keys[j].
+    //                    Already through canonicalize_key, which for THIS
+    //                    basis is the identity — it declares
+    //                    key_needs_level = true — so max_d survives and is a
+    //                    real tree level here.
+    //
+    //   unit_w[0..n_levels)
+    //                    the HALF-WIDTH at each depth, w_root / 2^d, indexed
+    //                    by the key's max_d.
+    //
+    //   kernel_params    softening as a LENGTH epsilon; the kernel's b is
+    //                    epsilon^2.
+    //
+    // THIS BASIS READS NEITHER unit_w NOR kernel_params, and that is the
+    // deliberate choice the header comment on this file explains rather than
+    // an oversight. Its local is DIMENSIONLESS by construction: the multipole
+    // is a bare charge and the local is a sum of charges divided by
+    // separations measured in deeper-cell half-widths. Introducing a physical
+    // length here would make the operator a function of the bounding box,
+    // which drifts with the particles, and would move this fixture's gate off
+    // the exact host recomputation it is built on — tstFarFieldContract.hpp's
+    // reference calls m2l_operator_entry, and that function takes integers.
+    //
+    // A basis wanting a physical operator does the opposite: it multiplies
+    // unit_w[k.max_d] in here and squares kernel_params.softening into the
+    // kernel's b. This one is the conformance fixture, not the example of
+    // how to write a physical basis.
+    //
+    // PLAIN STATIC MEMBER, not KOKKOS_INLINE_FUNCTION, per the Conventions
+    // row on host-side operator construction: it runs once on host and a
+    // basis needing LAPACK here must be allowed to call it.
+    //
+    // `ops` is allocated WithoutInitializing, so every entry of every column
+    // must be written — which at (1, 1) per column is trivial.
     // =======================================================================
-    template <class AuxType, class TView>
-    KOKKOS_INLINE_FUNCTION static void
-    m2l_build_operator( int dd, int ix, int iy, int iz, const AuxType& aux,
-                        const TView& T_out )
+    template <class KeyType, class AuxType, class OpsView>
+    static void build_m2l_operators( const KeyType* keys, int n_keys,
+                                     const double* unit_w, int n_levels,
+                                     const Canopy::M2LKernelParams&
+                                         kernel_params,
+                                     const AuxType& aux, const OpsView& ops )
     {
+        (void)unit_w;
+        (void)n_levels;
+        (void)kernel_params;
         (void)aux;
-        T_out( 0, 0 ) = m2l_operator_entry( dd, ix, iy, iz );
+        for ( int j = 0; j < n_keys; j++ )
+            ops( 0, 0, j ) = m2l_operator_entry( keys[j].dd, keys[j].ii,
+                                                 keys[j].jj, keys[j].kk );
     }
 
     // =======================================================================

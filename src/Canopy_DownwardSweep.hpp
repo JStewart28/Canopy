@@ -307,6 +307,123 @@ class DownwardSweep
         return static_cast<int>( from_bytes < cap ? from_bytes : cap );
     }
 
+    // -----------------------------------------------------------------------
+    // set_m2l_kernel_params()
+    //
+    // The kernel's physical parameters, handed to the basis's
+    // build_m2l_operators and build_aux_tables. softening is a LENGTH
+    // epsilon and the kernel's b is epsilon^2; the whole units statement is
+    // on M2LKernelParams in Canopy_FarFieldContract.hpp.
+    //
+    // CHANGING THIS EMPTIES THE OPERATOR CACHE, and that is the point. The
+    // cache below persists across topology changes on the premise that a
+    // canonicalized key PLUS these parameters determines the operator (risk
+    // R5 in tasks/abstract-solver-backend.md). Keep the cache across a
+    // parameter change and a solve whose softening was re-derived would reuse
+    // operators built for the old b — correct on the first solve and wrong
+    // after, which no single-solve gate would catch.
+    //
+    // A no-op when the value is unchanged, so a caller that sets it on every
+    // setup() neither dirties the list nor throws the cache away. That is
+    // what makes it safe for Solver to call unconditionally.
+    //
+    // UpwardSweep has the same setter and must be given the same value: it
+    // builds the device aux tables this sweep then borrows. Solver sets both.
+    // -----------------------------------------------------------------------
+    void set_m2l_kernel_params( const M2LKernelParams& params )
+    {
+        if ( params == _m2l_kernel_params )
+            return;
+        _m2l_kernel_params = params;
+        clear_m2l_op_cache();
+        _interaction_list_dirty = true;
+    }
+
+    const M2LKernelParams& m2l_kernel_params() const
+    {
+        return _m2l_kernel_params;
+    }
+
+    // -----------------------------------------------------------------------
+    // set_root_half_width()
+    //
+    // The HALF-WIDTH (not the full width) of the root cell, in the same units
+    // as the particle coordinates. From it the sweep derives the unit length
+    // at every level, unit_w[d] = w_root / 2^d, and hands that array to
+    // build_m2l_operators; a key's max_d indexes it.
+    //
+    // It is a single scalar because every cell is a cube: TreeBuilder takes
+    // the LARGEST of the three half extents of the root bounding box as the
+    // root half-width (Canopy_TreeBuilder.hpp, root_box()), so there is one
+    // length per level rather than three.
+    //
+    // WHY A SETTER RATHER THAN A setup() ARGUMENT: setup() is handed the
+    // upward sweep and a particle count and has no builder to ask. The
+    // alternative — recovering a physical width inside the interaction-list
+    // build — is deliberately unavailable: the classify pass is a pure-integer
+    // pipeline precisely so its M2LKey output is bit-identical by
+    // construction, with no per-source center gather and no FP rounding, and
+    // half_width_at_depth exists there only under CANOPY_ENABLE_DEBUG.
+    // Integer keys stay integer; only the operator builder sees lengths.
+    //
+    // THE CACHE IS EMPTIED ONLY WHEN THE BASIS CAN SEE THE CHANGE. A basis
+    // with key_needs_level = false has had max_d canonicalized away and its
+    // operators are scale-normalized, so by contract no operator it builds
+    // depends on any entry of unit_w; throwing its cache away because the
+    // bounding box drifted would empty the cache on every rebuild of a
+    // moving particle distribution and leave the cache doing nothing. A basis
+    // with key_needs_level = true does index unit_w, so for it a changed width
+    // invalidates every cached operator.
+    //
+    // A no-op when the value is unchanged.
+    //
+    // Left at zero when nobody calls this — a sweep driven directly by a test
+    // — which is harmless for a key_needs_level = false basis and is stated
+    // on build_m2l_operators.
+    // -----------------------------------------------------------------------
+    void set_root_half_width( double w_root )
+    {
+        if ( w_root == _root_half_width )
+            return;
+        _root_half_width = w_root;
+        if ( KernelType::key_needs_level )
+        {
+            clear_m2l_op_cache();
+            _interaction_list_dirty = true;
+        }
+    }
+
+    double root_half_width() const { return _root_half_width; }
+
+    // -----------------------------------------------------------------------
+    // The persistent operator cache: its size, how many operators have ever
+    // been built into it, and how to empty it.
+    //
+    // m2l_op_keys_built_count() is the cache's miss counter — the cumulative
+    // number of keys handed to KernelType::build_m2l_operators over the life
+    // of this sweep. It is the measurement that separates a cache from a
+    // rebuild: after a topology change that realizes no new key,
+    // interaction_list_build_count() increments and this one does not.
+    // A cache that silently rebuilt everything would be invisible in every
+    // other number this class exposes, including a bit-for-bit comparison of
+    // the operator table.
+    // -----------------------------------------------------------------------
+    int m2l_op_cache_size() const { return _m2l_op_cache_size; }
+
+    long long m2l_op_keys_built_count() const { return _m2l_op_keys_built; }
+
+    // Drop every cached operator. The next interaction-list build rebuilds
+    // the keys it needs. Public because a caller that changes something the
+    // sweep cannot see — a basis with a mutable parameter outside
+    // M2LKernelParams — has no other way to say so, and because the two
+    // setters above call it.
+    void clear_m2l_op_cache()
+    {
+        _m2l_op_cache_index.clear();
+        _m2l_op_cache_size = 0;
+        _m2l_op_cache = m2l_host_operators_type();
+    }
+
     // Number of times build_interaction_list_device has actually performed
     // a rebuild (i.e. did not early-return because dirty was false). Used
     // by tests to verify caching.
@@ -481,9 +598,78 @@ class DownwardSweep
     using m2l_operators_type =
         typename KernelType::template m2l_operators_type<memory_space>;
 
+    // The same operator set in Kokkos::HostSpace. The persistent cache below
+    // lives here rather than in memory_space: it is filled by
+    // KernelType::build_m2l_operators, which is a host function by contract
+    // (it may call LAPACK), and the per-tree table is assembled from it into
+    // the device table's host mirror. On a host backend the two spaces
+    // coincide and the assembly is a host-to-host copy.
+    using m2l_host_operators_type =
+        typename KernelType::template m2l_operators_type<Kokkos::HostSpace>;
+
     // The operator set built by the last build_interaction_list_device().
     // Entry op_idx corresponds to _m2l_realized_keys[op_idx].
     m2l_operators_type _m2l_op_table;
+
+    // -----------------------------------------------------------------------
+    // THE PERSISTENT OPERATOR CACHE, and what separates it from the table
+    // above.
+    //
+    // _m2l_op_table is PER TREE: its column order is this build's op_idx
+    // order, it is sized to this build's realized key count, and it is thrown
+    // away and rebuilt whenever the interaction list is dirty. The cache is
+    // PER GEOMETRY: a canonical key that has ever been built keeps its
+    // operator across every topology change, and the per-tree table is
+    // assembled from it by copying columns. So a rebuild after a repartition
+    // re-derives the key->op_idx map and the CSRs, and builds only the
+    // operators for keys never seen before — which, on a tree that moved but
+    // did not change shape, is none.
+    //
+    // WHAT MAKES THAT SOUND is the contract that a canonicalized key plus
+    // M2LKernelParams (plus, for a key_needs_level basis, unit_w) determines
+    // the operator. Both setters that can move any of those empty the cache.
+    // A basis whose operator depends on anything else — particle positions,
+    // say — must not use this class, and this is the assumption it would
+    // break (risk R5 in tasks/abstract-solver-backend.md).
+    //
+    // BOUNDED IN THE UNIT THE TABLE IS ALREADY ACCOUNTED IN. How many columns
+    // may exist at all is m2l_effective_op_cap() — the byte budget's worth of
+    // KernelType::bytes_per_key columns, floored by the count cap — and the
+    // cache is held to the same number rather than deriving a second one. It
+    // is grown geometrically to what is actually needed and never preallocated
+    // to the cap: at the default budget the cap is 32768 columns, which is
+    // 719 MB at P = 6 for a tree that realizes a few hundred keys.
+    //
+    // ON OVERFLOW THE CACHE IS EMPTIED AND REFILLED FROM THIS TREE'S KEYS.
+    // That always fits: the serial merge above refuses a key beyond
+    // effective_op_cap, so a build's realized key count never exceeds the cap.
+    // The alternative — an eviction policy — would need a usage order the
+    // sweep does not have and would buy nothing at the sizes measured here.
+    // -----------------------------------------------------------------------
+    m2l_host_operators_type _m2l_op_cache;
+
+    // Canonical key -> its column in _m2l_op_cache. Size equals
+    // _m2l_op_cache_size; columns are assigned in first-seen order and never
+    // move while the cache lives.
+    std::unordered_map<M2LKey, int, M2LKeyHash> _m2l_op_cache_index;
+
+    // Columns of _m2l_op_cache actually in use. Its allocated extent(2) may
+    // be larger (geometric growth) and is never smaller.
+    int _m2l_op_cache_size = 0;
+
+    // Cumulative count of keys handed to KernelType::build_m2l_operators over
+    // the life of this sweep, i.e. cache misses. Surfaced by
+    // m2l_op_keys_built_count(); never reset by clear_m2l_op_cache(), because
+    // it is a measurement of work done and not a measurement of cache state.
+    long long _m2l_op_keys_built = 0;
+
+    // The half-width of the root cell, from set_root_half_width(). Zero means
+    // nobody supplied it; see that setter and build_m2l_operators.
+    double _root_half_width = 0.0;
+
+    // The kernel's physical parameters, from set_m2l_kernel_params(). Handed
+    // to build_m2l_operators and to build_aux_tables. Default: unsoftened.
+    M2LKernelParams _m2l_kernel_params;
 
     // The realized key set, in operator-table column order: entry i is the
     // key of _m2l_op_table(:, :, i). Retained past the end of
@@ -560,6 +746,48 @@ class DownwardSweep
     std::vector<int>
         _shared_snapshot_indices; // shared cell indices at current depth
     std::vector<coeff_type> _shared_snapshot_buf;
+
+    // -----------------------------------------------------------------------
+    // _grow_m2l_op_cache(): make sure the operator cache can hold `needed`
+    // columns, preserving the ones it already holds.
+    //
+    // GEOMETRIC, so a distribution that keeps realizing a few new keys per
+    // rebuild does not copy the whole cache each time. Never preallocated to
+    // m2l_effective_op_cap(): that is 32768 columns at the default budget,
+    // 719 MB at P = 6, against the few hundred keys a healthy MAC traversal
+    // actually realizes. The caller has already established that `needed` is
+    // within the cap.
+    //
+    // The copy of the retained columns is a deep_copy of the basis's own
+    // element type into the same LayoutLeft shape, so a cached operator's
+    // bits survive a growth unchanged.
+    // -----------------------------------------------------------------------
+    void _grow_m2l_op_cache( int Nt, int Ns, int needed )
+    {
+        if ( static_cast<int>( _m2l_op_cache.extent( 2 ) ) >= needed &&
+             static_cast<int>( _m2l_op_cache.extent( 0 ) ) == Nt )
+            return;
+
+        int new_cap = static_cast<int>( _m2l_op_cache.extent( 2 ) ) * 2;
+        if ( new_cap < needed )
+            new_cap = needed;
+
+        m2l_host_operators_type grown(
+            Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                "m2l_op_cache" ),
+            Nt, Ns, new_cap );
+        if ( _m2l_op_cache_size > 0 )
+        {
+            auto src = Kokkos::subview(
+                _m2l_op_cache, Kokkos::ALL, Kokkos::ALL,
+                Kokkos::make_pair( 0, _m2l_op_cache_size ) );
+            auto dst = Kokkos::subview(
+                grown, Kokkos::ALL, Kokkos::ALL,
+                Kokkos::make_pair( 0, _m2l_op_cache_size ) );
+            Kokkos::deep_copy( dst, src );
+        }
+        _m2l_op_cache = grown;
+    }
 
   public:
     void build_interaction_list_device(
@@ -807,6 +1035,14 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::setup(
     // rebuilds it against the current tree. Without this, a re-setup
     // after a tree-topology change would silently reuse stale cell
     // indices from the previous tree.
+    //
+    // _m2l_op_cache IS DELIBERATELY NOT CLEARED HERE. Everything dropped
+    // below is indexed by cell index or by this tree's op_idx and is
+    // meaningless against a different tree; the operator cache is keyed by
+    // canonical geometry instead, so the tree changing is precisely the case
+    // it exists to survive. What does empty it is a change to the inputs an
+    // operator is a function of — see set_m2l_kernel_params and
+    // set_root_half_width.
     _m2l_op_table = m2l_operators_type();
     _m2l_ns_csr_targets = Kokkos::View<int*, memory_space>();
     _m2l_ns_csr_offsets = Kokkos::View<int*, memory_space>();
@@ -1320,51 +1556,144 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     _m2l_realized_keys = ops;
 
     // -----------------------------------------------------------------------
-    // Stage 4: build the (Nt, Ns, n_unique_ops) operator table on host,
-    // then deep_copy to device. One m2l_build_operator call per canonical
-    // key. No physical width enters the builder — it is handed
-    // (dd, ii, jj, kk) and nothing else — so a basis whose operator needs
-    // the absolute level must carry it through canonicalize_key and read it
-    // back out of the key here (supplying the physical width to the builder
-    // is T9's). For the solid-harmonic basis max_d is canonicalized away,
-    // so the realized key set under MAC = 0.5 is bounded and independent of
-    // tree depth.
+    // Stage 4: fill the persistent operator cache with the canonical keys it
+    // lacks, then assemble this tree's (Nt, Ns, n_unique_ops) table out of it
+    // and deep_copy that to device.
+    //
+    // TWO STRUCTURES, TWO LIFETIMES, and keeping them apart is the whole of
+    // this stage. The cache (_m2l_op_cache, keyed by canonical M2LKey) is
+    // geometry-keyed and persists: a key built once is never built again. The
+    // table is per tree — its columns are this build's op_idx order, which is
+    // the order the CSRs below index — and is rebuilt on the dirty flag
+    // exactly as before. A repartition that moves particles without realizing
+    // a new key therefore re-derives the map and copies columns, and calls
+    // KernelType::build_m2l_operators zero times. m2l_op_keys_built_count()
+    // is what says so; interaction_list_build_count() cannot, since it
+    // increments either way.
+    //
+    // THE BUILDER GETS LENGTHS, THE KEYS STAY INTEGER. unit_w[d] is the
+    // half-width at depth d, w_root / 2^d, exact in binary floating point
+    // because the divisor is a power of two. A basis reads it at the key's
+    // max_d. The solid-harmonic basis has had max_d canonicalized to 0 and
+    // must not read it at all — see build_m2l_operators on LaplaceKernel —
+    // so for it this array exists and is ignored, which is exactly the
+    // property key_needs_level declares.
     // -----------------------------------------------------------------------
     {
         const int Nt = KernelType::num_coeffs_per_cell;
         const int Ns = KernelType::m2l_num_src_coeffs;
+
+        // The cache is held to the same column cap as the table. It can be
+        // over it without any key being missing: set_m2l_op_table_byte_budget
+        // can lower the budget under a cache that is already larger, and that
+        // setter deliberately does not empty the cache (the budget does not
+        // change what an operator IS, only how many may be held). Enforce the
+        // bound here, where the cap is read, rather than there.
+        if ( _m2l_op_cache_size > effective_op_cap )
+            clear_m2l_op_cache();
+
+        // ---- 4a: build the operators the cache does not already hold. ----
+        if ( n_unique_ops > 0 )
+        {
+            // The keys this tree realized that are not in the cache, in this
+            // build's column order. `ops` is already distinct, so no dedup is
+            // needed here.
+            std::vector<M2LKey> missing;
+            for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
+                if ( _m2l_op_cache_index.find( ops[op_idx] ) ==
+                     _m2l_op_cache_index.end() )
+                    missing.push_back( ops[op_idx] );
+
+            if ( !missing.empty() )
+            {
+                // Overflow: emptying and refilling from this tree's keys
+                // always fits, because the serial merge above refused every
+                // key past effective_op_cap.
+                if ( static_cast<long long>( _m2l_op_cache_size ) +
+                         static_cast<long long>( missing.size() ) >
+                     static_cast<long long>( effective_op_cap ) )
+                {
+                    clear_m2l_op_cache();
+                    missing = ops;
+                }
+
+                const int n_missing = static_cast<int>( missing.size() );
+                const int first_col = _m2l_op_cache_size;
+                _grow_m2l_op_cache( Nt, Ns, first_col + n_missing );
+
+                CANOPY_SCOPED_TIMER_DETAILED(
+                    Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
+
+                // The unit length at each level, handed to the builder. See
+                // set_root_half_width for why this is a stored scalar rather
+                // than something recovered from the cells here.
+                std::vector<double> unit_w( _max_depth + 1, 0.0 );
+                if ( _max_depth >= 0 )
+                {
+                    unit_w[0] = _root_half_width;
+                    for ( int d = 1; d <= _max_depth; d++ )
+                        unit_w[d] = unit_w[d - 1] * 0.5;
+                }
+
+                // build_m2l_operators runs on host, so it needs a HostSpace
+                // aux. Build one rather than mirroring the device aux: the
+                // sweep cannot mirror a struct it is not allowed to look
+                // inside. This is bit-identical, not merely equal —
+                // build_aux_tables fills every entry on a host mirror from a
+                // pure function of (n, m) before deep-copying, so the host
+                // build and a mirror of the device build produce the same
+                // bytes. Built only when there are keys to build, so a
+                // rebuild that hits the cache entirely costs nothing here.
+                const auto h_aux =
+                    KernelType::template build_aux_tables<Kokkos::HostSpace>(
+                        KernelType::max_order, _m2l_kernel_params );
+
+                // Columns [first_col, first_col + n_missing) are contiguous
+                // in a LayoutLeft view, so this subview is the operator set
+                // the basis expects: column j is the operator for missing[j].
+                auto dst = Kokkos::subview(
+                    _m2l_op_cache, Kokkos::ALL, Kokkos::ALL,
+                    Kokkos::make_pair( first_col, first_col + n_missing ) );
+
+                // ONE CALL FOR THE WHOLE MISSING SET, deliberately: a basis
+                // that can share a factorization across keys has nowhere else
+                // to do it.
+                KernelType::build_m2l_operators(
+                    missing.data(), n_missing, unit_w.data(),
+                    static_cast<int>( unit_w.size() ), _m2l_kernel_params,
+                    h_aux, dst );
+
+                for ( int j = 0; j < n_missing; j++ )
+                    _m2l_op_cache_index.emplace( missing[j], first_col + j );
+                _m2l_op_cache_size = first_col + n_missing;
+                _m2l_op_keys_built += n_missing;
+            }
+        }
+
+        // ---- 4b: assemble this tree's table from the cache. ----
         m2l_operators_type op_table(
             Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_op_table" ),
             Nt, Ns, n_unique_ops > 0 ? n_unique_ops : 1 );
         auto h_op = Kokkos::create_mirror_view( op_table );
 
-        if ( n_unique_ops > 0 )
-        {
-            CANOPY_SCOPED_TIMER_DETAILED(
-                Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
-            // m2l_build_operator runs on host, so it needs a HostSpace
-            // aux. Build one rather than mirroring the device aux: the
-            // sweep cannot mirror a struct it is not allowed to look
-            // inside. This is bit-identical, not merely equal —
-            // build_aux_tables fills every entry on a host mirror from a
-            // pure function of (n, m) before deep-copying, so the host
-            // build and a mirror of the device build produce the same
-            // bytes.
-            const auto h_aux =
-                KernelType::template build_aux_tables<Kokkos::HostSpace>(
-                    KernelType::max_order );
-            for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
-            {
-                const auto& k = ops[op_idx];
-                auto T_slice = Kokkos::subview( h_op, Kokkos::ALL,
-                                                Kokkos::ALL, op_idx );
-                KernelType::m2l_build_operator( k.dd, k.ii, k.jj, k.kk, h_aux,
-                                                T_slice );
-            }
-        }
         {
             CANOPY_SCOPED_TIMER_DETAILED(
                 Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_COPY );
+            for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
+            {
+                const int src_col = _m2l_op_cache_index.at( ops[op_idx] );
+                // A column-to-column copy of the basis's own element type.
+                // Bitwise, not merely numerically, equal to what the builder
+                // wrote — which is what lets this task move WHERE the table is
+                // built without moving WHAT is in it.
+                auto src = Kokkos::subview( _m2l_op_cache, Kokkos::ALL,
+                                            Kokkos::ALL, src_col );
+                auto dst = Kokkos::subview( h_op, Kokkos::ALL, Kokkos::ALL,
+                                            op_idx );
+                for ( int t = 0; t < Nt; t++ )
+                    for ( int sidx = 0; sidx < Ns; sidx++ )
+                        dst( t, sidx ) = src( t, sidx );
+            }
             Kokkos::deep_copy( op_table, h_op );
         }
         _m2l_op_table = op_table;

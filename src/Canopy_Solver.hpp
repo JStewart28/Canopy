@@ -198,6 +198,12 @@ class Solver
             // P2P).
             _comm_plan.set_near_softening( cfg.softening,
                                            _near_softening_factor );
+            // ...and tell the sweeps, so a basis whose M2L operators or
+            // auxiliary tables depend on the kernel builds them for THIS
+            // softening. One number reaches all four subsystems, as a LENGTH
+            // (P2P squares it into eps^2 itself), so they cannot disagree
+            // about the convention. See _push_m2l_kernel_params.
+            _push_m2l_kernel_params( cfg.softening );
             _softening_initialized = true;
         }
     }
@@ -591,6 +597,7 @@ class Solver
             // Step 7: setup sweeps and P2P (not individually timed)
             _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
                            _builder.particle_keys(), _num_local );
+            _push_root_half_width();
             _downward.setup( _upward, _num_local );
             _p2p.setup( _builder, _partitioner, _comm_plan );
 
@@ -636,6 +643,7 @@ class Solver
         Kokkos::fence( "_finish_topology_change: pre-setup" );
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
                        _builder.particle_keys(), _num_local );
+        _push_root_half_width();
         _downward.setup( _upward, _num_local );
         _p2p.setup( _builder, _partitioner, _comm_plan );
         CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
@@ -663,6 +671,7 @@ class Solver
         Kokkos::fence( "_finish_topology_stable: pre-setup" );
         _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
                        _builder.particle_keys(), _num_local );
+        _push_root_half_width();
         _downward.setup( _upward, _num_local );
         _p2p.setup( _builder, _partitioner, _comm_plan );
         CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
@@ -698,6 +707,61 @@ class Solver
     // stable on MI300A.
     static constexpr double SOFTENING_FACTOR = 0.1;
 
+    // Hand the effective softening to both sweeps as M2LKernelParams.
+    //
+    // `eps` is a LENGTH and the kernel's Plummer parameter is eps^2; the whole
+    // units statement is on M2LKernelParams (Canopy_FarFieldContract.hpp).
+    // This is the same number _p2p and _comm_plan are given, deliberately: a
+    // basis that squares it gets exactly the b the near field uses.
+    //
+    // BOTH SWEEPS, because UpwardSweep builds the device auxiliary tables that
+    // DownwardSweep then borrows, while DownwardSweep builds its own host ones
+    // for the operator table. For a basis whose tables depend on the kernel,
+    // setting one and not the other would put two different tables in one
+    // solve.
+    //
+    // Called at the two places the softening is decided and nowhere else: the
+    // constructor's explicit branch, and _init_auto_softening for the deferred
+    // one. Both precede every _upward.setup / _downward.setup, and therefore
+    // every table build. The downward setter is a no-op on an unchanged value,
+    // so nothing here dirties the interaction list or empties the operator
+    // cache twice.
+    void _push_m2l_kernel_params( double eps )
+    {
+        M2LKernelParams params;
+        params.softening = eps;
+        _upward.set_m2l_kernel_params( params );
+        _downward.set_m2l_kernel_params( params );
+    }
+
+    // Hand the current root half-width to the downward sweep, which turns it
+    // into the per-level unit lengths its operator builder is given
+    // (unit_w[d] = w_root / 2^d).
+    //
+    // The HALF-WIDTH, and the LARGEST of the three half extents of the root
+    // bounding box — the same reduction TreeBuilder performs when it stamps
+    // the root cell, which is what makes every cell a cube and w_root a single
+    // scalar.
+    //
+    // Called immediately before each _downward.setup(), because the box is
+    // recomputed by every _builder.build() and so can move on any of the three
+    // setup flows. The setter is a no-op on an unchanged value and empties the
+    // operator cache only for a basis that declares key_needs_level, so a
+    // drifting box does not defeat the cache for a basis whose operators are
+    // scale-normalized.
+    void _push_root_half_width()
+    {
+        const auto& box = _builder.root_box();
+        double w_root = 0.0;
+        for ( int d = 0; d < 3; d++ )
+        {
+            const double hw = 0.5 * ( box.max[d] - box.min[d] );
+            if ( hw > w_root )
+                w_root = hw;
+        }
+        _downward.set_root_half_width( w_root );
+    }
+
     // Derive and apply the auto-softening length from the current global
     // bounding box and total particle count. No-op once softening has been
     // set (explicit value, or a prior auto computation).
@@ -726,6 +790,11 @@ class Solver
 
         _p2p.set_softening( static_cast<Scalar>( eps ) );
         _comm_plan.set_near_softening( eps, _near_softening_factor );
+        // The EFFECTIVE softening, which is what the operator builder must
+        // see: the configured value was negative and this is the length
+        // actually in force. _full_setup calls this before _upward.setup and
+        // _downward.setup, so it precedes every table build.
+        _push_m2l_kernel_params( eps );
         _softening_initialized = true;
 
         int rank = 0;

@@ -231,7 +231,7 @@ struct LaplaceKernel
     // Auxiliary tables. Precomputed, order-dependent data that the basis's
     // own operators need and that shared code neither builds, indexes nor
     // knows the shape of: the sweeps store one of these, hand it back to
-    // m2m_translate / m2l_translate / l2l_translate / m2l_build_operator,
+    // m2m_translate / m2l_translate / l2l_translate / build_m2l_operators,
     // and never look inside. A basis needing no such data returns an empty
     // struct.
     //
@@ -248,7 +248,7 @@ struct LaplaceKernel
     // and never crosses a rank boundary; it is a real constant multiplied
     // into the translation arithmetic. Its natural type is therefore the
     // basis's *arithmetic* scalar, scalar_type — which is what
-    // m2m_translate, m2l_translate, l2l_translate and m2l_build_operator
+    // m2m_translate, m2l_translate, l2l_translate and build_m2l_operators
     // all read it into (`const Scalar A_jk = ...`). A basis whose packed
     // component is narrower than its arithmetic type (a blocked or
     // mixed-precision coeff_type) would otherwise silently demote this table
@@ -258,7 +258,7 @@ struct LaplaceKernel
     // Parameterized on the memory space because the kernel is not; the
     // caller supplies its own. Two spaces are genuinely in use: the three
     // device operators consume the sweep's memory_space table, while
-    // m2l_build_operator runs on host over a Kokkos::HostSpace one. Spell it
+    // build_m2l_operators runs on host over a Kokkos::HostSpace one. Spell it
     //     typename KernelType::template aux_tables_type<memory_space>
     // -----------------------------------------------------------------------
     template <class MemorySpace>
@@ -273,15 +273,24 @@ struct LaplaceKernel
     //
     // The A_{n,m} table is built to degree 2*order, not order: M2L accesses
     // A at degree n+j where both n and j run up to P. A table one degree
-    // short does not fault — m2l_build_operator skips a zero A entry with
+    // short does not fault — build_m2l_operators skips a zero A entry with
     // `continue` — it silently produces a wrong operator. The factor of two
     // is the reason this table cannot live in shared code: it is a fact
     // about the solid-harmonic translation theorems and nothing else.
     //
+    // `kernel_params` carries the kernel's physical parameters (the softening
+    // LENGTH epsilon; see Canopy_FarFieldContract.hpp) so that a basis whose
+    // auxiliary tables depend on the kernel rather than on the order alone can
+    // build them. THIS basis's table does not: A_{n,m} is a pure function of
+    // (n, m), so the argument is ignored here. It is in the signature because
+    // the sweeps hand it to every basis and cannot know which ones care.
+    //
     // Host function, not device-callable: it allocates and fills a View.
     template <class MemorySpace>
-    static aux_tables_type<MemorySpace> build_aux_tables( int order )
+    static aux_tables_type<MemorySpace>
+    build_aux_tables( int order, const M2LKernelParams& kernel_params )
     {
+        (void)kernel_params;
         aux_tables_type<MemorySpace> aux;
         aux.A_table =
             build_A_coefficients<scalar_type, MemorySpace>( 2 * order );
@@ -671,13 +680,18 @@ struct LaplaceKernel
     // normalizations make the operator a function of (dd, ii, jj, kk) alone,
     // which is exactly what canonicalize_key below encodes by zeroing max_d.
     //
-    // NOTHING IN src/ CONSUMES THIS YET. `grep -rn key_needs_level src/`
-    // finds no reader: T8 is the task that uses it for the operator table's
-    // byte accounting (a level-carrying basis realizes more keys, so its
-    // budget must account for occupied depth). It is declared now so that the
-    // fact canonicalize_key encodes is also stated where a reader looks for
-    // it, and so that a conformance test can assert the two agree. Do not go
-    // looking for the consumer.
+    // TWO READERS IN src/, and the second one is load-bearing. The first is
+    // T8's operator-table instrumentation (src/Canopy_DownwardSweep.hpp), which
+    // prints it beside the realized key count because a level-carrying basis
+    // realizes strictly more keys on the same tree and its byte budget must
+    // absorb the difference. The second is the stage-4 operator build, which
+    // hands build_m2l_operators an array of per-level unit half-widths indexed
+    // by the key's max_d: a basis that zeroes max_d (this one) indexes
+    // unit_w[0] and must not depend on it, while a basis declaring
+    // key_needs_level = true keeps max_d and gets the physical half-width of
+    // the level the pair actually sits at. So this member is the statement
+    // that makes unit_w meaningful, and it must agree with canonicalize_key
+    // below — a conformance test asserts that it does.
     static constexpr bool key_needs_level = false;
 
     // Reduce a key to the form this basis's operator actually depends on.
@@ -738,21 +752,90 @@ struct LaplaceKernel
         M2LOverflow::PerPairTranslate;
 
     // =======================================================================
-    // m2l_build_operator
+    // build_m2l_operators — build the operator columns for a set of canonical
+    // M2L keys.
     //
-    // Build the per-pair M2L operator entries for a single (dx, dy, dz)
-    // offset into a 2D table T_out(out_idx, src_idx). At runtime the M2L
-    // contraction is then
+    // Replaces the former per-key m2l_build_operator. The sweep calls this
+    // ONCE per operator-table build, with the keys its persistent cache does
+    // not already hold, so a basis that can batch its construction (one
+    // factorization shared across keys, one LAPACK call over many right-hand
+    // sides) has somewhere to do it. This basis has nothing to batch and
+    // loops.
     //
-    //   L_{out_idx} += sum_{n,m} T_out(out_idx, n*n+n+m) * M_{n,m}(source)
+    // PLAIN STATIC MEMBER, not KOKKOS_INLINE_FUNCTION, per the Conventions
+    // row on host-side operator construction in
+    // tasks/abstract-solver-backend.md: this runs once on host into a
+    // Kokkos::HostSpace operator set, and a basis that needs LAPACK here must
+    // be allowed to call it. Marking it device-callable would forbid that.
+    //
+    // PARAMETERS
+    //
+    //   keys[0..n_keys)  the CANONICAL keys to build, in column order. Each
+    //                    is the sweep's own M2LKey — a nested type of
+    //                    DownwardSweep, so it arrives as a deduced template
+    //                    parameter for the same reason canonicalize_key takes
+    //                    one — carrying (max_d, dd, ii, jj, kk). They have
+    //                    already been through canonicalize_key, so whatever
+    //                    that function erased is gone here: for THIS basis
+    //                    max_d is always 0.
+    //
+    //   unit_w[0..n_levels)
+    //                    the unit length at each tree level: unit_w[d] is the
+    //                    HALF-WIDTH (not the full width) of a cell at depth d,
+    //                    w_root / 2^d, and n_levels is max_depth + 1. The key
+    //                    indexes it: unit_w[k.max_d] is the physical length
+    //                    that (ii, jj, kk) is measured in.
+    //
+    //                    THIS BASIS MUST NOT READ IT, and does not. Its
+    //                    operators are scale-normalized — dimensionless
+    //                    functions of (dd, ii, jj, kk) alone, which is exactly
+    //                    what key_needs_level = false and canonicalize_key
+    //                    zeroing max_d assert. Since max_d is zeroed, the only
+    //                    entry this basis could reach is unit_w[0] = w_root,
+    //                    and depending on it would make every operator a
+    //                    function of the bounding box, which drifts with the
+    //                    particles. A basis that wants a physical length
+    //                    declares key_needs_level = true, returns the key
+    //                    unchanged from canonicalize_key, and then max_d is
+    //                    its index into this array.
+    //
+    //                    unit_w is all zeros when nothing has told the sweep
+    //                    the root half-width (DownwardSweep::setup takes only
+    //                    the upward sweep and a particle count, so it is a
+    //                    setter, and a test that drives the sweeps directly
+    //                    may never call it). A key_needs_level = false basis
+    //                    is unaffected by construction.
+    //
+    //   kernel_params    the kernel's physical parameters; softening is a
+    //                    LENGTH epsilon and the kernel's b is epsilon^2 (see
+    //                    Canopy_FarFieldContract.hpp). IGNORED HERE: this
+    //                    basis's far field is the UNSOFTENED 1/r multipole
+    //                    expansion — the softening lives entirely in the near
+    //                    field, and CommunicationPlan's near-softening floor
+    //                    is what keeps pairs where that approximation holds
+    //                    out of M2L in the first place.
+    //
+    //   aux              this basis's auxiliary tables, in Kokkos::HostSpace.
+    //
+    //   ops              an (num_coeffs_per_cell, m2l_num_src_coeffs, n_keys)
+    //                    operator set, allocated WithoutInitializing: column j
+    //                    is the operator for keys[j], and EVERY entry of every
+    //                    column must be written.
+    //
+    // OFFSET SIGN CONVENTION: (ii, jj, kk) is SOURCE MINUS TARGET,
+    // round( (c_source - c_target) / unit_w[max_d] ), and dd is likewise
+    // d_source - d_target. Both are the sweep's (src/Canopy_DownwardSweep.hpp,
+    // the M2L key block) and neither is recoverable from the arithmetic below.
+    //
+    // At runtime the M2L contraction each column serves is
+    //
+    //   L_{out_idx} += sum_{n,m} T(out_idx, n*n+n+m) * M_{n,m}(source)
     //
     // i.e. all the per-pair scalar work (Ynm, A factors, i_power, sign,
-    // rho^-(n+j+1)) is absorbed into T_out and reused across every source-
-    // target pair that shares this offset.
-    // =======================================================================
-    // Scale-normalized M2L operator builder.
+    // rho^-(n+j+1)) is absorbed into the column and reused across every
+    // source-target pair that shares the key.
     //
-    // Key (dd, ii, jj, kk):
+    // Scale-normalized M2L operator, per key (dd, ii, jj, kk):
     //   dd            = d_source - d_target  ∈ [-DD_MAX, DD_MAX]
     //   (ii, jj, kk)  = round((c_source - c_target) / w_unit), with
     //                   w_unit = half-width at the deeper of the two depths
@@ -763,122 +846,142 @@ struct LaplaceKernel
     //   dd ≥ 0  →  F = 2^{ j · dd}           (per output row j)
     //   dd <  0 →  F = 2^{-(n+1) · dd}       (per source column n)
     // F(dd=0, ·, ·) = 1, so same-depth operators have no extra scaling.
-    template <class AuxType, class TView>
-    KOKKOS_INLINE_FUNCTION static void
-    m2l_build_operator( int dd, int ix, int iy, int iz, const AuxType& aux,
-                        const TView& T_out )
+    // =======================================================================
+    template <class KeyType, class AuxType, class OpsView>
+    static void build_m2l_operators( const KeyType* keys, int n_keys,
+                                     const double* unit_w, int n_levels,
+                                     const M2LKernelParams& kernel_params,
+                                     const AuxType& aux, const OpsView& ops )
     {
-        // The A_{n,m} table this basis puts in its aux tables. Named
-        // locally so the translation arithmetic below reads as the
-        // theorem it implements.
-        const auto& A_table = aux.A_table;
+        // Scale-normalized operators: no physical length and no kernel
+        // parameter enters. See the parameter block above — this is a
+        // property of this basis, asserted by key_needs_level = false, and
+        // not a shortcut.
+        (void)unit_w;
+        (void)n_levels;
+        (void)kernel_params;
 
-        // (ix, iy, iz) is the integer offset in deeper-cell half-widths.
-        // T̃ depends only on this dimensionless geometry plus dd.
-        const Scalar dx = static_cast<Scalar>( ix );
-        const Scalar dy = static_cast<Scalar>( iy );
-        const Scalar dz = static_cast<Scalar>( iz );
-        Scalar rho, theta, phi;
-        cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
-
-        const Scalar inv_rho = ( rho > 0.0 ) ? ( 1.0 / rho ) : 0.0;
-
-        constexpr int max_rho_pow = 2 * P + 2;
-        Scalar inv_rho_pow_tbl[max_rho_pow];
-        inv_rho_pow_tbl[0] = 1.0;
-        for ( int e = 1; e < max_rho_pow; e++ )
-            inv_rho_pow_tbl[e] = inv_rho_pow_tbl[e - 1] * inv_rho;
-
-        // F factor tables. Only one of these is populated; the other
-        // stays all-ones. dd in [-6, 6] so the exponents are small
-        // (max 7·6 = 42), exact in both double and float.
-        Scalar F_row[P + 1];  // F_row[j] for dd ≥ 0
-        Scalar F_col[P + 1];  // F_col[n] for dd < 0
-        for ( int e = 0; e <= P; e++ )
+        for ( int key_idx = 0; key_idx < n_keys; key_idx++ )
         {
-            F_row[e] = static_cast<Scalar>( 1 );
-            F_col[e] = static_cast<Scalar>( 1 );
-        }
-        if ( dd > 0 )
-        {
-            // F_row[j] = 2^{j · dd}
-            const Scalar step = static_cast<Scalar>( 1 << dd );
-            for ( int j = 1; j <= P; j++ )
-                F_row[j] = F_row[j - 1] * step;
-        }
-        else if ( dd < 0 )
-        {
-            // F_col[n] = 2^{(n+1) · |dd|}
-            const Scalar step = static_cast<Scalar>( 1 << ( -dd ) );
-            F_col[0] = step; // n=0 ⇒ 2^{|dd|}
-            for ( int n = 1; n <= P; n++ )
-                F_col[n] = F_col[n - 1] * step;
-        }
+            const int dd = keys[key_idx].dd;
+            const int ix = keys[key_idx].ii;
+            const int iy = keys[key_idx].jj;
+            const int iz = keys[key_idx].kk;
+            auto T_out =
+                Kokkos::subview( ops, Kokkos::ALL, Kokkos::ALL, key_idx );
 
-        constexpr int max_L = 2 * P;
-        constexpr int Y_size = ( max_L + 1 ) * ( max_L + 1 );
-        complex_type Y_tbl[Y_size];
-        for ( int L = 0; L <= max_L; L++ )
-            for ( int M = -L; M <= L; M++ )
-                Y_tbl[L * L + L + M] = Ynm<Scalar>( L, M, theta, phi );
+            // The A_{n,m} table this basis puts in its aux tables. Named
+            // locally so the translation arithmetic below reads as the
+            // theorem it implements.
+            const auto& A_table = aux.A_table;
 
-        constexpr int ip_stride = 2 * P + 1;
-        constexpr int ip_size = ( P + 1 ) * ip_stride;
-        complex_type ip_tbl[ip_size];
-        for ( int kk = 0; kk <= P; kk++ )
-            for ( int mm = -P; mm <= P; mm++ )
+            // (ix, iy, iz) is the integer offset in deeper-cell half-widths.
+            // T̃ depends only on this dimensionless geometry plus dd.
+            const Scalar dx = static_cast<Scalar>( ix );
+            const Scalar dy = static_cast<Scalar>( iy );
+            const Scalar dz = static_cast<Scalar>( iz );
+            Scalar rho, theta, phi;
+            cartesian_to_spherical( dx, dy, dz, rho, theta, phi );
+
+            const Scalar inv_rho = ( rho > 0.0 ) ? ( 1.0 / rho ) : 0.0;
+
+            constexpr int max_rho_pow = 2 * P + 2;
+            Scalar inv_rho_pow_tbl[max_rho_pow];
+            inv_rho_pow_tbl[0] = 1.0;
+            for ( int e = 1; e < max_rho_pow; e++ )
+                inv_rho_pow_tbl[e] = inv_rho_pow_tbl[e - 1] * inv_rho;
+
+            // F factor tables. Only one of these is populated; the other
+            // stays all-ones. dd in [-6, 6] so the exponents are small
+            // (max 7·6 = 42), exact in both double and float.
+            Scalar F_row[P + 1];  // F_row[j] for dd ≥ 0
+            Scalar F_col[P + 1];  // F_col[n] for dd < 0
+            for ( int e = 0; e <= P; e++ )
             {
-                const int abs_kk = kk;
-                const int abs_mm = ( mm < 0 ) ? -mm : mm;
-                const int kmm = kk - mm;
-                const int abs_kmm = ( kmm < 0 ) ? -kmm : kmm;
-                ip_tbl[kk * ip_stride + ( mm + P )] =
-                    i_power( abs_kmm - abs_kk - abs_mm );
+                F_row[e] = static_cast<Scalar>( 1 );
+                F_col[e] = static_cast<Scalar>( 1 );
+            }
+            if ( dd > 0 )
+            {
+                // F_row[j] = 2^{j · dd}
+                const Scalar step = static_cast<Scalar>( 1 << dd );
+                for ( int j = 1; j <= P; j++ )
+                    F_row[j] = F_row[j - 1] * step;
+            }
+            else if ( dd < 0 )
+            {
+                // F_col[n] = 2^{(n+1) · |dd|}
+                const Scalar step = static_cast<Scalar>( 1 << ( -dd ) );
+                F_col[0] = step; // n=0 ⇒ 2^{|dd|}
+                for ( int n = 1; n <= P; n++ )
+                    F_col[n] = F_col[n - 1] * step;
             }
 
-        for ( int out_idx = 0; out_idx < num_coeffs_per_cell; out_idx++ )
-        {
-            for ( int src_idx = 0; src_idx < m2l_num_src_coeffs; src_idx++ )
-                T_out( out_idx, src_idx ) = complex_type( 0.0, 0.0 );
+            constexpr int max_L = 2 * P;
+            constexpr int Y_size = ( max_L + 1 ) * ( max_L + 1 );
+            complex_type Y_tbl[Y_size];
+            for ( int L = 0; L <= max_L; L++ )
+                for ( int M = -L; M <= L; M++ )
+                    Y_tbl[L * L + L + M] = Ynm<Scalar>( L, M, theta, phi );
 
-            int j, k;
-            unflatten_triangular( out_idx, j, k );
-            const Scalar A_jk = A_table( a_index( j, k ) );
-
-            // F_row[j] is non-trivial only for dd ≥ 0; F_col[n] only for
-            // dd < 0. The other stays 1, so the product is the correct
-            // F(dd, n, j) in either case.
-            const Scalar F_j = F_row[j];
-
-            for ( int n = 0; n <= P; n++ )
-            {
-                const Scalar inv_rho_pow = inv_rho_pow_tbl[n + j + 1];
-                const Scalar F_nj = F_j * F_col[n];
-
-                for ( int m = -n; m <= n; m++ )
+            constexpr int ip_stride = 2 * P + 1;
+            constexpr int ip_size = ( P + 1 ) * ip_stride;
+            complex_type ip_tbl[ip_size];
+            for ( int kk = 0; kk <= P; kk++ )
+                for ( int mm = -P; mm <= P; mm++ )
                 {
-                    const int npj = n + j;
-                    const int mmk = m - k;
-                    const int abs_mmk = ( mmk < 0 ) ? -mmk : mmk;
-                    if ( abs_mmk > npj )
-                        continue;
+                    const int abs_kk = kk;
+                    const int abs_mm = ( mm < 0 ) ? -mm : mm;
+                    const int kmm = kk - mm;
+                    const int abs_kmm = ( kmm < 0 ) ? -kmm : kmm;
+                    ip_tbl[kk * ip_stride + ( mm + P )] =
+                        i_power( abs_kmm - abs_kk - abs_mm );
+                }
 
-                    const Scalar A_nm = A_table( a_index( n, m ) );
-                    const Scalar A_npj_mmk = A_table( a_index( npj, mmk ) );
-                    if ( A_npj_mmk == 0.0 )
-                        continue;
+            for ( int out_idx = 0; out_idx < num_coeffs_per_cell; out_idx++ )
+            {
+                for ( int src_idx = 0; src_idx < m2l_num_src_coeffs; src_idx++ )
+                    T_out( out_idx, src_idx ) = complex_type( 0.0, 0.0 );
 
-                    const complex_type ip =
-                        ip_tbl[k * ip_stride + ( m + P )];
-                    const complex_type Y =
-                        Y_tbl[npj * npj + npj + mmk];
+                int j, k;
+                unflatten_triangular( out_idx, j, k );
+                const Scalar A_jk = A_table( a_index( j, k ) );
 
-                    const Scalar sign_n = ( n % 2 == 0 ) ? 1.0 : -1.0;
-                    const Scalar coef_scalar =
-                        sign_n * A_nm * A_jk / A_npj_mmk * inv_rho_pow * F_nj;
+                // F_row[j] is non-trivial only for dd ≥ 0; F_col[n] only for
+                // dd < 0. The other stays 1, so the product is the correct
+                // F(dd, n, j) in either case.
+                const Scalar F_j = F_row[j];
 
-                    T_out( out_idx, n * n + n + m ) =
-                        ip * coef_scalar * Y;
+                for ( int n = 0; n <= P; n++ )
+                {
+                    const Scalar inv_rho_pow = inv_rho_pow_tbl[n + j + 1];
+                    const Scalar F_nj = F_j * F_col[n];
+
+                    for ( int m = -n; m <= n; m++ )
+                    {
+                        const int npj = n + j;
+                        const int mmk = m - k;
+                        const int abs_mmk = ( mmk < 0 ) ? -mmk : mmk;
+                        if ( abs_mmk > npj )
+                            continue;
+
+                        const Scalar A_nm = A_table( a_index( n, m ) );
+                        const Scalar A_npj_mmk = A_table( a_index( npj, mmk ) );
+                        if ( A_npj_mmk == 0.0 )
+                            continue;
+
+                        const complex_type ip =
+                            ip_tbl[k * ip_stride + ( m + P )];
+                        const complex_type Y =
+                            Y_tbl[npj * npj + npj + mmk];
+
+                        const Scalar sign_n = ( n % 2 == 0 ) ? 1.0 : -1.0;
+                        const Scalar coef_scalar =
+                            sign_n * A_nm * A_jk / A_npj_mmk * inv_rho_pow * F_nj;
+
+                        T_out( out_idx, n * n + n + m ) =
+                            ip * coef_scalar * Y;
+                    }
                 }
             }
         }

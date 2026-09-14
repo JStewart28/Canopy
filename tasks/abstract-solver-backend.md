@@ -370,8 +370,11 @@ current one:
 **None of those offsets account for T4**, which added the three-trait block, two
 `static_assert`s and an `#include <type_traits>` to both sweep headers and
 shifted everything after them again. They have not been re-measured, because the
-one task they would serve carries its own numbers: T5's **Fill in** list is
-verified against the working tree and is the authority for every site it names.
+two tasks they would serve carry their own numbers: T5's and **T9's** **Fill
+in** lists are verified against the working tree and are the authority for
+every site they name. **T10's and T11's are not**, and this task sequence has
+not re-measured the offsets for them either — so both should locate every site
+by symbol rather than by the numbers their entries quote.
 
 T1's and T2's own citations were current when written, which is the post-T1
 numbering; for those, only T2's deletions apply — `-1` past `:110`, `-3` past
@@ -1400,10 +1403,12 @@ memory-space-parameterized alias shape this task copies.
    `A_coeff<Scalar>(n, m)`, a pure function of $(n, m)$, before deep-copying, and
    on the SERIAL backend `memory_space` *is* `Kokkos::HostSpace`.
 
-   `build_aux_tables` takes the order and nothing else. T9 adds a
-   `kernel_params` argument when it introduces that type and plumbs
-   `FmmConfig::softening` into `_downward`; until then there is nothing to pass,
-   and the solid-harmonic table depends only on the order.
+   **Current signature, after T9:**
+   `build_aux_tables<MemorySpace>( int order, const M2LKernelParams& )`. T5
+   built the one-argument form; T9 added the second parameter so a basis whose
+   auxiliary tables depend on the kernel can build them, and plumbed
+   `FmmConfig::softening` to both sweeps as a length. The solid-harmonic table
+   ignores it and depends only on the order.
 
 2. Replace the `A_table` parameter with `aux` in every operator signature.
    `_A_table` becomes `_aux` of type `aux_tables_type<memory_space>` on **both**
@@ -1869,7 +1874,33 @@ declaring `EscalateToP2P` fails to compile with the named message.
 
 ---
 
-### T9 — Operator construction splits into a persistent cache and a per-tree map — **NOT STARTED**
+### T9 — Operator construction splits into a persistent cache and a per-tree map — **DONE**
+
+**Met.** All three suites pass at ranks 1-6 on the SERIAL backend in one
+allocation, flux job **`f3YFaF1JsFvf`** (and **`f3YFVVf2Tn4X`** before a
+late three-line addition), `build-tuolumne/`, at `HEAD` = `44c6521`.
+`Canopy_Test_LaplaceSolve_MPI_SERIAL`: `bitForBitArtifacts` matches the
+committed bytes at np 1-2 with **no regeneration** of
+`tests/data/laplace_solve_P6.txt`, `crossRankAgreement` passes at 2-6 and
+`matchesDirectSum` at 1-6. The first run reproduced **all 22** cross-rank and
+direct-sum deviations from T1's table character-for-character, including the
+np=3 cut `(273, 204, 329)` in all three bodies; the second reproduced 19,
+the three that moved being the known np 3-6 partitioner wobble — attributed
+in the log, and each moved figure landing on a value already on record from
+an earlier run of unmodified behavior. `fallback_pairs` is 0 at every rank and
+rank count at the default budget, so **R4 did not fire**.
+`Canopy_Test_FarFieldContract_MPI_SERIAL` passes at 1-6 with
+`not_bit_identical = 0` everywhere — the gate that matters for the two contract
+members this task replaced, since `MonopoleBasis`'s operator value is still the
+single function that test's host reference calls.
+`DownwardSweepCaching.rebuildsAfterInvalidate` now asserts what this task is
+for: after `invalidate_interaction_list()`, `interaction_list_build_count()`
+increments while `m2l_op_keys_built_count()` — a new counter on the operator
+cache — does **not** move, at every rank count, with the potential unchanged
+across the re-solve at the `1e-12` relative bound that body already carried.
+`Canopy_Test_DownwardSweep_MPI_SERIAL` was **baselined green at all six rank
+counts before any edit** (flux job `f3YFLjDhHMpB`), so the pass is a pass and
+not a pre-existing failure set carried forward.
 
 **Depends on:** T8.
 
@@ -1974,9 +2005,12 @@ is a cube and $w_{\rm root}$ is a single scalar.
 
 **Signature changes and their callers.** `m2l_build_operator` is removed and
 replaced; its callers are `src/Canopy_DownwardSweep.hpp:1361-1362` and
-`tests/CanopyTest_MonopoleBasis.hpp:552-557`. `tests/tstLaplaceKernel.hpp:682`
-calls it as well; that target does not compile and is out of scope — see
-[Current state](#current-state). The solid-harmonic basis's
+`tests/CanopyTest_MonopoleBasis.hpp:552-557`. **Corrected in T9:**
+`tests/tstLaplaceKernel.hpp` does **not** call it —
+`grep -n m2l_build tests/tstLaplaceKernel.hpp` finds nothing. That target does
+not compile, and is out of scope, for a T5-era reason instead: it passes a bare
+$A_{n,m}$ view to `m2m_translate` and `m2l_translate` (`:407`, `:571`), which
+have taken an `aux` struct since T5. See [Current state](#current-state). The solid-harmonic basis's
 `m2l_build_operator` body (`src/Canopy_LaplaceKernel.hpp:766-885`) moves inside
 the new method's per-key loop unchanged. `build_aux_tables` gains a parameter at
 the three sites in step 8. `DownwardSweep` gains two setters beside

@@ -67,6 +67,67 @@ enum class M2LOverflow
     EscalateToP2P
 };
 
+// ============================================================================
+// M2LKernelParams — the kernel's own physical parameters, handed to a basis
+// when it builds its M2L operators and its auxiliary tables.
+//
+// A basis whose operator is a function of geometry alone (the solid-harmonic
+// one, whose operators are scale-normalized) ignores this entirely. A basis
+// carrying PHYSICAL operators cannot: a softened kernel's operator depends on
+// the softening as well as on the translation vector, and there is no other
+// route from FmmConfig to the operator builder.
+//
+// THIS LIVES HERE, beside M2LOverflow, for the same reason: it is contract
+// vocabulary that the sweeps and every basis must be able to name, including
+// bases that have nothing to do with the solid-harmonic one.
+//
+// UNITS, which the design document requires on a declaration and which are not
+// recoverable from the code:
+//
+//   softening  is a LENGTH, epsilon, in the same units as the particle
+//              coordinates and the cell half-widths. It is NOT epsilon^2.
+//              The Plummer kernel this repository's near field evaluates is
+//
+//                  phi(r) = 1 / sqrt( r^2 + b ),      b = epsilon^2
+//
+//              so a basis that wants the kernel's b must square this field.
+//              The length is carried rather than b because a length is what
+//              FmmConfig::softening is (Canopy_Solver.hpp) and what
+//              P2P::set_softening is handed before it squares it into
+//              _softening2 (Canopy_P2P.hpp) — so the one number Solver
+//              decides reaches P2P, CommunicationPlan and the downward sweep
+//              unchanged, and the three cannot disagree about a convention.
+//
+//              The value is the EFFECTIVE softening, not the configured one:
+//              FmmConfig::softening < 0 selects the distribution-based
+//              auto-softening, and what arrives here is the length actually
+//              in force after that choice has been made.
+//
+// EQUALITY IS LOAD-BEARING. The downward sweep's persistent operator cache
+// rests on the premise that a canonicalized key plus these parameters
+// determines the operator (risk R5 in tasks/abstract-solver-backend.md), so
+// the sweep compares two M2LKernelParams to decide whether the cache it holds
+// is still valid. A field added here must join operator==, or a cache will
+// survive a change that invalidates it.
+// ============================================================================
+
+struct M2LKernelParams
+{
+    // Plummer softening LENGTH epsilon; the kernel's b is epsilon^2. Zero is
+    // an unsoftened kernel and is the default, which is what a sweep driven
+    // directly by a test (and never handed a Solver's configuration) runs at.
+    double softening = 0.0;
+
+    bool operator==( const M2LKernelParams& o ) const noexcept
+    {
+        return softening == o.softening;
+    }
+    bool operator!=( const M2LKernelParams& o ) const noexcept
+    {
+        return !( *this == o );
+    }
+};
+
 } // namespace Canopy
 
 #endif // CANOPY_FAR_FIELD_CONTRACT_HPP

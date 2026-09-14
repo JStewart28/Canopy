@@ -3119,3 +3119,432 @@ not an explanation, and the pre-existing `MultiSolve.M2L_BinEdge_Fallback`
 regression failure (3e-7 to 9e-6, recorded under `README.md` "Known Issues")
 exercises the same path at the same error scale. Connecting the two is a task
 this document does not have.
+
+## T9 — operator construction splits into a persistent cache and a per-tree map
+
+T9 is **DONE**. `m2l_build_operator` is gone, replaced by a host-only
+`build_m2l_operators` that takes a whole missing key set plus the per-level
+unit half-widths and the kernel's parameters; the solid-harmonic operator table
+came through byte-identical, with `tests/data/laplace_solve_P6.txt` not
+regenerated. The result is the same shape as T3, T4, T5 and T7's: the load-
+bearing outcome is that **nothing moved**, and the one number that was supposed
+to move — the count of operators rebuilt after a topology change — went to zero
+and stayed there.
+
+Gate runs flux jobs **`f3YFVVf2Tn4X`** and **`f3YFaF1JsFvf`** (all three suites,
+one allocation each; the second is after a late three-line addition), baseline
+run **`f3YFLjDhHMpB`**. tuolumne1003, Cray clang 20.0.0, `build-tuolumne/`
+(`Canopy_ENABLE_PROFILING=OFF`), at `HEAD` = `44c6521`.
+
+### The baseline this task was told to take, and what it showed
+
+`Canopy_Test_DownwardSweep_MPI_SERIAL` had been compiled by earlier tasks and
+**never run by any of them**, so a pre-existing failure there would have been
+charged to T9. Built and run at unmodified `HEAD` first (`f3YFLjDhHMpB`):
+`100% tests passed, 0 tests failed out of 6`, all eleven bodies green at every
+rank count from 1 to 6. So there is no pre-existing failure set to compare
+against — the post-change pass is a pass outright, which is the strongest of
+the possible baseline outcomes and the one that needed no interpretation.
+
+### Decisions taken as given, and how each landed
+
+- **`kernel_params` carries the softening as a LENGTH $\varepsilon$, not as
+  $b$.** `M2LKernelParams::softening` is the same `double` that reaches
+  `P2P::set_softening` (which squares it) and `CommunicationPlan::
+  set_near_softening`, so one number decided in one place reaches all three and
+  they cannot disagree about a convention. The declaration states
+  $b = \varepsilon^2$ and says the value is the **effective** softening, not the
+  configured one — `FmmConfig::softening < 0` selects auto-softening, and what
+  arrives is the length actually in force after that choice.
+- **The cache check extends `DownwardSweepCaching.rebuildsAfterInvalidate`**
+  rather than adding a new body. It already drove the sweeps directly, already
+  counted the rebuild and already compared the potential at `1e-12`; it gained
+  four `EXPECT_EQ`s and one measurement line. No new test body, no new target,
+  no `tests/CMakeLists.txt` change.
+
+### The contract as actually written
+
+Replacing `m2l_build_operator`, on `LaplaceKernel` and on `MonopoleBasis`
+identically:
+
+```cpp
+template <class KeyType, class AuxType, class OpsView>
+static void build_m2l_operators( const KeyType* keys, int n_keys,
+                                 const double* unit_w, int n_levels,
+                                 const M2LKernelParams& kernel_params,
+                                 const AuxType& aux, const OpsView& ops );
+```
+
+A **plain static member**, not `KOKKOS_INLINE_FUNCTION`, per the Conventions
+row on host-side operator construction — the old `m2l_build_operator` was
+device-marked on both bases and would have forbidden the LAPACK call a
+compressed-operator basis needs. `KeyType` is a deduced template parameter for
+exactly the reason `canonicalize_key`'s is: `M2LKey` is a nested type of
+`DownwardSweep<…, KernelType>` and a basis cannot name it without a circular
+dependency. `ops` is `(Nt, Ns, n_keys)` with column $j$ belonging to
+`keys[j]`; it arrives as a `LayoutLeft` range subview of the cache, which is
+contiguous, so a basis may treat a column as a dense matrix exactly as the
+device table's consumer does.
+
+`build_aux_tables` gains the same parameter:
+
+```cpp
+template <class MemorySpace>
+static aux_tables_type<MemorySpace>
+build_aux_tables( int order, const M2LKernelParams& kernel_params );
+```
+
+`M2LKernelParams` went into `src/Canopy_FarFieldContract.hpp`, beside
+`M2LOverflow`, for T8's reason verbatim: it is contract vocabulary the sweeps
+and **every** basis must name, and `tests/CanopyTest_MonopoleBasis.hpp`
+deliberately includes nothing else from `src/`. It carries `operator==`, and
+the comment says why that is load-bearing rather than decorative — the sweep
+compares two of them to decide whether its cache is still valid, so a field
+added without joining `operator==` would let a cache survive a change that
+invalidates it.
+
+### The split, and where the two structures now live
+
+`_m2l_op_table` is unchanged in kind: per tree, sized to this build's realized
+key count, columns in this build's `op_idx` order, thrown away and rebuilt on
+the dirty flag. What is new beside it:
+
+```cpp
+using m2l_host_operators_type =
+    typename KernelType::template m2l_operators_type<Kokkos::HostSpace>;
+
+m2l_host_operators_type                          _m2l_op_cache;
+std::unordered_map<M2LKey, int, M2LKeyHash>      _m2l_op_cache_index;
+int                                              _m2l_op_cache_size = 0;
+long long                                        _m2l_op_keys_built = 0;
+```
+
+**`m2l_operators_type` stayed an alias template**, as T3 handed forward, and
+this task is the first thing that actually needed it to be one: the cache is in
+`Kokkos::HostSpace` while the table is in `memory_space`, so the same basis
+type is instantiated at two spaces in one class. T3 wrote that "a basis that
+builds its operators in a different memory space than the sweep's would be the
+only reason to change it, and nothing here needs that" — something here now
+does, and the alias template is exactly what made it a two-line change.
+
+Stage 4 became 4a (fill the cache with the keys it lacks, one
+`build_m2l_operators` call for the whole missing set) and 4b (assemble this
+tree's table by copying cache columns in `op_idx` order, then `deep_copy`).
+`TIMER_ILIST_S4_OP_TABLE_BUILD` now covers 4a only and is **skipped entirely**
+when nothing is missing; the column assembly joined
+`TIMER_ILIST_S4_OP_TABLE_COPY`.
+
+**The host aux is now built only on a miss.** T5 recorded as a cost that the
+`Kokkos::HostSpace` aux was rebuilt on every operator-table build. It now sits
+inside 4a's `if ( !missing.empty() )`, so a rebuild that hits the cache
+entirely does not build it either. That is a side effect of this task, not a
+goal of it, and it is why the numbers T5 called "unmeasurable" stay so.
+
+### The two new setters, and the one this task did not expect to need
+
+On `DownwardSweep`, beside `set_m2l_op_table_byte_budget`:
+
+```cpp
+void set_m2l_kernel_params( const M2LKernelParams& );  // no-op if unchanged;
+                                                       // else clears cache + dirty
+void set_root_half_width( double w_root );             // no-op if unchanged; clears
+                                                       // cache + dirty only when
+                                                       // KernelType::key_needs_level
+```
+
+**Both are no-ops on an unchanged value, and that is not a micro-optimization.**
+`_push_root_half_width()` is called before *every* `_downward.setup()` — the
+root box is recomputed by every `_builder.build()` and can move on any of the
+three setup flows — so a setter that dirtied unconditionally would be harmless
+(setup dirties anyway) but one that emptied the cache unconditionally would
+make the cache do nothing on a moving particle distribution. The no-op is what
+keeps the cache a cache.
+
+**`set_root_half_width` clears the cache only for a `key_needs_level` basis,**
+and that is the sharpest use `key_needs_level` has yet been put to. A basis
+that zeroes `max_d` has by contract no operator that depends on any entry of
+`unit_w`; throwing its cache away because the bounding box drifted would empty
+the cache on every rebuild of exactly the workload the cache exists for. A
+basis that keeps `max_d` does index `unit_w`, and for it a changed width
+invalidates every cached operator. So the trait that T7 declared inert and T8
+read only for a printf is now the predicate that decides a cache-invalidation
+rule, and `src/Canopy_LaplaceKernel.hpp`'s "NOTHING IN src/ CONSUMES THIS YET"
+paragraph was rewritten to say so.
+
+**`UpwardSweep` needed the kernel-params setter too, which the task entry did
+not anticipate.** Its **Do** step 8 names `src/Canopy_UpwardSweep.hpp:266` as
+one of the three `build_aux_tables` sites but gives that class no way to obtain
+a `kernel_params` to pass. Passing a default-constructed one would have been
+silently wrong for the case the parameter exists to serve: `UpwardSweep` builds
+the **device** aux tables that `DownwardSweep::setup` then borrows, while
+`DownwardSweep` builds its own `Kokkos::HostSpace` aux for the operator table —
+so a basis whose tables depend on the kernel would have run one solve with two
+different tables. `UpwardSweep::set_m2l_kernel_params` is therefore a third
+setter, and `Solver::_push_m2l_kernel_params` sets both sweeps in one call so
+they cannot come apart. `UpwardSweep` has no dirty flag, so the setter's
+comment says what the class cannot enforce: call before `setup()`.
+
+### The `Solver` path, extended rather than reopened
+
+T8's finding that `FmmConfig` is copied field by field and that a value needed
+at a later `setup()` needs its own member **did not bite**, because neither new
+value is an `FmmConfig` field. The softening was already retained as
+`_softening_input` / `_softening_initialized`, and the root half-width is
+derived from `_builder.root_box()` at the moment it is needed. **`FmmConfig`
+gains no field and `README.md` is untouched** — no public API and no example's
+arguments changed.
+
+Two private helpers carry it:
+
+- `_push_m2l_kernel_params( double eps )` — called at the two places the
+  softening is decided and nowhere else: the constructor's explicit branch
+  beside `set_m2l_op_table_byte_budget`, and `_init_auto_softening` for the
+  deferred branch. Both precede every `_upward.setup` / `_downward.setup` and
+  therefore every table build.
+- `_push_root_half_width()` — called immediately before each of the three
+  `_downward.setup()` calls. It takes the **largest** of the three half extents
+  of `root_box()`, reproducing TreeBuilder's own reduction, which is what makes
+  every cell a cube and $w_{\rm root}$ a single scalar.
+
+**No per-source gather was reinstated.** The classify pass is untouched and
+remains a pure-integer pipeline; `unit_w` is derived from one stored scalar as
+`unit_w[d] = unit_w[d-1] * 0.5`, exact in binary floating point because the
+divisor is a power of two. Integer keys stayed integer.
+
+### What the reasoning revealed that the first run did not
+
+**The byte budget could put the cache over its own bound.** The cache is held
+to `m2l_effective_op_cap()` columns, and stage 4's overflow test is
+`cache_size + missing > cap`. That test cannot fire when `missing` is empty —
+so a `set_m2l_op_table_byte_budget` call that *lowered* the budget under an
+already-larger cache would leave the cache over budget indefinitely, because
+that setter deliberately does not empty the cache (the budget changes how many
+operators may be held, not what an operator is). Three lines at the top of
+stage 4 now enforce the bound where the cap is read:
+
+```cpp
+if ( _m2l_op_cache_size > effective_op_cap )
+    clear_m2l_op_cache();
+```
+
+Unreachable at every configuration this repository has — the budget is set once
+in `Solver`'s constructor, before any build — and both gate runs are identical
+on every figure the addition could touch. It is recorded here because the bound
+is a stated property of the cache and "currently unreachable" is not the same
+claim as "holds".
+
+**Nothing failed to compile, at any point, on any target.** Both bases, both
+sweeps, `Solver`, and all three test targets built first try, as did
+`Canopy_Test_MultiSolve_MPI_SERIAL`, which was compiled (not run) as insurance
+because `Solver` changed and `MultiSolve` and the two examples instantiate it —
+the Deliberate-deviations section names that exact drift as what left
+`Canopy_Test_LaplaceKernel_*` and `Canopy_Test_P2P_*` broken.
+
+**No new class-scope `static_assert` was added to either sweep**, so
+`tests/tstFarFieldContract.hpp`'s permanent negative-compile block needed no
+fourth basis and was not touched. It still carries three.
+
+### Gate measurements
+
+Flux job **`f3YFVVf2Tn4X`**, the first run: **all 22 cross-rank and direct-sum
+cells reproduce T1's table character-for-character**, including the np=5
+cross-rank pair at T1's `9.5809726336249496e-14` / `6.4438389009577268e-13`,
+and all six `op_budget` cells reproduce T8's 64-column column exactly. All
+three np=3 bodies drew T1's cut `(273, 204, 329)`.
+
+Flux job **`f3YFaF1JsFvf`**, after the three-line addition above: 19 of 22
+identical to 17 digits. Three figures moved, and **T8's three-step attribution
+procedure resolves all three without a control run**:
+
+| figure | `f3YFVVf2Tn4X` | `f3YFaF1JsFvf` |
+| --- | --- | --- |
+| np=5 cross-rank pot | 9.5809726336249496e-14 | 3.3416042637542698e-13 |
+| np=5 cross-rank grad | 6.4438389009577268e-13 | 1.7052716455411195e-12 |
+| np=3 direct-sum grad | 4.2399380705248681e-08 | 4.2399380705233977e-08 |
+
+- **Step 1 — compare the three bodies.** At np=3 they *disagree with each other
+  inside the second job*: two bodies realized `(285, 189, 329)` keys per rank
+  and the third realized `(273, 204, 329)`. Two bodies of one run of one binary
+  drawing two different partitions is the partitioner's non-determinism
+  measured directly, and it is the documented out-of-scope behavior.
+- **Step 2 — compare the cut against earlier logs.** `(273, 204, 329)` is T1's
+  and is what the third body drew; `(285, 189, 329)` is new. np=1, np=2 and
+  np 4-6 are identical to T8's lists at every rank.
+- **Step 3 — cross-rank moved while direct-sum held.** At np=5 the direct-sum
+  figures are identical to all 17 digits across both jobs while the cross-rank
+  pair moved, which T8 established is reassociation under an unchanged key
+  count and not attributable to a source change. And the np=5 pair moved
+  **between the two values already on record**: `f3YFVVf2Tn4X` reproduced T1's
+  and `f3XiPmWSEucB`'s value, `f3YFaF1JsFvf` reproduced `f3XiYE4xRbBd`'s, to
+  all 17 digits in both directions. The same two numbers, the third time.
+
+The np=3 direct-sum gradient moving in its 13th digit follows from step 1: a
+different partition is a different summation order. Its potential is unchanged
+to all 17 digits, and the deviation is four orders under `9.63e-07`.
+
+**Where the actual correctness claim lives is np 1-2, and it did not move in
+either run.** `bitForBitArtifacts` compared `locals()`, the operator table, the
+$A_{n,m}$ table and `n_unique_ops` against the committed bytes at `(1,0)`,
+`(2,0)` and `(2,1)` and matched in both jobs, with no regeneration. The
+partitioner wobble does not reach there: at np 1-2 the cut is not in question.
+
+`fallback_pairs = 0`, `locals_ext = (103,28,1)`, `optab_ext = (28,49,n_ops)`,
+`a_extent = 169`, `initial_hash = 0xb6ad437608ad69b7`, `op_budget = 2147483648`
+and `op_cap = 32768` at every rank and rank count in the three default-budget
+bodies, so **R4 did not fire**.
+
+`FarFieldContract` at 1-6: `not_bit_identical = 0` and `fallback_pairs = 0` at
+every rank in both bodies, and `levelReachesTheKey` still reports
+`n_unique_ops_with_level = 4628` against `without = 2572` on the 694-cell
+ncrit-4 tree — T7's and T8's numbers, unmoved by a builder that now *could*
+read a level.
+
+### The cache measurement — what R5's check actually returned
+
+`DownwardSweepCaching.rebuildsAfterInvalidate`, one solve, then
+`invalidate_interaction_list()`, then a second solve, at each rank count:
+
+| np | per-rank cache keys after both builds (= keys ever built) |
+| --- | --- |
+| 1 | 612 |
+| 2 | 1725, 1641 |
+| 3 | 1726, 1351, 1412 |
+| 4 | 1380, 1058, 1031, 1052 |
+| 5 | 1389, 724, 868, 801, 685 |
+| 6 | 1472, 814, 1010, 1194, 813, 746 |
+
+`interaction_list_build_count() == 2` and
+`m2l_op_keys_built_count() == m2l_op_cache_size()` at **every rank of every
+rank count** — two interaction-list builds, one round of operator construction,
+**zero keys rebuilt**. The potential comparison the body already carried passes
+at `1e-12` relative across the re-solve, which is **R5**'s check that a
+persisting cache has not gone stale.
+
+The counters are the whole point: a cache that silently rebuilt every key would
+pass the bit-for-bit gate — it would rebuild the same bits — and is invisible in
+every other number `DownwardSweep` exposes. `m2l_op_keys_built_count()` is the
+only place it shows up.
+
+**The Laplace-solve gate exercises the growth and overflow paths as a side
+effect, which is worth knowing when reading the pass.** Its 12 steps rebalance,
+so new keys appear across steps and `_grow_m2l_op_cache` runs repeatedly with
+partial hits; and `opTableByteBudget` runs the same 12 steps at a 64-column
+cap, so the cache overflows, is emptied and is refilled from the current tree's
+keys. Both paths are on the critical path of a gate that came out
+bit-identical.
+
+### R3 was not measured
+
+No exit criterion depends on it and the task entry says so. If a later task
+wants the figure, the timer that covers what T9 changed is
+`TIMER_ILIST_S4_OP_TABLE_BUILD`, **not** `M2L kernel (all depths)`: the host
+operator build is outside `run_m2l_all`'s scope entirely, and R3's committed
+instrument reads the wrong number for this task. T5's `f3Xfk8H1YPNF` figure
+(0.070 s over 24 solves) still stands as the M2L-kernel baseline, unmoved by
+T7, T8 or T9, none of which touched the fused kernel.
+
+### Signatures and declarations changed
+
+- `Canopy::M2LKernelParams` — new struct in `src/Canopy_FarFieldContract.hpp`,
+  with `operator==` / `operator!=`. One field, `softening`, a length.
+- `LaplaceKernel::m2l_build_operator` — **removed**. Replaced by
+  `LaplaceKernel::build_m2l_operators`, a plain static member. The former's
+  body moved inside the new method's per-key loop unchanged, re-indented and
+  fed `dd`/`ix`/`iy`/`iz` from the key, so the diff is readable and "no bits
+  moved" is checkable by eye as well as by the gate.
+- `LaplaceKernel::build_aux_tables` — second parameter.
+- `LaplaceKernel::key_needs_level` — declaration comment rewritten: it now has
+  two readers in `src/` (T8's profiling emission and T9's cache-invalidation
+  rule), where it claimed in capitals to have none.
+- `MonopoleBasis::m2l_build_operator` → `MonopoleBasis::build_m2l_operators`,
+  and `MonopoleBasis::build_aux_tables` gains the parameter.
+  `m2l_operator_entry` is **untouched** and remains the single source of the
+  operator value, called by the new builder and by
+  `tests/tstFarFieldContract.hpp`'s host reference — which is why that gate
+  stayed bit-exact. `m2l_accumulate` was not inlined away.
+- `UpwardSweep::set_m2l_kernel_params`, `UpwardSweep::m2l_kernel_params`,
+  `_m2l_kernel_params` — new; `Canopy_FarFieldContract.hpp` included.
+- `DownwardSweep::set_m2l_kernel_params`, `m2l_kernel_params`,
+  `set_root_half_width`, `root_half_width`, `m2l_op_cache_size`,
+  `m2l_op_keys_built_count`, `clear_m2l_op_cache`, `_grow_m2l_op_cache`,
+  `m2l_host_operators_type`, and the four cache members plus
+  `_root_half_width` and `_m2l_kernel_params` — new.
+- `Solver::_push_m2l_kernel_params`, `Solver::_push_root_half_width` — new
+  private helpers; four call sites (constructor, `_init_auto_softening`, and
+  before each of the three `_downward.setup()`).
+- `tests/tstDownwardSweep.hpp` — `rebuildsAfterInvalidate` gains four
+  `EXPECT_EQ`/`EXPECT_GT`s and a `[downward-caching]` measurement line;
+  `<cstdio>` included.
+
+### Repository state left behind
+
+- `src/Canopy_FarFieldContract.hpp`, `src/Canopy_LaplaceKernel.hpp`,
+  `src/Canopy_UpwardSweep.hpp`, `src/Canopy_DownwardSweep.hpp`,
+  `src/Canopy_Solver.hpp`, `tests/CanopyTest_MonopoleBasis.hpp`,
+  `tests/tstDownwardSweep.hpp` — as above.
+- `scripts/tuolumne/run_ctest_t9.flux` and
+  `scripts/tuolumne/run_ctest_t9_baseline.flux` — new.
+- `tasks/abstract-solver-backend.md` — T9 marked **DONE** with a **Met.**
+  paragraph; T5's **Do** step 1 rewritten to the current `build_aux_tables`
+  signature; the "None of those offsets account for T4" paragraph corrected to
+  say T5's **and T9's** **Fill in** lists are verified against the working tree
+  and T10's and T11's are not.
+- Logs kept: `canopy-t9-baseline.f3YFLjDhHMpB.log`,
+  `canopy-t9.f3YFVVf2Tn4X.log`, `canopy-t9.f3YFaF1JsFvf.log`.
+- **`tests/data/laplace_solve_P6.txt` not regenerated**, and the frozen
+  configuration block in `tests/tstLaplaceSolve.hpp` untouched. That file was
+  not edited at all.
+- **No `clang-format` pass**, per `CLAUDE.md`.
+- `README.md` untouched: no public API and no example's arguments changed, and
+  no new known issue was found.
+- Out of scope and untouched, as directed: `tests/tstLaplaceKernel.hpp` and
+  `Canopy_Test_P2P_*`. **A correction on the first of those:** the T9 entry
+  says `tests/tstLaplaceKernel.hpp:682` calls `m2l_build_operator` and would
+  break on its removal. It does not — `grep -n m2l_build tests/` finds nothing
+  in that file. What it does do is pass a bare $A_{n,m}$ view to
+  `m2m_translate` and `m2l_translate` (`:407`, `:571`), which have taken an
+  `aux` struct since **T5**. So that target's breakage predates this task by
+  four tasks and removing `m2l_build_operator` neither caused nor worsened it.
+  The entry has been corrected; `ctest -L regression`; the partitioner's non-determinism;
+  `sets_per_component` and the shared-cell slot expression (T10); the `Solver`
+  template parameter (T11); `run_cmake_tuolumne.sh`; `setup-repo.txt`. T8's
+  `scripts/tuolumne/run_op_table_budget_profile.flux` is still untracked — it
+  is T8's deliverable and was left exactly as found.
+
+**Affects:** **T10** — it inherits four things. First, **the setter path now
+has three setters on `DownwardSweep` and one on `UpwardSweep`**, and the rule
+they all follow is worth copying rather than re-deriving: no-op on an unchanged
+value, dirty the interaction list only if the value can change what the list or
+the table holds, and empty the operator cache only if the value can change what
+an *operator* is. A T10 knob that reshapes `_locals` belongs in the first two
+categories and **not** the third. Second, **`_m2l_op_table`'s shape is
+untouched** — still `(num_coeffs_per_cell, m2l_num_src_coeffs, n_ops)` — and
+the new cache has the same shape in `Kokkos::HostSpace`, so if T10's
+`sets_per_component` changes the operator's column shape it must change
+**both**, and the cache's key must then account for the set count or a stale
+column will survive a change of shape. Third, **the negative-compile block
+still has three bases**: T9 added no class-scope `static_assert`, so T10 is
+next in line for the rule that a new sweep-side assert needs its own basis
+there. Fourth, `FarFieldContract` still runs at `NComps = 2` with
+`num_coeffs_per_cell = 1`, so the multi-component exercise of the pack/unpack
+loops T10 rewrites is intact, and `not_bit_identical = 0` is its current
+reading. **T11** — it inherits three things. First, **the two contract members
+T9 replaced are the ones a new `FarField` type must now implement**:
+`build_m2l_operators` (plain static, key set at once, `unit_w` + `kernel_params`)
+and the two-argument `build_aux_tables`. A basis written against the old
+`m2l_build_operator` will not compile, and `MonopoleBasis` is the template for
+both. Second, **`Solver` now reaches into the sweeps at four places, not one**
+— `set_m2l_op_table_byte_budget`, `_push_m2l_kernel_params` (which touches
+*both* sweeps) and `_push_root_half_width` — so a `Solver` templated on
+`FarField` carries all four along, and `_push_m2l_kernel_params` is the one
+that must keep touching both sweeps or a kernel-dependent aux table will differ
+between the device and host builds. Third, `Canopy_Test_MultiSolve_MPI_SERIAL`
+**compiles against the changed `Solver` as of this task**, so T11's
+compile-only check of it starts from a known-good point. **Any later task using
+the gate** — the np=3 partitioner wobble has now been seen *within a single
+job*, two bodies drawing one cut and the third drawing T1's, which is a sharper
+statement than the earlier logs' "between runs" and makes step 1 of the
+attribution procedure decisive on its own. The np=5 cross-rank pair has now
+taken the same two values across four runs of three different HEADs; treat
+either as the reference. And the DownwardSweep suite is now known green at
+ranks 1-6 on this machine, which no earlier log could say.
