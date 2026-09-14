@@ -197,12 +197,35 @@ deviation in its 9th significant figure, `3.209361028925181e-07` against
 `3.2093610310582619e-07`, still 3x under `LS_DIRECT_SUM_TOL`. It is the same
 multijagged non-determinism and not a property of any change: it is reproduced by
 unmodified `HEAD` (flux job `f3XWSVHd6FVh`, the control run T3 attributed it
-with). **So a np 3-6 direct-sum or cross-rank deviation that moves only in its
-9th or later significant figure and stays under its pinned tolerance is this.**
-Confirm it the same way — stash the change, rebuild, re-run the gate from
-unmodified `HEAD` — before recording it as a finding of the task. The np 1-2
-bitwise half of the gate is unaffected, because the cut over one or two parts is
-reproducible.
+with). It has since been observed at np=3 and np=6 as well, and within a single
+job, so it belongs to no particular rank count. **So a np 3-6 direct-sum or
+cross-rank deviation that moves only in its 9th or later significant figure and
+stays under its pinned tolerance is this.**
+
+**Attribute it from the job's own `ctest -V` log, in three steps, and not from a
+control run.** Each step is decisive on its own, so stop at the first one that
+answers:
+
+1. **Compare the three test bodies' per-rank `n_unique_ops` lines at that rank
+   count.** Two bodies of one job over one binary drawing two different cuts is
+   the non-determinism measured directly.
+2. **If the three bodies agree with each other, compare the cut against the cuts
+   the progress log records.** A cut already paired with this same moved figure
+   in an earlier section settles it, because the pairing was established by a
+   run whose behavior was not in question.
+3. **If the cut agrees too, check whether the figure that moved is a *cross-rank*
+   one while every direct-sum figure holds to all 17 digits.** Equal per-rank key
+   counts do not imply an equal partition — the count is a five-integer
+   fingerprint of a 600-particle assignment — and the two maxima are attained at
+   different particles, the direct-sum one truncation-dominated at
+   $3.2\times10^{-7}$ and the cross-rank one reassociation-dominated at
+   $10^{-13}$, so only the smaller is sensitive at this scale. That combination
+   is reassociation under an unchanged key count and is not attributable to a
+   source change at all.
+
+Only if the direct-sum figures move as well is a stash-and-rebuild control run
+from unmodified `HEAD` worth the wall time. The np 1-2 bitwise half of the gate
+is unaffected throughout, because the cut over one or two parts is reproducible.
 
 So the gate is three checks — **the Laplace-solve gate** — and every task below
 is verified against all three:
