@@ -11,7 +11,7 @@ and Design Documentation](#algorithm-and-design-documentation) section below.
 ### Template Parameters
 
 ```cpp
-Canopy::Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>
+Canopy::Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps, FarField>
 ```
 
 | Parameter | Description | Default |
@@ -19,8 +19,17 @@ Canopy::Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>
 | `MemorySpace` | Kokkos memory space (e.g. `Kokkos::HostSpace`, `Kokkos::CudaSpace`) | — |
 | `ExecutionSpace` | Kokkos execution space (e.g. `Kokkos::OpenMP`, `Kokkos::Cuda`) | — |
 | `Scalar` | Floating-point type for field values | `double` |
-| `P_ORDER` | Multipole expansion order (higher = more accurate, more expensive) | `8` |
+| `P_ORDER` | The far field's order knob (higher = more accurate, more expensive). $P$ for a solid-harmonic basis, $p$ for Taylor, $n$ for Chebyshev — different quantities, same slot | `8` |
 | `NComps` | Number of simultaneous charge components | `1` |
+| `FarField` | Far-field basis, as a template taking `<Scalar, Order, NComps>` | `LaplaceKernel` |
+
+`FarField` selects a **basis-plus-kernel composition**, not a bare kernel: the
+type named there owns both the expansion the tree carries and the potential
+those coefficients represent, and supplies every far-field operator (P2M, M2M,
+M2L, L2L, L2P) together with the auxiliary tables they need. The default,
+`Canopy::LaplaceKernel`, is the solid-harmonic $1/r$ composition; omitting the
+argument is exactly today's solver. `createSolver` takes the same parameter in
+the same position.
 
 ### Constructor
 

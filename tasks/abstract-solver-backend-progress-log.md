@@ -3989,3 +3989,199 @@ cross-rank figure. Also worth knowing before reading a `-V` log:
 `bitForBitArtifacts` skips without solving at np >= 3, so a np >= 3 rank count
 prints three default-budget `[laplace-solve]` groups and not four, in the order
 `crossRankAgreement`, `matchesDirectSum`, `opTableByteBudget`.
+
+## T11 — the far field is a `Solver` template parameter
+
+T11 is **DONE**. `Solver` and `createSolver` take a sixth parameter,
+`template <class, int, int> class FarField = LaplaceKernel`, and
+`kernel_type` is `FarField<Scalar, P_ORDER, NComps>`. Every existing caller
+still compiles with five arguments and still gets the solid-harmonic path.
+
+### What changed, in full
+
+`src/Canopy_Solver.hpp` only:
+
+| site | before | after |
+| --- | --- | --- |
+| `:115-119` class comment | `P_ORDER - multipole expansion order` | `P_ORDER` documented as the basis's order knob ($P$ solid-harmonic, $p$ Taylor, $n$ Chebyshev), plus a `FarField` line |
+| `:122-124` template header | `<class MemorySpace, class ExecutionSpace, class Scalar = double, int P_ORDER = 8, int NComps = 1>` | same plus `template <class, int, int> class FarField = LaplaceKernel` |
+| `:130` typedef | `using kernel_type = LaplaceKernel<Scalar, P_ORDER, NComps>;` | `using kernel_type = FarField<Scalar, P_ORDER, NComps>;` |
+| `:812-820` `createSolver` | five parameters, forwarded | six, `FarField` forwarded into the returned `Solver` |
+
+Nothing else in the header moved, and the edit was deliberately not widened.
+`grep -n LaplaceKernel src/Canopy_Solver.hpp` now returns the include at `:18`,
+the class comment, and the two default arguments — no other use, and no
+`kernel_type::` use anywhere in the file, which is why a one-line typedef
+change is sufficient for the whole solver. All four sites where `Solver`
+reaches into the sweeps (T9's finding: `set_m2l_op_table_byte_budget`,
+`_push_m2l_kernel_params` touching both sweeps, and `_push_root_half_width`)
+go through `kernel_type` indirectly via `upward_type`/`downward_type` and
+needed no edit at all.
+
+### Decisions, as directed
+
+- **`README.md:14-23` updated in this change.** The "Template Parameters" code
+  block and table are the public statement of the signature T11 changes, and
+  `CLAUDE.md` requires the README to move with a public-facing API change. The
+  `FarField` row names `LaplaceKernel` as the default, and a short paragraph
+  below the table says what the slot selects: a **basis-plus-kernel
+  composition**, not a bare kernel — the type named there owns both the
+  expansion the tree carries and the potential those coefficients represent,
+  and supplies P2M/M2M/M2L/L2L/L2P plus the auxiliary tables. `P_ORDER`'s row
+  now says it is the far field's order knob, matching the class comment.
+- **No new class-scope `static_assert` on either sweep.** A `FarField`
+  conformance check on the template template parameter is the obvious
+  candidate and it is not this task. Clang reports one failed class-scope
+  assert per instantiation, so a new sweep-level guard would need its own
+  basis in the negative-compile block
+  (`tests/tstFarFieldContract.hpp:1195-1319`, four bases covering six guards),
+  and T11's exit criterion does not ask for one. The four existing guards
+  already reject a non-conforming basis — which this task's own compile-only
+  test now exercises, since it forces those sweeps to instantiate on
+  `MonopoleBasis`.
+- **The compile-only instantiation forces instantiation.** `using S =
+  Solver<...>;` instantiates nothing; the test asserts `sizeof(S) > 0`, which
+  requires a complete type, which instantiates the class body and therefore
+  its data members and therefore `UpwardSweep`, `DownwardSweep` and `P2P` on
+  `MonopoleBasis` — so their class-scope guards actually run. It also asserts
+  `std::is_same_v<S::kernel_type, MonopoleBasis<double,1,1>>`, which is the
+  part that would catch a typedef that compiles but composes the wrong type.
+
+### The new test
+
+`tests/tstFarFieldContract.hpp` gained `#include "Canopy_Solver.hpp"` (it did
+not include it before) and `<type_traits>`, plus
+`TEST( FarFieldContract, solverTakesTheBasisAsItsFarField )` sited after
+`levelReachesTheKey` and before the negative-compile block. It holds four
+`static_assert`s and a `SUCCEED()`: the `sizeof`/`kernel_type` pair on
+`Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, 1, 1, CanopyTest::MonopoleBasis>`,
+and the same pair on the five-argument `Solver<..., double, 1, 1>` requiring
+its `kernel_type` to still be `LaplaceKernel<double,1,1>`. **The second half is
+the R-C assertion in the test rather than only in the build**: a default that
+silently changed would keep every existing call site compiling and give it a
+different solver, which no compile check of `tstMultiSolve.hpp` would notice.
+
+`NComps = 1` here, not this file's `BASIS_NCOMPS = 2`: the six call sites T11
+must not break are single-component, so that is the shape worth proving
+portable. `P_ORDER = 1` is nominal — `MonopoleBasis` carries one coefficient
+regardless.
+
+### What only compiling revealed
+
+Nothing broke, and two things are worth recording because they were the risks:
+
+- **`Solver`'s member function bodies are not instantiated by the `sizeof`**,
+  which is exactly what makes the test meaningful and also what it cannot
+  cover. `Solver::solve()` and friends are only compiled for the
+  instantiations something actually calls, and no test calls a
+  `MonopoleBasis`-backed `Solver`. So this task proves `Solver`'s *class* is
+  basis-agnostic; it does not prove its member bodies are. T12 is where that
+  gets tested, by a basis that a real solve runs through.
+- **`LaplaceKernel<double, 1, 1>` instantiates cleanly at order 1**, which the
+  default-branch assertion depends on and which nothing else in the tree
+  exercises ($P=6$ in the gate, $P=8$ by default).
+
+### Numbers
+
+Flux job **`f3YHW8T5Cu1y`** (tuolumne1003, Cray clang 20.0.0, `RelWithDebInfo`,
+Kokkos SERIAL, `build-tuolumne/` unreconfigured), `scripts/tuolumne/run_ctest_t11.flux`:
+`100% tests passed, 0 tests failed out of 6` for both suites,
+`### exit codes: LaplaceSolve=0 FarFieldContract=0 ###`.
+
+| np | cross-rank pot | cross-rank grad | direct-sum pot | direct-sum grad |
+| --- | --- | --- | --- | --- |
+| 1 | (reference) | (reference) | 3.2093610331931809e-07 | 4.2399302231264458e-08 |
+| 2 | 4.1994107222659022e-13 | 2.1570013757642702e-12 | 3.2093610363952985e-07 | 4.239936667274564e-08 |
+| 3 | 8.0211305411572796e-13 | 4.0353546216363242e-12 | 3.2093610299898352e-07 | 4.2399380705248681e-08 |
+| 4 | 1.114294857300434e-12 | **5.5987399483706545e-12** | 3.2093610299888352e-07 | 4.2399368624331468e-08 |
+| 5 | **3.3416042637542698e-13** | **1.7052716455411195e-12** | 3.209361028925181e-07 | 4.2399357908696204e-08 |
+| 6 | 5.688835866646797e-13 | 2.8631357246763719e-12 | 3.2093610299905848e-07 | 4.2399381662523099e-08 |
+
+21 of the 22 cells are character-for-character T8's and T10's. `n_unique_ops`
+per rank is T1's exactly — np=1 → 686; np=2 → 368, 386; np=3 → 273, 204, 329;
+np=4 → 264, 128, 234, 194; np=5 → 180, 168, 147, 217, 187; np=6 → 174, 156,
+111, 160, 116, 175 — in **all three** default-budget bodies at every rank
+count, with `fallback_pairs = 0`, `locals_ext = (103,28,1)`,
+`optab_ext = (28,49,n_ops)`, `a_extent = 169`,
+`initial_hash = 0xb6ad437608ad69b7` and `op_cap = 32768` throughout. The
+tight-budget arm reproduces T8's table cell for cell: cap 64, `ops = 64`,
+fallback 1428 at np=1 and 639/587, 350/269/478, 336/148/238/202,
+162/137/153/196/189, 148/123/102/143/52/166 at np 2-6.
+`tests/data/laplace_solve_P6.txt` was not touched and `bitForBitArtifacts`
+passed at np 1-2.
+
+**The np=5 wobble, attributed at step 3.** The moved pair is the *second* of
+the two values this cell has taken since T1, previously seen in `f3XiYE4xRbBd`
+(T8) and `f3YGoLLVokLP` (T10). This run is T8's step-3 case verbatim rather
+than T10's step-1 case: the three np=5 bodies **agreed with each other**, their
+cut **is** T1's `(180, 168, 147, 217, 187)`, and the np=5 direct-sum figures
+are T1's to all 17 digits — only the cross-rank maximum moved. Per T8's
+recorded rule, a moved cross-rank figure with an unchanged key count and an
+unchanged direct-sum figure is reassociation and is not attributable to a
+source change; a control run is warranted only if the direct-sum figures move
+too. No control run was done. Both values are three orders under
+`LS_CROSS_RANK_TOL = 5.6e-10`. This is also the fifth run of the cell and the
+third time it has taken the higher value, so the "two stable values" reading
+from T9 continues to hold.
+
+Conformance side, unchanged from T10: `locals_ext` third extent 4
+(`NComps = 2`, `sets_per_component = 2`), `not_bit_identical = 0` at every rank
+and both configurations, `fallback_pairs = 0`, and
+`snap_writes == pack_writes == unpack_writes == slot_expected` with
+`slot_aliased = 0` and `slot_unwritten = 0` — 44/136/240/272/288/292 at np 1-6
+on Basic, 36 at every rank count on Small.
+
+### Build
+
+`make -j 4` in `build-tuolumne/`, never a bare `make`, no reconfiguration.
+`Canopy_Test_FarFieldContract_MPI_SERIAL` in 2m14s; then
+`Canopy_Test_LaplaceSolve_MPI_SERIAL Canopy_Test_MultiSolve_MPI_SERIAL
+example_fmm gravity_solve` in 11m13s, **exit 0**, all four `Built target`.
+The two examples emit the usual `amdgpu-waves-per-eu` occupancy warnings from
+the HIP variant of the sweeps; they predate this task and are unrelated.
+
+### Housekeeping
+
+- Design-doc corrections made as part of this task: T11's **Fill in** and
+  **Do** citations were measured against the working tree and rewritten
+  (`:104-105` → `:122-123`, `:112` → `:130`, `:719-727` → `:812-820`,
+  `:97-101` → `:115-119`), and T10's **Met.** paragraph no longer says the
+  change "is not yet committed" — it is, as `6d1580f`.
+- New file `scripts/tuolumne/run_ctest_t11.flux`, preamble copied from T10's,
+  `--time-limit=8`, `-q pdebug`, provenance echoed before any work. It runs the
+  two suites only; the other three targets are compile-only.
+- Out of scope and untouched, as directed: `tests/tstMultiSolve.hpp` and the
+  three examples — the point of the exit criterion is that they compile
+  unmodified; `examples/04_nan_replay/nan_replay.cpp`, still in no build
+  target; `tests/tstLaplaceKernel.hpp` and `Canopy_Test_P2P_*`, which do not
+  compile at `HEAD`; `ctest -L regression`; the partitioner's non-determinism;
+  the FD gradient at `src/Canopy_LaplaceKernel.hpp:851-879`, left for T12;
+  `run_cmake_tuolumne.sh`; `setup-repo.txt`; and the untracked
+  `scripts/tuolumne/*.flux` files from T8, T9 and T10.
+
+**Affects:** **T12** — it inherits four things. First, **the `FarField` slot is
+now the whole contract surface**: a Cartesian-Taylor basis is admissible iff
+`Solver<Mem, Exec, double, p, NComps, CartesianTaylorBasis>` completes, which
+means it must satisfy every guard `UpwardSweep`, `DownwardSweep` and `P2P`
+carry — the four coefficient guards, the `M2LOverflow` guard and the
+`sets_per_component` guard — plus supply `build_m2l_operators` (plain static,
+whole key set, `unit_w` + `kernel_params`) and the two-argument
+`build_aux_tables` that T9 left, and `sets_per_component` that T10 added.
+`MonopoleBasis` is the only complete worked example; `LaplaceKernel` is the
+only single-set one. Second, **`Solver`'s member bodies are still untested
+against a non-`LaplaceKernel` basis** — T11 proves the class composes, not that
+`solve()` does, because nothing calls a `MonopoleBasis`-backed solver. T12 is
+the first task that will run a solve through the slot, and it should expect
+the first real errors to appear in `Solver`'s member bodies rather than in its
+declarations. Third, **the negative-compile block still has four bases and six
+guards**: T11 added no class-scope assert, so T12 is next in line for the rule
+that a new sweep-side guard needs its own basis there. Fourth, **`P_ORDER` is
+now documented as the basis's order knob** in both the class comment and
+`README.md`, so a Taylor basis reading it as $p$ needs no new parameter and no
+rename — but it does need to say so on its own declaration, since the slot
+carries no units. **Any later task using the gate** — the np=5 cross-rank cell
+has now been measured five times and taken exactly two values; this run is the
+first where step 3 (cut agrees, direct-sum holds, only cross-rank moves) was
+the *only* applicable step, T8's case rather than T10's, so both step-1 and
+step-3 outcomes are now attested on more than one HEAD. Treat either np=5
+cross-rank value as the reference.

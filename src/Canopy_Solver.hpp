@@ -114,20 +114,24 @@ struct FmmConfig
 //
 // Template parameters:
 //   MemorySpace, ExecutionSpace - Kokkos spaces
-//   Scalar  - field scalar type (default double)
-//   P_ORDER - multipole expansion order
-//   NComps  - number of simultaneous solves (charge components)
+//   Scalar   - field scalar type (default double)
+//   P_ORDER  - the basis's order knob: P for a solid-harmonic basis, p for
+//              Taylor, n for Chebyshev. Different quantities, same slot.
+//   NComps   - number of simultaneous solves (charge components)
+//   FarField - basis-plus-kernel composition supplying the far-field
+//              operators (default LaplaceKernel)
 // ============================================================================
 
 template <class MemorySpace, class ExecutionSpace, class Scalar = double,
-          int P_ORDER = 8, int NComps = 1>
+          int P_ORDER = 8, int NComps = 1,
+          template <class, int, int> class FarField = LaplaceKernel>
 class Solver
 {
   public:
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
 
-    using kernel_type = LaplaceKernel<Scalar, P_ORDER, NComps>;
+    using kernel_type = FarField<Scalar, P_ORDER, NComps>;
     using builder_type = TreeBuilder<MemorySpace, ExecutionSpace>;
     using partitioner_type = TreePartitioner<MemorySpace, ExecutionSpace>;
     using comm_plan_type = CommunicationPlan<MemorySpace, ExecutionSpace>;
@@ -810,13 +814,14 @@ class Solver
 };
 
 template <class MemorySpace, class ExecutionSpace, class Scalar = double,
-          int P_ORDER = 8, int NComps = 1>
-std::shared_ptr<Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>>
+          int P_ORDER = 8, int NComps = 1,
+          template <class, int, int> class FarField = LaplaceKernel>
+std::shared_ptr<
+    Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps, FarField>>
 createSolver( MPI_Comm comm, const FmmConfig& cfg )
 {
-    return std::make_shared<
-        Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps>>( comm,
-                                                                       cfg );
+    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER,
+                                   NComps, FarField>>( comm, cfg );
 }
 
 } // namespace Canopy

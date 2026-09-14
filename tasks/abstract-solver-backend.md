@@ -2071,9 +2071,10 @@ change and compare failure sets rather than requiring green.
 one `DownwardSweep::shared_slot( i, ci, c, s )` whose flattening order is
 `c * sets_per_component + s`, stated on its declaration. At
 `sets_per_component == 1` that collapses to `c` exactly, so the solid-harmonic
-shapes are unchanged by construction. Verified at `HEAD`
-`262f33574b58fb4a91b103c8556dde5f5fbc8046` (working tree; the change is not yet
-committed), Cray clang 20.0.0, `build-tuolumne/` unreconfigured.
+shapes are unchanged by construction. Verified in the working tree at `HEAD`
+`262f33574b58fb4a91b103c8556dde5f5fbc8046`, Cray clang 20.0.0,
+`build-tuolumne/` unreconfigured; committed afterwards as
+`6d1580f1bf5631a040f9728a5c43e1ddbe55be19`.
 
 Flux job **`f3YGoLLVokLP`** (the gate) and **`f3YH7EEJ9zdd`** (the verification
 run after both perturbations were reverted and the negative-compile build's
@@ -2214,11 +2215,11 @@ carries `unit`, not `regression`.
 
 ---
 
-### T11 — `Solver` selects the far field, with existing callers unchanged — **NOT STARTED**
+### T11 — `Solver` selects the far field, with existing callers unchanged — **DONE**
 
 **Depends on:** T9, T10.
 
-**Fill in:** `src/Canopy_Solver.hpp:104-105`, `:112`, `:719-727`;
+**Fill in:** `src/Canopy_Solver.hpp:122-123`, `:130`, `:812-820`;
 `tests/tstFarFieldContract.hpp` for the compile-only instantiation below, which
 goes there because `MonopoleBasis` is defined beside it in `tests/`.
 
@@ -2227,11 +2228,11 @@ goes there because `MonopoleBasis` is defined beside it in `tests/`.
 
 **Do:**
 
-1. Add a **defaulted template template parameter** to `Solver` (`:104-105`):
+1. Add a **defaulted template template parameter** to `Solver` (`:122-123`):
    `template <class, int, int> class FarField = LaplaceKernel`, and change the
-   typedef at `:112` to `using kernel_type = FarField<Scalar, P_ORDER, NComps>;`.
-2. Give `createSolver` (`:719-727`) the same defaulted parameter and forward it.
-3. Document in the class comment (`:97-101`) that `P_ORDER` is now "the basis's
+   typedef at `:130` to `using kernel_type = FarField<Scalar, P_ORDER, NComps>;`.
+2. Give `createSolver` (`:812-820`) the same defaulted parameter and forward it.
+3. Document in the class comment (`:115-119`) that `P_ORDER` is now "the basis's
    order knob" — $P$ for a solid-harmonic basis, $p$ for Taylor, $n$ for
    Chebyshev. Different quantities, same slot.
 4. Delete the FD gradient (`src/Canopy_LaplaceKernel.hpp:851-879`)? **No** — that
@@ -2256,6 +2257,62 @@ new compile-only test in `tests/tstFarFieldContract.hpp` instantiates
 `Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, 1, 1, MonopoleBasis>`
 successfully, so `ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` still passes
 at ranks 1-6.
+
+**Met.** `Solver` and `createSolver` take
+`template <class, int, int> class FarField = LaplaceKernel` as their sixth
+parameter and `kernel_type` is `FarField<Scalar, P_ORDER, NComps>`. The edit is
+three lines of signature plus the class comment; `src/Canopy_Solver.hpp` still
+names `LaplaceKernel` only at its include and as the default argument, and no
+class-scope `static_assert` was added to either sweep (see the progress log for
+why). Verified in the working tree at `HEAD`
+`6d1580f1bf5631a040f9728a5c43e1ddbe55be19`, Cray clang 20.0.0, `build-tuolumne/`
+unreconfigured.
+
+**All five buildable instantiations compile, unmodified.**
+`make -j 4 Canopy_Test_LaplaceSolve_MPI_SERIAL Canopy_Test_MultiSolve_MPI_SERIAL
+example_fmm gravity_solve` exits 0, as does
+`make -j 4 Canopy_Test_FarFieldContract_MPI_SERIAL`. Neither
+`tests/tstMultiSolve.hpp` (three call sites) nor either example was touched, and
+`examples/04_nan_replay/nan_replay.cpp:66` is character-for-character the two
+examples' instantiation and stays out of the build. `MultiSolve` was built to
+compile and **not** run, per [Deliberate deviations](#deliberate-deviations).
+
+Flux job **`f3YHW8T5Cu1y`** (tuolumne1003, `RelWithDebInfo`, Kokkos SERIAL):
+`100% tests passed, 0 tests failed out of 6` for both
+`Canopy_Test_LaplaceSolve_MPI_SERIAL` and
+`Canopy_Test_FarFieldContract_MPI_SERIAL` — the full Laplace-solve gate
+(`bitForBitArtifacts` at np 1-2, `crossRankAgreement` at 2-6,
+`matchesDirectSum` at 1-6) and the conformance gate at ranks 1-6, the latter
+now carrying the new `FarFieldContract.solverTakesTheBasisAsItsFarField` body
+at every rank count.
+
+**The committed bit patterns matched with no regeneration.**
+`tests/data/laplace_solve_P6.txt` was not touched; `bitForBitArtifacts` passed
+at np 1-2 with `locals_ext = (103,28,1)`, `optab_ext = (28,49,n_ops)`,
+`a_extent = 169` and `initial_hash = 0xb6ad437608ad69b7` at every rank and rank
+count. `n_unique_ops` per rank reproduces T1's, T8's and T10's exactly: np=1 →
+686; np=2 → 368, 386; np=3 → 273, 204, 329; np=4 → 264, 128, 234, 194; np=5 →
+180, 168, 147, 217, 187; np=6 → 174, 156, 111, 160, 116, 175, with
+`fallback_pairs = 0` throughout, and the tight-budget arm reproduces T8's
+fallback counts cell for cell. **21 of T8's 22 cross-rank/direct-sum cells
+reproduce to all 17 digits**; the exception is the np=5 cross-rank pair, at
+`3.3416042637542698e-13` / `1.7052716455411195e-12` rather than
+`9.5809726336249496e-14` / `6.4438389009577268e-13`. That is the second of the
+two values this pair has taken since T1, and this run is step 3 of
+[the bit-for-bit gate](#the-bit-for-bit-gate)'s procedure exactly: all three
+np=5 bodies drew one cut, that cut is T1's, the np=5 direct-sum figures are
+T1's to all 17 digits, and only the reassociation-dominated cross-rank maximum
+moved. Both values are three orders under `LS_CROSS_RANK_TOL = 5.6e-10`. No
+control run.
+
+On the conformance side `locals().extent(2)` is 4, `not_bit_identical = 0` at
+every rank and both configurations, and the slot-coverage assertion holds
+everywhere — `snap_writes == pack_writes == unpack_writes == slot_expected`
+with `slot_aliased = 0` and `slot_unwritten = 0`, at 44/136/240/272/288/292 at
+np 1-6 on Basic and 36 at every rank count on Small, matching T10.
+
+`README.md`'s "Template Parameters" block and table gained the `FarField` row
+with its `LaplaceKernel` default, per `CLAUDE.md`'s public-API rule.
 
 ---
 

@@ -164,6 +164,7 @@
 
 #include "Canopy_CommunicationPlan.hpp"
 #include "Canopy_DownwardSweep.hpp"
+#include "Canopy_Solver.hpp"
 #include "Canopy_TreeBuilder.hpp"
 #include "Canopy_TreePartitioner.hpp"
 #include "Canopy_UpwardSweep.hpp"
@@ -184,6 +185,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -1148,6 +1150,51 @@ TEST( FarFieldContract, levelReachesTheKey )
                                                  TEST_EXECSPACE>(
         /*num_particles_per_rank=*/1000, /*ncrit=*/4, /*max_depth=*/6,
         /*tolerance=*/0.1, /*replication_depth=*/2 );
+}
+
+//---------------------------------------------------------------------------//
+// COMPILE-ONLY — the far field is a Solver template parameter (T11).
+//
+// Solver's sixth parameter is `template <class, int, int> class FarField`,
+// defaulted to LaplaceKernel. This test asserts that a basis which is not
+// LaplaceKernel can be named in that slot and that Solver's kernel_type is
+// the composition it selects.
+//
+// The sizeof() is what makes this a test rather than a spelling exercise.
+// Naming the type instantiates nothing; requiring it to be complete
+// instantiates the class body, hence its data members, hence UpwardSweep,
+// DownwardSweep and P2P on MonopoleBasis — so the class-scope guards those
+// sweeps carry (see the negative block below) actually run against this
+// basis. Member function bodies are not instantiated, which is the point:
+// Solver's own code must not assume a LaplaceKernel.
+//
+// NComps = 1 here, not the BASIS_NCOMPS = 2 used elsewhere in this file: the
+// six existing Solver call sites this task must not break instantiate a
+// single-component solver, so that is the shape worth proving portable.
+TEST( FarFieldContract, solverTakesTheBasisAsItsFarField )
+{
+    using SolverOnBasis =
+        Canopy::Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, /*P_ORDER=*/1,
+                       /*NComps=*/1, CanopyTest::MonopoleBasis>;
+
+    static_assert( sizeof( SolverOnBasis ) > 0,
+                   "Solver did not instantiate on MonopoleBasis." );
+    static_assert(
+        std::is_same_v<typename SolverOnBasis::kernel_type,
+                       CanopyTest::MonopoleBasis<double, 1, 1>>,
+        "Solver::kernel_type is not FarField<Scalar, P_ORDER, NComps>." );
+
+    // The default still selects the solid-harmonic path, which is R-C: the
+    // existing five-argument call sites must keep meaning what they meant.
+    using SolverDefault =
+        Canopy::Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, 1, 1>;
+    static_assert( sizeof( SolverDefault ) > 0,
+                   "Solver did not instantiate on its default far field." );
+    static_assert( std::is_same_v<typename SolverDefault::kernel_type,
+                                  Canopy::LaplaceKernel<double, 1, 1>>,
+                   "Solver's default FarField is no longer LaplaceKernel." );
+
+    SUCCEED();
 }
 
 //---------------------------------------------------------------------------//
