@@ -242,7 +242,7 @@ a task in this document.
 | Test tier for new tests | `unit` | The `regression` tier is the ship gate and holds only `MultiSolve` (`tests/CMakeLists.txt:60-62`), and no task here runs it — see [Deliberate deviations](#deliberate-deviations). Promoting anything into it requires confirming with the user first, per the repository's own rule. |
 | New test registration | add the name to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:48-57`) or `UNIT_SERIAL_TESTS` (`:36-39`) | Target becomes `Canopy_Test_<Name>_MPI_<DEVICE>`, tests `..._np_<N>` for `N` in 1-6. |
 | Build command | `make -j <N> <target>` for exactly the target(s) the task's exit criterion names, in whichever build tree the step is using — never a bare `make` | A whole-tree build compiles 33 test executables and the two examples, and cannot exit 0 in any case because two of those targets do not compile — see [Current state](#current-state). "Rebuild" anywhere below means rebuilding the named targets, and nothing else. Scope the build with the target argument and **not** by reconfiguring `Canopy_TEST_DEVICES` in the committed `build-tuolumne/`: that tree is the bitwise gate's configuration, and R3 rests on it not moving. |
-| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T8, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T10 additionally: `Canopy_Test_DownwardSweep_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve`. The last four are built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. The extras are the consumers that reach past `Solver` into what a task changes: `tests/tstDownwardSweep.hpp` reads `downward.locals()` at `:174`, `:265`, `:364` and `:376`, the view T10 reshapes, and T11 changes `Solver` itself, which `tests/tstMultiSolve.hpp` and the two examples instantiate. T8 is on the `FarFieldContract` list for a different reason than T6, T7, T10 and T11: it adds two contract members the sweeps read, so `MonopoleBasis` must declare them or that target stops compiling, and its `EscalateToP2P` rejection is a case in that test's permanent negative-compile block. Nothing else in `tests/` couples that tightly — `tstUpwardSweep.hpp` and `tstSingleSolve.hpp` instantiate the sweeps but call none of the operators these tasks touch, and `tstMultiSolve.hpp`'s `m2l_translate` mentions are all comments — so no other task compiles a consumer. |
+| Targets each task builds | every task: `Canopy_Test_LaplaceSolve_MPI_SERIAL`. T6, T7, T8, T9, T10, T11 additionally: `Canopy_Test_FarFieldContract_MPI_SERIAL`. T9 and T10 additionally: `Canopy_Test_DownwardSweep_MPI_SERIAL`. T11 additionally: `Canopy_Test_MultiSolve_MPI_SERIAL`, `example_fmm`, `gravity_solve`. T9 **runs** both of its extras; T10's `DownwardSweep` and all three of T11's are built to **compile**, not to run | This is the complete set; no remaining task builds anything else, and none builds an OPENMP or HIP variant. The extras are the consumers that reach past `Solver` into what a task changes: `tests/tstDownwardSweep.hpp` reads `downward.locals()` at `:174`, `:265`, `:364` and `:376`, the view T10 reshapes, and T11 changes `Solver` itself, which `tests/tstMultiSolve.hpp` and the two examples instantiate. T8 is on the `FarFieldContract` list for a different reason than T6, T7, T10 and T11: it adds two contract members the sweeps read, so `MonopoleBasis` must declare them or that target stops compiling, and its `EscalateToP2P` rejection is a case in that test's permanent negative-compile block. **T9 is the one task that runs its extras rather than merely compiling them.** It replaces `m2l_build_operator` and extends `build_aux_tables`, both of which `MonopoleBasis` implements (`tests/CanopyTest_MonopoleBasis.hpp:552-557`, `:247`) and one of which shares its operator value with that test's host reference (`tests/tstFarFieldContract.hpp:444`), so a signature change there moves a bit-exact gate and has to be re-run rather than re-compiled. And T9's own exit criterion lives in `tests/tstDownwardSweep.hpp` — `DownwardSweepCaching.rebuildsAfterInvalidate` is the only test that invalidates the interaction list without repartitioning, which `Solver` cannot do at all because `downward()` is `const` (`src/Canopy_Solver.hpp:504`). Nothing else in `tests/` couples that tightly — `tstUpwardSweep.hpp` and `tstSingleSolve.hpp` instantiate the sweeps but call none of the operators these tasks touch, and `tstMultiSolve.hpp`'s `m2l_translate` mentions are all comments — so no other task compiles a consumer. |
 | Reference data | one committed file, `tests/data/laplace_solve_P6.txt` | Three bit-for-bit records — `(nprocs, rank)` of `(1,0)`, `(2,0)`, `(2,1)` — plus one np=1 field record in canonical `GlobalId` order and a hash of the initial global particle set. The particle set is a fixed global set of $N_{\rm total} = 600$ from seed `1234 + P`, identical at every rank count, which is what makes the np=$k$-versus-np=1 comparison definable at all. The committed drift check hashes that *initial* set and not the state the field record is taken at: the solve drives the particles, so their positions at the last step are not bit-identical across rank counts. |
 | Test naming | `tests/tstLaplaceSolve.hpp` for the solve-level gate, `tests/tstLaplaceKernel.hpp` for the per-operator kernel tests | `Canopy_add_tests` maps a name to `tst<NAME>.hpp` and to `Canopy_Test_<NAME>_MPI_<DEVICE>` (`cmake/test_harness/test_harness.cmake:104-112`), so the file name, the `tests/CMakeLists.txt` entry and every exit criterion below move together. |
 | Bit-for-bit artifact form | 64-bit hash plus extents for `locals()` and the operator table; full bit patterns for the $A_{n,m}$ table and `n_unique_ops` | The operator table costs $N_t N_s \cdot 16 = 28\cdot49\cdot16$, 21.4 KB per key at $P=6$; committing it in full is not affordable. A hash over the raw bytes is exactly as sensitive to a bitwise change and still attributes a failure to one artifact, which is all any exit criterion here asks. Hashes are computed with the in-repo FNV-1a so a committed value depends on no library version. |
@@ -470,12 +470,15 @@ reasoning:*
 
 - **Softening never reaches the far field.** `FmmConfig::softening`
   (`src/Canopy_Solver.hpp:69`) is routed to `_p2p.set_softening` and
-  `_comm_plan.set_near_softening` only — in the constructor (`:169-178`) and in
-  `_init_auto_softening` (`:680-717`). Nothing passes it to `_upward` or
-  `_downward`, and `m2l_build_operator` is a **static** method taking
-  `(dd, ix, iy, iz, A_table, T_out)` (`src/Canopy_LaplaceKernel.hpp:516-519`) —
-  integers only. A softened basis needs $b$ *and* the physical unit width. T9
-  supplies both.
+  `_comm_plan.set_near_softening` only — in the constructor (`:183-203`) and in
+  `_init_auto_softening` (`:704-740`). The field defaults to $-1.0$, which
+  selects the distribution-based value the latter computes once during
+  `_full_setup()` (`:578`), so the effective softening is not known at
+  construction. Nothing passes it to `_upward` or `_downward`, and
+  `m2l_build_operator` is a **static** method taking
+  `(dd, ix, iy, iz, aux, T_out)` (`src/Canopy_LaplaceKernel.hpp:766-769`) —
+  integers and the basis's own auxiliary tables, no length. A softened basis
+  needs $b$ *and* the physical unit width. T9 supplies both.
 - **P2P never calls the kernel.** It uses only `scalar_type` and
   `num_components` (`src/Canopy_P2P.hpp:70-72`) and inlines
   $1/\sqrt{r^2+\varepsilon^2}$ and $-q\,\delta/(r^2+\varepsilon^2)^{3/2}$
@@ -1870,51 +1873,136 @@ declaring `EscalateToP2P` fails to compile with the named message.
 
 **Depends on:** T8.
 
-**Fill in:** `src/Canopy_DownwardSweep.hpp:645-646`, `:1079-1109`;
-`src/Canopy_Solver.hpp:69`, `:169-178`, `:565`, `:610`, `:685`.
+**Fill in:** `src/Canopy_DownwardSweep.hpp:1333-1371` (the stage-4 table build),
+`:302-308` (`m2l_effective_op_cap`), `:287-292` (the setter block T8 opened),
+`:544` and `:832` (the dirty flag and its early return), `:1611-1612` (where it
+is cleared and the build counted); `src/Canopy_LaplaceKernel.hpp:741-885`
+(`m2l_build_operator`, moved inside the new method); `src/Canopy_Solver.hpp:70`
+(`FmmConfig::softening`), `:183-203` (the constructor's config routing),
+`:704-740` (`_init_auto_softening`); `tests/CanopyTest_MonopoleBasis.hpp:247`
+and `:535-557` (the two contract members this task replaces);
+`tests/tstDownwardSweep.hpp:1258-1294` (`testRebuildsAfterInvalidate`).
 
-**Reference:** the rebuild trigger is `_interaction_list_dirty` (`:645-646`), set
-by `setup()` (`:637`) and by `invalidate_interaction_list()`
-(`src/Canopy_Solver.hpp:565`, `:610`).
+**Reference:** the rebuild trigger is `_interaction_list_dirty`
+(`src/Canopy_DownwardSweep.hpp:544`), tested at `:832`, set by `setup()`
+(`:824`), by `invalidate_interaction_list()` (`:266`) and by
+`set_m2l_op_table_byte_budget()` (`:290`), and cleared at `:1611`. `Solver`
+invalidates at `src/Canopy_Solver.hpp:589` and `:634`, in both cases after a
+repartition and immediately before `_downward.setup()` (`:594`, `:638`). The
+root half-width is the **largest** of the three half extents of
+`TreeBuilder::root_box()` (`src/Canopy_TreeBuilder.hpp:629-636`), so every cell
+is a cube and $w_{\rm root}$ is a single scalar.
 
 **Do:**
 
-1. Split the rebuild at `:1079-1109` into two pieces:
+1. Split the table build at `src/Canopy_DownwardSweep.hpp:1333-1371` into two
+   pieces:
    - a **geometry-keyed operator cache**, keyed by the canonicalized `M2LKey`,
      persisting across topology changes — a key already built is never rebuilt;
    - a **per-tree key→`op_idx` map**, rebuilt on the dirty flag exactly as today.
+
+   Bound the cache in the unit the table is already accounted in,
+   `KernelType::bytes_per_key`; how many columns may exist at all is
+   `m2l_effective_op_cap()` (`:302-308`), which the merge loop reads once into a
+   local at `:953`. Neither number is re-derived here.
+
 2. Replace `m2l_build_operator(dd, ix, iy, iz, aux, T_out)` with
-   `build_m2l_operators(keys[], unit_w[], kernel_params) -> ops`, a **host**
-   method (not `KOKKOS_INLINE_FUNCTION`) called only for keys the cache lacks.
-   It receives the whole missing key set at once so a basis that batches its
-   construction can.
-3. Plumb `kernel_params` — carrying at minimum the softening $b$ — from
-   `FmmConfig::softening` (`src/Canopy_Solver.hpp:69`) through `Solver` into
-   `_downward` before the table build. Today it reaches only `_p2p` and
-   `_comm_plan` (`:169-178`, `:680-717`).
-4. Supply `unit_w` as an array of `max_depth+1` half-widths computed as
-   $w_{\rm root}/2^{d}$ from `TreeBuilder::root_box()` (`src/Canopy_Solver.hpp:685`).
+   `build_m2l_operators(keys[], unit_w[], kernel_params, aux, ops)`, a **host**
+   method — not `KOKKOS_INLINE_FUNCTION`, per the [Conventions](#conventions)
+   row on host-side operator construction — called only for the keys the cache
+   lacks. It receives the whole missing key set at once so a basis that batches
+   its construction can.
+
+3. **`kernel_params` carries the softening as a length, and the length is the
+   effective one rather than the configured one.** `FmmConfig::softening`
+   (`src/Canopy_Solver.hpp:70`) is $\varepsilon$, and `P2P::set_softening`
+   squares it into `_softening2` (`src/Canopy_P2P.hpp:103-105`), so the kernel's
+   $b$ is $\varepsilon^2$; `kernel_params` carries $\varepsilon$ — the same
+   number `_p2p` and `_comm_plan` are handed — and its declaration states
+   $b = \varepsilon^2$, per the [Conventions](#conventions) row on units. The
+   field defaults to $-1.0$, which selects the distribution-based value computed
+   once in `_init_auto_softening()` (`:704-740`) during `_full_setup()` (`:578`),
+   so at construction time there is no value to pass. Set it on `_downward`
+   wherever the softening is decided: in the constructor's explicit-softening
+   branch beside `set_m2l_op_table_byte_budget` (`:188`), and in
+   `_init_auto_softening` for the auto branch. Both sites precede
+   `_downward.setup()` (`:594`) and therefore every table build.
+   `_softening_input` and `_softening_initialized` (`:690`, `:694`) already
+   carry that distinction. This rides T8's setter path rather than opening a
+   second one.
+
+4. **Changing `kernel_params` empties the cache.** The cache's premise is that a
+   canonicalized key plus `kernel_params` determines the operator (**R5**), so
+   its setter clears the cache as well as setting the dirty flag. Without that,
+   a solve whose softening is re-derived reuses operators built for the old $b$.
+
+5. Supply `unit_w` as an array of `max_depth+1` half-widths,
+   $w_{\rm unit}(d) = w_{\rm root}/2^{d}$, on the same setter path:
+   `DownwardSweep::setup` takes only the upward sweep and a particle count
+   (`src/Canopy_DownwardSweep.hpp:206-208`) and has no builder to ask.
    **Do not reinstate a per-source gather of cell centers** — the classify pass
-   stays a pure-integer pipeline (`:778-787`). Integer keys stay integer; only
+   stays a pure-integer pipeline (`:978-987`). Integer keys stay integer; only
    the builder sees lengths.
-5. State on the declaration whether `unit_w` is a half-width or a full width, and
-   whether the offset convention is source-minus-target. The existing key comment
-   uses half-widths and source-minus-target (`:280-294`, corrected in T7).
+
+6. **The builder reads the level out of the key, and the solid-harmonic basis
+   leaves none to read.** `canonicalize_key` zeroes `max_d` for `LaplaceKernel`
+   (`src/Canopy_LaplaceKernel.hpp:702`) and the cache is keyed on the
+   canonicalized key, so that basis's operators index `unit_w[0]` and must not
+   depend on it — which they do not, being scale-normalized. A basis needing a
+   physical width declares `key_needs_level = true` and returns the key
+   unchanged; `max_d` is then its index into `unit_w`. State this on
+   `build_m2l_operators`.
+
+7. State on the declaration whether `unit_w` is a half-width or a full width,
+   and that the offset convention is source-minus-target. The key already
+   carries both conventions (`src/Canopy_LaplaceKernel.hpp:741-765`,
+   `src/Canopy_DownwardSweep.hpp:357-372`).
+
+8. `build_aux_tables` gains `kernel_params` as a second argument, so a basis
+   whose auxiliary tables depend on the kernel can build them. Three sites:
+   `src/Canopy_UpwardSweep.hpp:266`, `src/Canopy_DownwardSweep.hpp:1354-1356`,
+   and `MonopoleBasis`'s own definition
+   (`tests/CanopyTest_MonopoleBasis.hpp:247`). The solid-harmonic table depends
+   only on the order and ignores it.
+
+9. `MonopoleBasis` implements the replaced members
+   (`tests/CanopyTest_MonopoleBasis.hpp:535-557`, `:247`) or
+   `Canopy_Test_FarFieldContract_MPI_SERIAL` stops compiling. Keep
+   `m2l_operator_entry` (`:347`) as the single source of the operator value:
+   `tests/tstFarFieldContract.hpp:444` calls it too, and the conformance gate is
+   bit-exact only because both paths evaluate the identical function.
 
 **Signature changes and their callers.** `m2l_build_operator` is removed and
-replaced; its single caller is `src/Canopy_DownwardSweep.hpp:1099-1100`. The
-solid-harmonic basis's `m2l_build_operator` body
-(`src/Canopy_LaplaceKernel.hpp:516-630`) moves inside the new method's per-key
-loop unchanged.
+replaced; its callers are `src/Canopy_DownwardSweep.hpp:1361-1362` and
+`tests/CanopyTest_MonopoleBasis.hpp:552-557`. `tests/tstLaplaceKernel.hpp:682`
+calls it as well; that target does not compile and is out of scope — see
+[Current state](#current-state). The solid-harmonic basis's
+`m2l_build_operator` body (`src/Canopy_LaplaceKernel.hpp:766-885`) moves inside
+the new method's per-key loop unchanged. `build_aux_tables` gains a parameter at
+the three sites in step 8. `DownwardSweep` gains two setters beside
+`set_m2l_op_table_byte_budget` (`:287-292`).
 
 **Exit criterion:** `ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL` passes the full
 [Laplace-solve gate](#the-bit-for-bit-gate) — bit-for-bit at ranks 1-2,
 `crossRankAgreement` at 2-6, `matchesDirectSum` at 1-6;
-and a test that calls `invalidate_interaction_list()` and re-solves
-shows `interaction_list_build_count()` (`:236-239`) incremented while a new
-counter on the operator cache shows **zero** keys rebuilt — proving the split is
-real. A cache that silently rebuilds everything would pass the bit-for-bit test
+`ctest -R Canopy_Test_FarFieldContract_MPI_SERIAL` passes at ranks 1-6, since
+this task changes two contract members `MonopoleBasis` implements; and
+`DownwardSweepCaching.rebuildsAfterInvalidate`
+(`tests/tstDownwardSweep.hpp:1258-1294`) shows `interaction_list_build_count()`
+(`src/Canopy_DownwardSweep.hpp:313-316`) incremented while a new counter on the
+operator cache shows **zero** keys rebuilt, with the potential unchanged across
+the re-solve — the `1e-12` relative comparison that body already carries
+(`:1286-1293`), which is **R5**'s check that a persisting cache has not gone
+stale. A cache that silently rebuilds everything would pass the bit-for-bit test
 and fail this one.
+
+That body is the right home for the check because it drives the sweeps directly
+and never repartitions, so a rebuilt-key count is attributable rather than
+partitioner drift. `Solver::downward()` is `const`
+(`src/Canopy_Solver.hpp:504`), so a `Solver`-level test cannot call the
+invalidator at all. `Canopy_Test_DownwardSweep_MPI_SERIAL` has been compiled but
+never run by any task in this document, so take a baseline of it before the
+change and compare failure sets rather than requiring green.
 
 ---
 
@@ -2163,10 +2251,11 @@ cache persists deliberately; if a basis's operator depends on anything beyond th
 canonicalized key and `kernel_params`, persistence is a correctness bug rather
 than an optimization. **Presents as:** correct results on the first solve and
 drifting results after a `rebalance` — which the Laplace-solve gate, a single solve,
-would not catch. **Do:** T9's exit criterion requires a re-solve after
-`invalidate_interaction_list()`; extend it to assert the potential is unchanged
-across that re-solve. Any basis whose operator depends on particle positions must
-declare so and opt out of the cache.
+would not catch. **Do:** T9's exit criterion re-solves after `invalidate_interaction_list()` and
+asserts the potential is unchanged across that re-solve, which is this risk's
+check. Its cache is cleared whenever `kernel_params` changes, so the persistence
+claim is scoped to a fixed kernel. Any basis whose operator depends on particle
+positions must declare so and opt out of the cache.
 
 **R6 — `sets_per_component != 1` breaks the shared-cell Allreduce.** The two
 hand-rolled pack/unpack loops (`:1774-1779`, `:1796-1801`) index by a running
