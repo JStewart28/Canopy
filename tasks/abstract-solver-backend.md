@@ -42,8 +42,9 @@ sweeps:
 template parameter, with the existing solid-harmonic path ported onto it and
 proven **bit-for-bit unchanged**, plus a second, non-harmonic basis carried far
 enough to prove the contract is real. The two production bases are separate
-work: Cartesian-Taylor is **T12**, a deliberately coarse task in this document;
-black-box FMM has no task here at all and gets its own design.
+work, each with its own design document: Cartesian-Taylor is delegated from
+**T12** to [cartesian-taylor-basis.md](cartesian-taylor-basis.md); black-box FMM
+has no task here at all and gets its own.
 
 **Requirements this abstraction must satisfy**, stated as the downstream solver
 states them:
@@ -61,7 +62,8 @@ states them:
 - **R-D** — three simultaneous charge components with gradient output, as
   `NComps = 3` already provides.
 
-**Out of scope.** Implementing either new basis beyond T12's coarse statement.
+**Out of scope.** Implementing either new basis. Cartesian-Taylor is designed in
+[cartesian-taylor-basis.md](cartesian-taylor-basis.md) and built there, not here.
 The tree builder, partitioner, MAC, dual-tree traversal, communication plan and
 CSR — none of them are kernel-aware and none of them change. `Canopy_P2P.hpp`
 does not change either: it never calls the kernel, and it already runs the
@@ -2316,69 +2318,22 @@ with its `LaplaceKernel` default, per `CLAUDE.md`'s public-API rule.
 
 ---
 
-### T12 — A Cartesian-Taylor basis — **NOT STARTED** — **COARSE**
-
-This task is stated coarsely on purpose. It is where the mathematics lives, and
-its fine-grained design cannot be written before the contract above is real and
-its own open questions are answered.
+### T12 — A Cartesian-Taylor basis — **DELEGATED**
 
 **Depends on:** T11.
 
-**Fill in:** new `src/Canopy_CartesianTaylorBasis.hpp`; one line in
-`src/CMakeLists.txt` `HEADERS_PUBLIC` (`:3-16`); new tests and one line in
-`tests/CMakeLists.txt`.
+The fine-grained design, the task sequence and the exit criterion for this work
+live in [cartesian-taylor-basis.md](cartesian-taylor-basis.md), which is
+self-contained: it states the full far-field contract a basis must satisfy, the
+Cartesian-Taylor operators and their conventions, and its own risks, and needs
+nothing from this document.
 
-**Reference:** [canopy-questions.md](canopy-questions.md) §§1-3 for the
-derivative ladder $\partial_a P_m = -(2m{+}1)\,r_a P_{m+1}$ with
-$P_m = w^{-(2m+1)/2}$, $w = r^2 + b$, and for the multi-index recurrence for
-$b_{k+e_i}$; [canopy-kernel-rec.md](canopy-kernel-rec.md), "Convergence per DOF",
-for what accuracy each order $p$ buys.
-
-**Do:**
-
-- Coefficients are real, $\binom{p+3}{3}$ per cell, so `coeff_type = Scalar` and
-  `scalars_per_coeff = 1`. `sets_per_component = 1`.
-- M2L is the sole kernel-touching operator: $\ell_p^A = \sum_q (-1)^{|q|}\,b_{p+q}(R)\,M_q^B$.
-  M2M and L2L are binomial Taylor shifts that never see the kernel. L2P
-  differentiates the local expansion analytically, which deletes the finite
-  difference at `src/Canopy_LaplaceKernel.hpp:851-879` for this basis.
-- `m2l_pre_cell` and `m2l_post_cell` are no-ops. `m2l_overflow_policy` is
-  `PerPairTranslate` — the ladder is device-evaluable, at a register cost worth
-  measuring.
-- `key_needs_level = true`, `canonicalize_key` is the identity: softening
-  introduces the absolute length $\sqrt{b}$ and destroys the scale invariance the
-  solid-harmonic operators exploit.
-- Set `Scalar = double` by `static_assert`.
-
-**Additional information needed** — each of these must be answered before a
-fine-grained design is possible, and none is answerable from the code:
-
-1. **What order $p$ is required?** The downstream solver's accuracy requirement
-   decides it, and the answer decides whether this basis is viable at all: at
-   standard admissibility each order buys between 0.24 and 0.48 decades while the
-   DOF count grows as $\binom{p+3}{3}\sim p^3/6$, so $10^{-6}$ wants $p\approx11$-24
-   ([canopy-kernel-rec.md](canopy-kernel-rec.md), "Convergence per DOF"). R-B's
-   $10^{-10}$ is likely out of reach for this basis. **This question is prior to
-   the task, not part of it.**
-2. **What is the realized key count and what do the tables cost?** T8's
-   instrumentation answers it. At $p=4$ the tables are 9.8 KB per key; the
-   multiplier is what is unknown.
-3. **What sign and normalization convention links the moment definition to the
-   $(-1)^{|q|}$ multiplier?** This is the one place the reference author flagged
-   as needing care, and getting it subtly wrong produces a plausible-looking
-   field rather than an obvious failure. The order-2 tensors are already
-   implemented in the reference treecode and give a component-level oracle.
-4. **How are symmetric tensors indexed?** Hand-derived Cartesian FMMs habitually
-   go wrong here. The index map is a design decision, not an implementation
-   detail, and it should be fixed and unit-tested before any operator is written.
-
-**Exit criterion:** deferred to this task's own design. At minimum it must
-include: a per-operator unit test against the reference treecode's order-2
-tensors; a full-pipeline solve with `near_softening_factor = 0` matching a direct
-softened sum to the tolerance answered in question 1; and
-the Laplace-solve gate still passing all three checks
-(`ctest -R Canopy_Test_LaplaceSolve_MPI_SERIAL`), since this task adds a basis and
-changes no shared code.
+In brief: a real-coefficient basis carrying $\binom{p+3}{3}$ coefficients per
+cell, in which the softening rides inside $w = r^2 + b$ at every derivative
+order, so that `near_softening_factor = 0` becomes a viable configuration. M2L is
+the sole kernel-touching operator; M2M and L2L are binomial Taylor shifts. It
+adds a basis and changes no shared code, so this document's Laplace-solve gate is
+one of its exit conditions rather than something it moves.
 
 ## Known risks
 
