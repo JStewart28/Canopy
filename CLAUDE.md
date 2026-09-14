@@ -104,6 +104,8 @@ repository, not the default plan location.
   tracked in the "Known Issues" section of `README.md`. When a test failure or
   bug is confirmed but not fixed this session, note it there (what fails, how it
   reproduces, and whether it predates the current work).
+- **Comments in code.** Keep comments succinct. Do not comment code whose
+  behavior is obvious. 
 
 ## Math in markdown
 Write math with KaTeX delimiters, not Doxygen ones:
