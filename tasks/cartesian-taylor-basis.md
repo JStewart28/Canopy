@@ -112,6 +112,12 @@ Everything below is derived from one scalar and one identity. Provenance:
 statement of the recurrences the reference treecode implements. Cite that section
 on every routine that transcribes a formula from it.
 
+That file is a pasted email thread, and its plain-text math has lost subscripts
+and mangled exponents: its line 56 writes $P_1 = w^{-3/2}$ as `1/w15`, and
+`P{m+1}`, `∂l φ` and `ε{ilm}` appear with the underscore dropped. The rendering
+below has been checked term by term against it, and where the two disagree the
+rendering below is correct.
+
 **The ladder.** With $w = r^2 + b$ and $P_m = w^{-(2m+1)/2}$, so that
 $P_0 = \varphi$,
 
@@ -318,6 +324,7 @@ is unaffected throughout.
 | Per-operator test | `tests/tstCartesianTaylor.hpp`, name `CartesianTaylor` in `UNIT_SERIAL_TESTS` (`tests/CMakeLists.txt:36-39`) | Host-only math over no MPI. Target becomes `Canopy_Test_CartesianTaylor_SERIAL` (`cmake/test_harness/test_harness.cmake:104-112`). |
 | Solve test | `tests/tstCartesianTaylorSolve.hpp`, name `CartesianTaylorSolve` in `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:48-58`) | Target becomes `Canopy_Test_CartesianTaylorSolve_MPI_SERIAL`, tests `..._np_<N>` for N in 1-6, CTest label `unit`. |
 | Adding a name to `tests/CMakeLists.txt` | run `make cmake_check_build_system` **first** | `make -j 4 <new target>` otherwise fails with "No rule to make target": make errors out before it regenerates, because the target is not in the current Makefile. Regenerating preserves the existing cache. |
+| Gating a SERIAL unit target | anchor the regex: `ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` | `Canopy_add_tests` registers a `_valgrind` variant beside every non-MPI test when valgrind is found (`cmake/test_harness/test_harness.cmake:157-162`), and it is found in `build-tuolumne/`. An unanchored `-R` runs both, and a Kokkos binary under valgrind need not fit `--time-limit=8`. No task here gates on the variant. MPI targets are unaffected — the valgrind block is in the non-MPI branch. |
 | Build command | `make -j 4 <target>` for exactly the targets a task's exit criterion names | A bare `make -j` has been SIGKILLed on the login node, and a whole-tree build cannot exit 0 in any case — `Canopy_Test_LaplaceKernel_*` and `Canopy_Test_P2P_*` do not compile and are out of scope. |
 | Build tree | `build-tuolumne/`, **never reconfigured** | It is the Laplace-solve gate's configuration. `Canopy_ENABLE_PROFILING` is `OFF` there, so any profiling figure comes from `build-tuolumne-prof/` instead. |
 | Formatting | do not run `clang-format` | Per `CLAUDE.md`. |
@@ -666,7 +673,9 @@ the log. Save new scripts under `scripts/tuolumne/`.
 **Fill in:** new `src/Canopy_CartesianTaylorBasis.hpp` — the multi-index ↔ flat
 slot map and the $b_k$ evaluator, nothing else; new
 `tests/tstCartesianTaylor.hpp`; one line in `src/CMakeLists.txt` `HEADERS_PUBLIC`
-(`:3-18`); one line in `tests/CMakeLists.txt` `UNIT_SERIAL_TESTS` (`:36-39`).
+(`:3-18`); one line in `tests/CMakeLists.txt` `UNIT_SERIAL_TESTS` (`:36-39`); new
+`scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux`, the batch wrapper for
+the SERIAL unit target, which T2 and T3 reuse unchanged.
 
 **Reference:** [canopy-questions.md](canopy-questions.md) §1 for the ladder
 $\partial_a P_m = -(2m{+}1) r_a P_{m+1}$, §2 for the closed-form tensors through
@@ -704,7 +713,7 @@ $\partial_a\partial_b\partial_c$, §3 for the multi-index recurrence.
 
 **Exit criterion:** `make cmake_check_build_system` then
 `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` in `build-tuolumne/` succeeds, and
-the target run under `ctest -V -R Canopy_Test_CartesianTaylor_SERIAL` passes with
+the target run under `ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes with
 every body green. Specifically: the index map is a bijection at orders 0-6; the
 recurrence reproduces all four §2 closed forms exactly at every sampled $(r, b)$;
 and the finite-difference check passes at $|k| = 4 \ldots 2p$. **Failure
@@ -771,7 +780,7 @@ evaluation formulas. The five call sites' offset senses are tabulated in
    Richardson-extrapolated finite difference of the same polynomial.
 
 **Exit criterion:** `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` succeeds and
-`ctest -V -R Canopy_Test_CartesianTaylor_SERIAL` passes every body, including
+`ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes every body, including
 T1's. **Failure direction:** temporarily setting `sets_per_component = 0` must
 fail to compile quoting `src/Canopy_DownwardSweep.hpp:154-158`, and setting
 `scalars_per_coeff = 2` must fail quoting `src/Canopy_UpwardSweep.hpp:74-79` —
@@ -859,7 +868,7 @@ checks below pass — before wiring anything else.
    ratio.
 
 **Exit criterion:** `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` succeeds and
-`ctest -V -R Canopy_Test_CartesianTaylor_SERIAL` passes every body. Specifically:
+`ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes every body. Specifically:
 $\ell_0$ matches the reference formula to round-off; the parity identity holds;
 the fused and per-pair operator paths agree exactly for a sampled set of keys;
 and the hand-run P2M → M2L → L2P beats the truncation bound. **Failure
