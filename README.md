@@ -352,6 +352,31 @@ peer discovery cost scale with the number of *actual* peers rather than
 `comm_size`. Not needed at the current target scale (≈256 ranks); revisit if
 Canopy runs at many thousands of ranks.
 
+### A precomputed term table for the Cartesian-Taylor derivative ladder
+
+`Canopy::CartesianTaylor::derivative_ladder`
+(`src/Canopy_CartesianTaylorBasis.hpp`) re-derives its entire index arithmetic
+on every call. For each slot it walks `inverse_slot` once to recover the
+multi-index, and then calls `slot` up to seven times — once for the leading
+`-r_i b_k` term and once for each surviving term of the two three-way sums — so
+nothing about the traversal is reused between invocations. In the M2L that call
+is per box pair, which is where the cost would actually be paid.
+
+A table of `(m, i, k, term slots)` — the target slot, the direction the
+recurrence steps in, the base multi-index, and the flat slots of the terms —
+built once on host and carried in the basis's `aux_tables_type` would remove
+all of it, leaving the ladder a straight-line weighted sum over a precomputed
+index list.
+
+This is not a correctness issue: the recomputed indices are exact and the
+values are the same either way. It is also not yet measurable — the call site
+that would pay for it does not exist until the Cartesian-Taylor M2L lands.
+Note that a table here is an *indirection*, and **R3** in
+[tasks/cartesian-taylor-basis.md](tasks/cartesian-taylor-basis.md) records a
+measured +18% M2L regression from a comparable one, with two candidate
+micro-causes tested and excluded. So the table must be measured against the
+recompute it replaces rather than assumed faster.
+
 ---
 
 ## Known Issues

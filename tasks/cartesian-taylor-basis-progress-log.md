@@ -414,3 +414,329 @@ $(r, b)$ scales T4 uses before touching the basis (**R2**); the 13.7× margin is
 measured at the scales tabulated above and nowhere else. **T2, T3** — the flux
 script `scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux` is reusable
 unchanged; its `-R` is anchored to exclude the valgrind variant.
+
+## T2 — the contract surface and the kernel-blind operators
+
+Added `Canopy::CartesianTaylorBasis<Scalar, P_ORDER, NComps>` to
+`src/Canopy_CartesianTaylorBasis.hpp` — the whole contract surface plus four
+complete operators — and four bodies to `tests/tstCartesianTaylor.hpp`. Nothing
+in T1's `Canopy::CartesianTaylor` namespace changed, as T1's **Affects:** line
+predicted; the class is built on those free functions and adds nothing to them.
+One README entry and three document corrections ride in the same commit.
+
+Flux jobs: `f3YUdrmXQa1d` (first clean run, 7/7, ctest rc 0) and `f3YUfS9vvt9m`
+(re-run after both perturbations were reverted, on the exact tree committed at
+the checkpoint — 7/7, rc 0, byte-identical figures).
+
+### Decisions carried in from the task statement
+
+- **`build_aux_tables` returns an empty `aux_tables_type`**, as `MonopoleBasis`
+  does. T1's multi-index tables are *not* precomputed here even though step 3
+  leaves the choice open. The only call sites that would pay for a table are
+  `m2l_core` and `build_m2l_operators`, both of which abort until T3 — so a
+  table built now has no consumer and no way to be measured against the
+  recompute it replaces, and **R3** is the reason it must be measured rather
+  than assumed. Tracked in `README.md` "Future Optimizations" instead; the
+  declaration on `aux_tables_type` says so and says why.
+- **The accumulator layout is fixed in T2**, not deferred. See below.
+- **`num_coeffs_per_cell` and `m2l_num_src_coeffs` are both spelled
+  `Canopy::CartesianTaylor::num_slots( P_ORDER )`**, T1's own already-`constexpr`
+  function, which already equals $\binom{p+3}{3}$. No second binomial helper was
+  written: two spellings of one count is how the M2L's shared flat index stops
+  being shared.
+- **The compile-only body instantiates at `P_ORDER = 2, NComps = 3`** (T4's and
+  the downstream solver's shape) and at `NComps = 1` beside it (the existing
+  `Solver` call sites' shape).
+- **The README edit rides in this task's checkpoint commit.**
+
+### The M2L accumulator layout, and why it had to be settled here
+
+```
+n_acc = num_coeffs_per_cell * NComps * sets_per_component     (= 10 * 3 * 1)
+acc_slot( out_idx, c, s ) = out_idx * num_comp_slots + comp_set_slot( c, s )
+```
+
+**Coefficient-major, then component, then set.** Two reasons, and neither is
+"MonopoleBasis does it":
+
+1. It is the **same nesting as the locals view** `(cell, coeff,
+   comp_set_slot)`, which makes `m2l_post_cell` a slot-for-slot walk of one
+   cell's slice rather than a transpose. That matters because `m2l_post_cell`
+   runs once per target cell per team and a transposed flush would stride the
+   locals view on its fastest axis.
+2. It is the nesting **T3's contraction wants**. The M2L reads
+   `M_full(source_cell, q_slot, c)`, whose component axis is likewise innermost,
+   so with this layout the component loop is stride-1 on *both* sides of the
+   multiply-accumulate.
+
+Fixing it in T2 was forced, not chosen: `m2l_post_cell` is written in this task
+and it **reads** the accumulator. `m2l_scratch_bytes` and `acc_slot` therefore
+both had to be settled here even though `m2l_core`, which fills the scratch,
+aborts. Deferring the layout to T3 would have left the flush indexing something
+whose shape nobody had decided. **T3 does not get to choose this** — `acc_slot`
+is the whole of the contract between the two stages.
+
+At `sets_per_component = 1` the expression collapses to
+`out_idx * NComps + c` and `comp_set_slot(c, 0) == c` exactly, which is the
+`Deliberate deviations` claim made concrete. The set factor is carried through
+`comp_set_slot`/`acc_slot` anyway so that a later set count changes one
+expression rather than six.
+
+### The single-source-of-truth functions T2 leaves for T3
+
+Two, both `KOKKOS_INLINE_FUNCTION static` on the basis:
+
+- **`taylor_monomials( dx, dy, dz, t[num_coeffs_per_cell] )`** — fills
+  `t[slot(k)] = d^k / k!` for every $|k| \le p$. **All four** kernel-blind
+  operators are this table contracted against a coefficient array (P2M against
+  a charge, M2M and L2L against a coefficient sum, L2P against the local), so
+  it has exactly one home. Built as an outer product of three per-axis running
+  products `pf[a][j] = d_a^j / j!`, so each entry costs two multiplies and no
+  `pow()` or factorial division appears in an inner loop. **The $1/k!$ is here
+  and nowhere else on these paths** — not in the $b_k$, which are raw
+  derivatives, and not applied a second time by any caller.
+- **`taylor_accumulate( acc, a, b )`** — the one multiply-accumulate step,
+  written as two statements with the product in a named local, per the
+  Conventions row on `-ffp-contract`. `MonopoleBasis::m2l_accumulate` is the
+  same device.
+
+T3's own single source of truth — the M2L operator entry — is a *third*
+function and does not exist yet. It should be written the same way, and
+`taylor_accumulate` is already there for it to use.
+
+### Where the contract as documented did not match what the sweeps demanded
+
+Three, all now corrected in `tasks/cartesian-taylor-basis.md` as part of this
+task:
+
+1. **T2's `**Fill in**` line contradicted its own steps 4 and 5.** It said the
+   task fills everything "except the three M2L stages' bodies and
+   `build_m2l_operators`'s body", which would have deferred `m2l_post_cell`.
+   No later task's `**Fill in**` names `m2l_post_cell` either, so following the
+   summary literally would have left it unwritten **permanently** — and that is
+   exactly the failure `Deliberate deviations` records: a no-op `m2l_post_cell`
+   compiles cleanly and leaves every local coefficient zero, because it is the
+   only stage that writes the locals view. Reworded to name `m2l_core`'s body
+   and `build_m2l_operators`'s body only.
+2. **Step 6 used macros that do not exist in a SERIAL unit test.**
+   `TEST_MS`/`TEST_ES` are template parameter names local to
+   `tests/tstFarFieldContract.hpp`'s fixtures. The macros the category header
+   defines are `TEST_MEMSPACE` and `TEST_EXECSPACE`
+   (`cmake/test_harness/TestSERIAL_Category.hpp:16-17`).
+3. **`m2l_accumulator_type` is not what the contract preamble claims.** The
+   preamble says every listed member is "reached by `UpwardSweep`,
+   `DownwardSweep`, `P2P` or `Solver`, or is required to keep one of them
+   well-formed." This one is neither: no sweep names it. Both existing bases
+   declare it only to reinterpret the sweep's raw scratch bytes inside their own
+   M2L stages (`src/Canopy_LaplaceKernel.hpp:330`,
+   `tests/CanopyTest_MonopoleBasis.hpp:327`). The sweep's obligation stops at
+   `m2l_scratch_bytes`, which is what it actually reads. Noted in the document
+   as **basis-internal**.
+
+Also corrected: the document's top-level `**Status:**` still read `NOT STARTED`
+with T1 already DONE. Now `IN PROGRESS — T1 and T2 DONE; T3 next`.
+
+One thing the document got **right** that a nearby comment gets wrong, worth
+restating because copying the wrong one is a compile error deep in a sweep:
+`build_aux_tables` takes **two** arguments, `( int order, const
+Canopy::M2LKernelParams& )`, per the real call sites at
+`src/Canopy_UpwardSweep.hpp:305` and `src/Canopy_DownwardSweep.hpp:1789`. The
+comment at `tests/CanopyTest_MonopoleBasis.hpp:297` shows a one-argument
+spelling and is stale.
+
+### What the four operators are, and why every check hit the roundoff floor
+
+`p2m_contribution` (atomic — one thread per particle, many particles per leaf),
+`m2m_translate` and `l2l_translate` (non-atomic — one team per parent), and
+`l2p_evaluate` with the **analytic** gradient, which deletes the central finite
+difference at `src/Canopy_LaplaceKernel.hpp:1378-1407` *for this basis only*.
+Note $|p - e_i| \le p - 1$, so the same order-$p$ shift table serves the
+potential and the gradient; no second table and no larger one is needed.
+
+Every width (`w_self`, `w_child`, `w_parent`) is ignored, and each declaration
+**says so and says why** rather than silently dropping it: the solid-harmonic
+basis divides by `w_self^{n+1}` because a scale-invariant kernel makes the
+normalized operator depend on the offset alone, and a softened kernel has no
+scale invariance — $b$ is a fixed $\mathrm{length}^2$ and does not rescale with
+the cell. There is no normalization to divide out and the coefficients carried
+here are physical.
+
+All four are **exact rational arithmetic**, not approximations, which is why
+every measured deviation below sits at the roundoff floor rather than at a
+truncation level. That is the expected result and it is what makes these
+tolerances meaningful: there is no truncation error for a loose bound to hide
+inside.
+
+| Body | Check | Worst, $p=2$ | Worst, $p=4$ |
+| --- | --- | --- | --- |
+| `m2m_shift` | P2M vs brute-force $\sum_j d_j^q/q!\,s_{jc}$, over $\max\lvert M\rvert$ | $7.547\times10^{-18}$ | $7.547\times10^{-18}$ |
+| `m2m_shift` | M2M vs **direct P2M about the parent center** | $1.208\times10^{-16}$ | $1.208\times10^{-16}$ |
+| `m2m_shift` | M2M round trip by $-s$ | $6.038\times10^{-17}$ | $6.038\times10^{-17}$ |
+| `l2l_shift` | L2L round trip by $-s$ | $4.441\times10^{-16}$ | $8.882\times10^{-15}$ |
+| `l2l_shift` | child expansion vs parent expansion at the same **physical point** | $8.882\times10^{-16}$ | $1.776\times10^{-15}$ |
+| `l2p_evaluation` | potential vs brute-force $\sum_p a^p\ell_p/p!$ | $2.220\times10^{-16}$ | $1.388\times10^{-16}$ |
+| `l2p_evaluation` | **analytic** gradient vs Richardson-extrapolated FD | $7.105\times10^{-15}$ | $2.576\times10^{-14}$ |
+
+The three `m2m_shift` figures being *identical* at $p = 2$ and $p = 4$ is not a
+sign that the $p=4$ instantiation silently ran at $p=2$ — the body asserts
+`num_coeffs_per_cell == num_slots(P)`, which is 10 against 35. The worst
+*absolute* deviation simply lands on a low-degree slot at both orders, because
+the sampled offsets are below 0.5 and the $1/k!$ shrinks the high-degree
+moments by orders of magnitude, so those slots contribute error far below the
+degree-0 and degree-1 ones. The scale the ratio is taken against,
+$\max\lvert M\rvert$, is the total charge at slot 0 in both cases.
+
+### Choices inside the test bodies
+
+- **Every body runs at two orders, $p = 2$ and $p = 4$.** At $p = 2$ several of
+  these checks degenerate — the shift sums have very few terms — and a body that
+  only ever ran at the shipping order would not notice a degree-dependent
+  indexing error. $p=4$ costs nothing here (no tree, no MPI, 35 slots).
+- **The oracles share no code with the basis.** The reference monomial
+  $d^k/k!$ is brute-force repeated multiplication with an explicit factorial
+  (`CT2::monoOverFact`), never `taylor_monomials`. Checking `taylor_monomials`
+  against itself would pass under any *consistent* indexing error, which is the
+  failure mode **R2** is about.
+- **M2M is checked against a direct P2M about the parent center, not only by
+  round trip.** The M2M is exact rather than truncated — expanding
+  $(y - c_{\rm par})^q$ produces only terms at degree $\le |q| \le p$, so
+  nothing is cut — which makes the moments of the *same particles* taken
+  directly about the parent center an exact reference. A round trip alone
+  cannot distinguish the right shift from a wrong-but-invertible one, and this
+  is also what gives `p2m_contribution` real coverage: it is the only operator
+  the task statement's step 7 does not name.
+- **L2L is likewise checked against the polynomial it is supposed to
+  preserve** — the shifted child expansion evaluated at a point, against the
+  parent expansion at the *same physical point* — for the same reason, and
+  because it exercises `l2p_evaluate` on a second input.
+- **The gradient's FD oracle needed only one Richardson step**, unlike T1's
+  ladder, which needed two. The reason is structural and worth writing down
+  because it stops holding: $u$ here is a **polynomial of degree $p$**, so the
+  central difference carries $h^2/6\,u''' + h^4/120\,u^{(5)} + \dots$ in which
+  every term above the degree vanishes identically. One step kills the $h^2$
+  term, so at $p \le 5$ the extrapolated difference equals the analytic
+  derivative *in exact arithmetic* and the only residual is cancellation
+  roundoff, $O(\varepsilon\,|u|/h)$. The tolerance is written against that scale
+  — $10^3\varepsilon\,|u|/h$ — rather than as a pinned constant, precisely so
+  that a later session raising $p$ above 5 sees the assumption stated. This is
+  the opposite situation from T1's, where the oracle was the sharpness bottleneck.
+- **`ASSERT_EQ( Basis::sets_per_component, 1 )` sits inside `l2l_shift`.** If
+  that trait ever moves, the `(component, set)` flattening stops collapsing to
+  `c` and this body is the first thing that must be revisited; the assertion is
+  where a later session finds that out.
+
+### Both perturbations
+
+Each was built on the login node — both are compile-time failures, so neither
+needed a job — and each was reverted **by inverting the edit**, not by
+`git checkout`, which would have discarded the task's uncommitted work. The
+tree was rebuilt clean and re-run green afterwards (`f3YUfS9vvt9m`).
+
+**Perturbation A — `sets_per_component = 1` → `0`.** Fails at
+`src/Canopy_DownwardSweep.hpp:154`, the guard the task statement names, reached
+through `Solver`'s `downward_type` member:
+
+```
+/g/g20/stewartj/research-bridges/canopy-dev/Canopy/src/Canopy_DownwardSweep.hpp:154:20: error: static assertion failed due to requirement 'sets_per_component >= 1': DownwardSweep: the basis declares sets_per_component < 1, so its locals view would have a degenerate third extent and every local coefficient read would be out of bounds
+  154 |     static_assert( sets_per_component >= 1,
+      |                    ^~~~~~~~~~~~~~~~~~~~~~~
+/g/g20/stewartj/research-bridges/canopy-dev/Canopy/src/Canopy_Solver.hpp:143:42: note: in instantiation of template class 'Canopy::DownwardSweep<Kokkos::HostSpace, Kokkos::Serial, Canopy::CartesianTaylorBasis<double, 2, 3>>' requested here
+  143 |     using potential_view_type = typename downward_type::potential_view_type;
+      |                                          ^
+/g/g20/stewartj/research-bridges/canopy-dev/Canopy/tests/tstCartesianTaylor.hpp:1144:20: note: in instantiation of template class 'Canopy::Solver<Kokkos::HostSpace, Kokkos::Serial, double, 2, 3, Canopy::CartesianTaylorBasis>' requested here
+ 1144 |     static_assert( sizeof( Solver3 ) > 0,
+      |                    ^
+/g/g20/stewartj/research-bridges/canopy-dev/Canopy/src/Canopy_DownwardSweep.hpp:154:39: note: expression evaluates to '0 >= 1'
+  154 |     static_assert( sets_per_component >= 1,
+      |                    ~~~~~~~~~~~~~~~~~~~^~~~
+```
+
+4 errors total: the assert fires twice, once per `Solver` instantiation
+(`NComps = 3` and `NComps = 1`), each followed by a cascade
+`error: no type named 'gradient_view_type' in 'Canopy::DownwardSweep<...>'` —
+clang marks the class invalid after a failed class-scope assert, so every later
+member lookup on it fails too.
+
+**Perturbation B — `scalars_per_coeff = 1` → `2`.** Fails at
+`src/Canopy_UpwardSweep.hpp:74`, the guard the task statement names, reached
+through `Solver`'s `_upward` data member:
+
+```
+/g/g20/stewartj/research-bridges/canopy-dev/Canopy/src/Canopy_UpwardSweep.hpp:74:20: error: static assertion failed due to requirement 'sizeof(double) == scalars_per_coeff * sizeof(double)': UpwardSweep: the basis's coeff_type is not scalars_per_coeff contiguous component_scalar_type, so the shared-cell Allreduce would transfer the wrong byte count
+   74 |     static_assert( sizeof( coeff_type ) ==
+      |                    ^~~~~~~~~~~~~~~~~~~~~~~
+   75 |                        scalars_per_coeff * sizeof( component_scalar_type ),
+      |                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/g/g20/stewartj/research-bridges/canopy-dev/Canopy/src/Canopy_Solver.hpp:693:17: note: in instantiation of template class 'Canopy::UpwardSweep<Kokkos::HostSpace, Kokkos::Serial, Canopy::CartesianTaylorBasis<double, 2, 3>>' requested here
+  693 |     upward_type _upward;
+      |                 ^
+/g/g20/stewartj/research-bridges/canopy-dev/Canopy/tests/tstCartesianTaylor.hpp:1144:20: note: in instantiation of template class 'Canopy::Solver<Kokkos::HostSpace, Kokkos::Serial, double, 2, 3, Canopy::CartesianTaylorBasis>' requested here
+ 1144 |     static_assert( sizeof( Solver3 ) > 0,
+      |                    ^
+/g/g20/stewartj/research-bridges/canopy-dev/Canopy/src/Canopy_UpwardSweep.hpp:74:41: note: expression evaluates to '8 == 16'
+```
+
+19 errors total. Three *distinct* static asserts fire, which is the interesting
+part and not noise:
+
+```
+src/Canopy_CartesianTaylorBasis.hpp:383  CartesianTaylorBasis: coeff_type is not scalars_per_coeff contiguous component_scalar_type, ...
+src/Canopy_UpwardSweep.hpp:74            UpwardSweep: the basis's coeff_type is not scalars_per_coeff contiguous component_scalar_type, ...
+src/Canopy_DownwardSweep.hpp:124         DownwardSweep: the basis's coeff_type is not scalars_per_coeff contiguous component_scalar_type, ...
+```
+
+Two things follow. First, the "clang reports only the **first** failing
+class-scope assert per class instantiation" rule the document's contract section
+closes with is **per class**, not per translation unit: these three live in
+three different classes and all three are reported. Second, the basis's own
+assert firing alongside the sweeps' is what marks `CartesianTaylorBasis` invalid
+and produces the trailing
+`error: no member named 'aux_tables_type' in 'Canopy::CartesianTaylorBasis<...>'`
+cascade in the *test* file. A future session perturbing a trait the basis also
+guards should expect that noise and read past it to the sweep diagnostic — the
+sweep guard is the one under test.
+
+Neither perturbation was satisfied vacuously: both fired *through* `Solver`'s
+data members, which is the whole point of the `sizeof( Solver ) > 0` body.
+
+### Not done, deliberately
+
+`build_m2l_operators`, `m2l_core` and `m2l_translate` all `Kokkos::abort` with a
+message naming T3. `m2l_translate` aborts too, though step 5 names only the
+other two: it is the `PerPairTranslate` fallback, and a silently-empty fallback
+would drop every overflowing pair's contribution — the same defined-but-wrong
+failure mode step 5 exists to prevent (**R4** makes it worse: the two paths
+disagreeing decides the answer). Nothing calls any of them before T3; the
+`sizeof` body instantiates class bodies, not member bodies.
+
+**Affects:**
+
+- **T3** — inherits three things it does not get to re-decide. (i) The
+  accumulator layout `acc_slot(out_idx, c, s) = out_idx * num_comp_slots +
+  comp_set_slot(c, s)`, coefficient-major, because `m2l_post_cell` already reads
+  it; `m2l_core` must fill exactly that. (ii) `taylor_accumulate` already exists
+  as the `-ffp-contract`-guarded multiply-accumulate — use it rather than
+  writing a second one. (iii) The counts: `num_coeffs_per_cell` and
+  `m2l_num_src_coeffs` are both `Canopy::CartesianTaylor::num_slots( P_ORDER )`,
+  and the M2L's $b_{p+q}$ table is `num_slots( 2 * P_ORDER )` sharing the same
+  flat index by T1's graded order, so **no second map and no translation between
+  maps**. T3's own single-source-of-truth function for the operator entry is the
+  third such function and does not exist yet. Also: all three aborting members
+  are `Kokkos::abort`s to *replace*, not empty bodies to fill — the abort text
+  naming T3 is how a wrong-but-running solve was made impossible, so removing an
+  abort and leaving a partial body reopens exactly that hole.
+- **T4** — **R7** stands untouched by this task's clean pass. The `sizeof` body
+  instantiates class bodies only, so `Solver::solve()` has still never been
+  compiled against a non-`LaplaceKernel` basis. Expect T4's first failures in
+  `src/Canopy_Solver.hpp`, read them as expected, and record every `Solver`
+  member body that turns out to assume something `LaplaceKernel`-specific. Also:
+  `l2p_evaluate` writes `phi_out` with `=` and not `+=`, matching the sweep's
+  accumulate-afterwards at `src/Canopy_DownwardSweep.hpp:2672-2674`; if T4 sees
+  doubled potentials, that convention is the first thing to check.
+- **T5** — `key_needs_level = true` is declared, so **R6** applies in full: the
+  operator cache empties on every rebuild whose root half-width moves. T5's
+  measurement is of that, and the declaration in the header states the coupling.
+- **T2, T3** — `scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux` was
+  reused **unchanged**, as T1 intended, and remains reusable by T3. Its
+  anchored `-R` is still what excludes the valgrind variant; that variant was
+  neither made to pass nor disabled.

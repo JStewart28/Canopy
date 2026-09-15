@@ -1,6 +1,6 @@
 # A Cartesian-Taylor far-field basis for Canopy
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — T1 and T2 DONE; T3 next
 
 ## Problem
 
@@ -475,6 +475,14 @@ using m2l_accumulator_type =
                  Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 ```
 
+`m2l_accumulator_type` is the **one exception** to the preamble above: no sweep
+names it and nothing outside the basis is kept well-formed by it. Both existing
+bases declare it only to reinterpret the sweep's raw scratch bytes inside their
+own M2L stages (`src/Canopy_LaplaceKernel.hpp:330`,
+`tests/CanopyTest_MonopoleBasis.hpp:327`). It is **basis-internal — you own its
+shape**; the sweep's obligation stops at `m2l_scratch_bytes`, which is what it
+actually reads.
+
 `m2l_operators_type` **must** be an alias template: the sweep spells it
 `typename KernelType::template m2l_operators_type<memory_space>`, and
 `DownwardSweep` instantiates it at two spaces at once — `memory_space` for the
@@ -768,14 +776,19 @@ naming it. Both jobs exited ctest rc 8.
 
 ---
 
-### T2 — The contract surface and the kernel-blind operators — **NOT STARTED**
+### T2 — The contract surface and the kernel-blind operators — **DONE**
 
 **Depends on:** T1.
 
 **Fill in:** `src/Canopy_CartesianTaylorBasis.hpp` — every member in
 [The complete contract](#the-complete-contract-a-farfield-type-must-supply)
-except the three M2L stages' bodies and `build_m2l_operators`'s body;
-`tests/tstCartesianTaylor.hpp` — three new bodies.
+except `m2l_core`'s body and `build_m2l_operators`'s body. `m2l_pre_cell` (a
+no-op) and `m2l_post_cell` (a real accumulator flush) are written *here*, per
+steps 4 and 5 below: no later task's **Fill in** names `m2l_post_cell`, so
+deferring it would leave it unwritten permanently — which is the failure
+[Deliberate deviations](#deliberate-deviations) records as compiling cleanly
+while leaving every local coefficient zero. `tests/tstCartesianTaylor.hpp` —
+three new bodies.
 
 **Reference:** `tests/CanopyTest_MonopoleBasis.hpp` in full, as the worked
 example of the shape: the traits block (`:101-263`), the struct-template
@@ -808,8 +821,13 @@ evaluation formulas. The five call sites' offset senses are tabulated in
    defined-but-wrong operator would let a solve run and produce a plausible
    field, which is the failure mode this ordering exists to prevent. No task in
    this document runs a solve before T3.
-6. Add a compile-only body asserting `Solver<TEST_MS, TEST_ES, double, p,
-   NComps, CartesianTaylorBasis>` is complete via `sizeof(S) > 0` — which forces
+6. Add a compile-only body asserting `Solver<TEST_MEMSPACE, TEST_EXECSPACE,
+   double, p, NComps, CartesianTaylorBasis>` is complete via `sizeof(S) > 0`
+   — the macros a SERIAL unit test has are `TEST_MEMSPACE` and `TEST_EXECSPACE`
+   (`cmake/test_harness/TestSERIAL_Category.hpp:16-17`);
+   `TEST_MS`/`TEST_ES` are template parameter names local to
+   `tests/tstFarFieldContract.hpp`'s fixtures and are not in scope elsewhere
+   — which forces
    the class body, its data members, and therefore `UpwardSweep`, `DownwardSweep`
    and `P2P` to instantiate, running all six class-scope guards against this
    basis — plus `std::is_same_v<S::kernel_type, CartesianTaylorBasis<double, p,
@@ -831,6 +849,47 @@ satisfied vacuously. Revert both perturbations by inverting the edit, **not** by
 both diagnostics in the log.
 
 **Checkpoint commit** at the end of this task.
+
+**Met.** `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` succeeded on the login
+node in `build-tuolumne/` with no warnings from the new code, and
+`ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passed **7/7 bodies** —
+T1's three unchanged at their previously measured figures ($2.911\times10^{-15}$
+closed-form, $7.321\times10^{-7}$ finite-difference) plus T2's four — at
+flux job `f3YUdrmXQa1d`, re-run green as `f3YUfS9vvt9m` on the exact tree
+committed at the checkpoint, both rc 0 with identical figures.
+
+What the four new bodies actually verified, each at **both** $p = 2$ and
+$p = 4$ and at `NComps = 3`, against oracles that share no code with the basis
+(brute-force repeated multiplication and an explicit factorial, never
+`taylor_monomials`): `p2m_contribution` against $\sum_j d_j^q/q!\,s_{jc}$ to
+$7.5\times10^{-18}$ of $\max|M|$; `m2m_translate` against a **direct P2M about
+the parent center** — the exact reference, since the shift is untruncated — to
+$1.2\times10^{-16}$, and its round trip by $-s$ to $6.0\times10^{-17}$;
+`l2l_translate`'s round trip by $-s$ to $8.9\times10^{-15}$ and the
+shifted child expansion against the parent expansion **at the same physical
+point** to $1.8\times10^{-15}$; `l2p_evaluate`'s potential against
+$\sum_p a^p\ell_p/p!$ to $2.2\times10^{-16}$ and its **analytic** gradient
+against a Richardson-extrapolated central difference of that same polynomial to
+$2.6\times10^{-14}$. Every figure is at the roundoff floor, which is the
+expected result: all four operators are exact rational arithmetic, not
+approximations.
+
+Both failure directions fired at the guards they were supposed to, each built
+and reverted by inverting the edit. `sets_per_component = 0` failed at
+`src/Canopy_DownwardSweep.hpp:154`; `scalars_per_coeff = 2` failed at
+`src/Canopy_UpwardSweep.hpp:74`, and also at `:124` in `DownwardSweep` and at
+the basis's own assert. Both diagnostics are quoted verbatim in the progress
+log. So the six class-scope guards are not satisfied vacuously here: they run
+against this basis through `Solver`'s data members.
+
+**Scope, stated rather than implied.** `build_m2l_operators`, `m2l_core` and
+`m2l_translate` `Kokkos::abort` naming T3 and are the only incomplete members.
+`m2l_post_cell` is **real**, not a stub, and the M2L accumulator layout it reads
+is fixed here — see the progress log. Per **R7** this pass is evidence about the
+**declarations only**: `Solver`'s member function bodies are not instantiated by
+a `sizeof`, so a clean T2 says nothing about whether `solve()` compiles on a
+non-`LaplaceKernel` basis. Expect T4's first failures inside
+`src/Canopy_Solver.hpp`.
 
 ---
 

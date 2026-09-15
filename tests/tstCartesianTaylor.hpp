@@ -1,11 +1,14 @@
 #include "Canopy_CartesianTaylorBasis.hpp"
+#include "Canopy_Solver.hpp"
 
 #include <Kokkos_Core.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
+#include <type_traits>
 #include <vector>
 
 namespace CartesianTaylorTest
@@ -492,6 +495,586 @@ void testFiniteDifference()
                  fd_h_divisor, fd_tol );
 }
 
+//===========================================================================//
+// T2 of tasks/cartesian-taylor-basis.md. Four more bodies, all host-only math
+// over no MPI and no tree:
+//
+//   m2m_shift           P2M then M2M against a direct P2M about the parent
+//                       center, and the shift round trip by -s.
+//   l2l_shift           L2L round trip by -s, and the shifted child
+//                       polynomial against the parent polynomial at the same
+//                       PHYSICAL point.
+//   l2p_evaluation      L2P against a brute-force sum_p a^p/p! l_p, and its
+//                       ANALYTIC gradient against a Richardson-extrapolated
+//                       central difference of that same polynomial.
+//   solver_instantiates COMPILE-ONLY: Solver< ..., CartesianTaylorBasis > is
+//                       a complete type, which runs the six class-scope sweep
+//                       guards against this basis.
+//
+// Each numerical body runs at TWO orders, p = 2 and p = 4. p = 2 is what T4
+// and the downstream solver use; p = 4 is there because several of the checks
+// below degenerate at low order -- the shift sums have few terms and the
+// finite difference of a quadratic is exact for a reason that stops holding
+// as the degree grows -- and a body that only ever ran at p = 2 would not
+// notice a degree-dependent indexing error.
+//
+// The oracles here are deliberately INDEPENDENT of the basis: the reference
+// monomial d^k/k! is computed by brute-force repeated multiplication and an
+// explicit factorial (monoOverFact below), not by calling the basis's own
+// taylor_monomials. Checking taylor_monomials against itself would pass with
+// any consistent indexing error, which is precisely the failure mode
+// (risk R2).
+//===========================================================================//
+
+namespace CT2
+{
+
+// Brute-force k! -- the reference factorial, never the basis's.
+inline double factorial( int n )
+{
+    double f = 1.0;
+    for ( int i = 2; i <= n; ++i )
+        f *= static_cast<double>( i );
+    return f;
+}
+
+// Brute-force d^k / k!, the reference Taylor monomial. Repeated
+// multiplication and one division per axis; no pow(), no table, and nothing
+// from Canopy::CartesianTaylorBasis.
+inline double monoOverFact( const double d[3], const int k[3] )
+{
+    double v = 1.0;
+    for ( int a = 0; a < 3; ++a )
+    {
+        for ( int j = 0; j < k[a]; ++j )
+            v *= d[a];
+        v /= factorial( k[a] );
+    }
+    return v;
+}
+
+// The GradWriter shape DownwardSweep hands l2p_evaluate
+// (src/Canopy_DownwardSweep.hpp:190-198): operator()(c, dim) returning a
+// writable reference. Reproduced here rather than reached into, because the
+// sweep's is a nested type of a class this test does not instantiate.
+template <class View2D>
+struct GradWriter
+{
+    View2D g;
+    KOKKOS_INLINE_FUNCTION double& operator()( int c, int d ) const
+    {
+        return g( c, d );
+    }
+};
+
+// Number of components every body below runs at. 3 is what T4 and the
+// downstream solver use; the operators are componentwise, so this is a
+// multiplicity check and not a physics one.
+constexpr int NC = 3;
+
+// The synthetic source distribution. Positions are RELATIVE TO THE CHILD
+// CENTER and are the same at every order, so a failure at p = 4 that is
+// absent at p = 2 is a degree effect and not a geometry one. Nothing here is
+// symmetric: a symmetric set would let a sign error in an odd-degree moment
+// cancel.
+struct Particle
+{
+    double d[3];
+    double q[NC];
+};
+
+inline std::vector<Particle> buildParticles()
+{
+    return {
+        Particle{ { 0.17, -0.31, 0.08 }, { 1.0, -2.0, 0.5 } },
+        Particle{ { -0.42, 0.05, -0.23 }, { -0.25, 3.0, 1.5 } },
+        Particle{ { 0.36, 0.44, 0.19 }, { 2.0, 0.75, -1.0 } },
+        Particle{ { -0.09, -0.48, 0.41 }, { 0.5, -0.5, 2.25 } },
+        Particle{ { 0.28, 0.12, -0.45 }, { -1.75, 1.25, 0.125 } },
+    };
+}
+
+// The center offset s = c_child - c_parent used by both shift bodies. Not
+// axis-aligned and not a power of two, so no term of a shift sum is
+// accidentally exact.
+constexpr double s_shift[3] = { 0.37, -0.62, 0.21 };
+
+//---------------------------------------------------------------------------//
+// Views, allocated per body. LayoutRight (cell, coeff, comp_set_slot) is the
+// sweeps' own coefficient layout.
+//---------------------------------------------------------------------------//
+using CoeffView = Kokkos::View<double***, Kokkos::LayoutRight, TEST_MEMSPACE>;
+
+//---------------------------------------------------------------------------//
+// Run P2M for every particle into cell `cell`, with offsets measured from
+// `center_offset` -- i.e. d_j = particle.d - center_offset, which lets one
+// particle list be accumulated about the child center (offset 0) or about the
+// parent center (offset -s) without moving the particles.
+//---------------------------------------------------------------------------//
+template <class Basis>
+void runP2M( const CoeffView& M, int cell,
+             const std::vector<Particle>& particles,
+             const double center_offset[3], double w_self )
+{
+    const int np = static_cast<int>( particles.size() );
+
+    Kokkos::View<double**, Kokkos::LayoutRight, TEST_MEMSPACE> pos(
+        "pos", np, 3 );
+    Kokkos::View<double**, Kokkos::LayoutRight, TEST_MEMSPACE> chg(
+        "chg", np, NC );
+    auto h_pos = Kokkos::create_mirror_view( pos );
+    auto h_chg = Kokkos::create_mirror_view( chg );
+    for ( int j = 0; j < np; ++j )
+    {
+        for ( int a = 0; a < 3; ++a )
+            h_pos( j, a ) = particles[j].d[a] - center_offset[a];
+        for ( int c = 0; c < NC; ++c )
+            h_chg( j, c ) = particles[j].q[c];
+    }
+    Kokkos::deep_copy( pos, h_pos );
+    Kokkos::deep_copy( chg, h_chg );
+
+    Kokkos::parallel_for(
+        "p2m", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, np ),
+        KOKKOS_LAMBDA( const int j ) {
+            double charges[NC];
+            for ( int c = 0; c < NC; ++c )
+                charges[c] = chg( j, c );
+            auto M_out = Kokkos::subview( M, cell, Kokkos::ALL, Kokkos::ALL );
+            Basis::p2m_contribution( charges, pos( j, 0 ), pos( j, 1 ),
+                                     pos( j, 2 ), w_self, M_out );
+        } );
+    Kokkos::fence();
+}
+
+//---------------------------------------------------------------------------//
+// One team, one M2M: shift cell `src`'s moments by (dx,dy,dz) into cell
+// `dst`. The sweep runs one team per parent; a league of one reproduces that
+// without a tree.
+//---------------------------------------------------------------------------//
+template <class Basis>
+void runM2M( const CoeffView& M, int src, int dst, const double sh[3] )
+{
+    using policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
+    typename Basis::template aux_tables_type<TEST_MEMSPACE> aux;
+    const double dx = sh[0], dy = sh[1], dz = sh[2];
+
+    Kokkos::parallel_for(
+        "m2m", policy( 1, 1 ),
+        KOKKOS_LAMBDA( const typename policy::member_type& team ) {
+            auto M_par = Kokkos::subview( M, dst, Kokkos::ALL, Kokkos::ALL );
+            // Widths are ignored by this basis; 1.0 is passed so a future
+            // read of one would be visible rather than silently zero.
+            Basis::m2m_translate( team, M, src, dx, dy, dz, 1.0, 2.0, aux,
+                                  M_par );
+        } );
+    Kokkos::fence();
+}
+
+//---------------------------------------------------------------------------//
+// One team, one L2L: shift cell `src`'s locals by (dx,dy,dz) into cell `dst`.
+//---------------------------------------------------------------------------//
+template <class Basis>
+void runL2L( const CoeffView& L, int src, int dst, const double sh[3] )
+{
+    using policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
+    typename Basis::template aux_tables_type<TEST_MEMSPACE> aux;
+    const double dx = sh[0], dy = sh[1], dz = sh[2];
+
+    Kokkos::parallel_for(
+        "l2l", policy( 1, 1 ),
+        KOKKOS_LAMBDA( const typename policy::member_type& team ) {
+            auto L_ch = Kokkos::subview( L, dst, Kokkos::ALL, Kokkos::ALL );
+            Basis::l2l_translate( team, L, src, dx, dy, dz, 1.0, 2.0, aux,
+                                  L_ch );
+        } );
+    Kokkos::fence();
+}
+
+//---------------------------------------------------------------------------//
+// L2P at one offset. Returns the potentials; fills `grad` when asked.
+//---------------------------------------------------------------------------//
+template <class Basis>
+void runL2P( const CoeffView& L, int cell, const double a[3], double phi[NC],
+             double grad[NC][3], bool compute_gradient )
+{
+    Kokkos::View<double*, TEST_MEMSPACE> phi_v( "phi", NC );
+    Kokkos::View<double**, Kokkos::LayoutRight, TEST_MEMSPACE> grad_v(
+        "grad", NC, 3 );
+    const double ax = a[0], ay = a[1], az = a[2];
+
+    Kokkos::parallel_for(
+        "l2p", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, 1 ),
+        KOKKOS_LAMBDA( const int ) {
+            double out[NC];
+            GradWriter<decltype( grad_v )> w{ grad_v };
+            Basis::l2p_evaluate( L, cell, ax, ay, az, 1.0, out, w,
+                                 compute_gradient );
+            for ( int c = 0; c < NC; ++c )
+                phi_v( c ) = out[c];
+        } );
+    Kokkos::fence();
+
+    auto h_phi = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                      phi_v );
+    auto h_grad = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                       grad_v );
+    for ( int c = 0; c < NC; ++c )
+    {
+        phi[c] = h_phi( c );
+        for ( int d = 0; d < 3; ++d )
+            grad[c][d] = h_grad( c, d );
+    }
+}
+
+// Deterministic, non-symmetric synthetic local coefficients. Magnitudes vary
+// across slots so that a slot permutation cannot be absorbed.
+inline double syntheticLocal( int s, int c )
+{
+    return 1.0 + 0.37 * static_cast<double>( s ) -
+           0.11 * static_cast<double>( s * s ) +
+           0.53 * static_cast<double>( c + 1 ) *
+               ( ( s % 3 == 0 ) ? -1.0 : 1.0 );
+}
+
+} // namespace CT2
+
+//---------------------------------------------------------------------------//
+// P2M into a child, M2M to the parent, checked two ways.
+//
+//   (a) AGAINST A DIRECT P2M ABOUT THE PARENT CENTER. The M2M is claimed to
+//       be exact, not truncated: M^par_q = sum_{q'<=q} s^{q-q'}/(q-q')! M^ch_q'
+//       follows from expanding (y - c_par)^q and every term of that expansion
+//       sits at degree <= |q| <= p, so nothing is cut. That makes the moments
+//       of the same particles taken directly about the parent center the
+//       EXACT reference -- a check the shift formula cannot satisfy by being
+//       merely self-consistent.
+//
+//   (b) THE ROUND TRIP BY -s. The shift operator is unitriangular in the
+//       multi-index partial order (q' <= q), so shift(s) . shift(-s) is the
+//       identity exactly, truncation included. This is the check the task
+//       statement names; (a) is the stronger one and is why P2M is covered
+//       here rather than left untested.
+//---------------------------------------------------------------------------//
+template <int P>
+void testM2MShift()
+{
+    using Basis = Canopy::CartesianTaylorBasis<double, P, CT2::NC>;
+    constexpr int Nco = Basis::num_coeffs_per_cell;
+    ASSERT_EQ( Nco, CT::num_slots( P ) );
+
+    const auto particles = CT2::buildParticles();
+    const double zero[3] = { 0.0, 0.0, 0.0 };
+    // A particle at d relative to the child center sits at d + s relative to
+    // the parent center, so the direct-about-parent P2M uses offset -s.
+    const double minus_s[3] = { -CT2::s_shift[0], -CT2::s_shift[1],
+                                -CT2::s_shift[2] };
+
+    // cells: 0 = child, 1 = M2M'd parent, 2 = direct parent, 3 = round trip
+    CT2::CoeffView M( "M", 4, Nco, CT2::NC );
+
+    CT2::runP2M<Basis>( M, 0, particles, zero, 1.0 );
+    CT2::runP2M<Basis>( M, 2, particles, minus_s, 2.0 );
+    CT2::runM2M<Basis>( M, 0, 1, CT2::s_shift );
+    CT2::runM2M<Basis>( M, 1, 3, minus_s );
+
+    auto h_M = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), M );
+
+    // The scale the two comparisons are measured against: the largest moment
+    // magnitude anywhere in the problem. Relative-to-entry is unusable, since
+    // individual moments can vanish for this particle set.
+    double scale = 0.0;
+    for ( int s = 0; s < Nco; ++s )
+        for ( int c = 0; c < CT2::NC; ++c )
+            for ( int cell = 0; cell < 3; ++cell )
+                scale = std::max( scale, std::abs( h_M( cell, s, c ) ) );
+    ASSERT_GT( scale, 0.0 );
+
+    // The P2M itself, against the brute-force monomial. This is what makes
+    // (a) a test of M2M rather than of P2M and M2M jointly.
+    double worst_p2m = 0.0;
+    for ( int s = 0; s < Nco; ++s )
+    {
+        int k[3];
+        CT::inverse_slot( s, k );
+        for ( int c = 0; c < CT2::NC; ++c )
+        {
+            double want = 0.0;
+            for ( const auto& pt : particles )
+                want += CT2::monoOverFact( pt.d, k ) * pt.q[c];
+            worst_p2m =
+                std::max( worst_p2m, std::abs( h_M( 0, s, c ) - want ) );
+            ASSERT_NEAR( h_M( 0, s, c ), want, 1.0e-13 * scale )
+                << "p = " << P << ": p2m_contribution disagrees with the "
+                << "brute-force sum_j d_j^q/q! s_jc at q = (" << k[0] << ","
+                << k[1] << "," << k[2] << "), component " << c;
+        }
+    }
+
+    double worst_direct = 0.0;
+    double worst_trip = 0.0;
+    for ( int s = 0; s < Nco; ++s )
+    {
+        int k[3];
+        CT::inverse_slot( s, k );
+        for ( int c = 0; c < CT2::NC; ++c )
+        {
+            const double d1 = std::abs( h_M( 1, s, c ) - h_M( 2, s, c ) );
+            worst_direct = std::max( worst_direct, d1 );
+            ASSERT_NEAR( h_M( 1, s, c ), h_M( 2, s, c ), 1.0e-12 * scale )
+                << "p = " << P << ": M2M by s = c_child - c_parent disagrees "
+                << "with a direct P2M about the parent center at q = (" << k[0]
+                << "," << k[1] << "," << k[2] << "), component " << c
+                << "; M2M " << h_M( 1, s, c ) << ", direct "
+                << h_M( 2, s, c );
+
+            const double d2 = std::abs( h_M( 3, s, c ) - h_M( 0, s, c ) );
+            worst_trip = std::max( worst_trip, d2 );
+            ASSERT_NEAR( h_M( 3, s, c ), h_M( 0, s, c ), 1.0e-12 * scale )
+                << "p = " << P << ": M2M by s then by -s did not return the "
+                << "child moments at q = (" << k[0] << "," << k[1] << ","
+                << k[2] << "), component " << c;
+        }
+    }
+
+    std::printf( "[cartesian-taylor] m2m p = %d: worst |diff| / max|M| -- "
+                 "p2m vs brute force %.3e, M2M vs direct-about-parent %.3e, "
+                 "round trip by -s %.3e\n",
+                 P, worst_p2m / scale, worst_direct / scale,
+                 worst_trip / scale );
+}
+
+//---------------------------------------------------------------------------//
+// L2L, checked two ways.
+//
+//   (a) THE POLYNOMIAL IS UNCHANGED AT A PHYSICAL POINT. Substituting
+//       (x - c_par) = (x - c_ch) + s into u(x) = sum_p (x-c_par)^p/p! l^par_p
+//       and collecting gives the L2L, and every term of that collection has
+//       p <= p' <= p_order, so nothing is cut: the child expansion and the
+//       parent expansion are the SAME polynomial, evaluated about different
+//       centers. This checks the shift against the thing it is supposed to
+//       preserve rather than against itself.
+//
+//   (b) THE ROUND TRIP BY -s, which the task statement names. The L2L
+//       operator is unitriangular the other way (p' >= p) and every
+//       intermediate index stays inside the table, so the composition is the
+//       identity exactly.
+//---------------------------------------------------------------------------//
+template <int P>
+void testL2LShift()
+{
+    using Basis = Canopy::CartesianTaylorBasis<double, P, CT2::NC>;
+    constexpr int Nco = Basis::num_coeffs_per_cell;
+    constexpr int NCS = Basis::num_comp_slots;
+
+    // sets_per_component = 1 is a documented deliberate deviation; if it ever
+    // moves, the (component, set) flattening below stops collapsing to c and
+    // this body is the first thing that must be revisited.
+    ASSERT_EQ( Basis::sets_per_component, 1 );
+    ASSERT_EQ( NCS, CT2::NC );
+
+    const double minus_s[3] = { -CT2::s_shift[0], -CT2::s_shift[1],
+                                -CT2::s_shift[2] };
+
+    // cells: 0 = parent, 1 = child, 2 = round trip back to the parent center
+    CT2::CoeffView L( "L", 3, Nco, NCS );
+    auto h_L = Kokkos::create_mirror_view( L );
+    double scale = 0.0;
+    for ( int s = 0; s < Nco; ++s )
+        for ( int c = 0; c < CT2::NC; ++c )
+        {
+            h_L( 0, s, Basis::comp_set_slot( c, 0 ) ) =
+                CT2::syntheticLocal( s, c );
+            scale = std::max( scale, std::abs( CT2::syntheticLocal( s, c ) ) );
+        }
+    Kokkos::deep_copy( L, h_L );
+
+    CT2::runL2L<Basis>( L, 0, 1, CT2::s_shift );
+    CT2::runL2L<Basis>( L, 1, 2, minus_s );
+
+    Kokkos::deep_copy( h_L, L );
+
+    double worst_trip = 0.0;
+    for ( int s = 0; s < Nco; ++s )
+    {
+        int k[3];
+        CT::inverse_slot( s, k );
+        for ( int c = 0; c < CT2::NC; ++c )
+        {
+            const int cs = Basis::comp_set_slot( c, 0 );
+            worst_trip = std::max(
+                worst_trip, std::abs( h_L( 2, s, cs ) - h_L( 0, s, cs ) ) );
+            ASSERT_NEAR( h_L( 2, s, cs ), h_L( 0, s, cs ), 1.0e-12 * scale )
+                << "p = " << P << ": L2L by s then by -s did not return the "
+                << "parent locals at p = (" << k[0] << "," << k[1] << ","
+                << k[2] << "), component " << c;
+        }
+    }
+
+    // (a): three probe points, given as offsets a from the CHILD center. The
+    // same physical point sits at a + s from the parent center.
+    const double probes[3][3] = { { 0.13, -0.27, 0.06 },
+                                  { -0.44, 0.19, 0.33 },
+                                  { 0.05, 0.05, -0.41 } };
+    double worst_poly = 0.0;
+    for ( const auto& a : probes )
+    {
+        const double a_par[3] = { a[0] + CT2::s_shift[0],
+                                  a[1] + CT2::s_shift[1],
+                                  a[2] + CT2::s_shift[2] };
+        double phi_ch[CT2::NC], phi_par[CT2::NC];
+        double g[CT2::NC][3];
+        CT2::runL2P<Basis>( L, 1, a, phi_ch, g, false );
+        CT2::runL2P<Basis>( L, 0, a_par, phi_par, g, false );
+
+        for ( int c = 0; c < CT2::NC; ++c )
+        {
+            const double u_scale =
+                std::max( std::abs( phi_par[c] ), std::abs( phi_ch[c] ) );
+            worst_poly =
+                std::max( worst_poly, std::abs( phi_ch[c] - phi_par[c] ) );
+            ASSERT_NEAR( phi_ch[c], phi_par[c], 1.0e-12 * ( u_scale + scale ) )
+                << "p = " << P << ": the L2L-shifted child expansion and the "
+                << "parent expansion disagree at the same physical point, "
+                << "component " << c << "; a_child = (" << a[0] << "," << a[1]
+                << "," << a[2] << ")";
+        }
+    }
+
+    std::printf( "[cartesian-taylor] l2l p = %d: worst |diff| -- round trip "
+                 "by -s %.3e, same-point polynomial %.3e (max|l| = %.3e)\n",
+                 P, worst_trip, worst_poly, scale );
+}
+
+//---------------------------------------------------------------------------//
+// L2P, checked two ways.
+//
+//   (a) THE POTENTIAL against a brute-force sum_p a^p/p! l_p built from
+//       monoOverFact, which shares no code with the basis.
+//
+//   (b) THE ANALYTIC GRADIENT against a Richardson-extrapolated central
+//       difference of the SAME polynomial, evaluated through l2p_evaluate
+//       itself with compute_gradient = false.
+//
+//       The oracle is sharper here than it is for the derivative ladder, and
+//       for a reason worth writing down: u is a POLYNOMIAL of degree p, so a
+//       central difference carries error h^2/6 u''' + h^4/120 u^(5) + ... in
+//       which every term above the degree vanishes identically. One Richardson
+//       step kills the h^2 term, so at p <= 5 the extrapolated difference
+//       equals the analytic derivative in exact arithmetic and the only
+//       residual is cancellation roundoff, which is O(eps |u| / h). The
+//       tolerance below is written against that scale rather than guessed.
+//       At p > 5 this stops being true and the tolerance would have to be
+//       re-measured -- which is why the scale is spelled out instead of a
+//       bare constant being pinned.
+//---------------------------------------------------------------------------//
+template <int P>
+void testL2PEvaluation()
+{
+    using Basis = Canopy::CartesianTaylorBasis<double, P, CT2::NC>;
+    constexpr int Nco = Basis::num_coeffs_per_cell;
+    constexpr int NCS = Basis::num_comp_slots;
+
+    CT2::CoeffView L( "L", 1, Nco, NCS );
+    auto h_L = Kokkos::create_mirror_view( L );
+    for ( int s = 0; s < Nco; ++s )
+        for ( int c = 0; c < CT2::NC; ++c )
+            h_L( 0, s, Basis::comp_set_slot( c, 0 ) ) =
+                CT2::syntheticLocal( s, c );
+    Kokkos::deep_copy( L, h_L );
+
+    const double probes[3][3] = { { 0.21, -0.34, 0.11 },
+                                  { -0.46, 0.08, 0.29 },
+                                  { 0.37, 0.42, -0.18 } };
+
+    // The differencing step. Nondimensionalized against the offset scale the
+    // probes sit at (order 0.5, a leaf half-width), not fixed absolutely.
+    const double h = 0.5 / 8.0;
+
+    double worst_phi = 0.0;
+    double worst_grad = 0.0;
+
+    for ( const auto& a : probes )
+    {
+        double phi[CT2::NC];
+        double grad[CT2::NC][3];
+        CT2::runL2P<Basis>( L, 0, a, phi, grad, true );
+
+        // (a) the potential.
+        for ( int c = 0; c < CT2::NC; ++c )
+        {
+            double want = 0.0;
+            for ( int s = 0; s < Nco; ++s )
+            {
+                int k[3];
+                CT::inverse_slot( s, k );
+                want += CT2::monoOverFact( a, k ) * CT2::syntheticLocal( s, c );
+            }
+            worst_phi = std::max( worst_phi, std::abs( phi[c] - want ) );
+            ASSERT_NEAR( phi[c], want, 1.0e-12 * ( std::abs( want ) + 1.0 ) )
+                << "p = " << P << ": l2p_evaluate disagrees with the "
+                << "brute-force sum_p a^p/p! l_p at component " << c
+                << ", a = (" << a[0] << "," << a[1] << "," << a[2] << ")";
+        }
+
+        // (b) the gradient.
+        for ( int dim = 0; dim < 3; ++dim )
+        {
+            double d1[CT2::NC], d2[CT2::NC];
+            double u_mag = 0.0;
+            for ( int step = 0; step < 2; ++step )
+            {
+                const double hh = ( step == 0 ) ? h : ( 0.5 * h );
+                double ap[3] = { a[0], a[1], a[2] };
+                double am[3] = { a[0], a[1], a[2] };
+                ap[dim] += hh;
+                am[dim] -= hh;
+
+                double phip[CT2::NC], phim[CT2::NC];
+                double gdummy[CT2::NC][3];
+                CT2::runL2P<Basis>( L, 0, ap, phip, gdummy, false );
+                CT2::runL2P<Basis>( L, 0, am, phim, gdummy, false );
+
+                for ( int c = 0; c < CT2::NC; ++c )
+                {
+                    const double dd = ( phip[c] - phim[c] ) / ( 2.0 * hh );
+                    if ( step == 0 )
+                        d1[c] = dd;
+                    else
+                        d2[c] = dd;
+                    u_mag = std::max(
+                        u_mag, std::max( std::abs( phip[c] ),
+                                         std::abs( phim[c] ) ) );
+                }
+            }
+
+            for ( int c = 0; c < CT2::NC; ++c )
+            {
+                // R(h) = ( 4 D(h/2) - D(h) ) / 3 -- one step, which is all the
+                // h^2 term needs; see the comment block above.
+                const double want = ( 4.0 * d2[c] - d1[c] ) / 3.0;
+                // Cancellation roundoff of a central difference:
+                // eps |u| / h, with a 1e3 safety factor over machine eps.
+                const double tol = 1.0e3 * 2.22e-16 * u_mag / ( 0.5 * h ) +
+                                   1.0e-13 * std::abs( want );
+                worst_grad =
+                    std::max( worst_grad, std::abs( grad[c][dim] - want ) );
+                ASSERT_NEAR( grad[c][dim], want, tol )
+                    << "p = " << P << ": l2p_evaluate's ANALYTIC gradient "
+                    << "disagrees with a Richardson-extrapolated central "
+                    << "difference of the same polynomial, component " << c
+                    << ", direction " << dim << ", a = (" << a[0] << ","
+                    << a[1] << "," << a[2] << "), h = " << h;
+            }
+        }
+    }
+
+    std::printf( "[cartesian-taylor] l2p p = %d: worst |diff| -- potential "
+                 "vs brute force %.3e, analytic gradient vs Richardson FD "
+                 "%.3e\n",
+                 P, worst_phi, worst_grad );
+}
+
 //---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
@@ -501,5 +1084,84 @@ TEST( cartesian_taylor, index_map_bijection ) { testIndexMapBijection(); }
 TEST( cartesian_taylor, closed_forms ) { testClosedForms(); }
 
 TEST( cartesian_taylor, finite_difference ) { testFiniteDifference(); }
+
+TEST( cartesian_taylor, m2m_shift )
+{
+    testM2MShift<2>();
+    testM2MShift<4>();
+}
+
+TEST( cartesian_taylor, l2l_shift )
+{
+    testL2LShift<2>();
+    testL2LShift<4>();
+}
+
+TEST( cartesian_taylor, l2p_evaluation )
+{
+    testL2PEvaluation<2>();
+    testL2PEvaluation<4>();
+}
+
+//---------------------------------------------------------------------------//
+// COMPILE-ONLY -- Solver instantiates on this basis, T2 step 6.
+//
+// The sizeof() is what makes this a test rather than a spelling exercise.
+// Naming the type instantiates nothing; requiring it to be COMPLETE
+// instantiates the class body, hence its data members, hence UpwardSweep,
+// DownwardSweep and P2P on CartesianTaylorBasis -- so all six class-scope
+// sweep guards actually run against this basis:
+//
+//   sizeof(coeff_type) == scalars_per_coeff * sizeof(component_scalar_type)
+//                                      src/Canopy_UpwardSweep.hpp:74-79
+//   agreement with detail::coeff_traits src/Canopy_UpwardSweep.hpp:85-93
+//   the sizeof relation again           src/Canopy_DownwardSweep.hpp:124-129
+//   the coeff_traits agreement again    src/Canopy_DownwardSweep.hpp:135-143
+//   sets_per_component >= 1             src/Canopy_DownwardSweep.hpp:154-158
+//   m2l_overflow_policy == PerPairTranslate
+//                                       src/Canopy_DownwardSweep.hpp:572-581
+//
+// WHAT THIS DOES NOT COVER, and the reason it is not a defect in the test:
+// member function bodies are compiled only for instantiations something
+// calls, so Solver::solve() is NOT instantiated here (risk R7). A clean pass
+// is evidence about the DECLARATIONS only. Expect T4's first build failures
+// inside src/Canopy_Solver.hpp rather than in the basis, and read them as
+// expected.
+//
+// P_ORDER = 2 and NComps = 3 is the shape T4 and the downstream solver use.
+// NComps = 1 is added beside it because it costs nothing and is the shape the
+// existing Solver call sites use.
+//
+// TEST_MEMSPACE / TEST_EXECSPACE are the macros a SERIAL unit test has
+// (cmake/test_harness/TestSERIAL_Category.hpp:16-17).
+//---------------------------------------------------------------------------//
+TEST( cartesian_taylor, solver_instantiates )
+{
+    using Solver3 =
+        Canopy::Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, /*P_ORDER=*/2,
+                       /*NComps=*/3, Canopy::CartesianTaylorBasis>;
+
+    static_assert( sizeof( Solver3 ) > 0,
+                   "Solver did not instantiate on CartesianTaylorBasis at "
+                   "P_ORDER = 2, NComps = 3." );
+    static_assert(
+        std::is_same_v<typename Solver3::kernel_type,
+                       Canopy::CartesianTaylorBasis<double, 2, 3>>,
+        "Solver::kernel_type is not FarField<Scalar, P_ORDER, NComps>." );
+
+    using Solver1 =
+        Canopy::Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, /*P_ORDER=*/2,
+                       /*NComps=*/1, Canopy::CartesianTaylorBasis>;
+
+    static_assert( sizeof( Solver1 ) > 0,
+                   "Solver did not instantiate on CartesianTaylorBasis at "
+                   "P_ORDER = 2, NComps = 1." );
+    static_assert(
+        std::is_same_v<typename Solver1::kernel_type,
+                       Canopy::CartesianTaylorBasis<double, 2, 1>>,
+        "Solver::kernel_type is not FarField<Scalar, P_ORDER, NComps>." );
+
+    SUCCEED();
+}
 
 } // namespace CartesianTaylorTest

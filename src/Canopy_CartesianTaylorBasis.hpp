@@ -12,7 +12,12 @@
 #ifndef CANOPY_CARTESIAN_TAYLOR_BASIS_HPP
 #define CANOPY_CARTESIAN_TAYLOR_BASIS_HPP
 
+#include "Canopy_FarFieldContract.hpp"
+
 #include <Kokkos_Core.hpp>
+
+#include <cstddef>
+#include <type_traits>
 
 namespace Canopy
 {
@@ -43,9 +48,12 @@ namespace CartesianTaylor
 //         length^{-1-|k|}. The factorials live in the moment (1/q!) and in
 //         the L2P evaluation (1/p!) and never here.
 //
-// This file is deliberately NOT a FarField contract member: no trait, no
-// typedef, no static_assert on the basis, no operator. It holds the slot map
-// and the b_k evaluator and nothing else (T1 of tasks/cartesian-taylor-basis.md).
+// Nothing in the Canopy::CartesianTaylor namespace below is a FarField
+// contract member: it is the slot map and the b_k evaluator, and it is usable
+// on its own (T1 of tasks/cartesian-taylor-basis.md). The contract surface --
+// the traits, the typedefs, the static_asserts and the operators -- lives on
+// Canopy::CartesianTaylorBasis at the bottom of this file (T2), which is built
+// ON TOP of these free functions and adds nothing to them.
 // ============================================================================
 
 //---------------------------------------------------------------------------//
@@ -257,6 +265,940 @@ void derivative_ladder( const double r[3], double b, int max_order,
 }
 
 } // namespace CartesianTaylor
+
+// ============================================================================
+// CartesianTaylorBasis -- the FarField contract surface (T2 and T3 of
+// tasks/cartesian-taylor-basis.md), built on the namespace above.
+//
+// A real-coefficient Cartesian Taylor expansion of the SOFTENED (Plummer)
+// kernel
+//
+//     phi(r) = ( |r|^2 + b )^{-1/2},      b = eps^2,
+//
+// carrying PHYSICAL, un-normalized coefficients. It exists because the
+// solid-harmonic basis expands 1/|r|, which is harmonic, and the softened
+// kernel is not: no solid-harmonic expansion of it converges. The softening
+// enters this basis in exactly one place -- b rides inside w = |R|^2 + b in
+// the M2L's derivative ladder -- which is why M2L is the only kernel-touching
+// operator here.
+//
+// ---------------------------------------------------------------------------
+// UNITS AND CONVENTIONS for this class. None of it is recoverable from the
+// code, and the Conventions table of tasks/cartesian-taylor-basis.md requires
+// it on the declarations; it is collected here and repeated on each operator.
+//
+//   * WIDTHS. Every width parameter this basis is handed (w_self, w_child,
+//     w_parent, w_source, w_target) is a HALF-WIDTH -- half the side length of
+//     the cell's cube, matching Canopy::CellInfo::half_width.
+//
+//     EVERY ONE OF THEM IS IGNORED, and that is a positive statement about
+//     this basis rather than an omission. The solid-harmonic basis divides its
+//     multipole by w_self^{n+1} because a scale-invariant kernel makes the
+//     normalized operator depend on the offset alone. A softened kernel has NO
+//     scale invariance -- b is a fixed length^2 and does not rescale with the
+//     cell -- so there is no normalization to divide out and the coefficients
+//     carried here are physical. Each operator restates this on its own
+//     declaration.
+//
+//   * OFFSETS. dx, dy, dz is always (other center - own center), but "other"
+//     differs per call site and the sense is what a sign error here would
+//     silently flip. Read from the sweeps (the table in the contract section
+//     of tasks/cartesian-taylor-basis.md):
+//
+//       p2m_contribution   particle position - cell center      ( d )
+//       m2m_translate      child center      - parent center    ( s )
+//       m2l_translate      source center     - target center    ( -R )
+//       l2l_translate      child center      - parent center    ( s )
+//       l2p_evaluate       particle position - cell center      ( a )
+//
+//     R = c_target - c_source is the offset the derivative ladder wants
+//     (canopy-questions.md §4), so the M2L NEGATES what it is handed. That is
+//     T3's business; it is stated here because the two senses differing by a
+//     sign is the single most likely place to lose a session.
+//
+//   * MULTIPOLE. M(cell, slot(q), c) is the physical Taylor moment
+//
+//         M_q = sum_{j in cell} ( y_j - c_cell )^q / q! * s_{j,c}
+//
+//     with s_{j,c} particle j's component-c charge. Units
+//     charge * length^{|q|}. THE 1/q! IS IN THE MOMENT -- it is not in the
+//     b_k, which are raw derivatives (see the namespace header above), and it
+//     is not applied again anywhere else.
+//
+//   * LOCAL. L(cell, slot(p), comp_set_slot(c, 0)) is the physical Taylor
+//     coefficient l_p of the potential about the cell center, so that
+//
+//         u(x) = sum_p ( x - c_cell )^p / p! * l_p .
+//
+//     Units charge * length^{-1-|p|}. The 1/p! is in the EVALUATION (l2p),
+//     not in l_p. This IS a physical potential, unlike the conformance
+//     fixture's dimensionless local, and is directly comparable to a direct
+//     sum over the softened kernel.
+//
+//   * SETS. sets_per_component = 1 -- a Taylor local is one set of
+//     C(p+3,3) coefficients per component. See that declaration.
+//
+//   * SCALAR. double only, by static_assert. A softened kernel has no scale
+//     invariance, so the FP32 conditioning argument that the solid-harmonic
+//     width normalizations exist for does not transfer.
+// ---------------------------------------------------------------------------
+//
+// T2 STATUS: build_m2l_operators, m2l_core and m2l_translate ABORT. They are
+// T3's, and they abort rather than filling zeros deliberately -- a
+// defined-but-wrong M2L operator lets a solve run and produce a plausible
+// field, which is the failure mode the task ordering exists to prevent. Every
+// other operator below is complete. m2l_post_cell in particular is REAL and
+// not a stub: it is the only stage that writes the locals view, and a no-op
+// there compiles cleanly while leaving every local coefficient zero.
+// ============================================================================
+
+template <class Scalar, int P_ORDER, int NComps = 1>
+struct CartesianTaylorBasis
+{
+    // The Conventions row on Scalar: this basis is double only. Spelled
+    // exactly as CanopyTest::MonopoleBasis does.
+    static_assert( std::is_same<Scalar, double>::value,
+                   "CartesianTaylorBasis: Scalar must be double" );
+
+    static_assert( P_ORDER >= 0,
+                   "CartesianTaylorBasis: P_ORDER is the Taylor order p and "
+                   "must be non-negative" );
+
+    using scalar_type = Scalar;
+
+    // -----------------------------------------------------------------------
+    // The coefficient contract. ONE REAL coefficient per slot: a Cartesian
+    // Taylor coefficient of a real potential is real, unlike the solid
+    // harmonics' Kokkos::complex. So scalars_per_coeff is 1 and coeff_type IS
+    // the component scalar -- the case Canopy::detail::coeff_traits' PRIMARY
+    // template covers, which is what makes coalesced_view_exchange and both
+    // shared-cell Allreduces work here with no specialization.
+    //
+    // The identity element is value-initialization, coeff_type() == +0.0.
+    // -----------------------------------------------------------------------
+    using coeff_type = Scalar;
+    using component_scalar_type = Scalar;
+    static constexpr int scalars_per_coeff = 1;
+
+    static_assert( sizeof( coeff_type ) ==
+                       scalars_per_coeff * sizeof( component_scalar_type ),
+                   "CartesianTaylorBasis: coeff_type is not "
+                   "scalars_per_coeff contiguous component_scalar_type, so "
+                   "the MPI packing in coalesced_view_exchange and in the two "
+                   "shared-cell reductions would transfer the wrong byte "
+                   "count" );
+
+    // The Taylor order p. The expansion carries every multi-index with
+    // |q| <= p.
+    static constexpr int max_order = P_ORDER;
+
+    static constexpr int num_components = NComps;
+
+    // =======================================================================
+    // num_coeffs_per_cell -- C(p+3,3), the number of multi-indices with
+    // |q| <= p, spelled THROUGH Canopy::CartesianTaylor::num_slots and never
+    // as a second binomial helper.
+    //
+    // That is not a style preference. num_slots is the same function the slot
+    // map is built from, so a flat index produced by slot() is in range by
+    // construction rather than by a coincidence between two spellings of one
+    // count. m2l_num_src_coeffs below is the same call for the same reason:
+    // the M2L contracts a source multipole against a target local over ONE
+    // flat index, and two spellings of that count is exactly how the shared
+    // index stops being shared.
+    //
+    // CONSTEXPR, and it must stay so: it drives the M2L's unrolling and the
+    // scratch size (risk R3 of tasks/cartesian-taylor-basis.md, which has
+    // already fired once at roughly +18%). num_slots is already constexpr.
+    // =======================================================================
+    static constexpr int num_coeffs_per_cell =
+        Canopy::CartesianTaylor::num_slots( P_ORDER );
+
+    // Flat source-coefficient count for the precomputed-operator path. The
+    // M2L operator is (num_coeffs_per_cell x m2l_num_src_coeffs) -- target
+    // local slots by source moment slots -- and both axes run over the SAME
+    // multi-index set at order p, so this is num_coeffs_per_cell again by
+    // construction and not by agreement.
+    static constexpr int m2l_num_src_coeffs =
+        Canopy::CartesianTaylor::num_slots( P_ORDER );
+
+    // =======================================================================
+    // sets_per_component -- ONE.
+    //
+    // A Taylor local is one set of C(p+3,3) coefficients per component:
+    // l_p^{(c)} for every |p| <= P_ORDER. There is no second quantity that
+    // accumulates over the same interaction list, so there is nothing for a
+    // second set to hold. At 1 the (component, set) flattening collapses to
+    // c exactly and the locals view's third extent is NComps, as it was
+    // before the trait existed.
+    //
+    // CONSTEXPR, per R3 -- it multiplies into m2l_scratch_bytes and into the
+    // sweep's TeamVectorRange zero-fill bound.
+    // =======================================================================
+    static constexpr int sets_per_component = 1;
+
+    // Slots one cell's coefficient occupies in the locals view and in the M2L
+    // accumulator: the locals view's third extent.
+    static constexpr int num_comp_slots = NComps * sets_per_component;
+
+    // (component, set) -> the locals view's third index. Component-major,
+    // set-minor -- identical to DownwardSweep::shared_slot's factor, which is
+    // what makes the shared-cell round trip put a coefficient back in its own
+    // slot. At sets_per_component = 1 this is the identity on c; it is spelled
+    // out anyway so that every slot expression in this file goes through ONE
+    // function and a later set count cannot be added in half the places.
+    KOKKOS_INLINE_FUNCTION
+    static constexpr int comp_set_slot( int c, int s )
+    {
+        return c * sets_per_component + s;
+    }
+
+    // -----------------------------------------------------------------------
+    // The M2L key contract. See Canopy::LaplaceKernel for the full statement
+    // of what the five key integers are.
+    // -----------------------------------------------------------------------
+
+    // The |dd| range guard. 6, but NOT for LaplaceKernel's reason: there, 6 is
+    // a precision bound on a scale-normalized operator carrying a residual
+    // 2^{j|dd|} factor, and a basis carrying PHYSICAL operators inherits
+    // neither that factor nor that bound. Here 6 merely bounds the key space,
+    // and it is chosen so the set of pairs routed to the fallback path is the
+    // same one every other basis in this repository sees -- which keeps
+    // total_fallback_pair_count() comparable across bases. It is not a
+    // precision claim about this basis.
+    static constexpr int m2l_key_dd_max = 6;
+
+    // TRUE, and necessarily so. This basis's operator is PHYSICAL: it is
+    // b_k(R) evaluated at the real translation vector R, whose length is the
+    // integer offset times the half-width at the deeper of the two depths. Two
+    // pairs with the same integer offset at different levels have different R
+    // and therefore different operators, so a level-blind key would alias
+    // them. The solid-harmonic basis can zero max_d precisely because its
+    // operator is scale-normalized; this one cannot.
+    //
+    // Consequence, recorded rather than worked around: set_root_half_width
+    // clears the ENTIRE operator cache when the root half-width changes, and
+    // only for a key_needs_level basis (src/Canopy_DownwardSweep.hpp:406-416).
+    // On a drifting bounding box the cache therefore empties on every rebuild
+    // (risk R6). That is a cost, not a defect -- it is also what keeps a
+    // level-dependent operator from being served stale (risk R5).
+    static constexpr bool key_needs_level = true;
+
+    // Identity -- the key is returned unchanged, max_d and all, because
+    // key_needs_level is true and the level is part of what distinguishes one
+    // operator from another here.
+    //
+    // A function template on the key type, deliberately: M2LKey is a nested
+    // type of DownwardSweep<..., KernelType>, so a basis cannot name it
+    // without a circular dependency. The sweep passes its own M2LKey and Key
+    // is deduced. Host-only, not KOKKOS_INLINE_FUNCTION -- the classify pass
+    // runs on host.
+    template <class Key>
+    static Key canonicalize_key( Key k )
+    {
+        return k;
+    }
+
+    // Bytes one operator column costs: the full (Nt x Ns) dense block. DERIVED
+    // from sizeof(coeff_type) and the two counts above, never a literal, so it
+    // tracks a change to either. At p = 2 this is 10 * 10 * 8 = 800 bytes per
+    // key.
+    static constexpr std::size_t bytes_per_key =
+        static_cast<std::size_t>( num_coeffs_per_cell ) *
+        static_cast<std::size_t>( m2l_num_src_coeffs ) * sizeof( coeff_type );
+
+    // A pair refused an operator column takes the basis's own per-pair
+    // operator at the physical geometry. This basis can evaluate one -- the
+    // derivative ladder is device-callable and allocates nothing -- so
+    // PerPairTranslate is available, and it is the enumerator that REQUIRES
+    // m2l_translate to be a real implementation. The other enumerator,
+    // EscalateToP2P, fails a class-scope static_assert in DownwardSweep.
+    static constexpr Canopy::M2LOverflow m2l_overflow_policy =
+        Canopy::M2LOverflow::PerPairTranslate;
+
+    // -----------------------------------------------------------------------
+    // The M2L operator set: (num_coeffs_per_cell, m2l_num_src_coeffs,
+    // n_unique_ops), LayoutLeft, element type coeff_type. The sweep addresses
+    // it only by the integer op_idx its CSR carries and never indexes inside.
+    //
+    // An ALIAS TEMPLATE on the memory space, not a typedef: DownwardSweep
+    // instantiates it at TWO spaces at once -- memory_space for the device
+    // table and Kokkos::HostSpace for the persistent operator cache
+    // (src/Canopy_DownwardSweep.hpp:621 and :630) -- and spells it
+    //     typename KernelType::template m2l_operators_type<memory_space>.
+    // A plain typedef does not compile.
+    // -----------------------------------------------------------------------
+    template <class MemorySpace>
+    using m2l_operators_type =
+        Kokkos::View<coeff_type***, Kokkos::LayoutLeft, MemorySpace>;
+
+    // -----------------------------------------------------------------------
+    // Auxiliary tables: NONE, and that is a decision with a reason rather than
+    // a gap.
+    //
+    // The multi-index arithmetic this basis runs -- inverse_slot once and slot
+    // up to seven times per ladder slot -- is recomputed on every call and
+    // COULD be tabulated here. It is not, in T2, because the only call sites
+    // that would pay for a table are m2l_core and build_m2l_operators, both of
+    // which abort until T3: a table built now has no consumer and no way to be
+    // measured against the recompute it replaces. Measuring it is not
+    // optional -- risk R3 of tasks/cartesian-taylor-basis.md records a
+    // MEASURED +18% M2L regression from a comparable indirection, with two
+    // candidate micro-causes tested and excluded. The opportunity is tracked
+    // in README.md's "Future Optimizations" instead of being taken on faith.
+    //
+    // A struct TEMPLATE on the memory space, not a plain empty struct, because
+    // that is how both sweeps spell it:
+    //     typename KernelType::template aux_tables_type<memory_space>
+    // (src/Canopy_UpwardSweep.hpp:109, src/Canopy_DownwardSweep.hpp:184).
+    // Neither sweep names a member, which is exactly why an empty struct
+    // satisfies them.
+    // -----------------------------------------------------------------------
+    template <class MemorySpace>
+    struct aux_tables_type
+    {
+    };
+
+    // TWO arguments, matching the real call sites at
+    // src/Canopy_UpwardSweep.hpp:305 and src/Canopy_DownwardSweep.hpp:1789.
+    //
+    // `order` is the Taylor order p; a basis needing a table sized by it would
+    // read it here rather than from its own template arguments.
+    // `kernel_params` carries the softening as a LENGTH eps -- the kernel's b
+    // is eps^2 (src/Canopy_FarFieldContract.hpp). This basis's operator does
+    // depend on b, but only inside the M2L, so nothing eps-dependent is built
+    // here; T3 reads kernel_params in build_m2l_operators.
+    //
+    // A plain static host function, not KOKKOS_INLINE_FUNCTION, per the
+    // Conventions row on host-side construction -- even though this one
+    // allocates nothing.
+    template <class MemorySpace>
+    static aux_tables_type<MemorySpace>
+    build_aux_tables( int order, const Canopy::M2LKernelParams& kernel_params )
+    {
+        (void)order;
+        (void)kernel_params;
+        return {};
+    }
+
+    // -----------------------------------------------------------------------
+    // The M2L team scratch, viewed as a scalar array.
+    //
+    // BASIS-INTERNAL. No sweep names this type: the sweep hands the stages raw
+    // char bytes sized by m2l_scratch_bytes, and this alias is only how THIS
+    // basis's own stages reinterpret them. Its shape is entirely this file's
+    // business, and the accumulator layout below is the whole of the contract
+    // between m2l_core (T3) and m2l_post_cell (T2).
+    // -----------------------------------------------------------------------
+    template <class ScratchSpace>
+    using m2l_accumulator_type =
+        Kokkos::View<scalar_type*, ScratchSpace,
+                     Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+
+    // =======================================================================
+    // THE M2L ACCUMULATOR LAYOUT -- settled here, in T2, even though m2l_core
+    // fills it only in T3.
+    //
+    // It has to be settled here because m2l_post_cell READS it, and
+    // m2l_post_cell is written in this task. A layout deferred to T3 would
+    // leave the flush indexing something whose shape nobody had decided.
+    //
+    //   n_acc = num_coeffs_per_cell * NComps * sets_per_component
+    //           contiguous scalar_type, holding the target cell's local
+    //           accumulator,
+    //
+    //   acc_slot(out_idx, c, s) = out_idx * num_comp_slots
+    //                             + comp_set_slot(c, s)
+    //
+    // COEFFICIENT-MAJOR, then component, then set -- the SAME nesting as the
+    // locals view (cell, coeff, comp_set_slot), which is what makes
+    // m2l_post_cell a slot-for-slot walk of one cell's slice rather than a
+    // transpose. It is also the nesting T3's contraction wants: the M2L reads
+    // M_full(source_cell, q_slot, c), whose component axis is likewise
+    // innermost, so the component loop is stride-1 on both sides of the
+    // multiply-accumulate.
+    //
+    // At sets_per_component = 1 this collapses to
+    // acc_slot(out_idx, c, 0) = out_idx * NComps + c; the set factor is
+    // carried anyway so that a later set count changes one expression.
+    // =======================================================================
+    KOKKOS_INLINE_FUNCTION
+    static constexpr int acc_slot( int out_idx, int c, int s )
+    {
+        return out_idx * num_comp_slots + comp_set_slot( c, s );
+    }
+
+    // =======================================================================
+    // m2l_scratch_bytes -- the per-team M2L scratch this basis needs, in
+    // bytes: one contiguous scalar_type array of n_acc entries in the layout
+    // above. The real/imag split the solid-harmonic basis needs has no
+    // analogue here; the coefficient is real.
+    //
+    // CONSTEXPR, and it must stay so. The sweep assigns it to a
+    // `constexpr size_t` (src/Canopy_DownwardSweep.hpp:2209) and derives the
+    // TeamVectorRange zero-fill bound from it, which is what keeps every
+    // extent inside the M2L stages a compile-time constant. A runtime value
+    // here deoptimizes the fused kernel WITH NO CORRECTNESS SIGNAL AT ALL
+    // (risk R3). num_coeffs_per_cell and sets_per_component are both
+    // static constexpr on this class, so the product is a constant
+    // expression. n_comps is a parameter only so the sweep can size scratch
+    // without reaching into this basis's template arguments; it is only ever
+    // passed num_components.
+    //
+    // The sweep hands the stages RAW, ZERO-FILLED bytes and relies on all-zero
+    // bytes being this basis's accumulator identity. That holds: the
+    // accumulator is IEEE-754 binary64, whose all-zero-bytes representation is
+    // +0.0, and +0.0 is the additive identity.
+    // =======================================================================
+    KOKKOS_INLINE_FUNCTION
+    static constexpr std::size_t m2l_scratch_bytes( int n_comps )
+    {
+        return static_cast<std::size_t>( num_coeffs_per_cell ) *
+               static_cast<std::size_t>( n_comps ) *
+               static_cast<std::size_t>( sets_per_component ) *
+               sizeof( scalar_type );
+    }
+
+    // =======================================================================
+    // taylor_accumulate -- the single multiply-accumulate step of every
+    // kernel-blind operator below, factored out so that no two of them, and no
+    // host reference in tests/tstCartesianTaylor.hpp, can drift apart.
+    //
+    // TWO STATEMENTS ON PURPOSE. `acc += a * b` as one statement is
+    // contractible to an FMA under the default -ffp-contract=on, and nothing
+    // guarantees that a device compilation and a plain host loop make the same
+    // contraction decision. Splitting the product into a named local puts a
+    // statement boundary between the multiply and the add, which
+    // -ffp-contract=on may not cross. Per the Conventions row on guarding
+    // against -ffp-contract; CanopyTest::MonopoleBasis::m2l_accumulate is the
+    // same device.
+    // =======================================================================
+    KOKKOS_INLINE_FUNCTION
+    static void taylor_accumulate( Scalar& acc, Scalar a, Scalar b )
+    {
+        const Scalar prod = a * b;
+        acc += prod;
+    }
+
+    // =======================================================================
+    // taylor_monomials -- THE Taylor shift table, and the single source of
+    // truth for it. Fills
+    //
+    //     t[ slot(k) ] = dx^kx dy^ky dz^kz / ( kx! ky! kz! )     for |k| <= p
+    //
+    // i.e. d^k / k! over the same slot map every coefficient array in this
+    // file uses.
+    //
+    // ALL FOUR kernel-blind operators are this table contracted against a
+    // coefficient array, which is why it has one home:
+    //
+    //   P2M   M_q       += t[q] * charge                 ( d = y - c_cell )
+    //   M2M   M^par_q   += sum_{q' <= q}  t[q-q'] M^ch_q'   ( s = c_ch - c_par )
+    //   L2L   l^ch_p    += sum_{p' >= p}  t[p'-p] l^par_p'  ( s = c_ch - c_par )
+    //   L2P   u          = sum_p          t[p]    l_p      ( a = x - c_cell )
+    //
+    // The 1/k! is HERE and nowhere else on these paths -- not in the b_k,
+    // which are raw derivatives, and not applied a second time by any caller.
+    //
+    // In:  dx, dy, dz  the offset, sense per the call-site table in this
+    //                  class's header comment. Length units.
+    // Out: t[ 0 .. num_coeffs_per_cell )   caller-provided, no allocation.
+    //
+    // Built as an outer product of three per-axis tables pf_i[j] = d_i^j / j!
+    // so each entry costs two multiplies; the per-axis tables are built by one
+    // running product each, so no pow() and no factorial division appears in
+    // an inner loop.
+    // =======================================================================
+    KOKKOS_INLINE_FUNCTION
+    static void taylor_monomials( Scalar dx, Scalar dy, Scalar dz,
+                                  Scalar ( &t )[num_coeffs_per_cell] )
+    {
+        Scalar pf[3][P_ORDER + 1];
+        const Scalar d[3] = { dx, dy, dz };
+
+        for ( int a = 0; a < 3; a++ )
+        {
+            pf[a][0] = static_cast<Scalar>( 1 );
+            for ( int j = 1; j <= P_ORDER; j++ )
+                pf[a][j] = pf[a][j - 1] * d[a] / static_cast<Scalar>( j );
+        }
+
+        for ( int s = 0; s < num_coeffs_per_cell; s++ )
+        {
+            int k[3];
+            Canopy::CartesianTaylor::inverse_slot( s, k );
+            t[s] = pf[0][k[0]] * pf[1][k[1]] * pf[2][k[2]];
+        }
+    }
+
+    // =======================================================================
+    // P2M: accumulate a particle's contribution to its leaf's Taylor moments.
+    //
+    //   M(slot(q), c) += d^q / q! * charge_c ,     d = particle - cell center
+    //
+    // canopy-questions.md §4, the P2M row. Kernel-blind: the softening does
+    // not appear, because a moment is a property of the source distribution
+    // and not of the kernel.
+    //
+    //   charges     Scalar[NComps], this particle's per-component charges
+    //   dx, dy, dz  PARTICLE POSITION MINUS CELL CENTER (d), length units
+    //               (src/Canopy_UpwardSweep.hpp:465-485)
+    //   w_self      this leaf's HALF-WIDTH. IGNORED -- this basis's moments
+    //               are physical and carry no width normalization; see the
+    //               class header.
+    //   M_out       2D slice M_out(coeff_slot, comp_idx) for this leaf
+    //
+    // ATOMIC. The sweep runs one thread per particle over a RangePolicy and
+    // many particles share a leaf, so two threads can accumulate into one
+    // moment slot concurrently.
+    // =======================================================================
+    template <class MSliceType>
+    KOKKOS_INLINE_FUNCTION static void
+    p2m_contribution( const Scalar ( &charges )[NComps], Scalar dx, Scalar dy,
+                      Scalar dz, Scalar w_self, const MSliceType& M_out )
+    {
+        (void)w_self;
+
+        Scalar t[num_coeffs_per_cell];
+        taylor_monomials( dx, dy, dz, t );
+
+        for ( int s = 0; s < num_coeffs_per_cell; s++ )
+            for ( int c = 0; c < NComps; c++ )
+            {
+                const Scalar contrib = t[s] * charges[c];
+                Kokkos::atomic_add( &M_out( s, c ), contrib );
+            }
+    }
+
+    // =======================================================================
+    // M2M: shift a child's moments to the parent center and accumulate.
+    //
+    //   M^par_q += sum_{q' <= q} s^{q-q'} / (q-q')! * M^ch_q' ,
+    //                                            s = c_child - c_parent
+    //
+    // canopy-questions.md §4, the M2M row. This is the plain binomial Taylor
+    // shift and is identical to any Cartesian FMM: it follows from
+    // (y - c_par)^q / q! = sum_{q' <= q} (y - c_ch)^q' / q' * s^{q-q'}/(q-q')!
+    // summed over the child's particles, so it is EXACT rather than truncated
+    // for every q the parent carries.
+    //
+    //   dx, dy, dz          CHILD CENTER MINUS PARENT CENTER (s), length units
+    //                       (src/Canopy_UpwardSweep.hpp:528-542)
+    //   w_child, w_parent   both HALF-WIDTHS. BOTH IGNORED -- physical,
+    //                       un-normalized moments; see the class header.
+    //   aux                 empty; this basis has no tables. IGNORED.
+    //   M_parent_out        2D slice M_parent_out(coeff_slot, comp_idx)
+    //
+    // NON-ATOMIC. The sweep runs one team per parent and that team walks its
+    // own children sequentially, so no two writers touch one parent.
+    // =======================================================================
+    template <class TeamMember, class MView, class AuxType, class MParentType>
+    KOKKOS_INLINE_FUNCTION static void
+    m2m_translate( const TeamMember& team_member, const MView& M_full,
+                   int child_cell, Scalar dx, Scalar dy, Scalar dz,
+                   Scalar w_child, Scalar w_parent, const AuxType& aux,
+                   const MParentType& M_parent_out )
+    {
+        (void)w_child;
+        (void)w_parent;
+        (void)aux;
+
+        Scalar t[num_coeffs_per_cell];
+        taylor_monomials( dx, dy, dz, t );
+
+        Kokkos::parallel_for(
+            Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
+            [&]( const int out_idx )
+            {
+                int q[3];
+                Canopy::CartesianTaylor::inverse_slot( out_idx, q );
+
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    Scalar acc = static_cast<Scalar>( 0 );
+
+                    // q' <= q componentwise; the shift multi-index is q - q',
+                    // whose degree is automatically <= |q| <= P_ORDER, so no
+                    // term of this sum falls outside the table.
+                    for ( int ax = 0; ax <= q[0]; ax++ )
+                        for ( int ay = 0; ay <= q[1]; ay++ )
+                            for ( int az = 0; az <= q[2]; az++ )
+                            {
+                                const int src =
+                                    Canopy::CartesianTaylor::slot( ax, ay,
+                                                                   az );
+                                const int sh =
+                                    Canopy::CartesianTaylor::slot(
+                                        q[0] - ax, q[1] - ay, q[2] - az );
+                                taylor_accumulate(
+                                    acc, t[sh],
+                                    M_full( child_cell, src, c ) );
+                            }
+
+                    M_parent_out( out_idx, c ) += acc;
+                }
+            } );
+    }
+
+    // =======================================================================
+    // M2L, per-pair fallback path -- T3.
+    //
+    // The sweep routes a pair here when its key trips a range guard or the
+    // operator-table count cap, in which case no operator column exists for
+    // it. m2l_overflow_policy selects PerPairTranslate, which is the
+    // enumerator that REQUIRES this to be a real implementation.
+    //
+    // ABORTS in T2. A defined-but-wrong M2L would let a solve run and produce
+    // a plausible field, which is the failure mode the task ordering exists to
+    // prevent; and this path must agree with the table path or WHICH pairs
+    // overflow changes the answer (risk R4). No task before T3 runs a solve.
+    //
+    // When T3 writes it: dx, dy, dz is SOURCE CENTER MINUS TARGET CENTER
+    // (src/Canopy_DownwardSweep.hpp:2338-2345), which is -R; the derivative
+    // ladder wants R = c_target - c_source, so this negates what it is handed.
+    // w_source, w_target are HALF-WIDTHS and are ignored. Atomic: the sweep
+    // runs one team per PAIR, so two pairs sharing a target write
+    // concurrently.
+    // =======================================================================
+    template <class TeamMember, class MView, class AuxType, class LTargetType>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_translate( const TeamMember& team_member, const MView& M_full,
+                   int source_cell, Scalar dx, Scalar dy, Scalar dz,
+                   Scalar w_source, Scalar w_target, const AuxType& aux,
+                   const LTargetType& L_target_out )
+    {
+        (void)team_member;
+        (void)M_full;
+        (void)source_cell;
+        (void)dx;
+        (void)dy;
+        (void)dz;
+        (void)w_source;
+        (void)w_target;
+        (void)aux;
+        (void)L_target_out;
+
+        Kokkos::abort(
+            "CartesianTaylorBasis::m2l_translate is not implemented until T3 "
+            "of tasks/cartesian-taylor-basis.md. It aborts rather than "
+            "writing zeros so that no solve can run on a plausible-looking "
+            "but wrong far field." );
+    }
+
+    // =======================================================================
+    // build_m2l_operators -- T3.
+    //
+    // Fills the dense (num_coeffs_per_cell x m2l_num_src_coeffs) operator of
+    // every canonical key the sweep's persistent cache is missing. Parameters
+    // mirror Canopy::LaplaceKernel::build_m2l_operators positionally:
+    // keys[0..n_keys) canonical (column j is keys[j]), unit_w[0..n_levels) the
+    // HALF-WIDTH at each depth indexed by the key's max_d, kernel_params the
+    // softening as a LENGTH eps (the kernel's b is eps^2).
+    //
+    // A PLAIN STATIC MEMBER, not KOKKOS_INLINE_FUNCTION, per the Conventions
+    // row on host-side operator construction: it runs once on host and a basis
+    // needing LAPACK here must be allowed to call it. `ops` is allocated
+    // WithoutInitializing, so when T3 writes this, every entry of every column
+    // must be written.
+    //
+    // ABORTS in T2, for the reason given on m2l_translate.
+    // =======================================================================
+    template <class KeyType, class AuxType, class OpsView>
+    static void build_m2l_operators( const KeyType* keys, int n_keys,
+                                     const double* unit_w, int n_levels,
+                                     const Canopy::M2LKernelParams&
+                                         kernel_params,
+                                     const AuxType& aux, const OpsView& ops )
+    {
+        (void)keys;
+        (void)n_keys;
+        (void)unit_w;
+        (void)n_levels;
+        (void)kernel_params;
+        (void)aux;
+        (void)ops;
+
+        Kokkos::abort(
+            "CartesianTaylorBasis::build_m2l_operators is not implemented "
+            "until T3 of tasks/cartesian-taylor-basis.md. It aborts rather "
+            "than filling zeros so that no solve can run on a "
+            "plausible-looking but wrong far field." );
+    }
+
+    // =======================================================================
+    // m2l_pre_cell -- NO-OP, and it must stay one.
+    //
+    // This basis contracts the source moments directly against the operator
+    // column and has no per-source-cell work to hoist.
+    //
+    // It MUST NOT WRITE TO SCRATCH: the accumulator living there is zeroed
+    // once per team, before the team's first pair, and carried across every
+    // pair of that team (src/Canopy_DownwardSweep.hpp:2226-2247). A pre_cell
+    // that cleared it would discard every pair but the last.
+    // =======================================================================
+    template <class TeamMember, class MView, class OpsType, class ScratchView>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_pre_cell( const TeamMember& team_member, const MView& M_full,
+                  int source_cell, const OpsType& ops,
+                  const ScratchView& scratch )
+    {
+        (void)team_member;
+        (void)M_full;
+        (void)source_cell;
+        (void)ops;
+        (void)scratch;
+    }
+
+    // =======================================================================
+    // m2l_core -- the per-pair apply, T3.
+    //
+    // When T3 writes it, it accumulates into the scratch in the acc_slot
+    // layout declared above:
+    //
+    //   acc(p, c) += sum_q ops(p, q, op_idx) * M(source_cell, q, c)
+    //
+    // with the operator column already carrying the (-1)^{|q|} b_{p+q}(R) of
+    // canopy-questions.md §4. The accumulator layout is NOT T3's to choose --
+    // it is fixed at acc_slot above, because m2l_post_cell below already
+    // reads it.
+    //
+    // ABORTS in T2, for the reason given on m2l_translate.
+    // =======================================================================
+    template <class TeamMember, class MView, class OpsType, class ScratchView>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_core( const TeamMember& team_member, const MView& M_full,
+              int source_cell, const OpsType& ops, int op_idx,
+              const ScratchView& scratch )
+    {
+        (void)team_member;
+        (void)M_full;
+        (void)source_cell;
+        (void)ops;
+        (void)op_idx;
+        (void)scratch;
+
+        Kokkos::abort(
+            "CartesianTaylorBasis::m2l_core is not implemented until T3 of "
+            "tasks/cartesian-taylor-basis.md. It aborts rather than writing "
+            "zeros so that no solve can run on a plausible-looking but wrong "
+            "far field." );
+    }
+
+    // =======================================================================
+    // m2l_post_cell -- flush the team's accumulator into the locals view.
+    //
+    // REAL, NOT A STUB, and written in T2 rather than deferred with the three
+    // stages above. This is the ONLY stage that writes the locals view: a
+    // no-op here compiles cleanly and leaves every local coefficient zero,
+    // which is precisely the failure the "Deliberate deviations" section of
+    // tasks/cartesian-taylor-basis.md records. It is also why the accumulator
+    // layout had to be settled in T2 -- this function indexes it.
+    //
+    //   L_out(target_cell, p, comp_set_slot(c, s))
+    //       += acc( acc_slot(p, c, s) )
+    //
+    // += RATHER THAN = : on a shared target, L2L from a shallower depth has
+    // already written there before the per-depth M2L runs. Each target cell is
+    // owned by exactly one team, so no atomics are needed.
+    //
+    // `ops` is in the signature because the sweep passes it to every stage;
+    // this basis needs nothing from it here.
+    // =======================================================================
+    template <class TeamMember, class ScratchView, class LView, class OpsType>
+    KOKKOS_INLINE_FUNCTION static void
+    m2l_post_cell( const TeamMember& team_member, const ScratchView& scratch,
+                   const LView& L_out, int target_cell, const OpsType& ops )
+    {
+        (void)ops;
+
+        using acc_type =
+            m2l_accumulator_type<typename ScratchView::memory_space>;
+        constexpr int n_acc = num_coeffs_per_cell * num_comp_slots;
+        scalar_type* acc_base =
+            reinterpret_cast<scalar_type*>( scratch.data() );
+        acc_type team_acc( acc_base, n_acc );
+
+        Kokkos::parallel_for(
+            Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
+            [&]( const int out_idx )
+            {
+                for ( int c = 0; c < NComps; c++ )
+                    for ( int st = 0; st < sets_per_component; st++ )
+                        L_out( target_cell, out_idx,
+                               comp_set_slot( c, st ) ) +=
+                            team_acc( acc_slot( out_idx, c, st ) );
+            } );
+    }
+
+    // =======================================================================
+    // L2L: shift the parent's local expansion to each child center.
+    //
+    //   l^ch_p += sum_{p' >= p} s^{p'-p} / (p'-p)! * l^par_p' ,
+    //                                            s = c_child - c_parent
+    //
+    // canopy-questions.md §4, the L2L row. The plain binomial Taylor shift
+    // again, read the other way: substituting (x - c_par) = (x - c_ch) + s
+    // into u(x) = sum_p' (x-c_par)^p'/p'! l^par_p' and collecting powers of
+    // (x - c_ch) gives exactly this. Unlike M2M it IS truncated -- the sum
+    // only runs over the p' the parent carries -- which is the usual Taylor
+    // L2L and not a defect of this basis.
+    //
+    //   dx, dy, dz          CHILD CENTER MINUS PARENT CENTER (s), length units
+    //                       (src/Canopy_DownwardSweep.hpp:2389-2397)
+    //   w_child, w_parent   both HALF-WIDTHS. BOTH IGNORED -- physical,
+    //                       un-normalized coefficients; see the class header.
+    //   aux                 empty; this basis has no tables. IGNORED.
+    //   L_child_out         2D slice L_child_out(coeff_slot, comp_set_slot)
+    //
+    // NON-ATOMIC. The sweep runs one team per parent and each child has
+    // exactly one parent.
+    // =======================================================================
+    template <class TeamMember, class LView, class AuxType, class LChildType>
+    KOKKOS_INLINE_FUNCTION static void
+    l2l_translate( const TeamMember& team_member, const LView& L_full,
+                   int parent_cell, Scalar dx, Scalar dy, Scalar dz,
+                   Scalar w_child, Scalar w_parent, const AuxType& aux,
+                   const LChildType& L_child_out )
+    {
+        (void)w_child;
+        (void)w_parent;
+        (void)aux;
+
+        Scalar t[num_coeffs_per_cell];
+        taylor_monomials( dx, dy, dz, t );
+
+        Kokkos::parallel_for(
+            Kokkos::TeamThreadRange( team_member, num_coeffs_per_cell ),
+            [&]( const int out_idx )
+            {
+                int pp[3];
+                Canopy::CartesianTaylor::inverse_slot( out_idx, pp );
+
+                // p' = p + a with |p'| <= P_ORDER, so |a| <= P_ORDER - |p|.
+                const int rem = P_ORDER - ( pp[0] + pp[1] + pp[2] );
+
+                // Every (component, set) slot shifts the same way -- L2L acts
+                // on each independently -- so this walks the flat slot range
+                // rather than the (component, set) pair. At
+                // sets_per_component = 1 the range IS the component range.
+                for ( int cs = 0; cs < num_comp_slots; cs++ )
+                {
+                    Scalar acc = static_cast<Scalar>( 0 );
+
+                    for ( int ax = 0; ax <= rem; ax++ )
+                        for ( int ay = 0; ax + ay <= rem; ay++ )
+                            for ( int az = 0; ax + ay + az <= rem; az++ )
+                            {
+                                const int src =
+                                    Canopy::CartesianTaylor::slot(
+                                        pp[0] + ax, pp[1] + ay, pp[2] + az );
+                                const int sh =
+                                    Canopy::CartesianTaylor::slot( ax, ay,
+                                                                   az );
+                                taylor_accumulate(
+                                    acc, t[sh],
+                                    L_full( parent_cell, src, cs ) );
+                            }
+
+                    L_child_out( out_idx, cs ) += acc;
+                }
+            } );
+    }
+
+    // =======================================================================
+    // L2P: evaluate the local expansion, and its gradient, at a particle.
+    //
+    //   u(x)         = sum_p a^p / p! * l_p ,      a = particle - cell center
+    //   d_i u(x)     = sum_{p : p_i >= 1} a^{p-e_i} / (p-e_i)! * l_p
+    //
+    // canopy-questions.md §4, the L2P row, and the shifted-multi-index
+    // gradient of the design document.
+    //
+    // THE GRADIENT IS ANALYTIC. It is the exact derivative of the polynomial
+    // being evaluated -- the same shift table read at slot(p - e_i) -- so it
+    // costs one extra table lookup per term and carries no step size, no
+    // cancellation and no truncation of its own. The solid-harmonic basis
+    // takes a central finite difference there
+    // (src/Canopy_LaplaceKernel.hpp:1378-1407); this basis does not need one,
+    // and nothing here touches that file. Note |p - e_i| <= P_ORDER - 1, so
+    // the same order-P_ORDER shift table serves both.
+    //
+    //   dx, dy, dz  PARTICLE POSITION MINUS CELL CENTER (a), length units
+    //               (src/Canopy_DownwardSweep.hpp:2650-2672)
+    //   w_self      this leaf's HALF-WIDTH. IGNORED -- physical,
+    //               un-normalized coefficients; see the class header.
+    //   phi_out     Scalar[NComps], WRITTEN WITH = , not += : the sweep
+    //               accumulates it into its own output view afterwards
+    //               (src/Canopy_DownwardSweep.hpp:2672-2674), exactly as it
+    //               does for the solid-harmonic basis.
+    //   grad_out    a GradWriter-shaped accessor: grad_out(c, dim) returns a
+    //               writable Scalar& (src/Canopy_DownwardSweep.hpp:190-198).
+    //               Written only when compute_gradient.
+    //
+    // SET 0 ONLY, which at sets_per_component = 1 is every set there is.
+    //
+    // Not a team operator: the sweep runs one thread per particle over a
+    // RangePolicy, and each particle writes only its own phi and gradient, so
+    // there is no atomic and no team range here.
+    // =======================================================================
+    template <class LView, class GradAccess>
+    KOKKOS_INLINE_FUNCTION static void
+    l2p_evaluate( const LView& L_full, int leaf_cell, Scalar dx, Scalar dy,
+                  Scalar dz, Scalar w_self, Scalar ( &phi_out )[NComps],
+                  const GradAccess& grad_out, bool compute_gradient )
+    {
+        (void)w_self;
+
+        Scalar t[num_coeffs_per_cell];
+        taylor_monomials( dx, dy, dz, t );
+
+        for ( int c = 0; c < NComps; c++ )
+        {
+            Scalar acc = static_cast<Scalar>( 0 );
+            for ( int s = 0; s < num_coeffs_per_cell; s++ )
+                taylor_accumulate(
+                    acc, t[s], L_full( leaf_cell, s, comp_set_slot( c, 0 ) ) );
+            phi_out[c] = acc;
+        }
+
+        if ( !compute_gradient )
+            return;
+
+        for ( int c = 0; c < NComps; c++ )
+            for ( int i = 0; i < 3; i++ )
+                grad_out( c, i ) = static_cast<Scalar>( 0 );
+
+        for ( int s = 0; s < num_coeffs_per_cell; s++ )
+        {
+            int p[3];
+            Canopy::CartesianTaylor::inverse_slot( s, p );
+
+            for ( int i = 0; i < 3; i++ )
+            {
+                // p - e_i carries a negative component exactly when p_i == 0,
+                // and those terms are the constants of the polynomial in x_i
+                // and differentiate to zero.
+                if ( p[i] == 0 )
+                    continue;
+
+                int sh_k[3] = { p[0], p[1], p[2] };
+                sh_k[i] -= 1;
+                const int sh = Canopy::CartesianTaylor::slot( sh_k[0], sh_k[1],
+                                                              sh_k[2] );
+
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    Scalar g = grad_out( c, i );
+                    taylor_accumulate(
+                        g, t[sh],
+                        L_full( leaf_cell, s, comp_set_slot( c, 0 ) ) );
+                    grad_out( c, i ) = g;
+                }
+            }
+        }
+    }
+};
+
 } // namespace Canopy
 
 #endif // CANOPY_CARTESIAN_TAYLOR_BASIS_HPP
