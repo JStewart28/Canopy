@@ -54,8 +54,11 @@ is the whole goal here.
 
 A far-field relative error of $10^{-10}$ is **out of reach for this basis** and
 is not a goal of any task below. A Cartesian Taylor expansion truncated at order
-$p$ has relative error $\sim (c\,w/R)^{p+1}$ with $c$ between $1$ and $\sqrt3$;
-at standard admissibility $R/w \approx 3$ each additional order buys between
+$p$ has relative error $\sim (c\,W/R)^{p+1}$, with $W$ the **full width of the
+source box** — not the $w = r^2 + b$ of the ladder below, which is a different
+quantity sharing a letter in the source material — and $c$ between $1$ and
+$\sqrt3$; at standard admissibility $R/W \approx 3$ each additional order buys
+between
 0.24 and 0.48 decades while the DOF count grows as $\binom{p+3}{3}\sim p^3/6$, so
 $10^{-6}$ alone wants $p \approx 11$–$24$, i.e. 364 to 2925 coefficients per cell
 ([canopy-kernel-rec.md](canopy-kernel-rec.md), "Convergence per DOF"). Reaching
@@ -217,9 +220,8 @@ $$
 R = -\,(ii, jj, kk)\cdot w_{\rm unit}[\texttt{max\_d}].
 $$
 
-The negation is not optional and is not absorbed anywhere else. A useful
-independent check: $\varphi$ is even, so $b_n(-R) = (-1)^{|n|} b_n(R)$, and the
-two spellings
+The negation is not optional and is not absorbed anywhere else. $\varphi$ is
+even, so $b_n(-R) = (-1)^{|n|} b_n(R)$, and the two spellings
 
 $$
 \ell_p = \sum_q (-1)^{|q|} b_{p+q}(R)\,M_q
@@ -227,8 +229,19 @@ $$
 \ell_p = (-1)^{|p|} \sum_q b_{p+q}(S)\,M_q,\quad S = -R
 $$
 
-must agree numerically. T3 asserts that they do; disagreement means the parity or
-the sign has been applied twice.
+must agree numerically. **Where each spelling gets its argument decides whether
+that comparison can fail at all.** The equality is an identity in the vector fed
+to it, so handing both spellings the same vector makes them agree whatever its
+sign: a comparison that obtains $S$ by negating the very $R$ the first spelling
+used is vacuous and passes over a wrong-signed operator. The two arguments must
+be sourced independently — the first through the production key-to-$R$ path,
+$R = -(ii,jj,kk)\cdot w_{\rm unit}[\texttt{max\_d}]$, and the second from the
+key's **raw** offset $S = (ii,jj,kk)\cdot w_{\rm unit}[\texttt{max\_d}]$, source
+minus target exactly as the sweep builds it
+(`src/Canopy_DownwardSweep.hpp:1464-1481`), with the $(-1)^{|p|}$ applied by the
+comparison itself. So sourced, a missing negation makes the two disagree at every
+odd $|p|$, and disagreement otherwise means the parity or the sign has been
+applied twice. T3 asserts it this way.
 
 `m2l_translate` is handed the same quantity in physical form — the fallback call
 site computes `dx = src_ci.center[0] - target_ci.center[0]`
@@ -417,10 +430,26 @@ looking:
 | Leaf size | `ncrit = 64` | `treecode.py:104` |
 | Documented accuracy | **~1e-3 relative velocity** at `theta = 0.3` | `README.md:71`, `PHYSICS.md:137`; measured 5.9e-4 / 1.1e-3 / 9.4e-4 at N = 642 / 2562 / 10242 in `PARALLELIZATION.md:24-30` |
 
-`_expansion_batch(R, G, D, Q, blob, order)` **is** the $\ell_0$ local coefficient
-— the value at the box center — for a single source box. Extending it to a real
-FMM means keeping that as $\ell_0$ and adding the $p \ge 1$ coefficients, which
-are just higher $b_{p+q}(R)$ off the same ladder.
+`_expansion_batch(R, G, D, Q, blob, order)` is the whole far-field contribution
+of one source box **at the target box center**, with no target-side expansion.
+Extending it to a real FMM means adding the coefficients that carry the
+expansion away from that center, which are just higher $b_{p+q}(R)$ off the same
+ladder.
+
+**It is not $\ell_0$**, and matching it against $\ell_0$ is a wrong comparison
+rather than a loose one. It returns a *velocity*, which needs
+$\nabla\varphi$: its three arrays are $-\partial\varphi$, $-\partial^2\varphi$
+and $-\partial^3\varphi$ ([canopy-questions.md](canopy-questions.md) §2, "minus
+these, shifted by one index"), so contracted against the degree-0/1/2 moments
+they give the **$|p| = 1$** local coefficients of the scalar pass — its gradient
+at the box center. $\ell_0$ is the scalar potential there and needs $b_k$ at
+degrees 0, 1 and 2 instead. T3's step 6 checks both, against §2 rather than
+against this file.
+
+Its moments are also **full symmetric tensors** where this basis's are
+multi-indexed. The two differ by $|q|!/q!$:
+$\sum_{a,b} T_{ab} d_a d_b = \sum_{|q|=2} \frac{|q|!}{q!} T_q d^q$. Any
+comparison across the two representations applies that factor.
 
 **Its `blob` is not $\varepsilon$.** `blob` is the quantity added to $r^2$, and at
 the solver's default `use_matlab_blob = True` it equals `eps`, not `eps**2`
@@ -902,8 +931,8 @@ non-`LaplaceKernel` basis. Expect T4's first failures inside
 truth for an operator entry; `tests/tstCartesianTaylor.hpp` — new bodies.
 
 **Reference:** [canopy-questions.md](canopy-questions.md) §4 for
-$\ell_p^A = \sum_q (-1)^{|q|} b_{p+q}(R) M_q^B$ and for the statement that
-`_expansion_batch` already **is** $\ell_0$ for a single source box.
+$\ell_p^A = \sum_q (-1)^{|q|} b_{p+q}(R) M_q^B$, and §2 for the closed-form
+tensors that are the in-repo oracle for both convention checks in step 6.
 `tests/CanopyTest_MonopoleBasis.hpp:378-494` for the single-source-of-truth
 pattern — `m2l_operator_entry`, `m2l_set_operator` and `m2l_accumulate`, each the
 sole home of one value — and `:651-708` for what `build_m2l_operators` is handed. The $R$ sign is
@@ -911,14 +940,35 @@ in [The sign of $R$](#the-sign-of-r-which-the-key-does-not-give-directly) above.
 
 **Do:**
 
-1. Write **one** function that maps a key plus `unit_w` plus `kernel_params` to
-   the dense $(N_t, N_s)$ operator, and reach it from `build_m2l_operators`, from
+1. Write **one** function that maps the **physical** $(R[3], b)$ to the dense
+   $(N_t, N_s)$ operator, and reach it from `build_m2l_operators`, from
    `m2l_translate` and from every host reference. Do not duplicate the
    expression anywhere. This is what makes the conformance comparisons exact
    rather than merely close.
-2. $R = -(ii, jj, kk) \cdot$ `unit_w[k.max_d]`, and $b = $
-   `kernel_params.softening`$^2$. `n_levels` bounds `max_d`; assert
+
+   It is parameterized on $R$ and $b$ rather than on a key because
+   `m2l_translate` cannot produce a key — see step 5 — while both callers can
+   produce $R$: `build_m2l_operators` as
+   $R = -(ii,jj,kk)\cdot$ `unit_w[k.max_d]` and `m2l_translate` as
+   $R = -(dx,dy,dz)$.
+2. $b = $ `kernel_params.softening`$^2$; the field is a **length** and the
+   kernel's $b$ is its square. `n_levels` bounds `max_d`; assert
    `0 <= k.max_d < n_levels` rather than indexing past the end.
+
+   Two further guards, because both values have a reachable default that would
+   make the operator silently wrong rather than noisy. **Abort loudly** with a
+   message naming the convention when `kernel_params.softening <= 0`:
+   `M2LKernelParams::softening` defaults to `0.0`, documented as the unsoftened
+   kernel a sweep driven directly by a test runs at
+   (`src/Canopy_FarFieldContract.hpp:118-120`), and `derivative_ladder` requires
+   $b > 0$ because $b = 0$ at $r = 0$ divides by zero. **Abort loudly** likewise
+   when `unit_w[k.max_d] <= 0`: `unit_w` is all zeros until something calls
+   `set_root_half_width` (`src/Canopy_DownwardSweep.hpp:402-404`), and a zero
+   entry yields $R = 0$ and a finite, wrong, physical operator. Neither is
+   reachable from the tasks here — T3 runs no sweep, T4 sets an explicit positive
+   `softening`, and `Solver::_push_root_half_width` runs before every
+   `_downward.setup()` — so these are guards for a later caller, not failures to
+   expect.
 3. Fill `ops(slot(p), slot(q), j) = (-1)^{|q|} b_{p+q}(R)` over all
    $|p|, |q| \le p_{\rm order}$, evaluating the ladder to $2p_{\rm order}$ once
    per key. `ops` is allocated `WithoutInitializing`; write every entry.
@@ -928,55 +978,106 @@ in [The sign of $R$](#the-sign-of-r-which-the-key-does-not-give-directly) above.
    `-ffp-contract` reason in [Conventions](#conventions). Keep
    `num_coeffs_per_cell` and the scratch extents compile-time constants
    (**R3**).
-5. `m2l_translate` reconstructs the same key from the physical geometry it is
-   handed — `w_unit = min(w_source, w_target)`,
-   $(ii,jj,kk) = \mathrm{round}((dx,dy,dz)/w_{\rm unit})$, and `dd` from
-   $w_{\rm target}/w_{\rm source} = 2^{dd}$ exactly — and reaches the same
-   operator function, so the fused and fallback paths agree. It is atomic: the
-   sweep runs one team per pair and two pairs can share a target.
-   `MonopoleBasis::m2l_translate` (`:567-649`) is the worked reconstruction.
-   **It cannot recover `max_d` from the widths alone** — it needs the physical
-   half-width, which it has — so build $R$ directly from `(dx, dy, dz)` with the
-   sign flipped, and assert in the test that this agrees with the table path
-   for the same pair.
+5. `m2l_translate` builds $R = -(dx, dy, dz)$ directly from the physical offset
+   it is handed and reaches the same operator function, so the fused and fallback
+   paths agree. It is atomic: the sweep runs one team per pair and two pairs can
+   share a target. Assert in the test that it agrees with the table path for the
+   same pair.
+
+   **It reconstructs no key, and needs none.** This operator is a function of the
+   physical $R$ and $b$ alone — it has **no `dd` dependence**, so there is
+   nothing a key would supply that $(dx,dy,dz)$ does not.
+   `MonopoleBasis::m2l_translate` (`:567-649`) does reconstruct one, and is not
+   the model to copy here: its local is dimensionless and normalized, so it needs
+   $F(dd) = 2^{\max(0,-dd)}$ to convert between "separation in deeper-cell
+   half-widths" and the source's own scale
+   (`tests/CanopyTest_MonopoleBasis.hpp:404-427`). A physical operator has no
+   normalization to undo. `m2l_translate` also cannot recover `max_d` from the
+   two half-widths in any case, which is the second reason the key route is
+   closed to it.
+
+   One consequence worth expecting rather than debugging: two keys differing only
+   in `dd` produce **identical operator columns**. That is duplication in the
+   table, not an error — `MonopoleBasis` records the same effect for the same
+   reason (`tests/CanopyTest_MonopoleBasis.hpp:156`).
 
 **Checkpoint commit here** — the operator builder compiles and the convention
 checks below pass — before wiring anything else.
 
-6. Pin the convention against the reference, which is the whole point of this
-   task. Two checks, both host-only over hand-built inputs, no sweep:
-   - **$\ell_0$ reproduces `_expansion_batch`.** For one source box with moments
-     $G, D, Q$ (orders 0/1/2) and one target box at separation $R$, the $p = 0$
-     local coefficient computed here must equal the reference formula's value.
-     Transcribe `_expansion_batch`'s three arrays into the test from
-     [canopy-questions.md](canopy-questions.md) §2's statement of them —
-     $K = r_a P_1$, $dK = \delta_{ab}P_1 - 3r_ar_bP_2$,
-     $ddK = -3(\delta_{ab}r_c + \delta_{ac}r_b + \delta_{bc}r_a)P_2 + 15r_ar_br_cP_3$,
-     each being **minus** the corresponding §2 tensor, shifted by one index —
-     and state on the assertion that the oracle is §2 and not a file outside the
+6. Pin the convention, which is the whole point of this task. Three checks, all
+   host-only over hand-built inputs, no sweep:
+   - **$\ell_0$ against §2's closed forms.** For one source box with moments
+     $M_q$, $|q| \le p$, and one target box at separation $R$,
+     $\ell_0 = \sum_q (-1)^{|q|} b_q(R) M_q$ must match an oracle hand-coded
+     from [canopy-questions.md](canopy-questions.md) §2 at degrees 0, 1 and 2 —
+     $b_\emptyset = P_0$, $\partial_a\varphi = -r_aP_1$,
+     $\partial_a\partial_b\varphi = -\delta_{ab}P_1 + 3r_ar_bP_2$. This is
+     **R1**'s real discriminator: the $(-1)^{|q|}$ multiplier and the $1/q!$
+     placement first bite at $|q| = 1$, and this is the check that sees them.
+     State on the assertion that the oracle is §2 and not a file outside the
      repository.
+   - **The $|p| = 1$ coefficients against the reference's contraction.** This is
+     the `_expansion_batch` correspondence, and the only check that exercises
+     $b_k$ at degree 3. Transcribe the reference's three arrays into the test
+     from §2's statement of them — $K = r_a P_1$,
+     $dK = \delta_{ab}P_1 - 3r_ar_bP_2$,
+     $ddK = -3(\delta_{ab}r_c + \delta_{ac}r_b + \delta_{bc}r_a)P_2 + 15r_ar_br_cP_3$,
+     each being **minus** the corresponding §2 tensor **shifted by one index** —
+     contract them against the degree-0/1/2 moments, and assert against
+     $\ell_{e_a}$ with the overall sign of $K = -\nabla\varphi$ stated on the
+     assertion rather than absorbed silently.
+
+     Those arrays carry derivatives of degree 1, 2 and 3, so contracting them
+     against degree-0/1/2 moments produces the $|p| = 1$ coefficients and
+     **not** $\ell_0$, which needs degrees 0, 1 and 2. §4's remark that
+     `_expansion_batch` "is the $p=0$ local coefficient" means it is the value at
+     the box center with no target-side expansion; the reference returns a
+     *velocity*, which needs $\nabla\varphi$, so what it corresponds to here is
+     the scalar pass's gradient at that center. Comparing it against $\ell_0$
+     builds an oracle that cannot match, and then invites "fixing" a correct
+     operator against it — the plausible-but-wrong outcome **R1** describes.
+
+     Both of these two checks convert between two representations, and **the
+     conversion carries a multinomial factor**. The reference's arrays and
+     moments are full
+     symmetric tensors; this basis's are multi-indexed, and
+     $\sum_{a,b} T_{ab}\,d_ad_b = \sum_{|q|=2} \frac{|q|!}{q!}\,T_q\,d^q$. §4's
+     prose equating $G, D, Q = \Sigma\gamma,\ \Sigma d\otimes\gamma,\
+     \Sigma d\otimes d\otimes\gamma$ with $M_q = \Sigma d^q/q!\cdot s$ elides it.
+     Getting $|q|!/q!$ wrong is another route to the same **R1** failure.
    - **The parity identity.** $\sum_q (-1)^{|q|} b_{p+q}(R) M_q$ and
-     $(-1)^{|p|}\sum_q b_{p+q}(-R) M_q$ must agree to round-off for every $p$.
-     Disagreement means the sign or the parity has been applied twice.
+     $(-1)^{|p|}\sum_q b_{p+q}(S) M_q$ must agree to round-off for every $p$,
+     with the two arguments sourced independently as
+     [The sign of $R$](#the-sign-of-r-which-the-key-does-not-give-directly)
+     requires: $R$ from the production key-to-$R$ path, $S$ from the key's raw
+     source-minus-target offset. Sourced any other way the identity is vacuous
+     and the check cannot fail. Disagreement means the sign or the parity has
+     been applied twice.
 7. Add an end-to-end algebraic check with no FMM in it: place a handful of
    sources in one box and a handful of targets in a well-separated box, run
    P2M → M2L → L2P by hand over the basis's own operators, and compare against a
    direct softened sum over the same particles. At $p = 2$ and an admissible
    separation this is the first number that says the basis computes the right
-   field rather than a self-consistent one. Assert against the separation-dependent
-   bound $(c\,w/R)^{p+1}$ rather than a round number, and print the achieved
-   ratio.
+   field rather than a self-consistent one. Assert against the
+   separation-dependent bound $(c\,W/R)^{p+1}$ rather than a round number, and
+   print the achieved ratio. $W$ is a box size, not the ladder's $w = r^2 + b$;
+   state on the assertion which length it was measured in — full width or
+   half-width — since the achieved $c$ is only interpretable against that choice.
 
 **Exit criterion:** `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` succeeds and
 `ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes every body. Specifically:
-$\ell_0$ matches the reference formula to round-off; the parity identity holds;
-the fused and per-pair operator paths agree exactly for a sampled set of keys;
-and the hand-run P2M → M2L → L2P beats the truncation bound. **Failure
-direction:** dropping the $(-1)^{|q|}$ multiplier must fail the $\ell_0$ check at
-the first odd $|q|$, and omitting the negation of $R$ must fail the parity check
-— each with a message naming which. A build in which both are dropped must still
-fail, since the two errors do not cancel for $|p| > 0$. Record all three
-outcomes in the log.
+$\ell_0$ matches the §2 closed forms to round-off; the $|p| = 1$ coefficients
+match the reference's $K/dK/ddK$ contraction to round-off; the parity identity
+holds with its two arguments independently sourced; the fused and per-pair
+operator paths agree exactly for a sampled set of keys; and the hand-run
+P2M → M2L → L2P beats the truncation bound. **Failure direction:** dropping the
+$(-1)^{|q|}$ multiplier must fail the $\ell_0$ check at the first odd $|q|$, and
+omitting the negation of $R$ must fail the parity check at the first odd $|p|$ —
+each with a message naming which. The parity check only fails that way because
+its two arguments come from independent sources; if a perturbed build passes it,
+the test is sourcing both from one $R$ and is measuring nothing. A build in which
+both are dropped must still fail, since the two errors do not cancel for
+$|p| > 0$. Record all three outcomes in the log.
 
 **Checkpoint commit** at the end of this task.
 
@@ -1109,10 +1210,14 @@ $\ell_0$ check failing, or T3 passing while T4's direct-sum comparison misses
 **Distinguished from R2** by which order it breaks at: a convention error is
 present at $|q| = 1$, the first odd multi-index, while an index-map error is
 invisible below $|k| = 4$ where the map first has non-trivial structure.
-**Do:** T3's $\ell_0$-reproduces-`_expansion_batch` check is the discriminator and
-must be written before any solve is run. If T4 misses and T3 passes, re-check the
+**Do:** T3's two convention checks are the discriminator and must be written
+before any solve is run — $\ell_0$ against §2's degree-0/1/2 closed forms, which
+is the one sensitive at $|q| = 1$, and the $|p| = 1$ coefficients against the
+reference's $K/dK/ddK$ contraction. If T4 misses and T3 passes, re-check the
 $1/q!$ placement: the factorial belongs in the moment and in the L2P evaluation,
-never in $b_k$.
+never in $b_k$. Then re-check the $|q|!/q!$ multinomial factor between the
+reference's full symmetric tensors and this basis's multi-indexed coefficients,
+which is the other route to the same wrong field.
 
 **R2 — the symmetric-tensor index map is wrong above $|k| = 3$.** Hand-derived
 Cartesian FMMs habitually go wrong here, and the closed forms that serve as the
