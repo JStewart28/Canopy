@@ -1,6 +1,7 @@
 configure_file(Canopy_Config.hpp.cmakein Canopy_Config.hpp)
 
 set(HEADERS_PUBLIC
+  Canopy_CartesianTaylorBasis.hpp
   Canopy_CommunicationPlan.hpp
   Canopy_DownwardSweep.hpp
   Canopy_FarFieldContract.hpp

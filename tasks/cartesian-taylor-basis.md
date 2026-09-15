@@ -666,7 +666,7 @@ the log. Save new scripts under `scripts/tuolumne/`.
 
 ## Task sequence
 
-### T1 — The index map and the derivative ladder — **NOT STARTED**
+### T1 — The index map and the derivative ladder — **DONE**
 
 **Depends on:** none.
 
@@ -724,6 +724,47 @@ assertion, each with a message naming the multi-index. Record both perturbation
 outcomes in the log.
 
 **Checkpoint commit** at the end of this task.
+
+**Met.** `make cmake_check_build_system` then
+`make -j 4 Canopy_Test_CartesianTaylor_SERIAL` in `build-tuolumne/` succeeds,
+and `ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes 3/3 bodies with
+ctest rc 0 (flux jobs `f3YTi9NMzAE3`, and `f3YTwT7yiC2K` re-run on the exact
+committed tree after both perturbations were reverted).
+
+*The index map is a bijection at orders 0-6*: `slot` is injective and onto
+$[0,\binom{p+3}{3})$ at every $p$ from 0 to 6 — 1, 4, 10, 20, 35, 56 and 84
+slots — with `inverse_slot(slot(k)) == k` for every $k$ in range and
+`slot(inverse_slot(s)) == s` for every $s$ in range. Each slot is also asserted
+to land inside its own degree block, which is what makes the chosen *degree-graded*
+order's prefix property a checked fact rather than an intention: the order-$p$
+table is a prefix of the order-$2p$ one, so the M2L's $b_{p+q}$ out to
+$|p+q| = 2p$ and the moments' $|q| \le p$ share one flat index.
+
+*The recurrence reproduces all four §2 closed forms at every sampled $(r,b)$*:
+worst deviation $2.911\times10^{-15}$ at $k = (3,0,0)$ against a $10^{-12}$
+tolerance, over 40 samples — $b \in \{10^{-6}, 6.25\times10^{-4}, 10^{-2}, 1\}$
+(the second being the solver's $\varepsilon = 0.025$ squared), each at $r = 0$
+and at $|r|/\sqrt b \in \{0.01, 1, 100\}$ in three directions. Errors are
+measured against $\varphi/L^{|k|}$, $L = \sqrt w$, because components vanish
+identically at the sampled $r$ and a relative test would divide by zero.
+
+*The finite-difference check passes at $|k| = 4 \ldots 2p$*: at $p = 2$ that is
+$|k| = 4$, worst deviation $7.321\times10^{-7}$ against $10^{-5}$. The oracle
+needed **two** Richardson steps rather than the one this section describes; one
+step bottoms out at $7.8\times10^{-6}$ and leaves no usable margin. See the
+divisor scan in [the log](cartesian-taylor-basis-progress-log.md) under `## T1`.
+
+*Failure direction, both run as their own job and reverted by inverting the
+edit*: perturbing $-2\sum_j k_j r_j$ to $-\sum_j k_j r_j$ failed
+`closed_forms` at multi-index $(2,0,0)$, $|k| = 2$ — $|k| \le 1$ untouched, as
+predicted, since the sum is empty at $k = 0$ — and `finite_difference` at
+$(2,0,2)$, with `index_map_bijection` still green. Swapping $k_y$ and $k_z$ in
+`inverse_slot` failed the bijection assertion at $(0,0,1)$ with the message
+naming it. Both jobs exited ctest rc 8.
+
+*Not a contract member*: the header declares no trait, typedef, alias template,
+`static_assert` on the basis or operator, and instantiates no sweep and no
+`Solver`. It does not yet compile as a `FarField`. That is T2.
 
 ---
 

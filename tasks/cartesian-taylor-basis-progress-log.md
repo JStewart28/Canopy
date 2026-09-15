@@ -180,3 +180,237 @@ the $1/q!$ belongs in the moment, never in $b_k$. **T4** — the pass condition 
 1e-3 at $\theta = 0.3$ with the $\theta = 0.5$ value pinned alongside, and
 `softening` must be set explicitly because `FmmConfig::softening = -1.0` selects
 auto-softening whose effective $\varepsilon$ moves with the distribution.
+
+## T1 — the index map and the derivative ladder
+
+Implemented `src/Canopy_CartesianTaylorBasis.hpp` (slot map + $b_k$ evaluator,
+nothing else), `tests/tstCartesianTaylor.hpp` (three bodies), one line in each
+of the two `CMakeLists.txt`, and
+`scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux`.
+
+### The total order on multi-indices
+
+**Degree-graded, then ascending lexicographic in $(k_x, k_y)$** — with
+$k_z = |k| - k_x - k_y$ determined, so the pair fixes the triple. Stated on the
+declaration in the header, which is where the reasoning belongs; repeated here
+because the *rejected* alternative is not recoverable from the code.
+
+Degree-graded is the load-bearing half and downstream code depends on it. The
+M2L needs $b_{p+q}$ out to $|p+q| = 2p$ while the moments only run to
+$|q| \le p$, so under a graded order the order-$p$ slot table is a **prefix** of
+the order-$2p$ table and one flat index is valid in both. A non-graded order
+(plain lexicographic on the triple, say) would need two maps and a translation
+between them at every M2L contraction. It is also why `slot()` takes no order
+argument: the degree is read off the multi-index itself and the answer does not
+move when $p$ changes, which is what makes the prefix property checkable rather
+than merely intended. The bijection test asserts it directly — every slot lands
+inside its own degree block.
+
+The within-degree half is arbitrary. It is pinned only so that it is written
+down: ascending in $k_x$, then in $k_y$. Closed forms:
+
+$$
+\mathrm{slot}(k) = \binom{n+2}{3} + k_x (n+1) - \frac{k_x(k_x-1)}{2} + k_y,
+\qquad n = |k|
+$$
+
+with $\binom{n+2}{3}$ the count of multi-indices of degree $< n$ and
+$\mathrm{num\_slots}(p) = \binom{p+3}{3}$. The inverse walks the degree and then
+the $k_x$-block; both walks are $O(|k|)$ and no table is built.
+
+### What the §3 recurrence turned out to need that §3 does not say
+
+Three things, all of which had to be decided to turn the formula into a table
+fill:
+
+1. **§3 gives no base case.** It produces $b_{k+e_i}$ from lower orders and
+   stops. The base is §1's $b_\emptyset = P_0 = w^{-1/2}$.
+2. **§3 does not say which $i$ to step in.** It states the recurrence for
+   $b_{k+e_i}$, but filling a table means going the other way: for each target
+   multi-index $m$, choosing a decomposition $m = k + e_i$. Any $i$ with
+   $m_i > 0$ gives the same $b_m$; the implementation takes the lowest so the
+   sweep is deterministic and the same value comes out on host and device.
+3. **"Any $b$ carrying a negative component is identically zero" never needs to
+   be implemented as a lookup.** Every term whose index would go negative has a
+   coefficient that vanishes on *exactly* the same condition, so guarding on the
+   coefficient is exact rather than an approximation and no zero-padded table is
+   required. Term by term, with $j \ne i$ unless stated:
+   - $-k_i b_{k-e_i}$: negative iff $k_i = 0$, and the coefficient is $k_i$.
+   - $-2 k_j r_j b_{k+e_i-e_j}$: component $j$ is $k_j - 1$, negative iff
+     $k_j = 0$, and the coefficient is $k_j$. At $j = i$ the index is $k$ itself
+     and is never negative.
+   - $-k_j(k_j{-}1) b_{k+e_i-2e_j}$: component $j$ is $k_j - 2$, negative iff
+     $k_j \le 1$, and the coefficient is $k_j(k_j-1)$. At $j = i$ the index is
+     $k - e_i$, negative iff $k_i = 0$, and the same coefficient vanishes.
+
+   This is worth having written down: a reader who implements the "≡ 0" clause
+   literally will allocate a padded table and a bounds-checked accessor for
+   nothing.
+
+Consequence of (3) plus §3's own "orders $|k|$ and $|k|-1$" statement — which
+holds including the $j = i$ term of the first sum, where the index is $b_k$
+itself at degree $|k|$ — is that **one forward sweep in ascending degree fills
+the table in place with no scratch buffer**. That is what makes the evaluator
+device-callable with a caller-provided array and no allocation.
+
+### Signatures
+
+```cpp
+namespace Canopy::CartesianTaylor {
+  KOKKOS_INLINE_FUNCTION constexpr int slot_degree_base( int n );      // C(n+2,3)
+  KOKKOS_INLINE_FUNCTION constexpr int num_slots_at_degree( int n );   // C(n+2,2)
+  KOKKOS_INLINE_FUNCTION constexpr int num_slots( int p );             // C(p+3,3)
+  KOKKOS_INLINE_FUNCTION constexpr int slot( int kx, int ky, int kz );
+  KOKKOS_INLINE_FUNCTION void inverse_slot( int s, int k[3] );
+  KOKKOS_INLINE_FUNCTION void derivative_ladder( const double r[3], double b,
+                                                 int max_order, double* out );
+}
+```
+
+`b` is **softening squared**, the quantity added to $r^2$ — not $\varepsilon$.
+`b <= 0` calls `Kokkos::abort` with a message naming the convention; it is a
+precondition, not a defaultable argument, because $b = 0$ at $r = 0$ divides by
+zero. `out` is caller-provided and holds **raw** $\partial^k\varphi$ with no
+$1/k!$. Nothing in the file is a contract member: no trait, no typedef, no
+`static_assert` on the basis, no operator, and no sweep or `Solver` is
+instantiated.
+
+### Decisions carried in from the task statement
+
+- **The finite-difference check runs at $|k| = 4$ only** — that is $2p$ at the
+  $p = 2$ every later task uses. The bijection assertion still runs at orders 0
+  through 6 because it is cheap and it is where hand-derived Cartesian FMMs
+  actually break (**R2**). The FD oracle is deliberately *not* extended to
+  match: its tolerance is scale-dependent at each order, and **R8** requires it
+  be re-measured rather than assumed if $p$ is ever raised.
+- **The `_valgrind` CTest variant is not a gate.** `Canopy_add_tests` registers
+  `Canopy_Test_CartesianTaylor_SERIAL_valgrind` beside the real test because
+  valgrind is found in `build-tuolumne/`
+  (`cmake/test_harness/test_harness.cmake:157-162`). The batch script's `-R` is
+  anchored, `'^Canopy_Test_CartesianTaylor_SERIAL$'`, which is what excludes it.
+  It was neither made to pass nor disabled.
+
+### Measured: the sampled $(r, b)$ and the tolerances they hold at
+
+40 samples. $b \in \{10^{-6},\ 6.25\times10^{-4},\ 10^{-2},\ 1\}$ — the second
+is the downstream solver's $\varepsilon = 0.025$ squared, with the set spanning
+roughly three decades either side of it. For each $b$: $r = 0$ exactly (legal,
+because $b > 0$), and $|r| / \sqrt b \in \{0.01,\ 1,\ 100\}$ in three
+directions — axis-aligned $(1,0,0)$ so the $\delta_{ab}$ terms of §2 stand
+alone, a generic unit vector $(0.36, -0.48, 0.80)$, and the diagonal
+$(1,1,1)/\sqrt3$. The $b \to 0$ limit is not sampled; it is a precondition
+violation, not an edge case.
+
+| Check | Tolerance | Achieved (worst over all 40 samples) | Margin |
+| --- | --- | --- | --- |
+| §2 closed forms, $\vert k\vert \le 3$ | $10^{-12}$ | $2.911\times10^{-15}$ at $k = (3,0,0)$ | 343× |
+| Finite difference, $\vert k\vert = 4$ | $10^{-5}$ | $7.321\times10^{-7}$ at $k = (4,0,0)$, $b = 6.25\times10^{-4}$ | 13.7× |
+
+Green flux jobs: `f3YTi9NMzAE3` (first clean run) and `f3YTwT7yiC2K` (re-run
+after both perturbations were reverted, on the exact tree committed at the
+checkpoint). Both 3/3 bodies, ctest rc 0, identical figures.
+
+Both errors are measured against the **natural scale of a $|k|$-th derivative**,
+$\varphi / L^{|k|}$ with $L = \sqrt w$, not relative to the value itself.
+Relative-to-value is unusable here: individual components vanish identically at
+the sampled $r$ (any $r_a = 0$ kills the odd terms) and the test would divide by
+zero. This is stated on both assertions.
+
+**The FD oracle needed two Richardson steps, not one.** The first implementation
+used the single step the design describes, $R_1(h) = (4D(h/2) - D(h))/3$, at
+$h = L/64$. A standalone replica of the map, the recurrence and the oracle —
+written to size the tolerance before spending a queue slot — showed that
+configuration achieving $7.8\times10^{-6}$ against a $10^{-5}$ tolerance: a
+1.3× margin, sitting exactly on the truncation/roundoff crossover. Widening the
+tolerance would have been the wrong fix, because this check is the *only* oracle
+above $|k| = 3$ and its sharpness is what bounds how small an index-map or
+recurrence error has to be to slip through (**R2**, **R8**). Sharpening the
+oracle instead: a second Richardson step,
+$R_2(h) = (16 R_1(h/2) - R_1(h))/15$, kills the $h^4$ term and leaves $O(h^6)$.
+The composed central stencils carry even powers of $h$ only, so the second step
+is valid for the same reason the first is.
+
+Divisor scan at $|k| = 4$, worst case over the whole sample set, two steps:
+
+| $h$ | worst | regime |
+| --- | --- | --- |
+| $L/8$ | $1.3\times10^{-4}$ | truncation-limited, falling as $(h/L)^6$ |
+| $L/16$ | $1.9\times10^{-6}$ | |
+| $L/32$ | $4.3\times10^{-7}$ | **the floor** — truncation and roundoff balanced |
+| $L/64$ | $7.2\times10^{-6}$ | roundoff-limited, rising as $(L/h)^4$ |
+
+$h = L/32$ is what shipped. The measured $7.3\times10^{-7}$ in the table above
+is the on-machine figure and sits just above the replica's $4.3\times10^{-7}$,
+the difference being `-ffp-contract` and libm. $4\times10^{-7}$ is about as
+good as a double-precision 4th-derivative difference gets; 13.7× is therefore
+the real margin available, not a number that can be improved by tuning $h$.
+
+Nondimensionalizing the step as $h = L/32$ rather than fixing it absolutely is
+what lets one tolerance hold across three decades of $b$ and four of
+$|r|/\sqrt b$: $L = \sqrt{r^2 + b}$ is the scale $\varphi$ actually varies on at
+every sampled point.
+
+### Both perturbations
+
+Each was built and run as its own flux job, and each was reverted by inverting
+the edit rather than by `git checkout`, which would have discarded the task's
+uncommitted work.
+
+**Perturbation A — the §3 coefficient $-2\sum_j k_j r_j \to -\sum_j k_j r_j$**
+(job `f3YTv3AMK12P`, ctest rc 8). `closed_forms` and `finite_difference` both
+failed; `index_map_bijection` still passed, correctly, since the map is
+untouched. First failure, naming the multi-index:
+
+```
+canopy-questions.md §3 recurrence disagrees with the §2 closed form at
+multi-index (2,0,0), |k| = 2: recurrence -999650068.7390641, closed form
+-999550093.73468971, |diff| / (phi/L^|k|) = 9.999e-05 > 1e-12;
+at r = (1e-05,0,0), b = 1e-06
+```
+
+This is exactly the predicted direction: $|k| \le 1$ is untouched because the
+perturbed sum is empty at $k = 0$, and the error appears at $|k| = 2$. Worth
+noting how *small* it is — $10^{-4}$ of scale, four decades above the tolerance
+but nowhere near an obvious blow-up. A test built on a loose relative tolerance
+would have missed it.
+
+**Perturbation B — `inverse_slot`'s $k_y$ and $k_z$ swapped** (job
+`f3YTvodPfdYT`, ctest rc 8). All three bodies failed. First failure:
+
+```
+inverse_slot( slot(0,0,1) = 1 ) gave (0,1,0), expected (0,0,1)
+```
+
+`closed_forms` then failed at $(0,0,1)$ and `finite_difference` at $(0,0,4)$,
+because `derivative_ladder` uses `inverse_slot` to walk each degree and so
+inherits the break. That coupling is worth recording for whoever perturbs this
+next: the map and the ladder are not independently testable in this
+implementation, and a map failure will always present as three red bodies rather
+than one.
+
+### An optimization not taken
+
+`derivative_ladder` calls `inverse_slot` once per slot and `slot` up to seven
+times per slot, all recomputed on every call. In the M2L inner loop this is per
+box pair. A precomputed table of $(m, i, k, \text{term slots})$ built once on
+host would remove all of it. Not done: it is a performance refinement, not a
+correctness issue, and T1 declares no contract member to hang a host-built table
+off. Flagged here rather than in `README.md` "Future Optimizations" because the
+call site that would pay for it does not exist until T2.
+
+**Affects:** **T2** — the signatures above are what to build the contract on:
+`slot`/`inverse_slot`/`num_slots` are free functions in
+`Canopy::CartesianTaylor` taking no order parameter, and `derivative_ladder`
+takes `( const double r[3], double b, int max_order, double* out )` with `b`
+softening *squared* and `out` caller-provided of length `num_slots(max_order)`.
+The graded order makes `num_coeffs_per_cell = num_slots(P_ORDER)` and the M2L's
+`num_slots(2*P_ORDER)` table share one index, so no second map is needed. T2
+adds the traits and operators; it should not need to change anything in this
+file. **T3** — the $b_k$ are raw $\partial^k\varphi$ with no $1/k!$, as the
+header states, so the $(-1)^{|q|}$ and the factorial placement T3 pins are
+entirely T3's business and nothing here pre-empts them. **T4** — if accuracy
+misses at $p = 2$, re-run this test's `finite_difference` body at the specific
+$(r, b)$ scales T4 uses before touching the basis (**R2**); the 13.7× margin is
+measured at the scales tabulated above and nowhere else. **T2, T3** — the flux
+script `scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux` is reusable
+unchanged; its `-R` is anchored to exclude the valgrind variant.

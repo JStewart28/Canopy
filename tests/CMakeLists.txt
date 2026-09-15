@@ -34,6 +34,7 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 
 # Non-MPI unit tests: utilities and on-node math kernels. Run serially.
 set(UNIT_SERIAL_TESTS
+  CartesianTaylor
   Helpers
   LaplaceKernel
   )
