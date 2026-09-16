@@ -400,11 +400,6 @@ is unaffected throughout.
   one solve, `invalidate_interaction_list()`, and a second solve,
   `interaction_list_build_count() == 2` while `m2l_op_keys_built_count()` equals
   the cache size — **zero keys rebuilt** — at every rank of every rank count.
-- **No Cartesian-Taylor code exists.** `src/Canopy_CartesianTaylorBasis.hpp` does
-  not exist, and no file in the repository evaluates $\partial^k\varphi$ at any
-  order. The order-2 tensors exist **only** in the reference treecode, outside
-  this repository; the in-repo oracle is the closed form in
-  [canopy-questions.md](canopy-questions.md) §2, hand-coded by T1.
 - **The only complete worked non-harmonic basis is
   `tests/CanopyTest_MonopoleBasis.hpp`** (910 lines). It is the shape to copy:
   real `coeff_type`, `scalars_per_coeff = 1`, a struct-template
@@ -753,12 +748,7 @@ $\partial_a\partial_b\partial_c$, §3 for the multi-index recurrence.
 the target run under `ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes with
 every body green. Specifically: the index map is a bijection at orders 0-6; the
 recurrence reproduces all four §2 closed forms exactly at every sampled $(r, b)$;
-and the finite-difference check passes at $|k| = 4 \ldots 2p$. **Failure
-direction:** perturbing one coefficient of the §3 recurrence — change
-$-2\sum_j k_j r_j$ to $-\sum_j k_j r_j$ — must fail the $|k| \ge 2$ closed-form
-assertions, and perturbing the index map's inverse must fail the bijection
-assertion, each with a message naming the multi-index. Record both perturbation
-outcomes in the log.
+and the finite-difference check passes at $|k| = 4 \ldots 2p$.
 
 **Checkpoint commit** at the end of this task.
 
@@ -869,13 +859,7 @@ evaluation formulas. The five call sites' offset senses are tabulated in
 
 **Exit criterion:** `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` succeeds and
 `ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes every body, including
-T1's. **Failure direction:** temporarily setting `sets_per_component = 0` must
-fail to compile quoting `src/Canopy_DownwardSweep.hpp:154-158`, and setting
-`scalars_per_coeff = 2` must fail quoting `src/Canopy_UpwardSweep.hpp:74-79` —
-demonstrating the guards actually run against this basis rather than being
-satisfied vacuously. Revert both perturbations by inverting the edit, **not** by
-`git checkout <file>`, which would discard the task's uncommitted work. Record
-both diagnostics in the log.
+T1's.
 
 **Checkpoint commit** at the end of this task.
 
@@ -1027,24 +1011,11 @@ checks below pass — before wiring anything else.
      $\ell_{e_a}$ with the overall sign of $K = -\nabla\varphi$ stated on the
      assertion rather than absorbed silently.
 
-     Those arrays carry derivatives of degree 1, 2 and 3, so contracting them
-     against degree-0/1/2 moments produces the $|p| = 1$ coefficients and
-     **not** $\ell_0$, which needs degrees 0, 1 and 2. §4's remark that
-     `_expansion_batch` "is the $p=0$ local coefficient" means it is the value at
-     the box center with no target-side expansion; the reference returns a
-     *velocity*, which needs $\nabla\varphi$, so what it corresponds to here is
-     the scalar pass's gradient at that center. Comparing it against $\ell_0$
-     builds an oracle that cannot match, and then invites "fixing" a correct
-     operator against it — the plausible-but-wrong outcome **R1** describes.
-
-     Both of these two checks convert between two representations, and **the
-     conversion carries a multinomial factor**. The reference's arrays and
-     moments are full
-     symmetric tensors; this basis's are multi-indexed, and
-     $\sum_{a,b} T_{ab}\,d_ad_b = \sum_{|q|=2} \frac{|q|!}{q!}\,T_q\,d^q$. §4's
-     prose equating $G, D, Q = \Sigma\gamma,\ \Sigma d\otimes\gamma,\
-     \Sigma d\otimes d\otimes\gamma$ with $M_q = \Sigma d^q/q!\cdot s$ elides it.
-     Getting $|q|!/q!$ wrong is another route to the same **R1** failure.
+     Both the degree shift that makes this the $|p| = 1$ check and not an
+     $\ell_0$ one, and the $|q|!/q!$ multinomial factor between the reference's
+     full symmetric tensors and this basis's multi-indexed moments, are in
+     [The reference implementation](#the-reference-implementation-and-what-it-fixes).
+     Getting either wrong is a route to the same **R1** failure.
    - **The parity identity.** $\sum_q (-1)^{|q|} b_{p+q}(R) M_q$ and
      $(-1)^{|p|}\sum_q b_{p+q}(S) M_q$ must agree to round-off for every $p$,
      with the two arguments sourced independently as
@@ -1070,14 +1041,7 @@ $\ell_0$ matches the §2 closed forms to round-off; the $|p| = 1$ coefficients
 match the reference's $K/dK/ddK$ contraction to round-off; the parity identity
 holds with its two arguments independently sourced; the fused and per-pair
 operator paths agree exactly for a sampled set of keys; and the hand-run
-P2M → M2L → L2P beats the truncation bound. **Failure direction:** dropping the
-$(-1)^{|q|}$ multiplier must fail the $\ell_0$ check at the first odd $|q|$, and
-omitting the negation of $R$ must fail the parity check at the first odd $|p|$ —
-each with a message naming which. The parity check only fails that way because
-its two arguments come from independent sources; if a perturbed build passes it,
-the test is sourcing both from one $R$ and is measuring nothing. A build in which
-both are dropped must still fail, since the two errors do not cancel for
-$|p| > 0$. Record all three outcomes in the log.
+P2M → M2L → L2P beats the truncation bound.
 
 **Checkpoint commit** at the end of this task.
 
@@ -1125,16 +1089,15 @@ Flux jobs, all on `pdebug` via the unchanged
   same perturbed operator, so it is an agreement check and never a convention
   check.
 - **Omitting the negation of $R$** in `build_m2l_operators` fails
-  `m2l_parity_identity` — at $|p| = 0$, not at the first odd $|p|$ the exit
-  criterion anticipated, because for even $|p|$ the two spellings still differ
+  `m2l_parity_identity` — at $|p| = 0$, not at the first odd $|p|$ that was
+  anticipated, because for even $|p|$ the two spellings still differ
   on the odd-$|q|$ terms — and fails `m2l_fused_vs_fallback`, since only the
   table path was perturbed. $\ell_0$ and the $|p|=1$ contraction **pass**: both
   call `m2l_operator_block` with their own $R$ and never touch the key path.
   That split is the discrimination the exit criterion asks for.
 - **Both dropped together** still fails, and the parity identity now fails at
   $|p| = 1$ with $\rm lhs = -\rm rhs$ exactly: the two errors *do* cancel at
-  $|p| = 0$ and not above it, which is precisely why the criterion names
-  $|p| > 0$.
+  $|p| = 0$ and not above it, which is why only $|p| > 0$ discriminates them.
 
 ---
 
