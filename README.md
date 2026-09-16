@@ -387,31 +387,6 @@ recompute it replaces rather than assumed faster.
 Tracked defects to be addressed in a later session. These are not introduced by
 current feature work — they reproduce on the pre-existing baseline.
 
-### `CartesianTaylorSolve.matchesDirectSumThetaRef` fails on the gradient, deliberately
-
-`Canopy_Test_CartesianTaylorSolve_MPI_SERIAL` is **knowingly red at np 1-6** on
-one of its two bodies. `matchesDirectSumThetaRef` asserts the reference
-treecode's documented 1e-3 relative accuracy at `mac_theta = 0.3`; the potential
-meets it at 2.655e-04 and the **gradient** does not, at 8.996e-03. The other
-body, `matchesDirectSumThetaCanopy`, passes. This is not a defect in
-`CartesianTaylorBasis` and the assertion was left failing rather than widened.
-
-The cause is that the two quantities being compared have different truncation
-order. The gradient of a degree-$p$ Taylor local is a degree-$(p-1)$ polynomial,
-so $\nabla\varphi$ truncates one order before $\varphi$; the reference is a
-Barnes-Hut treecode with **no target-side expansion at all**, so its documented
-figure is a source-side-only one — the same order as this solve's potential.
-Measured rather than argued: the absolute error ratio gradient/potential equals
-$1/W$ (the leaf half-width) to within 2.3% on two domains differing 12-fold in
-scale, and raising to $p = 3$ drops the gradient by the $R/W$ that one extra
-order predicts. Risks R1, R2 and R4 are all excluded by measurement.
-
-Closing it needs a decision, not a fix: restate the bar as a claim about the
-potential, or run the `mac_theta = 0.3` arm at $p = 3$. Full attribution, every
-figure and every job id are in
-[tasks/cartesian-taylor-basis-progress-log.md](tasks/cartesian-taylor-basis-progress-log.md)
-§T4, and the task entry is marked **BLOCKED ON A DECISION**.
-
 ### The leaf partition is not reproducible run-to-run above two ranks
 
 `TreePartitioner::partition_leaves` uses the Zoltan2 `multijagged` algorithm,

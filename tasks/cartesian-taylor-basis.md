@@ -1,6 +1,6 @@
 # A Cartesian-Taylor far-field basis for Canopy
 
-**Status:** IN PROGRESS — T1, T2 and T3 DONE; T4 built and measured but BLOCKED ON A DECISION (see T4); T5 next
+**Status:** IN PROGRESS — T1, T2, T3 and T4 DONE; T5 next
 
 ## Problem
 
@@ -1104,46 +1104,47 @@ Flux jobs, all on `pdebug` via the unchanged
 
 ---
 
-### T4 — A full-pipeline solve at `near_softening_factor = 0` — **BLOCKED ON A DECISION**
+### T4 — A full-pipeline solve at `near_softening_factor = 0` — **DONE**
 
 **Depends on:** T3.
 
-**Partly met, and blocked on one decision that is not a measurement.** Built
-and run; see [the progress log](cartesian-taylor-basis-progress-log.md) §T4 for
-every figure and job id.
+**Met.** `tests/tstCartesianTaylorSolve.hpp` drives
+`Solver<…, double, P, 3, CartesianTaylorBasis>` through 4 solves with
+`migrate / rebalance / migrate` between them, at np 1-6, against a direct
+**softened** sum at an explicit `softening = 0.025` with
+`near_softening_factor = 0`, at two admissibilities. Both suites build and one
+flux job runs both under `ctest -V`, with `m2l_n_unique_ops() > 0` asserted per
+rank in both arms (26180 at $\theta = 0.3$, np=1).
 
-*Met.* Both suites build and one flux job (`f3YfjP7sDgw9`) runs both under
-`ctest -V`. `Canopy_Test_LaplaceSolve_MPI_SERIAL` passes all four of its bodies
-at np 1-6 with **no** regeneration of `tests/data/laplace_solve_P6.txt`.
-`Canopy_Test_CartesianTaylorSolve_MPI_SERIAL` drives
-`Solver<…, double, 2, 3, CartesianTaylorBasis>` through 4 solves with
-`migrate / rebalance / migrate` between them at np 1-6 and both
-admissibilities, with `m2l_n_unique_ops() > 0` asserted per rank in both arms
-(26260 at $\theta = 0.3$, 7652 at $\theta = 0.5$, np=1). The
-$\theta = 0.3$ **potential** meets the 1e-3 bar at $2.655\times10^{-4}$; the
-$\theta = 0.5$ deviations are measured and pinned beside it
-($8.673\times10^{-4}$ potential, $2.159\times10^{-2}$ gradient). The
-`LaplaceKernel` failure direction fires at **260x** on the potential
-($6.907\times10^{-2}$). **R7 did not fire at all: `src/Canopy_Solver.hpp`
-needed no edit**, so the list of `LaplaceKernel`-specific member bodies this
-task was expected to produce is empty.
+At $\theta = 0.3$ the relative deviation is **at or below 1e-3 on both
+potential and gradient** — $1.896\times10^{-5}$ and $7.013\times10^{-4}$, the
+latter clearing the bar by $1.43\times$. That arm runs at **$p = 3$**, not the
+reference's 2, by explicit decision. At $p = 2$ its gradient is
+$8.996\times10^{-3}$, and that is structural rather than a defect: the gradient
+of a degree-$p$ Taylor local is degree $p-1$, so $\nabla\varphi$ truncates one
+order before $\varphi$, while `treecode.py` has **no target-side expansion**
+and carries no such term. Its documented 1e-3 is a source-side-only *velocity*
+figure — the same truncation order as this solve's *potential*, which meets the
+bar at $p = 2$. **R1**, **R2** and **R4** were each excluded by measurement
+before the order was changed, R2 by re-running T1's oracle at this solve's
+actual $(r,b)$ band, which the original sample set never covered. The
+$\theta = 0.5$ deviation is measured and pinned beside it at $p = 2$.
 
-*Not met.* The $\theta = 0.3$ **gradient** is $8.996\times10^{-3}$ against
-the 1e-3 bar. The assertion is left **failing**, not widened. **R1**, **R2**
-and **R4** are all excluded by measurement — including R2's mandated re-run of
-T1's oracle at this solve's actual $(r,b)$ band, which had never been sampled.
-The cause is the **target-side L2P truncation**, which `treecode.py` does not
-have: the gradient of a degree-$p$ local is degree $p-1$, so $\nabla\varphi$
-truncates one order before $\varphi$. The absolute error ratio grad/pot is
-$1/W$ (the cell half-width) to within 2.3% on two domains differing 12-fold in
-scale, and raising to $p = 3$ drops the gradient by the $R/W$ one extra order
-predicts. The reference's documented 1e-3 is a **velocity** figure from a
-treecode with **no target-side expansion**, so it is source-side-only — the
-same truncation order as this solve's *potential*, not its gradient.
+`Canopy_Test_LaplaceSolve_MPI_SERIAL` passes all four bodies at np 1-6 with
+**no** regeneration of `tests/data/laplace_solve_P6.txt`. The `LaplaceKernel`
+failure direction fails the same comparison by **three orders of magnitude** on
+the potential ($1.894\times10^{-2}$ against $1.896\times10^{-5}$). **R7 did not
+fire: `src/Canopy_Solver.hpp` needed no edit**, so the list of
+`LaplaceKernel`-specific member bodies this task was expected to produce is
+empty — `Solver` is basis-agnostic as written.
 
-**The decision T4 is blocked on:** either restate the bar as a claim about the
-potential, or run the $\theta = 0.3$ arm at $p = 3$. Both change what T4
-means, so neither was taken here.
+The particle cloud's half-span is **0.1155**, anchored so the closest
+MAC-admissible pair sits at exactly $R = 4\varepsilon$, the default
+`near_softening_factor` — the separation at which Canopy itself declares an
+unsoftened far field unsafe. That choice is load-bearing: on the original
+`[0.05, 0.95]` the MAC put every admissible pair at $R = 15.5\varepsilon$ and
+the failure direction did not fire at all. Every figure and job id is in
+[the progress log](cartesian-taylor-basis-progress-log.md) §T4.
 
 **Fill in:** new `tests/tstCartesianTaylorSolve.hpp`; one line in
 `tests/CMakeLists.txt` `UNIT_MPI_TESTS` (`:49-59`); new
@@ -1382,3 +1383,11 @@ ever raised above 2. Do not widen its tolerance to accommodate a failure —
 re-measure at the specific $(r, b)$ scales in use and report. $b > 0$ bounds
 $w \ge b$ away from zero, so this is a conditioning question and never a division
 by zero.
+
+**R8 IS NOW LIVE.** T4 raised its $\theta = 0.3$ arm to $p = 3$, whose ladder
+runs to $|k| = 6$, while T1's finite-difference oracle is validated at
+$|k| = 4$ and nowhere else. That arm is therefore gating on arithmetic the
+oracle has not checked. The instrument above must be re-run at `max_k = 6` —
+re-measuring the Richardson step divisor at the new order rather than widening
+the tolerance — before anything leans further on $p = 3$. This is the one
+verification gap T4 left open; see the progress log's T4 **Affects:** line.
