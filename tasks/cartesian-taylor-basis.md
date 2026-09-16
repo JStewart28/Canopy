@@ -1,6 +1,6 @@
 # A Cartesian-Taylor far-field basis for Canopy
 
-**Status:** IN PROGRESS — T1 and T2 DONE; T3 next
+**Status:** IN PROGRESS — T1, T2 and T3 DONE; T4 next
 
 ## Problem
 
@@ -922,7 +922,7 @@ non-`LaplaceKernel` basis. Expect T4's first failures inside
 
 ---
 
-### T3 — M2L, with the sign and normalization convention pinned — **NOT STARTED**
+### T3 — M2L, with the sign and normalization convention pinned — **DONE**
 
 **Depends on:** T2.
 
@@ -1080,6 +1080,61 @@ both are dropped must still fail, since the two errors do not cancel for
 $|p| > 0$. Record all three outcomes in the log.
 
 **Checkpoint commit** at the end of this task.
+
+**Met.** `build_m2l_operators`, `m2l_core` and `m2l_translate` replace their T2
+aborts, all three reaching one new single-source-of-truth function,
+`m2l_operator_block( R[3], b, op[Nt*Ns] )`, which maps the **physical**
+$(R, b)$ to the dense block $op(p,q) = (-1)^{|q|} b_{p+q}(R)$ with
+$R = c_{\rm target} - c_{\rm source}$. `aux_tables_type` grew the single scalar
+`b` (softening **squared**), because `m2l_translate`'s signature carries no
+`M2LKernelParams` and `aux` is the only channel it has. All twelve bodies pass
+(`make -j 4 Canopy_Test_CartesianTaylor_SERIAL`, then
+`ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'`) — the seven from T1 and
+T2, plus five new.
+Measured, each against the sum of its own term magnitudes rather than against
+the cancelling result, at tolerance $10^{-13}$ of that scale:
+
+| Check | Achieved | Tolerance |
+| --- | --- | --- |
+| $\ell_0$ vs §2 closed forms, $p = 2$ | $2.000\times10^{-16}$ | $10^{-13}$ |
+| $\ell_0$ vs §2 closed forms, $p = 3$ | $1.961\times10^{-16}$ | $10^{-13}$ |
+| $\lvert p\rvert = 1$ vs the reference's $K/dK/ddK$ contraction, $p = 2$ | $1.190\times10^{-15}$ | $10^{-13}$ |
+| parity identity, $R$ and $S$ independently sourced, 7 keys | $0$ (bitwise) | $10^{-13}$ |
+| fused vs per-pair path, 5 keys + a 3-pair accumulation | $0$ | `ASSERT_EQ`, exact |
+
+The hand-run P2M → M2L → L2P against a direct softened sum, at $p = 2$,
+$\varepsilon = 0.025$, box **half-width** $W = 0.5$: relative error
+$2.337\times10^{-3}$, $2.346\times10^{-4}$ and $2.530\times10^{-5}$ at
+$R/W = 8$, $16$ and $32$, i.e. achieved $c = 1.062$, $0.987$, $0.939$ against
+the pinned bound $(1.25\,W/R)^{3}$ — a factor 1.6 to 2.4 of margin.
+
+Flux jobs, all on `pdebug` via the unchanged
+`scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux`: `f3YeTspuFk3q`
+(first full pass, measuring the achieved $c$ before the bound was pinned),
+`f3YeUnMzVdk3` (green with the pinned bound, the checkpoint tree),
+`f3YeVguWwKE7` / `f3YeX8BoVNNB` / `f3YeXxRkMxHM` (the three perturbations), and
+`f3YeYsBmmaa3` (green on the exact tree committed, byte-identical figures).
+
+**The three perturbation outcomes**, each reverted by inverting the edit:
+
+- **Dropping the $(-1)^{|q|}$ multiplier** fails `m2l_ell0_closed_forms` first,
+  by $0.2299$ absolute against a tolerance of $9.27\times10^{-14}$, at
+  $R = (2,0,0)$ — the first odd $|q|$, as **R1** predicts. It also fails the
+  $|p|=1$ contraction, the parity identity and the end-to-end check.
+  `m2l_fused_vs_fallback` **passes** under it, correctly: both paths reach the
+  same perturbed operator, so it is an agreement check and never a convention
+  check.
+- **Omitting the negation of $R$** in `build_m2l_operators` fails
+  `m2l_parity_identity` — at $|p| = 0$, not at the first odd $|p|$ the exit
+  criterion anticipated, because for even $|p|$ the two spellings still differ
+  on the odd-$|q|$ terms — and fails `m2l_fused_vs_fallback`, since only the
+  table path was perturbed. $\ell_0$ and the $|p|=1$ contraction **pass**: both
+  call `m2l_operator_block` with their own $R$ and never touch the key path.
+  That split is the discrimination the exit criterion asks for.
+- **Both dropped together** still fails, and the parity identity now fails at
+  $|p| = 1$ with $\rm lhs = -\rm rhs$ exactly: the two errors *do* cancel at
+  $|p| = 0$ and not above it, which is precisely why the criterion names
+  $|p| > 0$.
 
 ---
 

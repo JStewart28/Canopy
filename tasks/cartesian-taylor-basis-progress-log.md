@@ -740,3 +740,242 @@ disagreeing decides the answer). Nothing calls any of them before T3; the
   reused **unchanged**, as T1 intended, and remains reusable by T3. Its
   anchored `-R` is still what excludes the valgrind variant; that variant was
   neither made to pass nor disabled.
+
+## T3 — the M2L, and the sign and normalization convention
+
+Replaced the three `Kokkos::abort` bodies in
+`src/Canopy_CartesianTaylorBasis.hpp` — `build_m2l_operators`, `m2l_core` and
+`m2l_translate` — added the operator's single source of truth and its two
+sizing traits, gave `aux_tables_type` its one scalar, and added five bodies to
+`tests/tstCartesianTaylor.hpp`. One README correction rides in the final
+commit. Nothing in T1's `Canopy::CartesianTaylor` namespace changed, and
+nothing outside those three files was touched.
+
+Flux jobs, all through the unchanged
+`scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux`: `f3YeTspuFk3q`
+(first full pass, 12/12, run with a deliberately non-gating bound so the
+end-to-end constant could be *measured* before it was pinned), `f3YeUnMzVdk3`
+(12/12 with the pinned bound — the checkpoint tree), `f3YeVguWwKE7`,
+`f3YeX8BoVNNB`, `f3YeXxRkMxHM` (the three perturbations, rc 8 each), and
+`f3YeYsBmmaa3` (12/12 on the exact tree committed, byte-identical figures).
+
+### The operator, and why it takes `R` and not a key
+
+```cpp
+KOKKOS_INLINE_FUNCTION
+static void m2l_operator_block( const Scalar R[3], Scalar b,
+                                Scalar ( &op )[m2l_op_entries] );
+```
+
+`op[ m2l_op_index(p_slot, q_slot) ] = (-1)^{|q|} b_{p+q}(R)`, target-slot-major,
+so `build_m2l_operators` copies it into `ops(p, q, j)` with no transpose.
+`R = c_target - c_source`; `b` is softening **squared**.
+
+**It is parameterized on the physical `(R, b)` and has no `dd` dependence, and
+that is forced rather than chosen.** `m2l_translate` is handed two cell
+centers and two half-widths and **cannot recover `max_d` from them**, so a
+key-parameterized operator would be unreachable from the fallback path — and
+without a shared operator function the fused-versus-fallback comparison could
+only ever be approximate. `MonopoleBasis::m2l_translate` reconstructs a key
+and is **not** the model here: its local is dimensionless and normalized, so
+it needs `F(dd)` to convert between "separation in deeper-cell half-widths"
+and the source's own scale. A physical operator has no normalization to undo.
+
+One consequence, expected rather than debugged: **two keys differing only in
+`dd` get bit-identical columns.** `m2l_parity_identity` asserts that directly
+(keys 0 and 1 of its list differ only in `dd`), so the duplication is pinned as
+a property rather than left to be rediscovered as a suspected bug.
+
+### Where `b` had to live, which was not obvious
+
+`m2l_translate` is a **device** operator and the fallback call site
+(`src/Canopy_DownwardSweep.hpp:2338-2347`) hands it the team, the multipoles,
+the source cell, the physical offset, two half-widths, `aux`, and the target
+slice — **no `M2LKernelParams`**. So for a basis whose operator depends on a
+kernel parameter, `aux_tables_type` is the *only* channel from
+`build_aux_tables` to a device operator. It grew exactly one member:
+
+```cpp
+template <class MemorySpace> struct aux_tables_type { double b = 0.0; };
+```
+
+**`b` is softening SQUARED**, and `build_aux_tables` is the one place on this
+path where the square is taken. `build_m2l_operators` does **not** read `aux` —
+it has `kernel_params` directly and squares it itself — so the square appears
+in exactly two places, one per path, each with the units on the declaration.
+
+The default of `0.0` is load-bearing and is why `m2l_translate` **guards**
+`aux.b > 0` rather than trusting it: a sweep a test drives directly is never
+handed a configuration and runs at `M2LKernelParams::softening = 0`, the
+unsoftened kernel this basis has no expansion of. `build_aux_tables` itself
+deliberately does **not** reject `eps <= 0`, because `UpwardSweep::setup` calls
+it unconditionally including for sweeps that never run an M2L; the rejection
+belongs at the point of use.
+
+### Decisions carried in from the task statement
+
+- **The fused-versus-fallback body constructs its geometry so the two paths'
+  $R$ are bit-identical, and asserts exact equality.** Root half-width 1.0 (a
+  power of two), `unit_w[d] = 2^-d`, and both cell centers exact dyadic
+  multiples of `unit_w[3] = 0.125`, so `c_s - c_t` reproduces
+  `(ii,jj,kk) * unit_w[max_d]` bit for bit. The body **asserts that premise
+  first** (`ASSERT_EQ` on each axis, with a message saying an exact comparison
+  is the wrong assertion if it fails) so a later session that moves the
+  geometry off the dyadic grid is told why its `ASSERT_EQ`s started failing
+  instead of concluding the operator drifted.
+- **The accumulator layout is T2's**, unchanged: `m2l_core` fills exactly
+  `acc_slot(out_idx, c, s)` and `m2l_post_cell` reads it as written.
+- **`taylor_accumulate` is reused**, not reimplemented, in both M2L paths.
+- **One flat index.** `m2l_ladder_slots = num_slots(2 * P_ORDER)` and the
+  order-$p$ slot table is its prefix by T1's graded order, so `slot(p+q)`
+  indexes the ladder directly. No second map exists.
+- **`num_coeffs_per_cell`, `sets_per_component` and `m2l_scratch_bytes` stayed
+  `constexpr`** (**R3**), and the two traits T3 added — `m2l_op_entries` and
+  `m2l_ladder_slots` — are `constexpr` too, because both are local-array
+  extents inside device operators.
+- **The `_valgrind` variant was left exactly as it is**; the script's anchored
+  `-R` still excludes it.
+
+### Measured
+
+Every figure is against the **sum of the term magnitudes** of the check, not
+against its result. The terms alternate in sign and cancel, so a relative test
+against the result would be a test of the cancellation rather than of the
+operator. Tolerance $10^{-13}$ of that scale throughout; all four sit three
+decades or more below it.
+
+| Body | Check | Achieved |
+| --- | --- | --- |
+| `m2l_ell0_closed_forms` | $\ell_0$ vs §2's closed forms, $p = 2$, 16 geometries | $2.000\times10^{-16}$ |
+| `m2l_ell0_closed_forms` | the same at $p = 3$ | $1.961\times10^{-16}$ |
+| `m2l_p1_contraction` | $\lvert p\rvert = 1$ vs the $K/dK/ddK$ contraction, $p = 2$ | $1.190\times10^{-15}$ |
+| `m2l_parity_identity` | 7 keys, $R$ and $S$ independently sourced | $0$, bitwise |
+| `m2l_fused_vs_fallback` | 5 keys, single pair, plus a 3-pair accumulation | $0$, `ASSERT_EQ` |
+
+`m2l_end_to_end`, P2M → M2L → L2P against a direct softened sum, $p = 2$,
+$\varepsilon = 0.025$ (so $b = 6.25\times10^{-4}$), both boxes at **half-width**
+$W = 0.5$ with sources at $\lvert d\rvert \le 0.48$ and probes at
+$\lvert a\rvert \le 0.48$ — a near-worst-case interior sample for that $W$,
+not a comfortable one:
+
+| $R/W$ | $R$ | relative error | achieved $c$ | bound $(1.25\,W/R)^3$ |
+| --- | --- | --- | --- | --- |
+| 8 | 4.0 | $2.3370\times10^{-3}$ | 1.062 | $3.815\times10^{-3}$ |
+| 16 | 8.0 | $2.3456\times10^{-4}$ | 0.987 | $4.768\times10^{-4}$ |
+| 32 | 16.0 | $2.5298\times10^{-5}$ | 0.939 | $5.961\times10^{-5}$ |
+
+The error falls by 9.96x and 9.27x per doubling of $R/W$ against the $8\times$
+a $(W/R)^{p+1}$ law predicts, i.e. slightly **faster** than third order over
+this range, which is the finite-source-extent effect and not an anomaly. The
+constant $c = 1.25$ was pinned **after** `f3YeTspuFk3q` measured 1.062 as the
+worst achieved value; it is stated on the declaration that raising it to
+accommodate a failure would silently change what the body means.
+
+### Two parity facts worth having written down
+
+**The parity identity is bitwise, not merely to round-off, and that is not a
+coincidence.** $b_n(S)$ and $b_n(R)$ with $R = -S$ differ termwise by exact
+sign flips — $w$ is identical and every term of the §3 recurrence carries a
+fixed parity of $r$ factors — and both sides sum in the same slot order, so
+every intermediate matches bit for bit. The achieved $0$ is therefore the
+*expected* value and a non-zero one would mean something real. This does not
+make the check vacuous: it is vacuous only if the two arguments come from one
+source, which is exactly what the independent sourcing prevents, and
+perturbation B proves it fires.
+
+**The exit criterion's predicted failure direction was half right, and the
+half that was wrong is informative.** It says omitting the negation of $R$
+"must fail the parity check at the first odd $|p|$". Measured, it fails at
+$|p| = 0$: with the sign multiplier still in place the perturbed left side is
+$(-1)^{|p|}\sum_q b_{p+q}(R) M_q$ against a right side of
+$\sum_q (-1)^{|q|} b_{p+q}(R) M_q$, and those differ on the odd-$|q|$ terms at
+**every** $|p|$, even ones included. The "first odd $|p|$" prediction is
+correct for the *both-dropped* build, where the two errors cancel exactly at
+$|p| = 0$ and the first surviving disagreement is at $|p| = 1$ — which is what
+was observed, with $\rm lhs = -\rm rhs$.
+
+### The three perturbations
+
+Each was applied, built on the login node, run as its own job, and reverted
+**by inverting the edit** — never by `git checkout`, which would have discarded
+the task's uncommitted work. The tree was rebuilt and re-run green afterwards
+(`f3YeYsBmmaa3`), and `git diff HEAD` was empty against the checkpoint commit
+before that run.
+
+**A — the $(-1)^{|q|}$ multiplier dropped** (`sign` forced to $+1$ in
+`m2l_operator_block`). `f3YeVguWwKE7`, rc 8, 4 of 12 bodies failing. First
+failure is `m2l_ell0_closed_forms` at $R = (2,0,0)$, $b = 6.25\times10^{-4}$:
+got $0.62584$, want $0.85579$, difference $0.22995$ against a tolerance of
+$9.27\times10^{-14}$ — twelve orders of magnitude, at the first odd $|q|$ as
+**R1** predicts. `m2l_p1_contraction`, `m2l_parity_identity` and
+`m2l_end_to_end` fail too. **`m2l_fused_vs_fallback` passes**, correctly and
+importantly: both paths reach the same perturbed operator, so it is an
+agreement check and never a convention check, and a session reading a green
+line there under a wrong operator should not take it as evidence about the
+convention.
+
+**B — the negation of $R$ omitted** in `build_m2l_operators`'s key-to-$R$ path.
+`f3YeX8BoVNNB`, rc 8, 2 of 12 failing: `m2l_parity_identity` (at $|p| = 0$,
+lhs $1.53785$ vs rhs $0.72480$, tolerance $1.96\times10^{-13}$) and
+`m2l_fused_vs_fallback` (only the table path was perturbed, so the two paths
+genuinely disagree). **$\ell_0$ and the $|p|=1$ contraction pass**, because
+both call `m2l_operator_block` with their own $R$ and never go through the key
+path. That split — sign errors caught by the closed forms, $R$-sense errors
+caught by the parity identity — is the discrimination the exit criterion asks
+for, and it only exists because the parity check's two arguments are sourced
+independently.
+
+**C — both dropped.** `f3YeXxRkMxHM`, rc 8, 5 of 12 failing — every M2L body.
+The parity identity fails at $|p| = 1$ with lhs $= -0.665732$ and
+rhs $= +0.665732$, i.e. exactly $\rm lhs = -\rm rhs$: the two errors cancel at
+$|p| = 0$ and nowhere above it. The errors do **not** cancel for $|p| > 0$,
+which is what the criterion required a both-dropped build to show.
+
+### An optimization not taken, again
+
+T1 flagged a host-built table of `(m, i, k, term slots)` for
+`derivative_ladder`, and **T3 is the first task with a call site that would pay
+for it**: `m2l_operator_block` evaluates one full ladder per key in
+`build_m2l_operators` and one per pair in `m2l_translate`. It is still not
+built. **R3** records a *measured* +18% M2L regression from a comparable
+indirection, with two candidate micro-causes tested and excluded, so a table
+here has to be measured against the recompute it replaces and not assumed
+faster — and no exit criterion in this document depends on a timing figure.
+The README entry was updated to say the call site now exists rather than that
+it does not yet. Still worth doing; it needs `build-tuolumne-prof/` and an
+`M2L kernel (all depths)` figure on either side, which is a task of its own.
+
+**Affects:**
+
+- **T4** — the single-source-of-truth function's final signature is
+  `static void m2l_operator_block( const Scalar R[3], Scalar b, Scalar
+  (&op)[m2l_op_entries] )`, `KOKKOS_INLINE_FUNCTION`, host- and
+  device-callable, allocating nothing, with `R = c_target - c_source` and `b`
+  softening **squared**. Any host reference T4 wants must go through it.
+  **On the accuracy margin: there is very little at the admissibility edge.**
+  The measured relative error at $R/W = 8$ — which is barely inside Canopy's
+  $\theta = 0.5$ MAC, $R > 2\sqrt3\,(w_a{+}w_b) = 6.93\,W$ — is
+  $2.34\times10^{-3}$, **above** the 1e-3 bar, and 1e-3 is only reached
+  somewhere around $R/W \approx 13$ ($2.35\times10^{-4}$ at $R/W = 16$). This
+  is the quantitative form of the design's "the reference's admissibility is
+  not Canopy's": the 1e-3 figure transfers at $\theta = 0.3$ and should **not**
+  be expected at $\theta = 0.5$, and T4's two-arm structure is what makes that
+  visible rather than looking like a defect. A single-pair bound is not a
+  whole-solve error, so T4 must measure rather than extrapolate from this — but
+  it should expect the $\theta = 0.5$ arm to land near 1e-3 and not far below
+  it, and should not read a miss there as a basis defect without first checking
+  the $\theta = 0.3$ arm.
+  **R7 still stands**: nothing here instantiated `Solver::solve()`, so expect
+  T4's first failures in `src/Canopy_Solver.hpp`.
+- **T4** — `m2l_translate` and `build_m2l_operators` both **abort** on a
+  non-positive softening, and `build_m2l_operators` additionally on
+  `max_d` outside `[0, n_levels)` and on `unit_w[max_d] <= 0`. T4 sets an
+  explicit positive softening, so none should fire; if one does, it is a
+  configuration-ordering bug in the solve setup and not a basis defect, and the
+  message names which value it was.
+- **T5** — unchanged by this task. `key_needs_level = true` still holds and
+  **R6** still applies in full.
+- **T4, T5** — `scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux` was
+  reused **unchanged** for the third task running. Its header comment still
+  lists only T1's three bodies; the target now has twelve, and the anchored
+  `-R` is what keeps the valgrind variant out of every one of these runs.

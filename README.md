@@ -369,9 +369,12 @@ all of it, leaving the ladder a straight-line weighted sum over a precomputed
 index list.
 
 This is not a correctness issue: the recomputed indices are exact and the
-values are the same either way. It is also not yet measurable — the call site
-that would pay for it does not exist until the Cartesian-Taylor M2L lands.
-Note that a table here is an *indirection*, and **R3** in
+values are the same either way. **As of T3 the call site exists** —
+`CartesianTaylorBasis::m2l_operator_block` evaluates one ladder per key in
+`build_m2l_operators` and one per pair in `m2l_translate` — so the opportunity
+is live rather than hypothetical, and it was still left unbuilt because
+nothing has measured it. Note that a table here is an *indirection*, and
+**R3** in
 [tasks/cartesian-taylor-basis.md](tasks/cartesian-taylor-basis.md) records a
 measured +18% M2L regression from a comparable one, with two candidate
 micro-causes tested and excluded. So the table must be measured against the
