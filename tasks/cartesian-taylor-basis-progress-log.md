@@ -979,3 +979,284 @@ it does not yet. Still worth doing; it needs `build-tuolumne-prof/` and an
   reused **unchanged** for the third task running. Its header comment still
   lists only T1's three bodies; the target now has twelve, and the anchored
   `-R` is what keeps the valgrind variant out of every one of these runs.
+
+## T4 — a full-pipeline solve at `near_softening_factor = 0`
+
+Added `tests/tstCartesianTaylorSolve.hpp` (two gating bodies and a
+parameterized multi-step harness), one line in `tests/CMakeLists.txt`
+`UNIT_MPI_TESTS`, and `scripts/tuolumne/run_ctest_cartesian_taylor.flux`. Two
+stale line references in `tasks/cartesian-taylor-basis.md` corrected. **No file
+under `src/` changed** — see the R7 result below, which is the headline.
+
+**The exit criterion is NOT met, and nothing was widened to hide it.** The
+$\theta = 0.3$ **gradient** lands at $8.996\times10^{-3}$ against the
+$10^{-3}$ bar, a factor of 9. The $\theta = 0.3$ **potential** meets the bar
+at $2.655\times10^{-4}$. The shipped test asserts the bar and therefore fails,
+by choice. The cause is measured, not argued, and is a property of the method
+rather than a defect in the basis — the detail is below under "Why the
+gradient misses".
+
+Flux jobs, all `pdebug`, all on a saturated queue (40/40 nodes allocated, so
+each waited 20-30 min in `SCHED`): `f3YfM7Ldtv5D` (first full run, both
+suites, np 1-6), `f3YfdTuJH59H` (the diagnostic job — R2's mandated T1 re-run
+plus the `LaplaceKernel` failure direction and a $p = 3$ order sweep),
+`f3YfgoXqJe2j` (re-measurement after the domain was corrected), and
+`f3YfjP7sDgw9` (the exit-criterion job on the exact committed tree).
+
+### R7 did not fire, and that is the task's real output
+
+**`src/Canopy_Solver.hpp` needed no edit at all.** `setup()`, `solve()`,
+`migrate()` and `rebalance()` all instantiated against
+`CartesianTaylorBasis<double, 2, 3>` and compiled clean on the first build.
+The list of `Solver` member bodies that turned out to assume something
+`LaplaceKernel`-specific — which T4's statement, **R7** and T2's **Affects:**
+line all expected to be this task's deliverable — **is empty.**
+
+That is a stronger result than it looks, and it is only credible because the
+same binary also drove `LaplaceKernel<double, 2, 3>` through the identical
+harness for the failure-direction arm: both bases reach `Solver::solve()`
+through one code path, so the clean build is not an artifact of the new basis
+happening to look like the old one at the declaration level. `Solver` is
+basis-agnostic as written. Whoever adds the next `FarField` should expect the
+same and should be suspicious if they find otherwise.
+
+### Why the gradient misses, measured rather than argued
+
+The three risks the task names as the diagnostics are all **excluded by
+measurement**:
+
+- **Not R1** (sign / normalization convention). R1 predicts a miss "by one to
+  three orders at every rank count and at both $\theta$". The potential is
+  $2.655\times10^{-4}$ — three decades better than a convention error permits,
+  and a misplaced $(-1)^{|q|}$ or $1/q!$ corrupts the $|q| = 1$ terms that
+  dominate $\varphi$ and $\nabla\varphi$ alike. T3's `m2l_ell0_closed_forms`
+  and `m2l_p1_contraction` are green.
+- **Not R2** (index map above $|k| = 3$). R2 requires T1's oracle be re-run at
+  the specific $(r, b)$ scales T4 uses before anything is touched, and that
+  turned out to matter: T4's band is $|r|/\sqrt b \in [9.28, 74.2]$, which lies
+  **entirely between** T1's sampled `1.0` and `100.0` and had never been
+  covered. Re-run with `scales = {0.01, 1.0, 9.276, 15.46, 74.2, 100.0}`:
+  `closed_forms` went from 40 to 76 samples (so the new points did run) with
+  the worst deviation moving only from $2.911\times10^{-15}$ to
+  $5.465\times10^{-15}$ against a $10^{-12}$ tolerance, and
+  `finite_difference` at $|k| = 4$ was **unchanged** at $7.321\times10^{-7}$
+  against $10^{-5}$. All 12 bodies green. The map and the §3 ladder are
+  accurate at exactly the scales this solve uses.
+- **Not R4** (per-pair path versus table path). `total_fallback_pair_count()`
+  is 300 per rank at $\theta = 0.3$ and **exactly 0** at $\theta = 0.5$, while
+  both arms show the same error structure — so the fallback path is not what
+  produces it. Also worth writing down because it is deducible rather than
+  measured: `max_depth = 6` bounds $|dd| \le 6$ identically, so the
+  `m2l_key_dd_max = 6` guard **can never fire** in this configuration. Every
+  fallback here is the sweep's own `|offset| <= 32` guard
+  (`src/Canopy_DownwardSweep.hpp:526`), tripped by deep-versus-deep cell pairs
+  separated far enough to satisfy the tighter $\theta = 0.3$ MAC. At
+  $\theta = 0.5$ the admissible separations are $1.67\times$ closer and nothing
+  trips it.
+
+**It is the target-side L2P truncation.** The gradient of a degree-$p$ Taylor
+local is a degree-$(p-1)$ polynomial, so $\nabla\varphi$ truncates one order
+before $\varphi$. The fingerprint is quantitative and it is the ratio of the
+**absolute** errors, which is $1/W$ for a target-side term and would be $1/R$
+for a source-side one:
+
+| domain | $W$ (depth-4 leaf) | abs. grad / abs. pot | $1/W$ | agreement |
+| --- | --- | --- | --- | --- |
+| `[0.05, 0.95]` | 0.033463 | 29.47 | 29.88 | 1.4% |
+| `[0.44, 0.56]` | 0.004471 | 218.5 | 223.7 | 2.3% |
+
+$1/R$ at the $\theta = 0.3$ MAC edge is 2.59 and 19.4 respectively — off by an
+order in both cases. The error is the potential's error differentiated over
+the **cell half-width**, on two domains differing 12-fold in scale.
+
+The order sweep confirms it from the other side. At $p = 3$ on `[0.05, 0.95]`
+the $\theta = 0.3$ gradient falls from $8.102\times10^{-3}$ to
+$6.975\times10^{-4}$, a ratio of **11.61** against the $R/W = 11.55$ that one
+extra order predicts — and it drops **under the bar**. On `[0.44, 0.56]`,
+where the softening blunts the expansion parameter to $W/\sqrt{R^2+b}$, the
+same step gives $8.996\times10^{-3} \to 1.141\times10^{-3}$ and the potential
+$2.655\times10^{-4} \to 2.178\times10^{-5}$. (Note **R8**: T1's
+finite-difference oracle is validated at $|k| = 4 = 2p$ only, so $p = 3$ is
+outside what that oracle covers. These are diagnostics, never gates.)
+
+**So the bar itself is the mismatch.** `treecode.py` evaluates its source
+expansion with **no target-side expansion at all**, so its documented
+$\sim 10^{-3}$ **velocity** accuracy is a source-side-only figure — the same
+truncation order as this file's **potential**, which meets it. Applying it to
+an FMM's *gradient* at the same $p$ compares quantities of different order.
+This is the same species of error the design document already records for
+admissibility ("the 1e-3 figure transfers only at matched admissibility"),
+one level deeper: it also transfers only at matched *expansion structure*.
+
+**The decision is not this task's to make**, which is why the assertion was
+left failing rather than widened. Either the bar is restated as a claim about
+the potential, or the $\theta = 0.3$ arm runs at $p = 3$. Both change what T4
+means.
+
+### The configuration, and the one that was wrong first
+
+The first configuration put the particles on `[0.05, 0.95]^3`, copied from
+`tstLaplaceSolve.hpp`. **It could not tell the two bases apart**, and the
+`LaplaceKernel` failure direction did not fire:
+
+| domain | basis | $\theta = 0.3$ potential | $\theta = 0.3$ gradient |
+| --- | --- | --- | --- |
+| `[0.05, 0.95]` | CartesianTaylor | $3.433\times10^{-4}$ | $8.102\times10^{-3}$ |
+| `[0.05, 0.95]` | **LaplaceKernel** | $1.258\times10^{-3}$ | $7.513\times10^{-3}$ |
+| `[0.44, 0.56]` | CartesianTaylor | $2.655\times10^{-4}$ | $8.996\times10^{-3}$ |
+| `[0.44, 0.56]` | **LaplaceKernel** | $6.907\times10^{-2}$ | $2.078\times10^{-1}$ |
+
+On the first domain `LaplaceKernel` was $3.7\times$ worse on the potential and
+**better** on the gradient — no failure direction at all, and a green-looking
+comparison that demonstrated nothing.
+
+The cause is dimensionless and has nothing to do with the particle count. The
+MAC puts the closest admissible pair at $R = 11.55\,W$, and the unsoftened far
+field's relative error from ignoring $b$ is $b/(2R^2)$; what decides whether
+that is large is therefore $\varepsilon/W$ and **nothing else**. On the first
+domain $W = 0.03346$ and $R = 15.5\,\varepsilon$, where
+$b/(2R^2) = 2.1\times10^{-3}$ — the same order as the $p = 2$ truncation, so
+the two bases are indistinguishable. Shrinking the cloud to a span of 0.12
+(root half-width 0.0715, $W = 0.004471$) puts the closest admissible pairs at
+$2.08\,\varepsilon$ ($\theta = 0.3$) and $1.25\,\varepsilon$
+($\theta = 0.5$), where $b/(2R^2)$ is 11% and 32%. The measured
+$6.907\times10^{-2}$ against a predicted 11.5% is the check that the mechanism
+is the one claimed.
+
+$\varepsilon = 0.025$ is pinned by the task statement, so the domain is the
+only free variable. **Nothing else about the problem changed**: the tree is a
+function of the dimensionless geometry, and the numbers say so — `n_cells`
+2936 against 2924, `n_unique_ops` 26260 against 26748, `fallback_pairs` 300
+against 318. `CTS_DT` was rescaled by $L^{3/2}$ (self-gravity gives
+$g \sim M/L^2$, hence a dynamical time $\sqrt{L^3/M}$):
+$(0.0715/0.5354)^{3/2} = 0.0494$, so $2.0\times10^{-4} \to 1.0\times10^{-5}$.
+Leaving `dt` alone would have moved every particle several domain widths in
+four steps.
+
+**This is the lesson worth carrying forward: a solve test for a softened
+far-field basis is only a test of the softening when $\varepsilon$ is
+comparable to the admissible separation, and Canopy's MAC makes that a
+statement about $\varepsilon/W$, not about $\varepsilon$.**
+
+### The configuration behind both pinned constants
+
+8640 particles global (divisible by every rank count 1-6) on
+`[0.44, 0.56]^3`, `ncrit = 8`, `max_depth = 6`, `replication_depth = 2`,
+`mac_theta` 0.3 and 0.5, `softening = 0.025` with
+`near_softening_factor = 0`, `P_ORDER = 2`, `NComps = 3`, `dt = 1.0e-5`,
+charges one-signed on [0.5, 1.5] drawn **independently per component** from
+seed `90210 + CTS_P`, SERIAL backend, np 1-6.
+
+**The particle count and `ncrit` are chosen together and are not free.** The
+tree refines while a cell holds more than `ncrit`, so 8640 at `ncrit = 8`
+reaches depth 4, a $16^3$ leaf grid. The $\theta = 0.3$ near field reaches
+$11.55\,W = 5.77$ cell widths, a neighbourhood of about 800 cells — under 20%
+of $16^3$, so most pairs are far field. At depth 3 ($8^3 = 512$ cells) that
+same neighbourhood covers the **whole grid** and only a handful of corner
+pairs stay admissible: `m2l_n_unique_ops() > 0` would still hold while the far
+field carried almost none of the field, and the accuracy check would pass
+without measuring anything. Lowering the particle count to make the test
+cheaper reopens exactly that hole.
+
+**The step schedule** is `solve -> migrate -> solve -> rebalance -> solve ->
+migrate -> solve`: 4 solves, 3 maintenance steps, the middle one a
+`rebalance()`. `rebalance()` repartitions, rebuilds the comm plan and
+invalidates the interaction list unconditionally, so the last two solves face
+an operator table rebuilt after the root box moved — which is **R5**'s
+stale-operator path, and the reason this file does the opposite of
+`tstLaplaceSolve.hpp:860-871`. That file uses `migrate()` and never
+`rebalance()` because it has a np 1-2 **bitwise** gate and needs one
+partition; this file has no bitwise gate and wants the repartition. No
+drifting-operator symptom appeared: every rank count agrees to $10^{-16}$.
+
+**Counters**, $\theta = 0.3$ / $\theta = 0.5$ at np=1: `n_unique_ops`
+26260 / 7652, `total_fallback_pair_count()` 300 / 0, effective operator cap
+32768 in both (the count cap, far above the realized key count, as **R4**
+expects at $p = 2$). `n_cells` 2936. Root half-width 0.0715.
+
+### Decisions carried in from the task statement
+
+- **`near_softening_factor = 0` with an explicit `softening = 0.025`.** The
+  default $-1.0$ selects distribution-based auto-softening, whose effective
+  $\varepsilon$ moves with the distribution and would make both constants
+  unpinnable. With `near_softening_factor = 0` the floor in
+  `CommunicationPlan::mac_satisfied` (`src/Canopy_CommunicationPlan.hpp:354`)
+  is skipped outright — it is guarded on `_near_softening_k > 0.0` — so no
+  admissible pair is pushed back into P2P.
+- **The direct sum is softened**, $\phi_i = \sum_{j\ne i} q_j (r^2+b)^{-1/2}$
+  and $\nabla\phi_i = -\sum_{j\ne i} q_j d (r^2+b)^{-3/2}$ with
+  $b = \varepsilon^2$, matching `src/Canopy_P2P.hpp:885` and the sign
+  convention of `tests/tstLaplaceSolve.hpp:1535-1538`. The distance work is
+  done once per $(i,j)$ with the component loop inside it.
+- **Deviations are normalized by the global field scale**, not per particle,
+  for the cancellation reason `tstLaplaceSolve.hpp:1546-1549` gives.
+- **No potential doubling appeared.** `l2p_evaluate` writes `phi_out` with
+  `=`, matching the sweep's accumulate-afterwards at
+  `src/Canopy_DownwardSweep.hpp:2673-2674`; T2's **Affects:** line flagged
+  this as the first thing to check and it needed no action.
+- **Nothing was added to `REGRESSION_MPI_TESTS`**, `ctest -L regression` was
+  not run, `clang-format` was not run, `CANOPY_LAPLACE_SOLVE_REGENERATE` was
+  never set and `tests/data/laplace_solve_P6.txt` was not regenerated.
+
+### One deliberate departure from the task statement
+
+**The harness is parameterized on the order and the basis**
+(`solver_type<MS, ES, P, Basis>`), where the statement implies a single
+spelling. The reason is that T4 requires a `LaplaceKernel` arm and the
+diagnosis required a $p = 3$ arm, and with a parameterized harness both are an
+**added `TEST` body** rather than an edit to the code under test — so the
+shipped path is provably the one that was measured. The particle set does not
+depend on either parameter (the seed is `90210 + CTS_P`, a constant), so every
+arm solves the same physics problem and the deviations are directly
+comparable. T5's measurement body gets the same harness for free.
+
+### The `LaplaceKernel` failure direction, and how it was run
+
+Run the way T1, T2 and T3 ran their perturbations: a temporary **additive**
+edit, built on the login node, submitted as its own job, and reverted **by
+inverting the edit** — never `git checkout`, which would have discarded this
+task's uncommitted work. `tests/tstCartesianTaylor.hpp` was confirmed
+byte-identical to `HEAD` afterwards (`git diff` empty), and the diagnostic
+`TEST` bodies were deleted from `tests/tstCartesianTaylorSolve.hpp` before the
+checkpoint.
+
+On the shipped configuration it fails as T4 requires: $6.907\times10^{-2}$
+potential against this basis's $2.655\times10^{-4}$ — **260x, two and a half
+orders of magnitude** — and $2.078\times10^{-1}$ gradient against
+$8.996\times10^{-3}$. That is the unsoftened multipole far field measured
+against a softened reference at `near_softening_factor = 0`, and it is what
+shows the new basis is doing the work rather than the tolerance being loose.
+It also confirms `Solver` drives a second basis through the same path.
+
+**Affects:**
+
+- **T4 itself is not DONE.** The $\theta = 0.3$ gradient arm asserts the
+  $10^{-3}$ bar and fails at $8.996\times10^{-3}$. It was left failing
+  deliberately. Closing T4 requires a decision that is not a measurement:
+  restate the bar as a claim about the potential (which meets it at
+  $2.655\times10^{-4}$), or run the $\theta = 0.3$ arm at $p = 3$. Everything
+  else in the exit criterion is met — both suites build, one flux job runs
+  both under `ctest -V`, and `Canopy_Test_LaplaceSolve_MPI_SERIAL` passes all
+  four of its bodies at np 1-6 with no reference-data regeneration.
+- **T5** — inherits the multi-step harness ready-made, already parameterized
+  on order and basis, already doing `migrate / rebalance / migrate` across 4
+  solves, and already printing `n_unique_ops`, `total_fallback_pair_count()`
+  and `m2l_effective_op_cap()` per rank. T5 adds
+  `m2l_op_keys_built_count()`, `m2l_op_cache_size()` and
+  `interaction_list_build_count()` to the same `[ct-solve]` line. **Its
+  "drifting root box" premise is satisfied but only just**: at
+  `dt = 1.0e-5` the root half-width moves in its 5th significant figure
+  between arms (0.071532607 against 0.071531806), which is enough to change
+  `set_root_half_width` and so to empty the cache, but T5 should raise `dt`
+  if it wants a visibly drifting box — and must rescale it by $L^{3/2}$, not
+  copy `tstLaplaceSolve.hpp`'s.
+- **T5, and any later basis** — **R7 is closed.** `src/Canopy_Solver.hpp` is
+  basis-agnostic as written; no member body assumed anything
+  `LaplaceKernel`-specific. Do not budget for `Solver` edits.
+- **R6 is untouched and unmeasured** by this task. `key_needs_level = true`
+  still holds and T5 still owns the magnitude.
+- **Anyone writing a solve test for this basis** — the
+  $\varepsilon/W$ argument above is the load-bearing one. A domain on which
+  the MAC puts every admissible pair at $R \gg \varepsilon$ makes
+  `CartesianTaylorBasis` and `LaplaceKernel` indistinguishable, and a test
+  written there proves nothing while looking green.

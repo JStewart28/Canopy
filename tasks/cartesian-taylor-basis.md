@@ -1,6 +1,6 @@
 # A Cartesian-Taylor far-field basis for Canopy
 
-**Status:** IN PROGRESS — T1, T2 and T3 DONE; T4 next
+**Status:** IN PROGRESS — T1, T2 and T3 DONE; T4 built and measured but BLOCKED ON A DECISION (see T4); T5 next
 
 ## Problem
 
@@ -649,7 +649,7 @@ also agree with the table path, or which pairs overflow changes the answer
 | `m2m_translate` | child center − parent center ($s$) | both half-widths | `src/Canopy_UpwardSweep.hpp:533-539` |
 | `m2l_translate` | source center − target center ($-R$) | both half-widths | `src/Canopy_DownwardSweep.hpp:2338-2345` |
 | `l2l_translate` | child center − parent center ($s$) | both half-widths | `src/Canopy_DownwardSweep.hpp:2389-2397` |
-| `l2p_evaluate` | particle − cell center ($a$) | `w_self` = leaf half-width | `src/Canopy_DownwardSweep.hpp:2658-2668` |
+| `l2p_evaluate` | particle − cell center ($a$) | `w_self` = leaf half-width | `src/Canopy_DownwardSweep.hpp:2668-2670`, with the potential accumulate at `:2673-2674` |
 
 Every width is a **half-width** — half the side length of the cell's cube,
 matching `Canopy::CellInfo::half_width`. This basis carries physical operators
@@ -1104,9 +1104,46 @@ Flux jobs, all on `pdebug` via the unchanged
 
 ---
 
-### T4 — A full-pipeline solve at `near_softening_factor = 0` — **NOT STARTED**
+### T4 — A full-pipeline solve at `near_softening_factor = 0` — **BLOCKED ON A DECISION**
 
 **Depends on:** T3.
+
+**Partly met, and blocked on one decision that is not a measurement.** Built
+and run; see [the progress log](cartesian-taylor-basis-progress-log.md) §T4 for
+every figure and job id.
+
+*Met.* Both suites build and one flux job (`f3YfjP7sDgw9`) runs both under
+`ctest -V`. `Canopy_Test_LaplaceSolve_MPI_SERIAL` passes all four of its bodies
+at np 1-6 with **no** regeneration of `tests/data/laplace_solve_P6.txt`.
+`Canopy_Test_CartesianTaylorSolve_MPI_SERIAL` drives
+`Solver<…, double, 2, 3, CartesianTaylorBasis>` through 4 solves with
+`migrate / rebalance / migrate` between them at np 1-6 and both
+admissibilities, with `m2l_n_unique_ops() > 0` asserted per rank in both arms
+(26260 at $\theta = 0.3$, 7652 at $\theta = 0.5$, np=1). The
+$\theta = 0.3$ **potential** meets the 1e-3 bar at $2.655\times10^{-4}$; the
+$\theta = 0.5$ deviations are measured and pinned beside it
+($8.673\times10^{-4}$ potential, $2.159\times10^{-2}$ gradient). The
+`LaplaceKernel` failure direction fires at **260x** on the potential
+($6.907\times10^{-2}$). **R7 did not fire at all: `src/Canopy_Solver.hpp`
+needed no edit**, so the list of `LaplaceKernel`-specific member bodies this
+task was expected to produce is empty.
+
+*Not met.* The $\theta = 0.3$ **gradient** is $8.996\times10^{-3}$ against
+the 1e-3 bar. The assertion is left **failing**, not widened. **R1**, **R2**
+and **R4** are all excluded by measurement — including R2's mandated re-run of
+T1's oracle at this solve's actual $(r,b)$ band, which had never been sampled.
+The cause is the **target-side L2P truncation**, which `treecode.py` does not
+have: the gradient of a degree-$p$ local is degree $p-1$, so $\nabla\varphi$
+truncates one order before $\varphi$. The absolute error ratio grad/pot is
+$1/W$ (the cell half-width) to within 2.3% on two domains differing 12-fold in
+scale, and raising to $p = 3$ drops the gradient by the $R/W$ one extra order
+predicts. The reference's documented 1e-3 is a **velocity** figure from a
+treecode with **no target-side expansion**, so it is source-side-only — the
+same truncation order as this solve's *potential*, not its gradient.
+
+**The decision T4 is blocked on:** either restate the bar as a claim about the
+potential, or run the $\theta = 0.3$ arm at $p = 3$. Both change what T4
+means, so neither was taken here.
 
 **Fill in:** new `tests/tstCartesianTaylorSolve.hpp`; one line in
 `tests/CMakeLists.txt` `UNIT_MPI_TESTS` (`:49-59`); new
@@ -1116,7 +1153,7 @@ that makes that body well-formed for **any** conforming `FarField`, never a
 branch on `CartesianTaylorBasis`. The Laplace-solve half of the exit criterion
 below is what guards those edits. No other file under `src/` changes.
 
-**Reference:** `tests/tstLaplaceSolve.hpp:1490-1590` for the direct-sum body's
+**Reference:** `tests/tstLaplaceSolve.hpp:1494-1583` for the direct-sum body's
 structure — the brute-force $O(N^2)$ reference over gathered last-step state, the
 global-scale normalization rather than a per-particle ratio, and the
 measured-then-pinned tolerance comment at `:155-187`.

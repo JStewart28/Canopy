@@ -47,6 +47,7 @@ set(UNIT_SERIAL_TESTS
 # later test's Kokkos::initialize. See README "Known Issues". Until that is
 # fixed it must not gate releases; MultiSolve is the regression gate.
 set(UNIT_MPI_TESTS
+  CartesianTaylorSolve
   CommunicationPlan
   DownwardSweep
   FarFieldContract
