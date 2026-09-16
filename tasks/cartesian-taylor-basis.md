@@ -34,7 +34,10 @@ Cartesian-Taylor basis in which the softening rides inside $w = r^2 + b$ at ever
 derivative order, so the far field is regularized automatically and
 `near_softening_factor = 0` becomes a viable configuration. It plugs into the
 `FarField` template slot that `Solver` already carries
-(`src/Canopy_Solver.hpp:125-134`) and changes no shared code.
+(`src/Canopy_Solver.hpp:125-134`), adds no shared arithmetic and declares no
+new class-scope guard. `Solver`'s member bodies have never been compiled against
+a non-`LaplaceKernel` basis, so T4 may need minimal generic fixes inside them
+(**R7**); nothing else under `src/` changes.
 
 **The end state.** A `Solver<Mem, Exec, double, p, NComps, CartesianTaylorBasis>`
 runs a full pipeline at `near_softening_factor = 0` and reproduces a direct
@@ -334,8 +337,8 @@ is unaffected throughout.
 | Provenance comments | **required** on anything transcribed | Name [canopy-questions.md](canopy-questions.md) and the exact § on every routine carrying one of its formulas, as `src/Canopy_LaplaceKernel.hpp:265` and `:676` already do for Greengard. |
 | Single source of truth for an operator value | required | Both the device path and any host reference must reach an operator value through **one** function, as `MonopoleBasis::m2l_operator_entry` is for its table build and its host reference. This is what makes a conformance comparison exact rather than merely close. |
 | Guarding against `-ffp-contract` | required where a host reference must match a device kernel bitwise | `acc += T * M` as one statement is contractible to an FMA under the default `-ffp-contract=on`, and nothing guarantees the same decision in a `Kokkos::parallel_for` lambda and a plain host loop. Split the product into a named local in one function both callers reach, as `MonopoleBasis::m2l_accumulate` does. |
-| Per-operator test | `tests/tstCartesianTaylor.hpp`, name `CartesianTaylor` in `UNIT_SERIAL_TESTS` (`tests/CMakeLists.txt:36-39`) | Host-only math over no MPI. Target becomes `Canopy_Test_CartesianTaylor_SERIAL` (`cmake/test_harness/test_harness.cmake:104-112`). |
-| Solve test | `tests/tstCartesianTaylorSolve.hpp`, name `CartesianTaylorSolve` in `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:48-58`) | Target becomes `Canopy_Test_CartesianTaylorSolve_MPI_SERIAL`, tests `..._np_<N>` for N in 1-6, CTest label `unit`. |
+| Per-operator test | `tests/tstCartesianTaylor.hpp`, name `CartesianTaylor` in `UNIT_SERIAL_TESTS` (`tests/CMakeLists.txt:36-40`) | Host-only math over no MPI. Target becomes `Canopy_Test_CartesianTaylor_SERIAL` (`cmake/test_harness/test_harness.cmake:104-112`). |
+| Solve test | `tests/tstCartesianTaylorSolve.hpp`, name `CartesianTaylorSolve` in `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:49-59`) | Target becomes `Canopy_Test_CartesianTaylorSolve_MPI_SERIAL`, tests `..._np_<N>` for N in 1-6, CTest label `unit`. |
 | Adding a name to `tests/CMakeLists.txt` | run `make cmake_check_build_system` **first** | `make -j 4 <new target>` otherwise fails with "No rule to make target": make errors out before it regenerates, because the target is not in the current Makefile. Regenerating preserves the existing cache. |
 | Gating a SERIAL unit target | anchor the regex: `ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` | `Canopy_add_tests` registers a `_valgrind` variant beside every non-MPI test when valgrind is found (`cmake/test_harness/test_harness.cmake:157-162`), and it is found in `build-tuolumne/`. An unanchored `-R` runs both, and a Kokkos binary under valgrind need not fit `--time-limit=8`. No task here gates on the variant. MPI targets are unaffected — the valgrind block is in the non-MPI branch. |
 | Build command | `make -j 4 <target>` for exactly the targets a task's exit criterion names | A bare `make -j` has been SIGKILLed on the login node, and a whole-tree build cannot exit 0 in any case — `Canopy_Test_LaplaceKernel_*` and `Canopy_Test_P2P_*` do not compile and are out of scope. |
@@ -705,7 +708,7 @@ the log. Save new scripts under `scripts/tuolumne/`.
 **Fill in:** new `src/Canopy_CartesianTaylorBasis.hpp` — the multi-index ↔ flat
 slot map and the $b_k$ evaluator, nothing else; new
 `tests/tstCartesianTaylor.hpp`; one line in `src/CMakeLists.txt` `HEADERS_PUBLIC`
-(`:3-18`); one line in `tests/CMakeLists.txt` `UNIT_SERIAL_TESTS` (`:36-39`); new
+(`:3-18`); one line in `tests/CMakeLists.txt` `UNIT_SERIAL_TESTS` (`:36-40`); new
 `scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux`, the batch wrapper for
 the SERIAL unit target, which T2 and T3 reuse unchanged.
 
@@ -1106,8 +1109,12 @@ Flux jobs, all on `pdebug` via the unchanged
 **Depends on:** T3.
 
 **Fill in:** new `tests/tstCartesianTaylorSolve.hpp`; one line in
-`tests/CMakeLists.txt` `UNIT_MPI_TESTS` (`:48-58`); new
-`scripts/tuolumne/run_ctest_cartesian_taylor.flux`.
+`tests/CMakeLists.txt` `UNIT_MPI_TESTS` (`:49-59`); new
+`scripts/tuolumne/run_ctest_cartesian_taylor.flux`; `src/Canopy_Solver.hpp`, if
+and only if a member body fails to compile against this basis — the minimal edit
+that makes that body well-formed for **any** conforming `FarField`, never a
+branch on `CartesianTaylorBasis`. The Laplace-solve half of the exit criterion
+below is what guards those edits. No other file under `src/` changes.
 
 **Reference:** `tests/tstLaplaceSolve.hpp:1490-1590` for the direct-sum body's
 structure — the brute-force $O(N^2)$ reference over gathered last-step state, the
@@ -1124,8 +1131,17 @@ driving a pipeline at 1-6 ranks.
    the particle distribution and would make the tolerance unpinnable. Choose the
    downstream solver's $\varepsilon = 0.025$ and state it on the constant.
 2. Drive `Solver<…, double, 2, NComps, CartesianTaylorBasis>` — $p = 2$, the
-   reference's order — through a full solve at np 1-6.
-3. Compare against a direct **softened** sum: $\phi_i = \sum_{j\ne i} q_j (r^2 + b)^{-1/2}$
+   reference's order — through a **multi-step** solve at np 1-6: several solves
+   with an integration step between them and **at least one `rebalance()`**
+   (`src/Canopy_Solver.hpp:344-356`). The step loop at
+   `tests/tstLaplaceSolve.hpp:872-890` is the pattern, with the one difference
+   that matters: it uses `migrate()` and never `rebalance()`, so its np 1-2
+   bitwise gate faces a single partition (`:860-871`). This test has no bitwise
+   gate and needs the opposite — a rebalance is what moves the root box and so
+   empties the operator cache, and it is the only way **R5**'s stale-operator
+   path is exercised here at all.
+3. Compare the gathered last-step state against a direct **softened** sum:
+   $\phi_i = \sum_{j\ne i} q_j (r^2 + b)^{-1/2}$
    and $\nabla\phi_i = -\sum_{j \ne i} q_j\, d\, (r^2+b)^{-3/2}$ with
    $d = x_i - x_j$ and $b = \varepsilon^2$. This is the sign convention
    `tests/tstLaplaceSolve.hpp:1535-1538` uses for the unsoftened case, and it
@@ -1137,8 +1153,9 @@ driving a pipeline at 1-6 ranks.
    runs.
 5. Pin both achieved deviations as named constants with a provenance comment
    stating the configuration they were measured at — particle count, `ncrit`,
-   `max_depth`, `replication_depth`, `softening`, `mac_theta`, rank counts — in
-   the style of `LS_CROSS_RANK_TOL` / `LS_DIRECT_SUM_TOL`
+   `max_depth`, `replication_depth`, `softening`, `mac_theta`, the step count,
+   what ran between steps, rank counts — in the style of
+   `LS_CROSS_RANK_TOL` / `LS_DIRECT_SUM_TOL`
    (`tests/tstLaplaceSolve.hpp:155-187`). Assert against the pinned value with a
    small margin, not against a round number, so a regression is visible rather
    than merely inside a loose bound.
@@ -1312,7 +1329,10 @@ covering the declarations only. Expect T4's first failures there, read them as
 expected rather than as a defect in the basis, and record in the log every
 `Solver` member body that turned out to assume something `LaplaceKernel`-specific
 — that list is the real output of T4's first build and belongs to whoever writes
-the next basis.
+the next basis. T4 fixes each one in place, with the minimal edit that makes the
+body well-formed for any conforming `FarField` rather than a branch on this
+basis; the Laplace-solve gate is what shows the edit moved nothing for the
+existing one.
 
 **R8 — the forward recurrence loses accuracy at high order.** Each step of the §3
 recurrence divides by $w$ and accumulates terms weighted by $k_j(k_j-1)$, so
