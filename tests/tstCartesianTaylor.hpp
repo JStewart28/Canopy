@@ -737,6 +737,341 @@ inline double syntheticLocal( int s, int c )
                ( ( s % 3 == 0 ) ? -1.0 : 1.0 );
 }
 
+//---------------------------------------------------------------------------//
+// T3 -- the M2L. Oracles, geometries and path runners.
+//
+// Everything here is either an ORACLE, which shares no code with the basis,
+// or a RUNNER, which drives one of the basis's two M2L paths exactly as the
+// sweep does. The one thing no body below re-implements is the operator
+// itself: Basis::m2l_operator_block is the single source of truth the
+// Conventions table requires, and every check reaches an operator value
+// through it or through build_m2l_operators, never through a transcription.
+//---------------------------------------------------------------------------//
+
+// The five integers DownwardSweep::M2LKey carries
+// (src/Canopy_DownwardSweep.hpp:583-595), reproduced rather than reached
+// into: M2LKey is a nested type of DownwardSweep<..., KernelType>, which this
+// file never instantiates, and build_m2l_operators is a template on the key
+// type precisely so a caller can hand it its own.
+// tests/tstFarFieldContract.hpp:912 does the same.
+//
+// (ii, jj, kk) * unit_w[max_d] is SOURCE CENTER MINUS TARGET CENTER
+// (src/Canopy_DownwardSweep.hpp:1464-1481). It is NOT R.
+struct M2LProbeKey
+{
+    int max_d;
+    int dd;
+    int ii;
+    int jj;
+    int kk;
+};
+
+//---------------------------------------------------------------------------//
+// The multi-indexed moments of buildParticles(),
+//
+//     M[ q_slot * NC + c ] = sum_j d_j^q / q! * s_jc ,
+//
+// with d_j measured from the source cell center. Brute force through
+// monoOverFact -- never p2m_contribution -- so the moments the M2L is checked
+// against share no code with the basis (risk R2). THE 1/q! IS HERE, which is
+// the convention half of R1: the operator carries raw derivatives and must
+// not apply a factorial a second time.
+//---------------------------------------------------------------------------//
+inline std::vector<double> buildMoments( const std::vector<Particle>& ps,
+                                         int n_slots )
+{
+    std::vector<double> M( static_cast<std::size_t>( n_slots ) * NC, 0.0 );
+    for ( const auto& p : ps )
+        for ( int s = 0; s < n_slots; ++s )
+        {
+            int k[3];
+            CT::inverse_slot( s, k );
+            const double m = monoOverFact( p.d, k );
+            for ( int c = 0; c < NC; ++c )
+                M[static_cast<std::size_t>( s ) * NC + c] += m * p.q[c];
+        }
+    return M;
+}
+
+//---------------------------------------------------------------------------//
+// The reference treecode's moments: FULL SYMMETRIC TENSORS, plain sums with
+// no factorial anywhere --
+//
+//     G_c = sum_j s_jc ,  D_{a,c} = sum_j d_ja s_jc ,
+//     Q_{ab,c} = sum_j d_ja d_jb s_jc
+//
+// -- which is canopy-questions.md §4's "sum gamma, sum d(x)gamma,
+// sum d(x)d(x)gamma". This is a DIFFERENT REPRESENTATION of the same
+// distribution as buildMoments above, and converting between the two costs
+// the multinomial |q|!/q!:
+//
+//     sum_{a,b} T_ab d_a d_b = sum_{|q|=2} (|q|!/q!) T_q d^q .
+//
+// Getting that factor wrong is a route to the R1 failure, so the contraction
+// below applies it explicitly rather than letting the two representations
+// look interchangeable.
+//---------------------------------------------------------------------------//
+struct TensorMoments
+{
+    double G[NC];
+    double D[3][NC];
+    double Q[3][3][NC];
+};
+
+inline TensorMoments buildTensorMoments( const std::vector<Particle>& ps )
+{
+    TensorMoments t;
+    for ( int c = 0; c < NC; ++c )
+    {
+        t.G[c] = 0.0;
+        for ( int a = 0; a < 3; ++a )
+        {
+            t.D[a][c] = 0.0;
+            for ( int b = 0; b < 3; ++b )
+                t.Q[a][b][c] = 0.0;
+        }
+    }
+    for ( const auto& p : ps )
+        for ( int c = 0; c < NC; ++c )
+        {
+            t.G[c] += p.q[c];
+            for ( int a = 0; a < 3; ++a )
+            {
+                t.D[a][c] += p.d[a] * p.q[c];
+                for ( int b = 0; b < 3; ++b )
+                    t.Q[a][b][c] += p.d[a] * p.d[b] * p.q[c];
+            }
+        }
+    return t;
+}
+
+//---------------------------------------------------------------------------//
+// The reference's three arrays, TRANSCRIBED FROM canopy-questions.md §2 --
+// the in-repo oracle -- and not from treecode.py, which is not in this
+// repository and which no test here depends on having. Each is MINUS the
+// corresponding §2 tensor shifted by one index, because the reference returns
+// a VELOCITY and K = -grad phi:
+//
+//     K_a     =  r_a P_1                              = -( d_a phi )
+//     dK_ab   =  delta_ab P_1 - 3 r_a r_b P_2         = -( d_a d_b phi )
+//     ddK_abc = -3( delta_ab r_c + delta_ac r_b + delta_bc r_a ) P_2
+//               + 15 r_a r_b r_c P_3                  = -( d_a d_b d_c phi )
+//
+// ddK carries derivatives of degree THREE, which is why contracting these
+// three against the degree-0/1/2 moments gives the |p| = 1 local coefficients
+// and not l_0 -- and it is the only check here that exercises b_k at |k| = 3.
+//---------------------------------------------------------------------------//
+inline double refKa( const double r[3], double bb, int a )
+{
+    return r[a] * P( 1, wOf( r, bb ) );
+}
+
+inline double refdKab( const double r[3], double bb, int a, int b )
+{
+    const double w = wOf( r, bb );
+    return static_cast<double>( delta( a, b ) ) * P( 1, w ) -
+           3.0 * r[a] * r[b] * P( 2, w );
+}
+
+inline double refddKabc( const double r[3], double bb, int a, int b, int c )
+{
+    const double w = wOf( r, bb );
+    const double t = static_cast<double>( delta( a, b ) ) * r[c] +
+                     static_cast<double>( delta( a, c ) ) * r[b] +
+                     static_cast<double>( delta( b, c ) ) * r[a];
+    return -3.0 * t * P( 2, w ) + 15.0 * r[a] * r[b] * r[c] * P( 3, w );
+}
+
+//---------------------------------------------------------------------------//
+// The (R, b) the two convention checks run over. R = c_target - c_source, and
+// |R| sits well outside the source particles' own extent (|d| <= 0.48) so the
+// expansion is in its convergent regime; neither convention check depends on
+// that, but a divergent configuration would make the printed scales
+// uninterpretable. b is SOFTENING SQUARED: 6.25e-4 is the downstream solver's
+// eps = 0.025 squared.
+//---------------------------------------------------------------------------//
+struct M2LGeom
+{
+    double R[3];
+    double b;
+};
+
+inline std::vector<M2LGeom> buildM2LGeometries()
+{
+    // Unit directions: two axis-aligned (so the delta_ab terms of §2 stand
+    // alone and no r_a r_b term masks a sign), and two generic with mixed
+    // signs (so no component of any odd-degree tensor vanishes).
+    const double dirs[][3] = { { 1.0, 0.0, 0.0 },
+                               { 0.0, -1.0, 0.0 },
+                               { 0.36, -0.48, 0.80 },
+                               { -0.48, -0.60, 0.64 } };
+    const double mags[] = { 2.0, 8.0 };
+    const double bs[] = { 6.25e-4, 1.0e-2 };
+
+    std::vector<M2LGeom> out;
+    for ( double bb : bs )
+        for ( double m : mags )
+            for ( const auto& d : dirs )
+                out.push_back(
+                    M2LGeom{ { m * d[0], m * d[1], m * d[2] }, bb } );
+    return out;
+}
+
+//---------------------------------------------------------------------------//
+// Direct softened sum -- the end-to-end oracle. No expansion of any kind:
+//
+//     u_c(x) = sum_j s_jc / sqrt( |x - y_j|^2 + b ) ,
+//              y_j = c_source + d_j
+//
+// through the same phi() the §2 oracle is built on.
+//---------------------------------------------------------------------------//
+inline void directSum( const std::vector<Particle>& ps, const double c_src[3],
+                       const double x[3], double bb, double out[NC] )
+{
+    for ( int c = 0; c < NC; ++c )
+        out[c] = 0.0;
+
+    for ( const auto& p : ps )
+    {
+        const double r[3] = { x[0] - ( c_src[0] + p.d[0] ),
+                              x[1] - ( c_src[1] + p.d[1] ),
+                              x[2] - ( c_src[2] + p.d[2] ) };
+        const double g = phi( r, bb );
+        for ( int c = 0; c < NC; ++c )
+            out[c] += p.q[c] * g;
+    }
+}
+
+//---------------------------------------------------------------------------//
+// The FUSED path, driven exactly as DownwardSweep::run_m2l_fused drives it
+// (src/Canopy_DownwardSweep.hpp:2195-2251): one team per TARGET, raw
+// zero-filled scratch bytes sized by m2l_scratch_bytes, m2l_pre_cell and
+// m2l_core once per source, m2l_post_cell once at the end. A league of one
+// reproduces that without a tree.
+//
+// Reproducing the loop rather than calling the sweep is what makes this a
+// test of the basis: the sweep is not instantiated here and no tree, no MPI
+// and no operator cache is involved.
+//---------------------------------------------------------------------------//
+template <class Basis>
+void runM2LFused(
+    const CoeffView& M, const std::vector<int>& src_cells,
+    const std::vector<int>& op_idx,
+    const typename Basis::template m2l_operators_type<TEST_MEMSPACE>& ops,
+    const CoeffView& L, int target_cell )
+{
+    using policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
+    using member_t = typename policy::member_type;
+    using scratch_space = typename TEST_EXECSPACE::scratch_memory_space;
+    using ScratchBytes =
+        Kokkos::View<char*, scratch_space,
+                     Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+
+    const int n_pairs = static_cast<int>( src_cells.size() );
+    Kokkos::View<int*, TEST_MEMSPACE> d_src( "m2l_src", n_pairs );
+    Kokkos::View<int*, TEST_MEMSPACE> d_op( "m2l_op_idx", n_pairs );
+    auto h_src = Kokkos::create_mirror_view( d_src );
+    auto h_op = Kokkos::create_mirror_view( d_op );
+    for ( int s = 0; s < n_pairs; ++s )
+    {
+        h_src( s ) = src_cells[s];
+        h_op( s ) = op_idx[s];
+    }
+    Kokkos::deep_copy( d_src, h_src );
+    Kokkos::deep_copy( d_op, h_op );
+
+    // constexpr for the same reason the sweep spells it that way (risk R3):
+    // the stages' internal extents stay compile-time constants.
+    constexpr std::size_t scratch_bytes = Basis::m2l_scratch_bytes( NC );
+    constexpr int scratch_bytes_int = static_cast<int>( scratch_bytes );
+
+    policy pol( 1, 1 );
+    pol.set_scratch_size(
+        0, Kokkos::PerTeam( ScratchBytes::shmem_size( scratch_bytes ) ) );
+
+    Kokkos::parallel_for(
+        "m2l_fused", pol,
+        KOKKOS_LAMBDA( const member_t& team ) {
+            ScratchBytes scratch( team.team_scratch( 0 ), scratch_bytes );
+
+            // Byte fill, as the sweep does: the layout inside is the basis's
+            // and all-zero bytes are +0.0.
+            Kokkos::parallel_for(
+                Kokkos::TeamVectorRange( team, scratch_bytes_int ),
+                [&]( int i ) { scratch( i ) = char( 0 ); } );
+            team.team_barrier();
+
+            for ( int s = 0; s < n_pairs; ++s )
+            {
+                Basis::m2l_pre_cell( team, M, d_src( s ), ops, scratch );
+                Basis::m2l_core( team, M, d_src( s ), ops, d_op( s ),
+                                 scratch );
+            }
+
+            Basis::m2l_post_cell( team, scratch, L, target_cell, ops );
+        } );
+    Kokkos::fence();
+}
+
+//---------------------------------------------------------------------------//
+// The PER-PAIR FALLBACK path, driven exactly as
+// DownwardSweep::run_m2l_fallback drives it
+// (src/Canopy_DownwardSweep.hpp:2331-2347): one team per PAIR, the physical
+// offset SOURCE CENTER MINUS TARGET CENTER, the two half-widths, and the aux
+// table -- which is the only channel the softening has to this path.
+//
+// `aux` is built through Basis::build_aux_tables from an M2LKernelParams
+// carrying the softening as a LENGTH, so the eps -> b squaring under test is
+// the basis's own and not this file's.
+//---------------------------------------------------------------------------//
+template <class Basis>
+void runM2LTranslate( const CoeffView& M, int source_cell,
+                      const double d_src_minus_tgt[3], double softening_eps,
+                      const CoeffView& L, int target_cell )
+{
+    using policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
+    using member_t = typename policy::member_type;
+
+    Canopy::M2LKernelParams kp;
+    kp.softening = softening_eps;
+    auto aux = Basis::template build_aux_tables<TEST_MEMSPACE>(
+        Basis::max_order, kp );
+
+    const double dx = d_src_minus_tgt[0];
+    const double dy = d_src_minus_tgt[1];
+    const double dz = d_src_minus_tgt[2];
+
+    Kokkos::parallel_for(
+        "m2l_translate", policy( 1, 1 ),
+        KOKKOS_LAMBDA( const member_t& team ) {
+            auto L_t =
+                Kokkos::subview( L, target_cell, Kokkos::ALL, Kokkos::ALL );
+            // Widths are ignored by this basis; distinct non-unit values are
+            // passed so a future read of one would be visible rather than
+            // silently zero.
+            Basis::m2l_translate( team, M, source_cell, dx, dy, dz, 1.0, 2.0,
+                                  aux, L_t );
+        } );
+    Kokkos::fence();
+}
+
+//---------------------------------------------------------------------------//
+// Load a moment array built by buildMoments into cell `cell` of a coefficient
+// view, in the (cell, coeff, comp_set_slot) layout the sweeps use.
+//---------------------------------------------------------------------------//
+template <class Basis>
+void loadMoments( const CoeffView& M, int cell, const std::vector<double>& m,
+                  int n_slots )
+{
+    auto h_M = Kokkos::create_mirror_view( M );
+    Kokkos::deep_copy( h_M, M );
+    for ( int s = 0; s < n_slots; ++s )
+        for ( int c = 0; c < NC; ++c )
+            h_M( cell, s, Basis::comp_set_slot( c, 0 ) ) =
+                m[static_cast<std::size_t>( s ) * NC + c];
+    Kokkos::deep_copy( M, h_M );
+}
+
 } // namespace CT2
 
 //---------------------------------------------------------------------------//
@@ -1075,6 +1410,685 @@ void testL2PEvaluation()
                  P, worst_phi, worst_grad );
 }
 
+//===========================================================================//
+// T3 of tasks/cartesian-taylor-basis.md -- the M2L, with the sign and
+// normalization convention pinned. Five bodies, all host math over hand-built
+// inputs and no sweep, no tree and no MPI:
+//
+//   m2l_ell0_closed_forms   l_0 against §2's degree-0/1/2 closed forms. The
+//                           discriminator for the (-1)^{|q|} multiplier and
+//                           the 1/q! placement (risk R1), both of which first
+//                           bite at |q| = 1.
+//   m2l_p1_contraction      the |p| = 1 coefficients against the reference's
+//                           K/dK/ddK contraction, which is the only check
+//                           here that exercises b_k at degree 3.
+//   m2l_parity_identity     sum_q (-1)^{|q|} b_{p+q}(R) M_q against
+//                           (-1)^{|p|} sum_q b_{p+q}(S) M_q, with R and S
+//                           INDEPENDENTLY SOURCED.
+//   m2l_fused_vs_fallback   the table path and the per-pair path, EXACTLY
+//                           equal (risk R4).
+//   m2l_end_to_end          P2M -> M2L -> L2P by hand against a direct
+//                           softened sum, against the truncation bound.
+//===========================================================================//
+
+//---------------------------------------------------------------------------//
+// l_0 = sum_q (-1)^{|q|} b_q(R) M_q against the canopy-questions.md §2 closed
+// forms.
+//
+// THE ORACLE IS §2, hand-coded in this file at referenceClosedForm above, and
+// NOT treecode.py, which is not in this repository. §2 stops at |k| = 3, so
+// this body runs at p = 2 and p = 3 and no higher.
+//
+// WHAT IT SEES. Both halves of risk R1 land on the degree-1 term and nowhere
+// lower:
+//   * dropping the (-1)^{|q|} multiplier flips every odd-|q| term, so the
+//     first disagreement is at |q| = 1;
+//   * applying the 1/q! a second time in the operator scales every |q| >= 2
+//     term, so the first disagreement is at |q| = 2.
+// The degree-0 term carries neither, which is why an l_0 check that stopped
+// at |q| = 0 would be vacuous.
+//
+// TOLERANCE. The comparison is against the sum of the term magnitudes,
+// sum_q |b_q(R) M_q|, not against |l_0|: terms of opposite sign cancel and a
+// relative test against the result would be a test of the cancellation. Both
+// sides are the same sum in a different order, so the achieved deviation
+// should sit at the roundoff floor of that scale, and it is printed.
+//---------------------------------------------------------------------------//
+template <int P>
+void testM2LEll0ClosedForms()
+{
+    static_assert( P <= 3,
+                   "the §2 closed forms stop at |k| = 3, so l_0 at order p "
+                   "needs p <= 3" );
+
+    using Basis = Canopy::CartesianTaylorBasis<double, P, CT2::NC>;
+    constexpr int Nco = Basis::num_coeffs_per_cell;
+
+    const auto particles = CT2::buildParticles();
+    const auto M = CT2::buildMoments( particles, Nco );
+    const auto geoms = CT2::buildM2LGeometries();
+
+    // slot of the zero multi-index -- l_0's row of the operator.
+    const int p0 = CT::slot( 0, 0, 0 );
+
+    double worst_rel = 0.0;
+
+    for ( const auto& g : geoms )
+    {
+        double op[Basis::m2l_op_entries];
+        Basis::m2l_operator_block( g.R, g.b, op );
+
+        for ( int c = 0; c < CT2::NC; ++c )
+        {
+            double got = 0.0;
+            double want = 0.0;
+            double scale = 0.0;
+
+            for ( int q_slot = 0; q_slot < Nco; ++q_slot )
+            {
+                const double m = M[static_cast<std::size_t>( q_slot ) *
+                                       CT2::NC + c];
+
+                got += op[Basis::m2l_op_index( p0, q_slot )] * m;
+
+                int q[3];
+                CT::inverse_slot( q_slot, q );
+                const int nq = q[0] + q[1] + q[2];
+                const double sign = ( ( nq & 1 ) == 0 ) ? 1.0 : -1.0;
+                const double bq = referenceClosedForm( q, g.R, g.b );
+
+                want += sign * bq * m;
+                scale += std::abs( bq * m );
+            }
+
+            const double tol = 1.0e-13 * scale;
+            worst_rel = std::max( worst_rel, std::abs( got - want ) / scale );
+
+            ASSERT_NEAR( got, want, tol )
+                << "p = " << P << ": l_0 = sum_q (-1)^{|q|} b_q(R) M_q "
+                << "disagrees with the canopy-questions.md §2 closed forms "
+                << "(hand-coded in THIS file, not read from any file outside "
+                << "this repository). Check the (-1)^{|q|} multiplier, which "
+                << "belongs to the operator and first bites at |q| = 1, and "
+                << "the 1/q! placement, which belongs to the MOMENT and to "
+                << "the L2P and never to b_k. R = (" << g.R[0] << ","
+                << g.R[1] << "," << g.R[2] << "), b = " << g.b
+                << ", component " << c;
+        }
+    }
+
+    std::printf( "[cartesian-taylor] m2l l_0 vs §2 closed forms, p = %d: "
+                 "worst |got-want| / sum|b_q M_q| = %.3e over %d geometries\n",
+                 P, worst_rel, static_cast<int>( geoms.size() ) );
+}
+
+//---------------------------------------------------------------------------//
+// The |p| = 1 coefficients against the reference's K/dK/ddK contraction.
+//
+// WHAT THIS IS AND IS NOT. _expansion_batch is the whole far-field
+// contribution of one source box AT THE TARGET BOX CENTER with no target-side
+// expansion, and it returns a VELOCITY -- so its three arrays are
+// -d phi, -dd phi and -ddd phi, and contracted against the degree-0/1/2
+// moments they give the SCALAR PASS'S GRADIENT at that center, which is
+// l_{e_a}. It is NOT l_0, which needs b_k at degrees 0, 1 and 2 instead.
+// Comparing it against l_0 builds an oracle that cannot match and then
+// invites "fixing" a correct operator against it -- the plausible-but-wrong
+// outcome R1 describes.
+//
+// THE IDENTITY BEING ASSERTED, derived from canopy-questions.md §4's
+// l_p = sum_q (-1)^{|q|} b_{p+q}(R) M_q with p = e_a, term by term:
+//
+//   |q| = 0 :  + b_{e_a} G            = -K_a G
+//   |q| = 1 :  - sum_b b_{e_a+e_b} D_b = + sum_b dK_ab D_b
+//   |q| = 2 :  + sum_{|q|=2} b_{e_a+q} M_q
+//              = (1/2) sum_{b,c} (d_a d_b d_c phi) Q_bc
+//              = -(1/2) sum_{b,c} ddK_abc Q_bc
+//
+// so    l_{e_a} = -K_a G + sum_b dK_ab D_b - (1/2) sum_{b,c} ddK_abc Q_bc ,
+// i.e.  the reference's velocity-shaped contraction
+//
+//       V_a = K_a G - sum_b dK_ab D_b + (1/2) sum_{b,c} ddK_abc Q_bc
+//
+// equals MINUS l_{e_a}. THE OVERALL SIGN IS K = -grad phi AND IS STATED HERE
+// AND ON THE ASSERTION rather than absorbed silently.
+//
+// THE 1/2 IS THE MULTINOMIAL FACTOR |q|!/q!, not a convention: Q_bc is a full
+// symmetric tensor and sum_{b,c} T_bc d_b d_c = sum_{|q|=2} (2!/q!) T_q d^q.
+// Getting it wrong is the other route to the same R1 failure.
+//
+// p = 2 ONLY. The three arrays carry exactly the degree-0/1/2 moments, so at
+// p = 3 l_{e_a} would additionally carry the |q| = 3 term that the reference
+// has no array for and the two would legitimately differ.
+//---------------------------------------------------------------------------//
+void testM2LP1Contraction()
+{
+    constexpr int P = 2;
+    using Basis = Canopy::CartesianTaylorBasis<double, P, CT2::NC>;
+    constexpr int Nco = Basis::num_coeffs_per_cell;
+
+    const auto particles = CT2::buildParticles();
+    const auto M = CT2::buildMoments( particles, Nco );
+    const auto T = CT2::buildTensorMoments( particles );
+    const auto geoms = CT2::buildM2LGeometries();
+
+    double worst_rel = 0.0;
+
+    for ( const auto& g : geoms )
+    {
+        double op[Basis::m2l_op_entries];
+        Basis::m2l_operator_block( g.R, g.b, op );
+
+        for ( int a = 0; a < 3; ++a )
+        {
+            int e_a[3] = { 0, 0, 0 };
+            e_a[a] = 1;
+            const int p_slot = CT::slot( e_a[0], e_a[1], e_a[2] );
+
+            for ( int c = 0; c < CT2::NC; ++c )
+            {
+                // l_{e_a}, through the operator -- the quantity under test.
+                double ell = 0.0;
+                for ( int q_slot = 0; q_slot < Nco; ++q_slot )
+                    ell += op[Basis::m2l_op_index( p_slot, q_slot )] *
+                           M[static_cast<std::size_t>( q_slot ) * CT2::NC + c];
+
+                // The reference contraction, from the §2-transcribed arrays
+                // and the FULL SYMMETRIC TENSOR moments.
+                double v = CT2::refKa( g.R, g.b, a ) * T.G[c];
+                double scale = std::abs( CT2::refKa( g.R, g.b, a ) * T.G[c] );
+
+                for ( int b = 0; b < 3; ++b )
+                {
+                    const double t =
+                        CT2::refdKab( g.R, g.b, a, b ) * T.D[b][c];
+                    v -= t;
+                    scale += std::abs( t );
+                }
+
+                for ( int b = 0; b < 3; ++b )
+                    for ( int d = 0; d < 3; ++d )
+                    {
+                        const double t =
+                            0.5 * CT2::refddKabc( g.R, g.b, a, b, d ) *
+                            T.Q[b][d][c];
+                        v += t;
+                        scale += std::abs( t );
+                    }
+
+                const double tol = 1.0e-13 * scale;
+                worst_rel =
+                    std::max( worst_rel, std::abs( -ell - v ) / scale );
+
+                ASSERT_NEAR( -ell, v, tol )
+                    << "p = 2: the |p| = 1 local coefficient disagrees with "
+                    << "the reference's K/dK/ddK contraction. THE OVERALL "
+                    << "SIGN IS K = -grad phi, so the reference's velocity "
+                    << "equals MINUS l_{e_a} and that is what is asserted "
+                    << "here. The arrays are transcribed from "
+                    << "canopy-questions.md §2 (minus the §2 tensor, shifted "
+                    << "by one index) and the 1/2 on the Q term is the "
+                    << "multinomial |q|!/q! between full symmetric tensors "
+                    << "and multi-indexed moments, not a convention. "
+                    << "direction a = " << a << ", R = (" << g.R[0] << ","
+                    << g.R[1] << "," << g.R[2] << "), b = " << g.b
+                    << ", component " << c;
+            }
+        }
+    }
+
+    std::printf( "[cartesian-taylor] m2l |p|=1 vs reference K/dK/ddK "
+                 "contraction, p = 2: worst |got-want| / sum|terms| = %.3e "
+                 "over %d geometries\n",
+                 worst_rel, static_cast<int>( geoms.size() ) );
+}
+
+//---------------------------------------------------------------------------//
+// The parity identity, with its two arguments INDEPENDENTLY SOURCED.
+//
+// phi is even, so b_n(-R) = (-1)^{|n|} b_n(R) and the two spellings
+//
+//     l_p = sum_q (-1)^{|q|} b_{p+q}(R) M_q          R = c_target - c_source
+//     l_p = (-1)^{|p|} sum_q b_{p+q}(S) M_q          S = -R
+//
+// must agree. THE EQUALITY IS AN IDENTITY IN THE VECTOR FED TO IT: handing
+// both spellings the same vector makes them agree whatever its sign, so a
+// check that obtained S by negating the very R the first spelling used would
+// be VACUOUS and would pass over a wrong-signed operator. The two arguments
+// are therefore sourced independently:
+//
+//   * the first from the PRODUCTION key-to-R path -- build_m2l_operators,
+//     handed real keys and a real unit_w table, which is where
+//     R = -(ii,jj,kk) * unit_w[max_d] is spelled;
+//   * the second from the key's RAW offset S = (ii,jj,kk) * unit_w[max_d],
+//     source minus target exactly as src/Canopy_DownwardSweep.hpp:1464-1481
+//     builds it, fed to T1's derivative_ladder directly, with the (-1)^{|p|}
+//     applied by this body.
+//
+// So sourced, a missing negation in build_m2l_operators makes the two
+// disagree, and disagreement otherwise means the sign or the parity has been
+// applied twice.
+//---------------------------------------------------------------------------//
+void testM2LParityIdentity()
+{
+    constexpr int P = 2;
+    using Basis = Canopy::CartesianTaylorBasis<double, P, CT2::NC>;
+    constexpr int Nco = Basis::num_coeffs_per_cell;
+    constexpr int Ns = Basis::m2l_num_src_coeffs;
+
+    const auto particles = CT2::buildParticles();
+    const auto M = CT2::buildMoments( particles, Nco );
+
+    // The half-width at each depth, w_root / 2^d, with a root half-width of
+    // 1.0 -- a power of two, so every unit_w and every product below is exact
+    // in binary64 and the identity is tested on the numbers, not on the
+    // rounding.
+    const int n_levels = 4;
+    std::vector<double> unit_w( n_levels );
+    for ( int d = 0; d < n_levels; ++d )
+        unit_w[d] = 1.0 / static_cast<double>( 1 << d );
+
+    // The softening as a LENGTH; the kernel's b is its square.
+    const double eps = 0.025;
+    const double bb = eps * eps;
+    Canopy::M2LKernelParams kp;
+    kp.softening = eps;
+
+    // Keys spanning both signs on every axis, several depths, and one pair
+    // differing only in dd.
+    const std::vector<CT2::M2LProbeKey> keys = {
+        { 2, 0, 3, -4, 2 },  { 2, 3, 3, -4, 2 },   { 3, 0, -5, 1, 4 },
+        { 1, -1, 4, 0, -3 }, { 0, 0, 2, -2, 1 },   { 3, 2, -6, 5, -2 },
+        { 2, 1, -2, -3, -4 } };
+    const int nk = static_cast<int>( keys.size() );
+
+    auto aux =
+        Basis::template build_aux_tables<Kokkos::HostSpace>( P, kp );
+
+    // WithoutInitializing, as the sweep allocates it
+    // (src/Canopy_DownwardSweep.hpp) -- so an unwritten entry is garbage and
+    // not a zero that could pass by accident.
+    typename Basis::template m2l_operators_type<Kokkos::HostSpace> ops(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_ops" ), Nco, Ns,
+        nk );
+
+    Basis::build_m2l_operators( keys.data(), nk, unit_w.data(), n_levels, kp,
+                                aux, ops );
+
+    std::vector<double> bk( CT::num_slots( 2 * P ) );
+    double worst_rel = 0.0;
+
+    for ( int j = 0; j < nk; ++j )
+    {
+        // S -- the key's RAW offset, source minus target. NOT obtained by
+        // negating anything the operator used.
+        const double S[3] = {
+            static_cast<double>( keys[j].ii ) * unit_w[keys[j].max_d],
+            static_cast<double>( keys[j].jj ) * unit_w[keys[j].max_d],
+            static_cast<double>( keys[j].kk ) * unit_w[keys[j].max_d] };
+
+        CT::derivative_ladder( S, bb, 2 * P, bk.data() );
+
+        for ( int p_slot = 0; p_slot < Nco; ++p_slot )
+        {
+            int p[3];
+            CT::inverse_slot( p_slot, p );
+            const int np = p[0] + p[1] + p[2];
+            const double par = ( ( np & 1 ) == 0 ) ? 1.0 : -1.0;
+
+            for ( int c = 0; c < CT2::NC; ++c )
+            {
+                double lhs = 0.0;
+                double rhs = 0.0;
+                double scale = 0.0;
+
+                for ( int q_slot = 0; q_slot < Ns; ++q_slot )
+                {
+                    const double m =
+                        M[static_cast<std::size_t>( q_slot ) * CT2::NC + c];
+
+                    lhs += ops( p_slot, q_slot, j ) * m;
+
+                    int q[3];
+                    CT::inverse_slot( q_slot, q );
+                    const double bpq =
+                        bk[CT::slot( p[0] + q[0], p[1] + q[1],
+                                     p[2] + q[2] )];
+                    rhs += par * bpq * m;
+                    scale += std::abs( bpq * m );
+                }
+
+                const double tol = 1.0e-13 * scale;
+                worst_rel = std::max( worst_rel,
+                                      std::abs( lhs - rhs ) / scale );
+
+                ASSERT_NEAR( lhs, rhs, tol )
+                    << "the parity identity fails at |p| = " << np
+                    << ". The left side comes from the PRODUCTION key-to-R "
+                    << "path, build_m2l_operators, where "
+                    << "R = -(ii,jj,kk) * unit_w[max_d]; the right side from "
+                    << "the key's RAW source-minus-target offset S fed to "
+                    << "derivative_ladder with the (-1)^{|p|} applied here. "
+                    << "Disagreement means the NEGATION OF R is missing, or "
+                    << "that the sign or the parity has been applied twice. "
+                    << "key " << j << " = (max_d " << keys[j].max_d << ", dd "
+                    << keys[j].dd << ", " << keys[j].ii << "," << keys[j].jj
+                    << "," << keys[j].kk << "), component " << c;
+            }
+        }
+    }
+
+    // The documented consequence of a key-independent operator: keys 0 and 1
+    // differ only in dd, and this basis's operator has NO dd dependence, so
+    // their columns are identical. Duplication in the table, not an error.
+    for ( int p_slot = 0; p_slot < Nco; ++p_slot )
+        for ( int q_slot = 0; q_slot < Ns; ++q_slot )
+            ASSERT_EQ( ops( p_slot, q_slot, 0 ), ops( p_slot, q_slot, 1 ) )
+                << "keys 0 and 1 differ only in dd, and this basis's operator "
+                << "is a function of the physical (R, b) alone, so their "
+                << "columns must be bit-identical. A difference means "
+                << "something key-dependent leaked into the operator.";
+
+    std::printf( "[cartesian-taylor] m2l parity identity, p = 2: worst "
+                 "|lhs-rhs| / sum|b_{p+q} M_q| = %.3e over %d keys\n",
+                 worst_rel, nk );
+}
+
+//---------------------------------------------------------------------------//
+// The fused table path and the per-pair fallback path, EXACTLY equal.
+//
+// WHY EXACT AND NOT MERELY CLOSE. Both paths reach one operator function,
+// walk q in ascending slot order through one taylor_accumulate, and add a
+// single named local into a zero-initialized destination -- so for the same
+// pair they produce bit-identical coefficients. That is what makes a non-zero
+// total_fallback_pair_count() harmless; if the two disagreed, WHICH pairs
+// overflow the operator-table cap would decide the answer (risk R4).
+//
+// THE GEOMETRY IS BUILT SO THE TWO R ARE BIT-IDENTICAL, which is what makes
+// "agree exactly" achievable rather than aspirational. The table path builds
+// R = -(ii,jj,kk) * unit_w[max_d]; m2l_translate builds R = -(c_s - c_t) from
+// two cell centers. Those are the same value mathematically but not
+// necessarily the same double -- real cell centers come from repeated halving
+// off the root center (src/Canopy_TreeBuilder.hpp:289-297), so c_s - c_t need
+// not round to ii * unit_w[max_d] exactly for an arbitrary root center. Here
+// the root half-width is 1.0, a power of two, and both centers are exact
+// dyadic multiples of unit_w[3] = 0.125, so every product and the subtraction
+// are exact and ASSERT_EQ is the right assertion. A case with a non-dyadic
+// center would have to assert to round-off and say so.
+//---------------------------------------------------------------------------//
+void testM2LFusedVsFallback()
+{
+    constexpr int P = 2;
+    using Basis = Canopy::CartesianTaylorBasis<double, P, CT2::NC>;
+    constexpr int Nco = Basis::num_coeffs_per_cell;
+    constexpr int Ns = Basis::m2l_num_src_coeffs;
+    constexpr int NCS = Basis::num_comp_slots;
+
+    const int n_levels = 4;
+    std::vector<double> unit_w( n_levels );
+    for ( int d = 0; d < n_levels; ++d )
+        unit_w[d] = 1.0 / static_cast<double>( 1 << d );
+
+    const double eps = 0.025;
+    Canopy::M2LKernelParams kp;
+    kp.softening = eps;
+
+    // Every component an exact multiple of unit_w[n_levels-1] = 0.125.
+    const double c_t[3] = { 0.25, -0.5, 0.75 };
+
+    const std::vector<CT2::M2LProbeKey> keys = {
+        { 2, 0, 3, -4, 2 },  { 3, 0, -5, 1, 4 }, { 1, -1, 4, 0, -3 },
+        { 0, 0, 2, -2, 1 },  { 3, 2, -6, 5, -2 } };
+    const int nk = static_cast<int>( keys.size() );
+
+    auto aux = Basis::template build_aux_tables<Kokkos::HostSpace>( P, kp );
+
+    typename Basis::template m2l_operators_type<Kokkos::HostSpace> ops_h(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_ops_h" ), Nco,
+        Ns, nk );
+    Basis::build_m2l_operators( keys.data(), nk, unit_w.data(), n_levels, kp,
+                                aux, ops_h );
+
+    // Host cache -> device table, the shape DownwardSweep uses
+    // (src/Canopy_DownwardSweep.hpp:621 and :630).
+    typename Basis::template m2l_operators_type<TEST_MEMSPACE> ops(
+        Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_ops" ), Nco, Ns,
+        nk );
+    Kokkos::deep_copy( ops, ops_h );
+
+    const auto particles = CT2::buildParticles();
+    const auto M_ref = CT2::buildMoments( particles, Nco );
+
+    // Source moments live in cells 0..nk-1 so a multi-pair run has distinct
+    // sources; every one carries the same moments, which is what lets the
+    // per-pair comparison below isolate the operator.
+    CT2::CoeffView M( "M", nk, Nco, NCS );
+    for ( int j = 0; j < nk; ++j )
+        CT2::loadMoments<Basis>( M, j, M_ref, Nco );
+
+    double worst_pair = 0.0;
+
+    for ( int j = 0; j < nk; ++j )
+    {
+        const double w = unit_w[keys[j].max_d];
+        // c_source = c_target + (ii,jj,kk) * unit_w[max_d]. Exact: every
+        // term is a dyadic multiple of 0.125.
+        const double d_src_minus_tgt[3] = {
+            static_cast<double>( keys[j].ii ) * w,
+            static_cast<double>( keys[j].jj ) * w,
+            static_cast<double>( keys[j].kk ) * w };
+        const double c_s[3] = { c_t[0] + d_src_minus_tgt[0],
+                                c_t[1] + d_src_minus_tgt[1],
+                                c_t[2] + d_src_minus_tgt[2] };
+        const double dd[3] = { c_s[0] - c_t[0], c_s[1] - c_t[1],
+                               c_s[2] - c_t[2] };
+
+        // The premise of ASSERT_EQ below: the offset the fallback path is
+        // handed is the SAME DOUBLE the table path's key arithmetic produces.
+        for ( int a = 0; a < 3; ++a )
+            ASSERT_EQ( dd[a], d_src_minus_tgt[a] )
+                << "the test geometry is not exactly dyadic: c_s - c_t does "
+                << "not reproduce (ii,jj,kk) * unit_w[max_d] bit for bit, so "
+                << "the two paths' R differ and an exact comparison is not "
+                << "the right assertion. axis " << a << ", key " << j;
+
+        CT2::CoeffView L_fused( "L_fused", 1, Nco, NCS );
+        CT2::runM2LFused<Basis>( M, { j }, { j }, ops, L_fused, 0 );
+
+        CT2::CoeffView L_fb( "L_fb", 1, Nco, NCS );
+        CT2::runM2LTranslate<Basis>( M, j, dd, eps, L_fb, 0 );
+
+        auto h_fused = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), L_fused );
+        auto h_fb =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), L_fb );
+
+        for ( int s = 0; s < Nco; ++s )
+            for ( int cs = 0; cs < NCS; ++cs )
+            {
+                worst_pair = std::max(
+                    worst_pair, std::abs( h_fused( 0, s, cs ) -
+                                          h_fb( 0, s, cs ) ) );
+                ASSERT_EQ( h_fused( 0, s, cs ), h_fb( 0, s, cs ) )
+                    << "the fused (table) M2L path and the per-pair "
+                    << "m2l_translate fallback disagree for ONE pair, and "
+                    << "the geometry is exactly dyadic so they must agree "
+                    << "BIT FOR BIT. If they do not, which pairs overflow the "
+                    << "operator-table cap decides the answer (risk R4). "
+                    << "key " << j << " = (max_d " << keys[j].max_d << ", "
+                    << keys[j].ii << "," << keys[j].jj << "," << keys[j].kk
+                    << "), slot " << s << ", comp_set_slot " << cs;
+            }
+    }
+
+    // Multi-pair: three sources into one target. The fused path accumulates
+    // in team scratch across pairs and flushes once; the fallback path
+    // atomically adds per pair. Same pair order, same arithmetic, so still
+    // exact -- and this is the part of the accumulator contract a
+    // single-pair comparison cannot reach.
+    {
+        const int n_pairs = 3;
+        CT2::CoeffView L_fused( "L_fused_multi", 1, Nco, NCS );
+        CT2::runM2LFused<Basis>( M, { 0, 1, 2 }, { 0, 1, 2 }, ops, L_fused,
+                                 0 );
+
+        CT2::CoeffView L_fb( "L_fb_multi", 1, Nco, NCS );
+        for ( int j = 0; j < n_pairs; ++j )
+        {
+            const double w = unit_w[keys[j].max_d];
+            const double dd[3] = { static_cast<double>( keys[j].ii ) * w,
+                                   static_cast<double>( keys[j].jj ) * w,
+                                   static_cast<double>( keys[j].kk ) * w };
+            CT2::runM2LTranslate<Basis>( M, j, dd, eps, L_fb, 0 );
+        }
+
+        auto h_fused = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), L_fused );
+        auto h_fb =
+            Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), L_fb );
+
+        for ( int s = 0; s < Nco; ++s )
+            for ( int cs = 0; cs < NCS; ++cs )
+                ASSERT_EQ( h_fused( 0, s, cs ), h_fb( 0, s, cs ) )
+                    << "the two M2L paths disagree once THREE pairs "
+                    << "accumulate into one target. Single pairs agreeing "
+                    << "and three not is an accumulator-order difference, "
+                    << "not an operator difference: m2l_core adds one named "
+                    << "local per (p, c) into the scratch and m2l_post_cell "
+                    << "flushes once, which must match the fallback's "
+                    << "per-pair atomic add in the same order. slot " << s
+                    << ", comp_set_slot " << cs;
+    }
+
+    std::printf( "[cartesian-taylor] m2l fused vs fallback, p = 2: worst "
+                 "|fused - fallback| = %.3e over %d keys (exact equality "
+                 "asserted) + a 3-pair accumulation\n",
+                 worst_pair, nk );
+}
+
+//---------------------------------------------------------------------------//
+// P2M -> M2L -> L2P by hand, against a direct softened sum. No FMM, no tree,
+// no sweep -- just the basis's own operators run in sequence over one source
+// box and one target box.
+//
+// THIS IS THE FIRST NUMBER THAT SAYS THE BASIS COMPUTES THE RIGHT FIELD
+// rather than a self-consistent one: every check above compares two
+// expressions built from the same b_k, while this one compares against
+// sum_j s_j / sqrt(|x - y_j|^2 + b) with no expansion in it at all.
+//
+// THE BOUND. Taylor truncation at order p goes as (c W / R)^{p+1}. W IS THE
+// BOX HALF-WIDTH here -- stated because the achieved c is only interpretable
+// against that choice, and the alternative (full width) would halve it. R is
+// the center-to-center separation. The sources sit inside |d| <= 0.48 and the
+// probes inside |a| <= 0.48 of a half-width 0.5 box, so the configuration is
+// a nearly worst-case one for its W rather than a comfortable interior
+// sample.
+//
+// The achieved c is PRINTED at every separation, which is the number T4 needs
+// to know how much margin the 1e-3 accuracy bar has at p = 2.
+//---------------------------------------------------------------------------//
+void testM2LEndToEnd()
+{
+    constexpr int P = 2;
+    using Basis = Canopy::CartesianTaylorBasis<double, P, CT2::NC>;
+    constexpr int Nco = Basis::num_coeffs_per_cell;
+    constexpr int NCS = Basis::num_comp_slots;
+
+    // Both boxes: HALF-WIDTH 0.5, i.e. full width 1.0.
+    const double Wh = 0.5;
+    const double eps = 0.025;   // softening LENGTH
+    const double bb = eps * eps;
+
+    const double c_s[3] = { 0.0, 0.0, 0.0 };
+    const double zero[3] = { 0.0, 0.0, 0.0 };
+
+    // A generic unit direction: no component of R vanishes, so no term of any
+    // odd-degree tensor drops out of the comparison.
+    const double u[3] = { 0.36, -0.48, 0.80 };
+
+    // R / W = 8, 16, 32. Canopy's MAC at theta = 0.5 admits R^2 theta^2 >
+    // 3 (w_a + w_b)^2, i.e. R > 2 sqrt(3) (w_a + w_b) = 6.93 W here, so all
+    // three are admissible and the first is close to the admissibility edge.
+    const double seps[] = { 4.0, 8.0, 16.0 };
+
+    // The pinned constant of the bound. MEASURED, not guessed: the achieved
+    // c printed below is 1.062, 0.987 and 0.939 at R/W = 8, 16 and 32
+    // (flux f3YeTspuFk3q), so 1.25 sits about 18% above the worst of them and
+    // leaves a factor 1.6 to 2.4 of margin on the error itself. Tight enough
+    // that a field wrong by a factor of two fails it; loose enough that it is
+    // a bound and not a pinned digit. Raising it to accommodate a failure
+    // would silently change what this body means -- re-measure instead, and
+    // record the new figures in the T3 entry of
+    // tasks/cartesian-taylor-basis-progress-log.md.
+    const double c_bound = 1.25;
+
+    const auto particles = CT2::buildParticles();
+
+    const double probes[4][3] = { { 0.21, -0.34, 0.11 },
+                                  { -0.46, 0.08, 0.29 },
+                                  { 0.37, 0.42, -0.18 },
+                                  { -0.12, -0.44, -0.40 } };
+
+    for ( double sep : seps )
+    {
+        const double c_t[3] = { c_s[0] + sep * u[0], c_s[1] + sep * u[1],
+                                c_s[2] + sep * u[2] };
+
+        // P2M about the source center.
+        CT2::CoeffView M( "M_e2e", 1, Nco, NCS );
+        CT2::runP2M<Basis>( M, 0, particles, zero, Wh );
+
+        // M2L: the per-pair path, handed SOURCE CENTER MINUS TARGET CENTER
+        // exactly as src/Canopy_DownwardSweep.hpp:2338-2340 computes it.
+        CT2::CoeffView L( "L_e2e", 1, Nco, NCS );
+        const double d_src_minus_tgt[3] = { c_s[0] - c_t[0], c_s[1] - c_t[1],
+                                            c_s[2] - c_t[2] };
+        CT2::runM2LTranslate<Basis>( M, 0, d_src_minus_tgt, eps, L, 0 );
+
+        double worst_abs = 0.0;
+        double scale = 0.0;
+
+        for ( const auto& a : probes )
+        {
+            double got[CT2::NC];
+            double grad[CT2::NC][3];
+            CT2::runL2P<Basis>( L, 0, a, got, grad, false );
+
+            const double x[3] = { c_t[0] + a[0], c_t[1] + a[1],
+                                  c_t[2] + a[2] };
+            double want[CT2::NC];
+            CT2::directSum( particles, c_s, x, bb, want );
+
+            for ( int c = 0; c < CT2::NC; ++c )
+            {
+                worst_abs = std::max( worst_abs, std::abs( got[c] - want[c] ) );
+                scale = std::max( scale, std::abs( want[c] ) );
+            }
+        }
+
+        const double rel = worst_abs / scale;
+        const double ratio = Wh / sep;
+        const double bound = std::pow( c_bound * ratio, P + 1 );
+        const double achieved_c =
+            std::pow( rel, 1.0 / static_cast<double>( P + 1 ) ) / ratio;
+
+        std::printf( "[cartesian-taylor] m2l end-to-end p = 2: R/W = %4.1f "
+                     "(W = HALF-WIDTH %.3f, R = %.3f, eps = %.3f) rel err "
+                     "%.4e, bound (%.2f W/R)^3 = %.4e, achieved c = %.3f\n",
+                     sep / Wh, Wh, sep, eps, rel, c_bound, bound, achieved_c );
+
+        ASSERT_LT( rel, bound )
+            << "P2M -> M2L -> L2P misses the direct softened sum by more "
+            << "than the truncation bound (c W / R)^{p+1} at p = 2. W IS THE "
+            << "BOX HALF-WIDTH (" << Wh << "), not the full width -- the "
+            << "achieved c is only interpretable against that choice. "
+            << "R = " << sep << ", R/W = " << ( sep / Wh ) << ", achieved "
+            << "c = " << achieved_c << " against the pinned c = " << c_bound
+            << ". A miss here with every convention check above passing "
+            << "points at the index map above |k| = 3 (risk R2) rather than "
+            << "at the sign or the factorials.";
+    }
+}
+
 //---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
@@ -1102,6 +2116,20 @@ TEST( cartesian_taylor, l2p_evaluation )
     testL2PEvaluation<2>();
     testL2PEvaluation<4>();
 }
+
+TEST( cartesian_taylor, m2l_ell0_closed_forms )
+{
+    testM2LEll0ClosedForms<2>();
+    testM2LEll0ClosedForms<3>();
+}
+
+TEST( cartesian_taylor, m2l_p1_contraction ) { testM2LP1Contraction(); }
+
+TEST( cartesian_taylor, m2l_parity_identity ) { testM2LParityIdentity(); }
+
+TEST( cartesian_taylor, m2l_fused_vs_fallback ) { testM2LFusedVsFallback(); }
+
+TEST( cartesian_taylor, m2l_end_to_end ) { testM2LEndToEnd(); }
 
 //---------------------------------------------------------------------------//
 // COMPILE-ONLY -- Solver instantiates on this basis, T2 step 6.
