@@ -9,1356 +9,821 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#ifndef CANOPY_TREE_HPP
-#define CANOPY_TREE_HPP
+#ifndef CANOPY_SOLVER_HPP
+#define CANOPY_SOLVER_HPP
 
-
-#include <ArborX.hpp>
-#include <Canopy_SolverLayer.hpp>
+#include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_Profiling.hpp"
+#include "Canopy_DownwardSweep.hpp"
+#include "Canopy_LaplaceKernel.hpp"
+#include "Canopy_P2P.hpp"
+#include "Canopy_TreeBuilder.hpp"
+#include "Canopy_TreePartitioner.hpp"
+#include "Canopy_UpwardSweep.hpp"
 
 #include <Cabana_Core.hpp>
-#include <Cabana_Grid.hpp>
-
 #include <Kokkos_Core.hpp>
-#include <Kokkos_Sort.hpp>
-
-#include <memory>
 
 #include <mpi.h>
 
-#include <limits>
+#include <cmath>
+#include <cstddef>
+#include <cstdio>
+#include <memory>
+#include <unordered_set>
 
 namespace Canopy
 {
 
-// https://repositorio.unesp.br/server/api/core/bitstreams/0e824479-3128-41f7-8cd2-462e9a242c42/content
+// ============================================================================
+// FmmConfig
+//
+// All FMM-pipeline configuration knobs in a single struct. The MPI
+// communicator is kept out — it is program context, not FMM behavior — so
+// the Solver constructor reads as `Solver(comm, cfg)`.
+//
+// The six bounding-box tolerances are per-face padding factors applied to
+// the global root box: `*min_tol` pads the low side of each axis, `*max_tol`
+// the high side. Each is a fraction of the axis width. A value of 0.0 means
+// "no padding on this face". Asymmetric values let workloads with different
+// boundary behavior (e.g. fixed wall at -x, free outflow at +x) match the
+// physical layout without inflating the opposite face.
+// ============================================================================
 
-// Value for no field given
-inline constexpr std::size_t no_id = static_cast<std::size_t>(-1);
+struct FmmConfig
+{
+    int ncrit;
+    int max_depth;
 
-// Container for Particle input data and mapping from slice Id to the
-// correct data unit
-template<class AoSoAType, class Scalar,
-         std::size_t PositionId,
-         std::size_t InDataId,
-         std::size_t OutDataId,
-         std::size_t ForceId = no_id>
-struct ParticleMetadata
-{   
-  using aosoa_type = AoSoAType;
-  using scalar_type = Scalar;
-  static constexpr std::size_t pos = PositionId;
-  static constexpr std::size_t in  = InDataId;
-  static constexpr std::size_t out = OutDataId;
-  static constexpr std::size_t force = ForceId;
+    double xmin_tol = 0.0;
+    double xmax_tol = 0.0;
+    double ymin_tol = 0.0;
+    double ymax_tol = 0.0;
+    double zmin_tol = 0.0;
+    double zmax_tol = 0.0;
+
+    double ncrit_tol = 0.1;
+    int replication_depth = 1;
+    double imbalance_tolerance = 0.05;
+    double mac_theta = 0.5;
+    // Negative selects distribution-based auto-softening at first setup().
+    double softening = -1.0;
+    // Near-field softening floor: the multipole far-field uses the UNSOFTENED
+    // 1/r kernel, so it is only accurate where the Plummer softening is
+    // negligible (R >> eps). Any pair closer than near_softening_factor * eps
+    // is forced to the softened near-field (P2P) instead of M2L. A larger value
+    // is more accurate (far-field relative softening error ~ 1/(2*factor^2)) but
+    // widens the near field (more P2P pairs). 0 disables the floor. Only has an
+    // effect when softening > 0.
+    double near_softening_factor = 4.0;
+
+    // Per-rank memory budget for the hashed M2L operator table, in bytes.
+    // The downward sweep builds one dense operator column per distinct
+    // translation key; this bounds how much memory that table may occupy.
+    // The cap that actually binds is the smaller of this budget's worth of
+    // columns and the sweep's M2L_OP_COUNT_CAP (32768) — see
+    // DownwardSweep::m2l_effective_op_cap(). Pairs beyond the cap are refused
+    // a column and fall back to the per-pair M2L translation, which is the
+    // same mathematics evaluated pair by pair; they are counted by
+    // DownwardSweep::total_fallback_pair_count().
+    //
+    // A column costs the basis's bytes_per_key: num_coeffs_per_cell *
+    // m2l_num_src_coeffs * sizeof(coeff_type), which is 21952 B at P = 6 and
+    // 58320 B at P = 8 in double precision. At the 2 GB default the count cap
+    // binds first at every order this solver supports, so lowering this is
+    // the only way to make the budget the binding constraint.
+    std::size_t m2l_op_table_byte_budget = 2ull * 1024ull * 1024ull * 1024ull;
 };
 
-template<class Real>
-constexpr MPI_Datatype mpi_real_type()
-{
-    if constexpr (std::is_same_v<Real, float>)  return MPI_FLOAT;
-    else if constexpr (std::is_same_v<Real, double>) return MPI_DOUBLE;
-    else if constexpr (std::is_same_v<Real, long double>) return MPI_LONG_DOUBLE;
-    else {
-        static_assert(!sizeof(Real), "Unsupported real_type for MPI");
-        return MPI_DATATYPE_NULL;
-    }
-}
+// ============================================================================
+// Solver
+//
+// Facade that owns the full FMM pipeline (TreeBuilder, TreePartitioner,
+// CommunicationPlan, UpwardSweep, DownwardSweep, P2P) and exposes the
+// minimal API a time-stepping application needs:
+//
+//   setup()          — one-time initialization
+//   solve()          — one timestep evaluation (P2M → M2M → M2L → L2L
+//                      → L2P → P2P), zeroing internal output views first
+//   migrate()        — cheapest inter-step maintenance; particles moved
+//                      but tree topology unchanged
+//   rebalance()      — moderate maintenance; topology changed but
+//                      bounding box still valid
+//   rebuild()        — heavy maintenance; full do-over
+//   auto_maintain()  — picks the cheapest valid path automatically
+//
+// Template parameters:
+//   MemorySpace, ExecutionSpace - Kokkos spaces
+//   Scalar   - field scalar type (default double)
+//   P_ORDER  - the basis's order knob: P for a solid-harmonic basis, p for
+//              Taylor, n for Chebyshev. Different quantities, same slot.
+//   NComps   - number of simultaneous solves (charge components)
+//   FarField - basis-plus-kernel composition supplying the far-field
+//              operators (default LaplaceKernel)
+// ============================================================================
 
-// MPI datatype representing Kokkos::complex<Real> as two contiguous reals.
-template<class Real>
-MPI_Datatype mpi_kokkos_complex_type()
-{
-    static_assert(std::is_floating_point_v<Real>,
-                  "mpi_kokkos_complex_type<Real>: Real must be float/scalar_type/long scalar_type");
-
-    static MPI_Datatype dt = MPI_DATATYPE_NULL;
-    static bool committed = false;
-
-    if (!committed)
-    {
-        MPI_Type_contiguous(2, mpi_real_type<Real>(), &dt);
-        MPI_Type_commit(&dt);
-        committed = true;
-    }
-    return dt;
-}
-
-template <class MemorySpace, class ExecutionSpace, class Metadata, 
-          std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
+template <class MemorySpace, class ExecutionSpace, class Scalar = double,
+          int P_ORDER = 8, int NComps = 1,
+          template <class, int, int> class FarField = LaplaceKernel>
 class Solver
 {
   public:
-    // Check metadata
-    static_assert(Metadata::pos != no_id, "metadata must define position index");
-    static_assert(Metadata::in != no_id, "metadata must define in_data index");
-    static_assert(Metadata::out != no_id, "metadata must define out_data index");
-
-    using metadata = Metadata;
-
     using memory_space = MemorySpace;
     using execution_space = ExecutionSpace;
-    
-    //! Self type
-    using solver_type = Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>;
 
-    //! Memory space size type
-    using size_type = typename memory_space::size_type;
-    //! Dimension number
-    static constexpr std::size_t num_space_dim = 3;
-    //! Scalar type
-    using scalar_type = typename metadata::scalar_type;
-    //! Mesh type
-    using mesh_type = Cabana::Grid::SparseMesh<scalar_type, num_space_dim>;
+    using kernel_type = FarField<Scalar, P_ORDER, NComps>;
+    using builder_type = TreeBuilder<MemorySpace, ExecutionSpace>;
+    using partitioner_type = TreePartitioner<MemorySpace, ExecutionSpace>;
+    using comm_plan_type = CommunicationPlan<MemorySpace, ExecutionSpace>;
+    using upward_type = UpwardSweep<MemorySpace, ExecutionSpace, kernel_type>;
+    using downward_type =
+        DownwardSweep<MemorySpace, ExecutionSpace, kernel_type>;
+    using p2p_type = P2P<MemorySpace, ExecutionSpace, kernel_type>;
 
-    static constexpr std::size_t cell_per_tile_dim = CellPerTileDim;
+    using potential_view_type = typename downward_type::potential_view_type;
+    using gradient_view_type = typename downward_type::gradient_view_type;
 
-    //! AoSoA related types
-    //! MemberType Data types
-    //! Cell x/y/z center
-    static constexpr int p = ExpansionCutoff;
-    using complex = Kokkos::complex<scalar_type>;
-    // MemberType must be trivially copyable, so we cannot use complex.
-    // Instead, store as two doubles
-    // Multipoles are stored with cell center position, locals are stored with cell ijk position
-    using multipole_member_types = Cabana::MemberTypes<scalar_type[(p+1)*(p+1)][2], scalar_type[3]>;
-    using local_member_types = Cabana::MemberTypes<scalar_type[(p+1)*(p+1)][2], int[3]>;
-    //! AoSoA Tuple type
-    using multipole_tuple_type = Cabana::Tuple<multipole_member_types>;
-    using local_tuple_type = Cabana::Tuple<local_member_types>;
-    using multipole_aosoa_type = Cabana::AoSoA<multipole_member_types, memory_space, cell_per_tile_dim>;
-    using local_aosoa_type = Cabana::AoSoA<local_member_types, memory_space, cell_per_tile_dim>;
-
-    //! Particle data
-    using particle_aosoa_type = typename metadata::aosoa_type;
-    
-    Solver( const std::array<scalar_type, 3>& global_low_corner,
-          const std::array<scalar_type, 3>& global_high_corner,
-          const std::size_t leaf_tiles_per_dim,
-          const std::size_t tile_reduction_factor,
-          MPI_Comm comm )
-        : _global_low_corner( global_low_corner )
-        , _global_high_corner( global_high_corner )
-        , _leaf_tiles_per_dim( leaf_tiles_per_dim )
-        , _tile_reduction_factor( tile_reduction_factor )
-        , _root_tiles_per_dim( 1 )
-        , _comm( comm )
+    enum class MaintenanceAction
     {
-        MPI_Comm_rank( comm, &_rank );
-        MPI_Comm_size( comm, &_comm_size );
-
-        // Reserve space for 10 layers
-        _tree.reserve(10);
-        
-        /*
-        Steps:
-        1. Initially partition based on the 2D partition of the surface.
-        2. Register sparse grid using positions.
-        3. Optimize partitioner.
-        4. Re-register sparse grid.
-        5. Use Distributor to send particles to their rank of ownership in the new partition.
-        6. Aggregate data (vorticities) into cells based on particles that reside in the cell.
-        */
-    }
-
-    /**
-     * Reset state from previous calls to solve on a Solver object
-     */
-    void reset()
-    {
-        _tree.clear();
-    }
-    
-    void add_layer(const int tiles_per_dim, const int halo_width, const int layer_num)
-    {
-        // printf("L%d: cell_per_dim: %d\n", layer_num, cell_per_tile_dim * tiles_per_dim);
-        auto layer = createSolverLayer<solver_type, cell_per_tile_dim>(
-            _global_low_corner, _global_high_corner, tiles_per_dim, _tile_reduction_factor, halo_width, layer_num, _comm);
-        _tree.push_back(layer);
-    }
-
-    void build()
-    {
-        if (_tile_reduction_factor < 2)
-            throw std::runtime_error("Canopy::Solver::build: _tile_reduction_factor must be greater than 1.\n");
-
-        int layer_num = 0;
-
-        std::size_t next_layer_tiles_per_dim = _leaf_tiles_per_dim;
-        add_layer(next_layer_tiles_per_dim, 2, layer_num++);
-
-        // Calculate the depth of the tree
-        int depth = 0;
-        while (next_layer_tiles_per_dim > _root_tiles_per_dim)
-        {
-            depth++;
-            next_layer_tiles_per_dim = static_cast<std::size_t>(next_layer_tiles_per_dim / _tile_reduction_factor);
-            if (next_layer_tiles_per_dim == 0) next_layer_tiles_per_dim = 1;
-            add_layer(next_layer_tiles_per_dim, 2, layer_num++);
-            
-        }
-    }
-
-    /**
-     * Populate a Kokkos::View that maps to the passed-in AoSoA to the rank
-     * each particle should be migrated to based on its x/y/z position.
-     * Maps particles according to a specific layer of the tree
-     */
-    template <class ViewType, class PositionSliceType>
-    void mapParticles(const PositionSliceType& positions, ViewType& particle_ranks,
-                      const std::size_t particle_num, const int layer, const bool run_load_balance)
-    {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::mapParticles");
-
-        using mem_space = typename ViewType::memory_space;
-        using exec_space = typename ViewType::execution_space;
-
-        // Load balance the partition if requested.
-        auto tree_layer = _tree[layer];
-        if (run_load_balance)
-        {
-            tree_layer->optimizePartition(positions, particle_num);
-        }
-
-        // Get all rank domains on host
-        auto domain_bounds = tree_layer->domains();
-        const int comm_size = _comm_size;
-
-        // Flag for cell centers that may be outside of the domain.
-        // This will happen if the domain does not have integer-value
-        // high and low points.
-        Kokkos::View<int, memory_space> is_out_of_bounds("is_out_of_bounds");
-        Kokkos::deep_copy(is_out_of_bounds, 0);
-
-        Kokkos::parallel_for(
-            "Canopy::Solver::mapParticles loop",
-            Kokkos::RangePolicy<exec_space>(0, particle_num),
-            KOKKOS_LAMBDA(const int i) {
-                const scalar_type xpos = positions(i, 0);
-                const scalar_type ypos = positions(i, 1);
-                const scalar_type zpos = positions(i, 2);
-
-                // Linear search: check each rank domain
-                for (int r = 0; r < comm_size; ++r)
-                {
-                    const scalar_type x_lo = domain_bounds(r, 0);
-                    const scalar_type y_lo = domain_bounds(r, 1);
-                    const scalar_type z_lo = domain_bounds(r, 2);
-                    const scalar_type x_hi = domain_bounds(r, 3);
-                    const scalar_type y_hi = domain_bounds(r, 4);
-                    const scalar_type z_hi = domain_bounds(r, 5);
-
-                    // Non-inclusive upper bound
-                    if (xpos >= x_lo && xpos < x_hi &&
-                        ypos >= y_lo && ypos < y_hi &&
-                        zpos >= z_lo && zpos < z_hi)
-                    {
-                        particle_ranks(i) = r;
-                        return;
-                    }
-                }
-
-                // If no domain was found, mark as invalid
-                particle_ranks(i) = -1;
-                Kokkos::atomic_store(&is_out_of_bounds(), 1);
-            });
-
-            int out_of_bounds;
-            Kokkos::deep_copy(out_of_bounds, is_out_of_bounds);
-            if (out_of_bounds)
-            {
-                throw std::runtime_error("Canopy::Solver:MapParticles: particle or cell center is out of bounds.");
-            }
-    }
-
-    /*
-     Set the root layer. At (root layer - 1) there one tile per dimension,
-     but since there are still multiple cells per tile, there must be one
-     final aggregation step to translate and add multipoles into a single
-     set of coefficients at the root. Since the root layer is a single set of
-     multipole coefficients that is not distributed, store the root layer data
-     in this object instyead of a SolverLayer.
-    */
-    void initializeRootLayer()
-    {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::initializeRootLayer");
-
-        // One rank holds all the data in the layer below the root because
-        // there is only one tile per dimensions and therefore no
-        // distributed partitioning.
-        if(_tree.empty())
-        {
-            throw std::runtime_error("Canopy::Solver::initializeRootLayer: function called with an empty tree.");
-        }
-
-        // Initialize _M_root
-        _M_root = Kokkos::View<complex[(p+1)*(p+1)], memory_space>("_M_root");
-
-        // DEBUG: Set top layer to first layer
-        auto top_layer = _tree.back();
-
-        auto multipoles = top_layer->multipoles();
-        std::size_t cells_activated = top_layer->numCells();
-        auto multipole_coefficients_slice = Cabana::slice<0>(multipoles);
-        auto cell_center_slice = Cabana::slice<1>(multipoles);
-        
-        // Save cell centers for multipole translations
-        Kokkos::View<scalar_type*[3], memory_space> incoming_cell_centers("incoming_cell_centers", cells_activated);
-
-        // Save multipole coefficients.
-        static constexpr std::size_t num_coefficients = (p+1) * (p+1);
-        Kokkos::View<complex*, memory_space> M_children("M_children", num_coefficients * cells_activated);
-
-        // Offset for filling M_children.
-        Kokkos::View<std::size_t, memory_space> idx("idx");
-        Kokkos::deep_copy(idx, 0);
-
-        // The center of expansion at the root layer is the center of the domain.
-        Kokkos::Array<scalar_type, 3> domain_center;
-        for (int d = 0; d < 3; ++d)
-            domain_center[d] = _global_low_corner[d] + 0.5 * (_global_high_corner[d] - _global_low_corner[d]);
-
-        // Iterate over all activated cells
-        Kokkos::parallel_for(
-        "Canopy::Solver::initializeRootLayer loop",
-        Kokkos::RangePolicy<execution_space>( 0, cells_activated ),
-        KOKKOS_LAMBDA( const int index ) {
-            // printf("R%d: checking index %d\n", rank, index);
-            
-            // Save the incoming cell center.
-            for (int j = 0; j < 3; ++j)
-                incoming_cell_centers(index, j) = cell_center_slice(index, j);
-
-            // Save multipole coefficients
-            auto offset_M_base = index * num_coefficients;
-            for (std::size_t j = 0; j < num_coefficients; ++j)
-            {
-                scalar_type real_part = multipole_coefficients_slice(index, j, 0);
-                scalar_type imag_part = multipole_coefficients_slice(index, j, 1);
-                M_children(offset_M_base + j) = complex(real_part, imag_part);
-            }
-        
-        } );
-
-        Kokkos::fence();
-
-        // Copy cell centers and multipole coefficients to host
-        auto incoming_cell_centers_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), incoming_cell_centers);
-        auto M_children_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), M_children);
-
-        // Create objects needed for translation of multipole coefficients.
-        Canopy::Operator::Scalar::M2M<Kokkos::HostSpace, Kokkos::DefaultHostExecutionSpace, scalar_type> m2m( p );
-
-        // Iterate over each incoming data.
-        for (std::size_t i = 0; i < cells_activated; ++i)
-        {
-            // Create subview of correct multipole coefficients
-            auto sub_M = Kokkos::subview(M_children_h, Kokkos::make_pair(i * num_coefficients, (i+1)*num_coefficients));
-
-            // Create Kokkos:Array of vector pointing from child cell center to cell center.
-            Kokkos::Array<scalar_type, 3> vector_to_center;
-            Kokkos::Array<scalar_type, 3> child_center = {incoming_cell_centers_h(i, 0),
-                incoming_cell_centers_h(i, 1), incoming_cell_centers_h(i, 2)};
-            
-            for (int j = 0; j < 3; ++j)
-                vector_to_center[j] = (domain_center[j] - child_center[j])*-1;
-
-            // Translate and add coefficients.
-            m2m(sub_M, vector_to_center);
-        }
-
-        // Set _M_root
-        Kokkos::deep_copy(_M_root, m2m.coefficients());
-
-        // Determine which rank owns the (root layer - 1) tiles
-        std::vector<std::size_t> sendbuf(_comm_size, cells_activated);
-        std::vector<std::size_t> recvbuf(_comm_size, 0);
-        MPI_Alltoall(sendbuf.data(), 1, MPI_UNSIGNED_LONG_LONG,
-                    recvbuf.data(), 1, MPI_UNSIGNED_LONG_LONG,
-                    _comm);
-
-        // Now recvbuf[r] contains cells_activated for rank r.
-        // Find the rank with a non-zero value.
-        int root = -1;
-        for (int r = 0; r < _comm_size; ++r)
-        {
-            if (recvbuf[r] != 0)
-            {
-                root = r;
-                break;
-            }
-        }
-        if (root == -1)
-        {
-            throw std::runtime_error("Canopy::Solver::initializeRootLayer: No rank has non-empty map size!");
-        }
-
-        // Now broadcast the data from the root.
-        int count = static_cast<int>(_M_root.size());
-        MPI_Bcast(_M_root.data(), count, mpi_kokkos_complex_type<scalar_type>(), root, _comm);
-    }
-
-
-    /**
-     * Assumes all particles in 'data' are owned by this rank; i.e., particles have already been
-     * distributed to their correct owner rank
-     * 
-     * Assumes x/y/z coordinates are the first tuple element in "data"
-     */
-    void create_multipoles(std::shared_ptr<particle_aosoa_type> external_data, bool run_load_balance)
-    {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::create_multipoles");
-
-        // Data comes from externally to populate leaf layer (layer 0)
-        _leaf_particles = external_data;
-        migrateParticleData(*_leaf_particles, run_load_balance);
-
-        // Set out data to 0
-        auto out_data_slice = Cabana::slice<metadata::out>(*_leaf_particles);
-        Cabana::deep_copy(out_data_slice, 0.0);
-
-        // Owned particles are the number of leaf particles
-        _owned_particles = _leaf_particles->size();
-
-        _tree[0]->populateCells(*_leaf_particles, 0, _leaf_particles->size());
-        for (std::size_t i = 1; i < _tree.size(); i++)
-        {
-            migrateAndSetLayer(i-1, i, run_load_balance);
-        }
-        initializeRootLayer();
-    }
-
-    /**
-     * Migrate particle data to the rank that owns them at the leaf layer.
-     */
-    void migrateParticleData(particle_aosoa_type& external_data, bool run_load_balance)
-    {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::migrateParticleData");
-
-        auto positions = Cabana::slice<metadata::pos>(external_data);
-        Kokkos::View<int*, memory_space> layer_owner("layer_owner", external_data.size());
-        mapParticles(positions, layer_owner, external_data.size(), 0, run_load_balance);
-        Cabana::Distributor<MemorySpace> distributor(_comm, layer_owner);
-        Cabana::migrate( distributor, external_data );
-    }
-
-    /**
-     * Used to internally migrate and aggregate multipoles from one layer to the next.
-     * Use position_slice_id slice for positions.
-     */
-    void migrateAndSetLayer(int from_layer, int to_layer, bool run_load_balance)
-    {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::migrateAndSetLayer");
-
-        // Communicate cell data
-        auto f_layer = _tree[from_layer];
-        auto num_cells = f_layer->numCells();
-        auto multipoles = f_layer->multipoles();
-        auto positions = Cabana::slice<1>(multipoles);
-        Kokkos::View<int*, memory_space> export_ranks("export_ranks", num_cells);
-
-        // printf("From layer %d: num cells: %d\n", from_layer, num_cells);
-
-        // All coefficients are haloed, so ids is just the index
-        Kokkos::View<int*, memory_space> export_ids("ids", num_cells);
-        Kokkos::parallel_for(
-            "fill_export_ids",
-            Kokkos::RangePolicy<execution_space>(0, export_ids.extent(0)),
-            KOKKOS_LAMBDA(const int i)
-            {
-                export_ids(i) = i;
-            }
-        );
-
-        mapParticles(positions, export_ranks, num_cells, to_layer, run_load_balance);
-
-        // Create halo
-        Cabana::Halo<memory_space> halo( _comm, num_cells, export_ids,
-                                    export_ranks );
-
-        // Resize multipole AoSoA for gather
-        multipoles.resize(halo.numLocal() + halo.numGhost());
-
-        // Gather
-        Cabana::gather( halo, multipoles );
-
-        _tree[to_layer]->populateCells(multipoles, halo.numLocal(), halo.numLocal() + halo.numGhost());
-    }
-
-    struct FirstValidLayerInfo
-    {
-        int layer = -1;
-        int cells_per_dim = 0;
+        Migrate,
+        Rebalance,
+        Rebuild
     };
 
-    FirstValidLayerInfo firstValidMultipoleLayerInfo() const
+    // -----------------------------------------------------------------------
+    // Constructor
+    // -----------------------------------------------------------------------
+    // softening: near-field Plummer softening length. Bounds the pairwise
+    //   force for close encounters so a divergent acceleration cannot fling a
+    //   particle out of the domain and degenerate the next tree build (an
+    //   unsoftened run on a clustering system escapes the bounding box, forces
+    //   a rebuild into a pathological tree, and corrupts the M2L exchange).
+    //
+    //   Pass softening >= 0 to set it explicitly (0 = unsoftened, opt-in).
+    //   Pass softening < 0 (the DEFAULT) to auto-derive it from the particle
+    //   distribution at setup() time as
+    //       eps = SOFTENING_FACTOR * (V / N)^(1/3)
+    //   i.e. a fraction of the mean inter-particle spacing, where V is the
+    //   global bounding-box volume and N the total particle count. Computed
+    //   once at the first setup() and held fixed thereafter (see README for
+    //   the rationale and the future option to recompute per rebuild).
+    Solver( MPI_Comm comm, const FmmConfig& cfg )
+        : _comm( comm )
+        , _replication_depth( cfg.replication_depth )
+        , _builder( comm, cfg.ncrit, cfg.max_depth,
+                    std::array<double, 6>{ cfg.xmin_tol, cfg.xmax_tol,
+                                           cfg.ymin_tol, cfg.ymax_tol,
+                                           cfg.zmin_tol, cfg.zmax_tol },
+                    cfg.ncrit_tol )
+        , _partitioner( comm, cfg.replication_depth, cfg.imbalance_tolerance )
+        , _comm_plan( comm, cfg.mac_theta )
+        , _upward( comm )
+        , _downward( comm )
+        , _p2p( comm )
+        , _num_local( 0 )
+        , _softening_input( cfg.softening )
+        , _near_softening_factor( cfg.near_softening_factor )
+        , _softening_initialized( false )
     {
-        const int starting_layer = static_cast<int>(_tree.size()) - 1;
+        // Memory budget for the M2L operator table. Routed to the downward
+        // sweep here rather than through setup(), beside the other two config
+        // knobs a subsystem has to be told about; the sweep's own default
+        // applies to a sweep driven directly by a test.
+        _downward.set_m2l_op_table_byte_budget( cfg.m2l_op_table_byte_budget );
 
-        for (int L = starting_layer; L >= 0; --L)
+        // Explicit softening (including an explicit 0 for an unsoftened run):
+        // apply it now. A negative value defers to the distribution-based
+        // auto-softening computed in _full_setup().
+        if ( cfg.softening >= 0.0 )
         {
-            const auto cpd = static_cast<int>(_tree[L]->cellsPerDim());
-            if (cpd >= 4)
-                return {L, cpd};
+            _p2p.set_softening( static_cast<Scalar>( cfg.softening ) );
+            // Widen the near-field so the unsoftened multipole far-field stays
+            // accurate (M2L only beyond factor*eps; closer pairs use softened
+            // P2P).
+            _comm_plan.set_near_softening( cfg.softening,
+                                           _near_softening_factor );
+            // ...and tell the sweeps, so a basis whose M2L operators or
+            // auxiliary tables depend on the kernel builds them for THIS
+            // softening. One number reaches all four subsystems, as a LENGTH
+            // (P2P squares it into eps^2 itself), so they cannot disagree
+            // about the convention. See _push_m2l_kernel_params.
+            _push_m2l_kernel_params( cfg.softening );
+            _softening_initialized = true;
         }
-
-        return {};
     }
 
-    /**
-     * For each layer, convert multipole coefficients to local coefficients centered
-     * around each cell.
-     */
-    void multipole_to_local()
+    // -----------------------------------------------------------------------
+    // setup(): one-time pipeline initialization.
+    //
+    //   build → partition → build → sort_by_leaf → build → comm_plan.build
+    //   → upward.setup → downward.setup → p2p.setup
+    //
+    // After setup() the AoSoA has been permuted (particles grouped by leaf)
+    // and migrated to its owning rank. The caller's num_local_particles is
+    // the count BEFORE migration.
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, int ChargeIdx, class AoSoA>
+    void setup( AoSoA& particles, int num_local_particles_before )
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::multipole_to_local");
-
-        const auto first_valid_layer_info = firstValidMultipoleLayerInfo();
-        const int first_valid_layer = first_valid_layer_info.layer;
-        const int starting_cells_per_dimension =
-            first_valid_layer_info.cells_per_dim;
-
-        if (first_valid_layer < 0)
-        {
-            printf("No valid multipole layers (need >= 4 cells per dimension)\n");
-            return;
-        }
-
-        // Data structures for haloing and translating locals vertically
-        local_aosoa_type halo_data("halo_data", 0);
-
-        // Compute locals at first valid layer
-        _tree[first_valid_layer]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
-
-        for (int L = first_valid_layer - 1; L >= 0; --L)
-        {
-            // Get the computed locals at the layer above L (more coarse layer)
-            _tree[L + 1]->sendCoarseLocals(halo_data, _tree[L]->domains());
-
-            // Add these locals to layer L
-            _tree[L]->addCoarseLocals(halo_data);
-
-            // Compute locals at layer L
-            _tree[L]->multipole_to_local(starting_cells_per_dimension, first_valid_layer);
-        }
+        _full_setup<PositionIdx, ChargeIdx>( particles,
+                                             num_local_particles_before );
     }
 
-    void haloParticles()
+    // -----------------------------------------------------------------------
+    // solve(): one FMM + P2P evaluation against the current particle state.
+    // Outputs are accumulated into internally-owned views (zeroed first).
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, int ChargeIdx, class AoSoA>
+    void solve( AoSoA& particles, bool compute_gradient )
     {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::haloParticles");
+        auto positions = Cabana::slice<PositionIdx>( particles );
+        auto charges = Cabana::slice<ChargeIdx>( particles );
 
-        auto leaf_cell_size = _tree[0]->cellSize();
-        auto leaf_cell_per_dim = _tree[0]->cellsPerDim();
-        auto cell_base = _tree[0]->cell_offsets();
-        auto cell_offsets = _tree[0]->num_owned_cell();
-        auto positions = Cabana::slice<metadata::pos>(*_leaf_particles);
+        // Resize/zero output views to current local count
+        if ( static_cast<int>( _potential.extent( 0 ) ) != _num_local )
+            _potential = potential_view_type( "fmm_potential", _num_local );
+        Kokkos::deep_copy( _potential, Scalar( 0 ) );
 
-        const int rank = _rank;
-        const int comm_size = _comm_size;
-        const int cell_incr_factor = static_cast<int>(_tile_reduction_factor);
+        if ( compute_gradient )
+        {
+            if ( static_cast<int>( _gradient.extent( 0 ) ) != _num_local )
+                _gradient = gradient_view_type( "fmm_gradient", _num_local );
+            Kokkos::deep_copy( _gradient, Scalar( 0 ) );
+        }
+        else if ( _gradient.extent( 0 ) != 0 )
+        {
+            _gradient = gradient_view_type( "fmm_gradient", 0 );
+        }
 
-        const auto first_valid_layer_info = firstValidMultipoleLayerInfo();
-        const int direct_start_layer = first_valid_layer_info.layer;
-        const int direct_start_cpd = first_valid_layer_info.cells_per_dim;
-        const bool direct_all_pairs = direct_start_layer < 0;
+        double _t0 = CANOPY_WTIME();
+        _upward.execute( charges, positions, _comm_plan );
+        double _t_up = CANOPY_WTIME() - _t0;
 
-        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
+        _t0 = CANOPY_WTIME();
+        _downward.execute( _upward.multipoles(), positions, _potential,
+                           _gradient, compute_gradient, _comm_plan );
+        double _t_dn = CANOPY_WTIME() - _t0;
 
-        // Build the rank halo domains from the same direct-interaction bounds
-        // used in computeP2P so the direct/M2L split stays consistent.
-        using domain_type = Kokkos::View<int*[6], memory_space>;
-        domain_type halo_domains("halo_domains", _comm_size);
-        Kokkos::parallel_for("Canopy::Solver::compute halo domains",
-            Kokkos::RangePolicy<execution_space>(0, _comm_size),
-            KOKKOS_LAMBDA(const int r)
-            {
-                if (direct_all_pairs)
-                {
-                    for (int i = 0; i < 3; ++i)
-                    {
-                        halo_domains(r, i) = 0;
-                        halo_domains(r, i + 3) = leaf_cell_per_dim;
-                    }
-                    return;
-                }
+        _t0 = CANOPY_WTIME();
+        _p2p.execute( positions, charges, _potential, _gradient,
+                      compute_gradient );
+        double _t_p2p = CANOPY_WTIME() - _t0;
 
-                bool rank_has_cells = true;
-                Kokkos::Array<int, 3> rank_low_cell;
-                Kokkos::Array<int, 3> rank_high_cell;
-                for (int i = 0; i < 3; ++i)
-                {
-                    rank_low_cell[i] = cell_base(r, i);
-                    rank_has_cells = rank_has_cells && (cell_offsets(r, i) > 0);
-                    rank_high_cell[i] =
-                        cell_base(r, i) + cell_offsets(r, i) - 1;
-                }
-
-                if (!rank_has_cells)
-                {
-                    for (int i = 0; i < 3; ++i)
-                    {
-                        halo_domains(r, i) = 0;
-                        halo_domains(r, i + 3) = 0;
-                    }
-                    return;
-                }
-
-                const auto lower_bounds =
-                    cell2Bound(rank_low_cell, 0, direct_start_layer,
-                               direct_start_cpd, cell_incr_factor)
-                        .second;
-                const auto upper_bounds =
-                    cell2Bound(rank_high_cell, 0, direct_start_layer,
-                               direct_start_cpd, cell_incr_factor)
-                        .second;
-
-                for (int i = 0; i < 3; ++i)
-                {
-                    halo_domains(r, i) = lower_bounds[i];
-                    halo_domains(r, i + 3) = upper_bounds[i + 3];
-                }
-            }
-        );
-
-        // Iterate over particles. If we have a particle that falls within another ranks' halo
-        // domain, we must halo it.
-
-        // First, count the number of particles that must be haloed.
-        Kokkos::View<std::size_t, memory_space> num_halos("num_halos");
-        Kokkos::deep_copy(num_halos, 0);
-        Kokkos::parallel_for("Canopy::Solver::count halo particles",
-            Kokkos::RangePolicy<execution_space>(0, _leaf_particles->size()),
-            KOKKOS_LAMBDA(const int pid)
-            {
-                const scalar_type x = positions(pid, 0);
-                const scalar_type y = positions(pid, 1);
-                const scalar_type z = positions(pid, 2);
-
-                auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
-
-                std::size_t local_count = 0;
-
-                for (std::size_t r = 0; r < comm_size; r++)
-                {
-                    if (r == rank)
-                        continue;
-
-                    const bool inside =
-                        (cell_ijk[0] >= halo_domains(r, 0) && cell_ijk[0] < halo_domains(r, 3)) &&
-                        (cell_ijk[1] >= halo_domains(r, 1) && cell_ijk[1] < halo_domains(r, 4)) &&
-                        (cell_ijk[2] >= halo_domains(r, 2) && cell_ijk[2] < halo_domains(r, 5));
-
-                    if (inside)
-                        local_count++;        
-                }
-
-                if (local_count > 0)
-                    Kokkos::atomic_add(&num_halos(), local_count);
-            });
-
-        std::size_t num_halos_h;
-        Kokkos::deep_copy(num_halos_h, num_halos);
-
-        // Now save which particles go to which ranks
-        // XXX - optimize this to reduce atomics
-        Kokkos::deep_copy(num_halos, 0);
-        Cabana::AoSoA<Cabana::MemberTypes<int, int>, memory_space, 4> ids_ranks("ids_ranks", num_halos_h);
-        auto id_slice = Cabana::slice<0>(ids_ranks);
-        auto rank_slice = Cabana::slice<1>(ids_ranks);
-        Kokkos::parallel_for("Canopy::Solver::fill halo particles",
-            Kokkos::RangePolicy<execution_space>(0, _leaf_particles->size()),
-            KOKKOS_LAMBDA(const int pid)
-            {
-                const scalar_type x = positions(pid, 0);
-                const scalar_type y = positions(pid, 1);
-                const scalar_type z = positions(pid, 2);
-                auto cell_ijk = position2ijk(x, y, z, low_corner, leaf_cell_size);
-
-                for (std::size_t r = 0; r < comm_size; r++)
-                {
-                    if (r == rank)
-                        continue;
-
-                    const bool inside =
-                        (cell_ijk[0] >= halo_domains(r, 0) && cell_ijk[0] < halo_domains(r, 3)) &&
-                        (cell_ijk[1] >= halo_domains(r, 1) && cell_ijk[1] < halo_domains(r, 4)) &&
-                        (cell_ijk[2] >= halo_domains(r, 2) && cell_ijk[2] < halo_domains(r, 5));
-
-                    if (inside)
-                    {
-                        auto index = Kokkos::atomic_fetch_add(&num_halos(), 1);
-                        id_slice(index) = pid;
-                        rank_slice(index) = r;
-                    }   
-                }
-            });
-        
-        // Now halo the particles
-        Cabana::Halo<memory_space> halo( _comm, _leaf_particles->size(), id_slice,
-                                    rank_slice );
-        std::size_t num_local = halo.numLocal();
-        _leaf_particles->resize(halo.numLocal() + halo.numGhost());
-        Cabana::gather(halo, *_leaf_particles);
-
-        // Save owned and ghost information
-        _owned_particles = halo.numLocal();
-        _ghost_particles = halo.numGhost();
+        CANOPY_PRINT_SOLVE_BREAKDOWN( _comm, _t_up, _t_dn, _t_p2p );
     }
 
-    template<class TripleScalarSlice, class SingleScalarSlice, class LocalsSlice, class IJK2Index>
-    struct ComputeWithLocals
+    // -----------------------------------------------------------------------
+    // migrate(): cheapest maintenance. Tree topology assumed unchanged;
+    // only particle positions shifted (possibly across ranks).
+    //
+    //   redistribute → build → sort_by_leaf → build
+    //   → upward.setup → downward.setup → p2p.setup
+    //
+    // comm_plan is reused when topology is confirmed stable. If build()
+    // detects a topology change (bounding-box drift can shift cell
+    // boundaries past nearby particles), falls back to
+    // _finish_topology_change so the comm_plan is rebuilt before the
+    // next solve.
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, class AoSoA>
+    RedistributeResult migrate( AoSoA& particles )
     {
-        TripleScalarSlice positions;
-        TripleScalarSlice force;
-        SingleScalarSlice scalars;
-        SingleScalarSlice potentials;
-        LocalsSlice locals;
-        IJK2Index ijk2index;
-        Kokkos::Array<scalar_type, 3> cell_size;
-        Kokkos::Array<scalar_type, 3> low_corner;
-        int p;
-
-        // Constructor without force
-        ComputeWithLocals(TripleScalarSlice positions_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
-            LocalsSlice locals_, const IJK2Index& ijk2index_,
-            Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
-            int p_)
-            : positions(positions_)
-            , scalars(scalars_)
-            , potentials(potentials_)
-            , locals(locals_)
-            , ijk2index(ijk2index_)
-            , cell_size(cell_size_)
-            , low_corner(low_corner_)
-            , p(p_)
-            {}
-
-        // Constructor with force
-        ComputeWithLocals(TripleScalarSlice positions_, TripleScalarSlice force_, SingleScalarSlice scalars_, SingleScalarSlice potentials_,
-            LocalsSlice locals_, const IJK2Index& ijk2index_,
-            Kokkos::Array<scalar_type, 3> cell_size_, Kokkos::Array<scalar_type, 3> low_corner_,
-            const int p_)
-            : positions(positions_)
-            , force(force_)
-            , scalars(scalars_)
-            , potentials(potentials_)
-            , locals(locals_)
-            , ijk2index(ijk2index_)
-            , cell_size(cell_size_)
-            , low_corner(low_corner_)
-            , p(p_)
-            {}
-
-        KOKKOS_INLINE_FUNCTION
-        void operator()(const int tpi) const
+        CANOPY_RESET_TIMERS();
+        RedistributeResult result{};
         {
-            // Get the cell this point falls into
-            Kokkos::Array<std::size_t, 3> target_cell_ijk;
-            for (int dim = 0; dim < 3; ++dim)
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_MIGRATE_TOTAL );
+
+            // Snapshot the current cell-key set before rebuilding the tree.
+            std::unordered_set<MortonKey> old_keys;
+            old_keys.reserve( _builder.cells().size() );
+            for ( const auto& c : _builder.cells() )
+                old_keys.insert( c.key );
+
+            // Rebuild tree from current positions (also recomputes bounding box).
+            { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+              auto positions = Cabana::slice<PositionIdx>( particles );
+              _builder.build( positions, _num_local ); }
+
+            // If the topology changed the existing comm_plan is invalid.
+            // Fall back to the full topology-change path so it is rebuilt.
+            bool topology_changed = ( _builder.cells().size() != old_keys.size() );
+            if ( !topology_changed )
             {
-                target_cell_ijk[dim] = static_cast<std::size_t>(
-                    Kokkos::floor((positions(tpi, dim) - low_corner[dim]) / cell_size[dim]) );
-            }
-
-            // Only continue if this cell exists in the mesh.
-            // It always should.
-            auto cell_exists = ijk2index.exists(target_cell_ijk);
-            if (!cell_exists)
-                return;
-
-            // Center of local expansion is the cell center
-            Kokkos::Array<scalar_type, 3> l_center;
-            for (int i = 0; i < 3; i++)
-                l_center[i] = low_corner[i] + (static_cast<scalar_type>(target_cell_ijk[i]) + 0.5) * cell_size[i];
-
-            // Convert target point to spherical coordinates relative to local center
-            scalar_type r, theta, phi;
-            Canopy::Operator::cart2sph( positions(tpi, 0) - l_center[0],
-                                    positions(tpi, 1) - l_center[1],
-                                    positions(tpi, 2) - l_center[2],
-                                    r, theta, phi );
-
-            auto ijk2l_index = ijk2index.find(target_cell_ijk);
-            auto local_index = ijk2index.value_at(ijk2l_index);
-
-            // Accumulate potential using locals, and forces if enabled
-            scalar_type potential_accumulator = 0.0;
-            Kokkos::Array<scalar_type, 3> force_accumulator = {0.0, 0.0, 0.0};
-            for ( int n = 0; n <= p; n++ )
-            {
-                for ( int m = -n; m <= n; m++ )
+                for ( const auto& c : _builder.cells() )
                 {
-                    int idx = Operator::Scalar::index( n, m );
-
-                    // Greengard eq. 3.59
-                    complex L_nm = complex(locals(local_index, idx, 0), locals(local_index, idx, 1));
-                    complex Y_nm = Operator::Scalar::Ynm( n, m, theta, phi );
-
-                    // Potential accumulator
-                    potential_accumulator += (L_nm * Kokkos::pow( r, n ) * Y_nm).real();
-                            
-                    // Force accumulator
-                    if constexpr (metadata::force != no_id)
+                    if ( old_keys.find( c.key ) == old_keys.end() )
                     {
-                        // d_dr term. Operator guards against r ~ 0. Kokkos::pow(r, n) term not
-                        // included in operator
-                        force_accumulator[0] += (L_nm * Operator::Scalar::d_dr(r, n, static_cast<scalar_type>(Kokkos::pow( r, n )) * Y_nm)).real();
-
-                        // d_dtheta term
-                        force_accumulator[1] += (L_nm * Kokkos::pow( r, n ) * Operator::Scalar::d_dtheta(r, theta, phi, n, m)).real();
-
-                        // d_dphi term. Kokkos::pow(r, j) term not included in operator.
-                        force_accumulator[2] += (L_nm * Operator::Scalar::d_dphi(m, static_cast<scalar_type>(Kokkos::pow( r, n )) * Y_nm)).real();
+                        topology_changed = true;
+                        break;
                     }
                 }
             }
-            potentials(tpi) += potential_accumulator;
-            if constexpr (metadata::force != no_id)
+
+            if ( topology_changed )
             {
-                // Convert potentials in spherical coordinates to potentials in cartesian coordinates.
-                auto cart_pot = Operator::partials_to_cartesian_gradient(force_accumulator, r, theta, phi);
-
-                // Accumulate and multiply by scalar in_data to get force: F = ma
-                for (int d = 0; d < 3; d++)
-                    force(tpi, d) += -1.0 * scalars(tpi) * cart_pot[d];
-            }
-                
-        }
-    };
-
-    /**
-     * Take the locals from the leaf layer and convert them into potentials at each particle.
-     */
-    void computeL2P()
-    {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::computeL2P");
-
-        // int rank = _rank;
-
-        auto positions = Cabana::slice<metadata::pos>(*_leaf_particles);
-        auto scalars = Cabana::slice<metadata::in>(*_leaf_particles);
-        auto potentials = Cabana::slice<metadata::out>(*_leaf_particles);
-        auto cell_size = _tree[0]->cellSize();
-        auto cells_per_dim = _tree[0]->cellsPerDim();
-        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
-
-        auto ijk2index = _tree[0]->cellijk2i();
-
-        auto locals = Cabana::slice<0>(_tree[0]->locals());
-
-        using PosSlice = decltype(positions);
-        using ScalarSlice = decltype(scalars);
-        using LocalsSliceT = decltype(locals);
-        using MapT = decltype(ijk2index);
-
-        if constexpr (metadata::force != no_id)
-        {
-            auto force = Cabana::slice<metadata::force>(*_leaf_particles);
-
-            // Zero force
-            Cabana::deep_copy(force, 0.0);
-            
-            // Use force constructor
-            ComputeWithLocals<PosSlice, ScalarSlice, LocalsSliceT, MapT>
-                cwl(positions, force, scalars, potentials, locals, ijk2index, cell_size, low_corner, p);
-            Kokkos::parallel_for(
-                "Canopy::Solver::populate_local",
-                Kokkos::RangePolicy<execution_space>(0, _leaf_particles->size()),
-                cwl);
-        }
-        else
-        {
-            // Use no force constructor
-            ComputeWithLocals<PosSlice, ScalarSlice, LocalsSliceT, MapT>
-                cwl(positions, scalars, potentials, locals, ijk2index, cell_size, low_corner, p);
-
-            Kokkos::parallel_for(
-                "Canopy::Solver::populate_local",
-                Kokkos::RangePolicy<execution_space>(0, _leaf_particles->size()), cwl);
-        }
-    }
-
-    template<class TripleScalarSlice, class SingleScalarSlice,
-             class ParticleCellIJKView, class CellLookupMap, class CellOffsetView,
-             class CellParticleView>
-    struct ComputeDirectly
-    {
-        TripleScalarSlice positions;
-        TripleScalarSlice force;
-        SingleScalarSlice scalars;
-        SingleScalarSlice potentials;
-        ParticleCellIJKView particle_cell_ijk;
-        CellLookupMap cell_id_to_index;
-        CellOffsetView cell_offsets;
-        CellParticleView cell_particles;
-        int cells_per_dim;
-        int direct_start_layer;
-        int direct_start_cpd;
-        int cell_incr_factor;
-        bool direct_all_pairs;
-        size_type owned_particles;
-
-        KOKKOS_INLINE_FUNCTION
-        size_type cellLinearId(const int i, const int j, const int k) const
-        {
-            return static_cast<size_type>(i) +
-                   static_cast<size_type>(cells_per_dim) *
-                       (static_cast<size_type>(j) +
-                        static_cast<size_type>(cells_per_dim) *
-                            static_cast<size_type>(k));
-        }
-
-        // Constructor without force
-        ComputeDirectly(TripleScalarSlice positions_, SingleScalarSlice scalars_,
-            SingleScalarSlice potentials_, ParticleCellIJKView particle_cell_ijk_,
-            CellLookupMap cell_id_to_index_, CellOffsetView cell_offsets_,
-            CellParticleView cell_particles_,
-            const int cells_per_dim_, const int direct_start_layer_,
-            const int direct_start_cpd_, const int cell_incr_factor_,
-            const bool direct_all_pairs_, const size_type owned_particles_)
-            : positions(positions_)
-            , scalars(scalars_)
-            , potentials(potentials_)
-            , particle_cell_ijk(particle_cell_ijk_)
-            , cell_id_to_index(cell_id_to_index_)
-            , cell_offsets(cell_offsets_)
-            , cell_particles(cell_particles_)
-            , cells_per_dim(cells_per_dim_)
-            , direct_start_layer(direct_start_layer_)
-            , direct_start_cpd(direct_start_cpd_)
-            , cell_incr_factor(cell_incr_factor_)
-            , direct_all_pairs(direct_all_pairs_)
-            , owned_particles(owned_particles_)
-            {}
-
-        // Constructor with force
-        ComputeDirectly(TripleScalarSlice positions_, TripleScalarSlice force_,
-            SingleScalarSlice scalars_, SingleScalarSlice potentials_,
-            ParticleCellIJKView particle_cell_ijk_, CellLookupMap cell_id_to_index_,
-            CellOffsetView cell_offsets_, CellParticleView cell_particles_,
-            const int cells_per_dim_,
-            const int direct_start_layer_, const int direct_start_cpd_,
-            const int cell_incr_factor_, const bool direct_all_pairs_,
-            const size_type owned_particles_)
-            : positions(positions_)
-            , force(force_)
-            , scalars(scalars_)
-            , potentials(potentials_)
-            , particle_cell_ijk(particle_cell_ijk_)
-            , cell_id_to_index(cell_id_to_index_)
-            , cell_offsets(cell_offsets_)
-            , cell_particles(cell_particles_)
-            , cells_per_dim(cells_per_dim_)
-            , direct_start_layer(direct_start_layer_)
-            , direct_start_cpd(direct_start_cpd_)
-            , cell_incr_factor(cell_incr_factor_)
-            , direct_all_pairs(direct_all_pairs_)
-            , owned_particles(owned_particles_)
-            {}
-
-        KOKKOS_INLINE_FUNCTION
-        void operator()(const size_type my_id) const
-        {
-            const scalar_type xi = positions(my_id,0);
-            const scalar_type yi = positions(my_id,1);
-            const scalar_type zi = positions(my_id,2);
-            scalar_type phi = 0.0;
-            Kokkos::Array<scalar_type, 3> fpart = {0.0, 0.0, 0.0};
-            const scalar_type q_i = scalars(my_id);
-
-            Kokkos::Array<int, 6> direct_bounds;
-            if (direct_all_pairs)
-            {
-                for (int d = 0; d < 3; ++d)
-                {
-                    direct_bounds[d] = 0;
-                    direct_bounds[d + 3] = cells_per_dim;
-                }
+                _finish_topology_change<PositionIdx>( particles );
+                result = RedistributeResult{ 0, 0, _num_local };
             }
             else
             {
-                Kokkos::Array<int, 3> cell_ijk;
-                for (int d = 0; d < 3; ++d)
-                    cell_ijk[d] = particle_cell_ijk(my_id, d);
-
-                const auto bounds =
-                    cell2Bound(cell_ijk, 0, direct_start_layer,
-                               direct_start_cpd, cell_incr_factor);
-                for (int d = 0; d < 3; ++d)
-                {
-                    direct_bounds[d] = bounds.second[d];
-                    direct_bounds[d + 3] = bounds.second[d + 3];
-                }
+                { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REDISTRIBUTE );
+                  result = _partitioner.redistribute( _builder, particles,
+                                                      _num_local ); }
+                _num_local = _partitioner.num_local_particles();
+                _finish_topology_stable<PositionIdx>( particles );
             }
+        } // TIMER_MIGRATE_TOTAL destructs here
+        CANOPY_PRINT_MIGRATE_TIMERS( _comm );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
+        return result;
+    }
 
-            for (int k = direct_bounds[2]; k < direct_bounds[5]; ++k)
+    // -----------------------------------------------------------------------
+    // rebalance(): moderate maintenance. Tree topology may change
+    // (refine / coarsen) but bounding box still valid.
+    //
+    //   builder.update → repartition → build → sort_by_leaf → build
+    //   → comm_plan.build → upward.setup → downward.setup → p2p.setup
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, class AoSoA>
+    void rebalance( AoSoA& particles )
+    {
+        // Full rebuild of the global tree from current positions.
+        // Cheaper paths (TreeBuilder::update) can be substituted later
+        // once stable — rebalance still saves work over rebuild() because
+        // the partition step is a re-partition rather than the initial
+        // partition. Today both are equivalent in TreePartitioner.
+        CANOPY_RESET_TIMERS();
+        {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REBALANCE_TOTAL );
+            { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+              auto positions = Cabana::slice<PositionIdx>( particles );
+              _builder.build( positions, _num_local ); }
+            _finish_topology_change<PositionIdx>( particles );
+        } // TIMER_REBALANCE_TOTAL destructs here
+        CANOPY_PRINT_REBALANCE_TIMERS( _comm );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
+    }
+
+    // -----------------------------------------------------------------------
+    // rebuild(): heavy maintenance. Full do-over (e.g. particles escaped
+    // the bounding box).
+    //
+    //   build → partition → build → sort_by_leaf → build → comm_plan.build
+    //   → upward.setup → downward.setup → p2p.setup
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, int ChargeIdx, class AoSoA>
+    void rebuild( AoSoA& particles )
+    {
+        _full_setup<PositionIdx, ChargeIdx>( particles, _num_local );
+    }
+
+    // -----------------------------------------------------------------------
+    // auto_maintain(): pick the cheapest valid maintenance flow based on
+    // the current particle state, and run it.
+    //
+    // Decision logic (each step's check is globally consistent across ranks):
+    //   1. needs_rebuild (any particle escaped the bounding box)  → rebuild()
+    //   2. tree topology changed (set of cell keys differs after a fresh
+    //      build of the global tree)                              → rebalance()
+    //   3. otherwise                                              → migrate()
+    //
+    // The topology check works because TreeBuilder owns a globally-replicated
+    // cell list — every rank computes the same set of Morton keys after
+    // build(), so every rank reaches the same MaintenanceAction without an
+    // additional collective.
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, int ChargeIdx, class AoSoA>
+    MaintenanceAction auto_maintain( AoSoA& particles )
+    {
+        // Ensure any pending device writes to particle positions
+        // (e.g. from integrate_particles) are visible before we read
+        // them on the host or feed them back into the builder. On
+        // unified-memory APUs (MI300A) this fence is required for
+        // correctness, not just timing.
+        Kokkos::fence( "auto_maintain: pre-positions" );
+
+        // 1) Bounding-box escape ⇒ full rebuild.
+        {
+            auto positions = Cabana::slice<PositionIdx>( particles );
+            if ( _builder.needs_rebuild( positions, _num_local ) )
             {
-                for (int j = direct_bounds[1]; j < direct_bounds[4]; ++j)
+                _full_setup<PositionIdx, ChargeIdx>( particles, _num_local );
+#if defined( CANOPY_ENABLE_PROFILING )
                 {
-                    for (int i = direct_bounds[0]; i < direct_bounds[3]; ++i)
-                    {
-                        const auto cell_id = cellLinearId(i, j, k);
-                        if ( !cell_id_to_index.exists( cell_id ) )
-                            continue;
-
-                        const auto map_index = cell_id_to_index.find(cell_id);
-                        const auto occupied_cell_index =
-                            cell_id_to_index.value_at(map_index) - 1;
-                        for (size_type cell_index =
-                                 cell_offsets(occupied_cell_index);
-                             cell_index <
-                             cell_offsets(occupied_cell_index + 1);
-                             ++cell_index)
-                        {
-                            const size_type neighbor_id =
-                                cell_particles(cell_index);
-                            if (neighbor_id == my_id)
-                                continue;
-
-                            const scalar_type dx =
-                                xi - positions(neighbor_id, 0);
-                            const scalar_type dy =
-                                yi - positions(neighbor_id, 1);
-                            const scalar_type dz =
-                                zi - positions(neighbor_id, 2);
-                            const scalar_type r2 =
-                                dx * dx + dy * dy + dz * dz;
-
-                            if (r2 == 0.0)
-                                continue;
-
-                            const scalar_type q_j = scalars(neighbor_id);
-                            const scalar_type dist_inv =
-                                1.0 / Kokkos::sqrt(r2);
-                            const bool neighbor_is_owned =
-                                neighbor_id < owned_particles;
-
-                            if (neighbor_is_owned)
-                            {
-                                if (neighbor_id < my_id)
-                                    continue;
-
-                                phi += q_j * dist_inv;
-                                Kokkos::atomic_add(&potentials(neighbor_id),
-                                                   q_i * dist_inv);
-                            }
-                            else
-                            {
-                                phi += q_j * dist_inv;
-                            }
-
-                            if constexpr(metadata::force != no_id)
-                            {
-                                const scalar_type dist_inv3 =
-                                    dist_inv * dist_inv * dist_inv;
-                                const scalar_type fp = q_i * q_j * dist_inv3;
-                                fpart[0] += fp * dx;
-                                fpart[1] += fp * dy;
-                                fpart[2] += fp * dz;
-
-                                if (neighbor_is_owned)
-                                {
-                                    Kokkos::atomic_add(
-                                        &force(neighbor_id, 0), -fp * dx);
-                                    Kokkos::atomic_add(
-                                        &force(neighbor_id, 1), -fp * dy);
-                                    Kokkos::atomic_add(
-                                        &force(neighbor_id, 2), -fp * dz);
-                                }
-                            }
-                        }
-                    }
+                    int _diag_rank = 0;
+                    MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
+                    if ( _diag_rank == 0 )
+                        std::fprintf(
+                            stderr,
+                            "[Canopy diag] auto_maintain k_changed=NA "
+                            "N_total=%zu action=Rebuild\n",
+                            _builder.cells().size() );
                 }
+#endif
+                return MaintenanceAction::Rebuild;
             }
-
-            Kokkos::atomic_add(&potentials(my_id), phi);
-
-            if constexpr(metadata::force != no_id)
-                for (int d = 0; d < 3; d++)
-                    Kokkos::atomic_add(&force(my_id, d), fpart[d]);
         }
-    };
 
-    void computeP2P()
-    {
-        Kokkos::Profiling::ScopedRegion region("Canopy::Solver::computeP2P");
+        // Snapshot the current global cell-key set, then rebuild the tree
+        // from current positions and compare. The cell list is identical on
+        // every rank, so the comparison is deterministic.
+        std::unordered_set<MortonKey> old_keys;
+        old_keys.reserve( _builder.cells().size() );
+        for ( const auto& c : _builder.cells() )
+            old_keys.insert( c.key );
 
-        haloParticles();
-
-        auto positions = Cabana::slice<metadata::pos>(*_leaf_particles);
-        auto scalars = Cabana::slice<metadata::in>(*_leaf_particles);
-        auto potentials = Cabana::slice<metadata::out>(*_leaf_particles);
-
-        auto cell_size = _tree[0]->cellSize();
-        auto cells_per_dim = _tree[0]->cellsPerDim();
-        Kokkos::Array<scalar_type, 3> low_corner = {_global_low_corner[0], _global_low_corner[1], _global_low_corner[2]};
-
-        const size_type owned_particles =
-            static_cast<size_type>(_owned_particles);
-        const auto total_particles =
-            static_cast<size_type>(_leaf_particles->size());
-
-        const auto first_valid_layer_info = firstValidMultipoleLayerInfo();
-        const int direct_start_layer = first_valid_layer_info.layer;
-        const int direct_start_cpd = first_valid_layer_info.cells_per_dim;
-        const bool direct_all_pairs = direct_start_layer < 0;
-        const int cell_incr_factor = static_cast<int>(_tile_reduction_factor);
-
-        using policy_type =
-            Kokkos::RangePolicy<execution_space, Kokkos::IndexType<size_type>>;
-        const policy_type particle_policy(0, total_particles);
-
-        Kokkos::View<int*[3], memory_space> particle_cell_ijk(
-            "direct_particle_cell_ijk", total_particles);
-        Kokkos::View<size_type*, memory_space> particle_cell_ids(
-            "direct_particle_cell_ids", total_particles);
-
-        Kokkos::parallel_for(
-            "Canopy::Solver::compute_direct_particle_cells", particle_policy,
-            KOKKOS_LAMBDA(const size_type pid)
-            {
-                const auto ijk = position2ijk(
-                    positions(pid, 0), positions(pid, 1), positions(pid, 2),
-                    low_corner, cell_size);
-
-                for (int d = 0; d < 3; ++d)
-                    particle_cell_ijk(pid, d) = static_cast<int>(ijk[d]);
-
-                particle_cell_ids(pid) =
-                    static_cast<size_type>(ijk[0]) +
-                    static_cast<size_type>(cells_per_dim) *
-                        (static_cast<size_type>(ijk[1]) +
-                         static_cast<size_type>(cells_per_dim) *
-                             static_cast<size_type>(ijk[2]));
-            });
-
-        using direct_cell_map_type =
-            Kokkos::UnorderedMap<size_type, size_type, memory_space>;
-        direct_cell_map_type cell_id_to_index;
-        const auto cell_capacity_hint =
-            total_particles > 0 ? total_particles : static_cast<size_type>( 1 );
-        cell_id_to_index.rehash( cell_capacity_hint );
-
-        Kokkos::parallel_for(
-            "Canopy::Solver::index_direct_cells", particle_policy,
-            KOKKOS_LAMBDA(const size_type pid)
-            {
-                cell_id_to_index.insert( particle_cell_ids(pid),
-                                         static_cast<size_type>(0) );
-            });
-        Kokkos::fence();
-
-        const auto num_occupied_cells = cell_id_to_index.size();
-
-        Kokkos::View<size_type*, memory_space> cell_counts(
-            "direct_cell_counts", num_occupied_cells);
-        Kokkos::deep_copy(cell_counts, static_cast<size_type>(0));
-
-        Kokkos::View<size_type, memory_space> occupied_cell_counter(
-            "occupied_cell_counter");
-        Kokkos::deep_copy(occupied_cell_counter, static_cast<size_type>(0));
-
-        using value_view_type = Kokkos::View<size_type*, memory_space>;
-        using map_op_type =
-            Kokkos::UnorderedMapInsertOpTypes<value_view_type, size_type>;
-        using atomic_add_type = typename map_op_type::AtomicAdd;
-        atomic_add_type atomic_add;
-
-        Kokkos::parallel_for(
-            "Canopy::Solver::set_direct_cell_indices",
-            policy_type(0, static_cast<size_type>(cell_id_to_index.capacity())),
-            KOKKOS_LAMBDA(const size_type slot)
-            {
-                if (cell_id_to_index.valid_at(slot))
-                {
-                    const auto cell_id = cell_id_to_index.key_at(slot);
-                    const auto occupied_cell_index =
-                        Kokkos::atomic_fetch_add(
-                            &occupied_cell_counter(),
-                            static_cast<size_type>(1));
-                    cell_id_to_index.insert(cell_id, occupied_cell_index + 1,
-                                            atomic_add);
-                }
-            });
-
-        Kokkos::parallel_for(
-            "Canopy::Solver::count_direct_cell_particles", particle_policy,
-            KOKKOS_LAMBDA(const size_type pid)
-            {
-                const auto map_index =
-                    cell_id_to_index.find(particle_cell_ids(pid));
-                const auto occupied_cell_index =
-                    cell_id_to_index.value_at(map_index) - 1;
-                Kokkos::atomic_fetch_add(&cell_counts(occupied_cell_index),
-                                         static_cast<size_type>(1));
-            });
-
-        Kokkos::View<size_type*, memory_space> cell_offsets_view(
-            "direct_cell_offsets", num_occupied_cells + 1);
-        Kokkos::parallel_scan(
-            "Canopy::Solver::scan_direct_cell_offsets",
-            policy_type(0, num_occupied_cells + 1),
-            KOKKOS_LAMBDA(const size_type cell_id, size_type& update,
-                          const bool final)
-            {
-                if (final)
-                    cell_offsets_view(cell_id) = update;
-
-                if (cell_id < num_occupied_cells)
-                    update += cell_counts(cell_id);
-            });
-
-        Kokkos::View<size_type*, memory_space> cell_fill_offsets(
-            "direct_cell_fill_offsets", num_occupied_cells);
-        Kokkos::parallel_for(
-            "Canopy::Solver::init_direct_cell_fill_offsets",
-            policy_type(0, num_occupied_cells),
-            KOKKOS_LAMBDA(const size_type cell_id)
-            {
-                cell_fill_offsets(cell_id) = cell_offsets_view(cell_id);
-            });
-
-        Kokkos::View<size_type*, memory_space> cell_particles(
-            "direct_cell_particles", total_particles);
-        Kokkos::parallel_for(
-            "Canopy::Solver::fill_direct_cell_particles", particle_policy,
-            KOKKOS_LAMBDA(const size_type pid)
-            {
-                const auto map_index =
-                    cell_id_to_index.find(particle_cell_ids(pid));
-                const auto occupied_cell_index =
-                    cell_id_to_index.value_at(map_index) - 1;
-                const auto write_index =
-                    Kokkos::atomic_fetch_add(&cell_fill_offsets(occupied_cell_index),
-                                             static_cast<size_type>(1));
-                cell_particles(write_index) = pid;
-            });
-
-        using PosSlice = decltype(positions);
-        using ScalarSlice = decltype(scalars);
-        using ParticleCellIJKView = decltype(particle_cell_ijk);
-        using CellLookupMap = decltype(cell_id_to_index);
-        using CellOffsetsView = decltype(cell_offsets_view);
-        using CellParticlesView = decltype(cell_particles);
-
-        if constexpr (metadata::force != no_id)
         {
-            auto force = Cabana::slice<metadata::force>(*_leaf_particles);
-
-            ComputeDirectly<PosSlice, ScalarSlice, ParticleCellIJKView,
-                            CellLookupMap,
-                            CellOffsetsView, CellParticlesView>
-                cd(positions, force, scalars, potentials, particle_cell_ijk,
-                   cell_id_to_index, cell_offsets_view, cell_particles,
-                   cells_per_dim,
-                   direct_start_layer, direct_start_cpd, cell_incr_factor,
-                   direct_all_pairs, owned_particles);
-
-            Kokkos::parallel_for(
-                "Canopy::Solver::populate_direct",
-                policy_type(0, static_cast<size_type>(owned_particles)), cd);
+            auto positions = Cabana::slice<PositionIdx>( particles );
+            _builder.build( positions, _num_local );
         }
-        else
+
+        // Counting variant of the topology comparison: walk all new cells (no
+        // early break) and tally cells present in new but missing from old.
+        // Derive the symmetric difference and N_total for the diagnostic
+        // [[canopy-auto-maintain-investigation]]. Same big-O as the previous
+        // early-exit loop (one hash lookup per new cell); only the early-out
+        // is removed.
+        const size_t n_new = _builder.cells().size();
+        const size_t n_old = old_keys.size();
+        size_t k_in_new_not_old = 0;
+        for ( const auto& c : _builder.cells() )
+            if ( old_keys.find( c.key ) == old_keys.end() )
+                ++k_in_new_not_old;
+        const size_t matched = n_new - k_in_new_not_old;
+        const size_t k_changed = ( n_new - matched ) + ( n_old - matched );
+        const bool topology_changed = ( k_changed > 0 );
+#if defined( CANOPY_ENABLE_PROFILING )
+        const size_t N_total = ( n_new > n_old ) ? n_new : n_old;
+#endif
+
+        if ( topology_changed )
         {
-            ComputeDirectly<PosSlice, ScalarSlice, ParticleCellIJKView,
-                            CellLookupMap,
-                            CellOffsetsView, CellParticlesView>
-                cd(positions, scalars, potentials, particle_cell_ijk,
-                   cell_id_to_index, cell_offsets_view, cell_particles,
-                   cells_per_dim,
-                   direct_start_layer, direct_start_cpd, cell_incr_factor,
-                   direct_all_pairs, owned_particles);
-
-            Kokkos::parallel_for(
-                "Canopy::Solver::populate_direct",
-                policy_type(0, owned_particles), cd);
+            // 2) Topology changed ⇒ full rebalance (repartition + comm_plan
+            //    rebuild + setups). _builder.build() already happened above.
+            _finish_topology_change<PositionIdx>( particles );
+#if defined( CANOPY_ENABLE_PROFILING )
+            {
+                int _diag_rank = 0;
+                MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
+                if ( _diag_rank == 0 )
+                    std::fprintf(
+                        stderr,
+                        "[Canopy diag] auto_maintain k_changed=%zu "
+                        "N_total=%zu action=Rebalance\n",
+                        k_changed, N_total );
+            }
+#endif
+            return MaintenanceAction::Rebalance;
         }
-        Kokkos::fence();
+
+        // 3) Topology stable ⇒ cheap migrate path (reuse comm_plan).
+        //    _builder is already freshly built; redistribute uses its keys.
+        RedistributeResult rr =
+            _partitioner.redistribute( _builder, particles, _num_local );
+        (void)rr;
+        _num_local = _partitioner.num_local_particles();
+        _finish_topology_stable<PositionIdx>( particles );
+#if defined( CANOPY_ENABLE_PROFILING )
+        {
+            int _diag_rank = 0;
+            MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
+            if ( _diag_rank == 0 )
+                std::fprintf(
+                    stderr,
+                    "[Canopy diag] auto_maintain k_changed=%zu "
+                    "N_total=%zu action=Migrate\n",
+                    k_changed, N_total );
+        }
+#endif
+        return MaintenanceAction::Migrate;
     }
 
-    /**
-     * Perform the fast multipole method.
-     */
 
-    void solve(std::shared_ptr<particle_aosoa_type> aosoa, bool run_load_balance)
-    {
-        reset();
-        build();
-        create_multipoles(aosoa, run_load_balance);
-        multipole_to_local();
-        computeL2P();
-        computeP2P();
+    // -----------------------------------------------------------------------
+    // Accessors
+    // -----------------------------------------------------------------------
+    int num_local_particles() const { return _num_local; }
 
-        // Remove ghost particles
-        _leaf_particles->resize(_owned_particles);
-    }
+    const potential_view_type& potential() const { return _potential; }
+    const gradient_view_type& gradient() const { return _gradient; }
 
-    int rank() const { return _rank; }
+    // Read-only access to internal sweep stages, primarily for tests and
+    // diagnostics (e.g. asserting that the M2L bin-edge fallback path was
+    // exercised). Not part of the supported runtime API.
+    const downward_type& downward() const { return _downward; }
 
-    /**
-     * Returns the number of layers with the root layer included in the
-     * count, which is stored outside of the tree.
-     */
-    std::size_t numLayers() const { return _tree.size() + 1; }
-
-    auto M_root() {return _M_root;}
-    auto data() {return _leaf_particles;}
-    auto numOwnedParticles() {return _owned_particles;}
-    auto numGhostParticles() {return _ghost_particles;}
-    std::array<scalar_type, 3> globalLowCorner() const { return _global_low_corner; }
-    std::array<scalar_type, 3> globalHighCorner() const { return _global_high_corner; }
-
-    /**
-     * Get a layer of the tree
-     */
-    auto layer(int layer)
-    {
-        if (layer >= _tree.size())
-            throw std::runtime_error("Canopy::Solver:layer: Requested layer larger than tree depth!\n");
-        return _tree[layer];
-    }
+    const builder_type& builder() const { return _builder; }
+    const partitioner_type& partitioner() const { return _partitioner; }
+    const comm_plan_type& comm_plan() const { return _comm_plan; }
 
   private:
-    std::array<scalar_type, 3> _global_high_corner;
-    std::array<scalar_type, 3> _global_low_corner;
-    const MPI_Comm _comm;
-    int _rank, _comm_size;
+    // -----------------------------------------------------------------------
+    // _full_setup: shared body for setup() and rebuild()
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, int ChargeIdx, class AoSoA>
+    void _full_setup( AoSoA& particles, int num_local_before )
+    {
+        CANOPY_RESET_TIMERS();
+        {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SETUP_TOTAL );
 
-    // Solver layers.
-    std::vector<std::shared_ptr<SolverLayer<solver_type, cell_per_tile_dim>>> _tree;
+            // Step 1: initial tree build on caller-provided distribution
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+                auto positions = Cabana::slice<PositionIdx>( particles );
+                _builder.build( positions, num_local_before );
+            }
 
-    // How many tiles per dimension in the leaf layer.
-    std::size_t _leaf_tiles_per_dim;
+            // Step 2: partition (migrates particles across ranks)
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_PARTITION );
+                _partitioner.partition( _builder, particles, num_local_before );
+            }
+            _num_local = _partitioner.num_local_particles();
 
-    // Factor for how many tiles the mesh should be reduced by for each layer
-    std::size_t _tile_reduction_factor;
+            // Step 3: rebuild for migrated particles (accumulated into
+            // TIMER_BUILDER_BUILD via += in the registry)
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+                auto positions = Cabana::slice<PositionIdx>( particles );
+                _builder.build( positions, _num_local );
+            }
 
-    // Maxmimum tiles per dimension at the (root layer -1) layer
-    std::size_t _root_tiles_per_dim;
+            // Step 4: sort AoSoA by leaf. The partitioner also permutes
+            // builder.particle_keys() in place to match the new AoSoA order,
+            // so no follow-up _builder.build() is needed.
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
+                _partitioner.sort_particles_by_leaf( _builder, particles );
+            }
 
-    // Root data
-    Kokkos::View<complex[(p+1)*(p+1)], memory_space> _M_root;
+            // Step 5b: refresh ownership against the FINAL tree using the
+            // leaf assignment cached from step 2's partition_leaves. At scale
+            // (~4e8 particles) the post-migration build can produce a tree
+            // with substantially fewer cells than the pre-partition build
+            // (see MI300A investigation: 4.2M -> 867k). Without this
+            // refresh, cell_owner_map (populated against the larger
+            // pre-partition tree) is stale relative to the final cells
+            // passed to comm_plan.build, which silently produces a
+            // phantom-send M2M plan and an MPI_ERR_TRUNCATE later in the
+            // upward sweep.
+            //
+            // We DO NOT re-run Zoltan2 here: multijagged is non-deterministic
+            // (per partition_leaves comment) so a second call would emit a
+            // different assignment, triggering a multi-GB Cabana::migrate
+            // that overflows MPI's signed int count. Instead we vote per
+            // leaf using local particle keys for any leaf that wasn't in
+            // step 2's tree.
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_PARTITION );
+                _partitioner.refresh_ownership_for_current_tree(
+                    _builder, particles );
+            }
 
-    // Leaf particles
-    std::shared_ptr<particle_aosoa_type> _leaf_particles;
-    std::size_t _owned_particles = 0;
-    std::size_t _ghost_particles = 0;
+            // Distribution-based default softening (no-op if the caller passed
+            // an explicit softening, or after the first auto computation). The
+            // global bounding box and total particle count are available now
+            // that the tree is built.
+            _init_auto_softening();
+
+            // Step 6: communication plan
+            {
+                CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_COMM_PLAN_BUILD );
+                _comm_plan.build( _builder.cells(), _partitioner.ownership(),
+                                  _partitioner.cell_owner_map(),
+                                  _replication_depth );
+            }
+            // Tree topology and comm plan just changed; the cached M2L
+            // interaction list must be rebuilt on the next solve.
+            _downward.invalidate_interaction_list();
+
+            // Step 7: setup sweeps and P2P (not individually timed)
+            _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
+                           _builder.particle_keys(), _num_local );
+            _push_root_half_width();
+            _downward.setup( _upward, _num_local );
+            _p2p.setup( _builder, _partitioner, _comm_plan );
+
+        } // TIMER_SETUP_TOTAL destructs here
+        CANOPY_PRINT_SETUP_TIMERS( _comm );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
+    }
+
+    // -----------------------------------------------------------------------
+    // _finish_topology_change: complete a maintenance flow that has
+    // already changed (or rebuilt) the tree topology. Picks up at the
+    // repartition step and runs through all setups including a fresh
+    // comm_plan build.
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, class AoSoA>
+    void _finish_topology_change( AoSoA& particles )
+    {
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REPARTITION );
+          _partitioner.repartition( _builder, particles, _num_local ); }
+        _num_local = _partitioner.num_local_particles();
+
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+          auto positions = Cabana::slice<PositionIdx>( particles );
+          _builder.build( positions, _num_local ); }
+
+        // sort_particles_by_leaf permutes builder.particle_keys() in place,
+        // so a follow-up _builder.build() is unnecessary here.
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
+          _partitioner.sort_particles_by_leaf( _builder, particles ); }
+
+        // Refresh ownership against the FINAL tree using cached leaf
+        // assignment. See bug 1 note in _full_setup.
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REPARTITION );
+          _partitioner.refresh_ownership_for_current_tree(
+              _builder, particles ); }
+
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_COMM_PLAN_BUILD );
+          _comm_plan.build( _builder.cells(), _partitioner.ownership(),
+                            _partitioner.cell_owner_map(), _replication_depth ); }
+        // Tree topology and comm plan just changed; invalidate the cache.
+        _downward.invalidate_interaction_list();
+
+        Kokkos::fence( "_finish_topology_change: pre-setup" );
+        _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
+                       _builder.particle_keys(), _num_local );
+        _push_root_half_width();
+        _downward.setup( _upward, _num_local );
+        _p2p.setup( _builder, _partitioner, _comm_plan );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
+    }
+
+    // -----------------------------------------------------------------------
+    // _finish_topology_stable: complete a migrate flow. Tree topology is
+    // assumed unchanged so comm_plan is reused. _num_local must already
+    // reflect the post-migration particle count.
+    // -----------------------------------------------------------------------
+    template <int PositionIdx, class AoSoA>
+    void _finish_topology_stable( AoSoA& particles )
+    {
+        // Rebuild particle_keys for the (now migrated) particles
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_BUILDER_BUILD );
+          auto positions = Cabana::slice<PositionIdx>( particles );
+          _builder.build( positions, _num_local ); }
+
+        // sort_particles_by_leaf permutes builder.particle_keys() in place,
+        // so a follow-up _builder.build() is unnecessary here.
+        { CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_SORT_BY_LEAF );
+          _partitioner.sort_particles_by_leaf( _builder, particles ); }
+
+        // Reuse existing comm_plan (topology unchanged).
+        Kokkos::fence( "_finish_topology_stable: pre-setup" );
+        _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
+                       _builder.particle_keys(), _num_local );
+        _push_root_half_width();
+        _downward.setup( _upward, _num_local );
+        _p2p.setup( _builder, _partitioner, _comm_plan );
+        CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
+    }
+
+    // -----------------------------------------------------------------------
+    // Members
+    // -----------------------------------------------------------------------
+    MPI_Comm _comm;
+    int _replication_depth;
+
+    builder_type _builder;
+    partitioner_type _partitioner;
+    comm_plan_type _comm_plan;
+    upward_type _upward;
+    downward_type _downward;
+    p2p_type _p2p;
+
+    int _num_local;
+
+    // Softening configuration. _softening_input < 0 selects distribution-based
+    // auto-softening (computed once in _full_setup); >= 0 is an explicit value.
+    // _softening_initialized guards the one-shot auto computation so it is
+    // fixed at the first setup() and not recomputed on later rebuilds.
+    double _softening_input;
+    // Multiple of the softening length below which pairs use softened P2P
+    // instead of the unsoftened multipole M2L. From FmmConfig.
+    double _near_softening_factor;
+    bool _softening_initialized;
+    // Fraction of the mean inter-particle spacing used as the auto-softening
+    // length. 0.1 is a standard collisionless-N-body choice and matches the
+    // smallest softening empirically observed to keep the clustering test
+    // stable on MI300A.
+    static constexpr double SOFTENING_FACTOR = 0.1;
+
+    // Hand the effective softening to both sweeps as M2LKernelParams.
+    //
+    // `eps` is a LENGTH and the kernel's Plummer parameter is eps^2; the whole
+    // units statement is on M2LKernelParams (Canopy_FarFieldContract.hpp).
+    // This is the same number _p2p and _comm_plan are given, deliberately: a
+    // basis that squares it gets exactly the b the near field uses.
+    //
+    // BOTH SWEEPS, because UpwardSweep builds the device auxiliary tables that
+    // DownwardSweep then borrows, while DownwardSweep builds its own host ones
+    // for the operator table. For a basis whose tables depend on the kernel,
+    // setting one and not the other would put two different tables in one
+    // solve.
+    //
+    // Called at the two places the softening is decided and nowhere else: the
+    // constructor's explicit branch, and _init_auto_softening for the deferred
+    // one. Both precede every _upward.setup / _downward.setup, and therefore
+    // every table build. The downward setter is a no-op on an unchanged value,
+    // so nothing here dirties the interaction list or empties the operator
+    // cache twice.
+    void _push_m2l_kernel_params( double eps )
+    {
+        M2LKernelParams params;
+        params.softening = eps;
+        _upward.set_m2l_kernel_params( params );
+        _downward.set_m2l_kernel_params( params );
+    }
+
+    // Hand the current root half-width to the downward sweep, which turns it
+    // into the per-level unit lengths its operator builder is given
+    // (unit_w[d] = w_root / 2^d).
+    //
+    // The HALF-WIDTH, and the LARGEST of the three half extents of the root
+    // bounding box — the same reduction TreeBuilder performs when it stamps
+    // the root cell, which is what makes every cell a cube and w_root a single
+    // scalar.
+    //
+    // Called immediately before each _downward.setup(), because the box is
+    // recomputed by every _builder.build() and so can move on any of the three
+    // setup flows. The setter is a no-op on an unchanged value and empties the
+    // operator cache only for a basis that declares key_needs_level, so a
+    // drifting box does not defeat the cache for a basis whose operators are
+    // scale-normalized.
+    void _push_root_half_width()
+    {
+        const auto& box = _builder.root_box();
+        double w_root = 0.0;
+        for ( int d = 0; d < 3; d++ )
+        {
+            const double hw = 0.5 * ( box.max[d] - box.min[d] );
+            if ( hw > w_root )
+                w_root = hw;
+        }
+        _downward.set_root_half_width( w_root );
+    }
+
+    // Derive and apply the auto-softening length from the current global
+    // bounding box and total particle count. No-op once softening has been
+    // set (explicit value, or a prior auto computation).
+    void _init_auto_softening()
+    {
+        if ( _softening_initialized )
+            return;
+
+        const auto& box = _builder.root_box();
+        double volume = 1.0;
+        for ( int d = 0; d < 3; d++ )
+            volume *= ( box.max[d] - box.min[d] );
+
+        long long n_total = 0;
+        for ( const auto& c : _builder.cells() )
+            if ( c.key == ROOT_KEY )
+            {
+                n_total = static_cast<long long>( c.global_count );
+                break;
+            }
+
+        double eps = 0.0;
+        if ( n_total > 0 && volume > 0.0 )
+            eps = SOFTENING_FACTOR *
+                  std::cbrt( volume / static_cast<double>( n_total ) );
+
+        _p2p.set_softening( static_cast<Scalar>( eps ) );
+        _comm_plan.set_near_softening( eps, _near_softening_factor );
+        // The EFFECTIVE softening, which is what the operator builder must
+        // see: the configured value was negative and this is the length
+        // actually in force. _full_setup calls this before _upward.setup and
+        // _downward.setup, so it precedes every table build.
+        _push_m2l_kernel_params( eps );
+        _softening_initialized = true;
+
+        int rank = 0;
+        MPI_Comm_rank( _comm, &rank );
+        if ( rank == 0 )
+            std::printf( "[Canopy] auto softening eps=%.6g "
+                         "(factor=%.3g, N=%lld, bbox_volume=%.6g)\n",
+                         eps, SOFTENING_FACTOR, n_total, volume );
+    }
+
+    potential_view_type _potential;
+    gradient_view_type _gradient;
 };
 
-template <class MemorySpace, class ExecutionSpace, class Metadata, 
-          std::size_t CellPerTileDim, std::size_t ExpansionCutoff>
-std::shared_ptr<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>
-        createSolver( const std::array<typename Metadata::scalar_type, 3>& global_low_corner,
-                    const std::array<typename Metadata::scalar_type, 3>& global_high_corner,
-                    const std::size_t leaf_tiles_per_dim,
-                    const std::size_t tile_reduction_factor,
-                    MPI_Comm comm)
+template <class MemorySpace, class ExecutionSpace, class Scalar = double,
+          int P_ORDER = 8, int NComps = 1,
+          template <class, int, int> class FarField = LaplaceKernel>
+std::shared_ptr<
+    Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER, NComps, FarField>>
+createSolver( MPI_Comm comm, const FmmConfig& cfg )
 {
-    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Metadata, CellPerTileDim, ExpansionCutoff>>(global_low_corner,
-            global_high_corner, leaf_tiles_per_dim, tile_reduction_factor,
-            comm);
+    return std::make_shared<Solver<MemorySpace, ExecutionSpace, Scalar, P_ORDER,
+                                   NComps, FarField>>( comm, cfg );
 }
 
-} // end namespace Canopy
+} // namespace Canopy
 
-#endif // CANOPY_TREE_HPP
+#endif // CANOPY_SOLVER_HPP

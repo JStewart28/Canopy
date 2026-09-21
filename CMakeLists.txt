@@ -69,6 +69,10 @@ macro(Canopy_add_dependency)
   set(Canopy_ENABLE_${CANOPY_DEPENDENCY_OPTION} ${${CANOPY_DEPENDENCY_PACKAGE}_FOUND})
 endmacro()
 
+# find trilinos
+Canopy_add_dependency( PACKAGE Trilinos )
+set_package_properties(Trilinos PROPERTIES TYPE REQUIRED PURPOSE "Used for load balancing")
+
 # find MPI
 Canopy_add_dependency( PACKAGE MPI COMPONENTS CXX )
 set_package_properties(MPI PROPERTIES TYPE REQUIRED PURPOSE "Used for distributed parallelization")
@@ -99,6 +103,47 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   else()
     unset(INTERNAL_Canopy_BUILD_MARCH)
   endif()
+endif()
+
+##---------------------------------------------------------------------------##
+## DevFast: minimal optimization for fast compile during active development.
+##
+## Targets -O0 to skip nvcc optimization passes (the dominant per-TU cost
+## with nvcc_wrapper) while keeping -g so backtraces remain useful. Not for
+## profiling or performance work — use RelWithDebInfo for that.
+##---------------------------------------------------------------------------##
+set(CMAKE_CXX_FLAGS_DEVFAST "-O0 -g" CACHE STRING
+    "Flags used by the CXX compiler during DevFast builds." FORCE)
+set(CMAKE_C_FLAGS_DEVFAST "-O0 -g" CACHE STRING
+    "Flags used by the C compiler during DevFast builds." FORCE)
+set(CMAKE_EXE_LINKER_FLAGS_DEVFAST "" CACHE STRING
+    "Flags used for linking binaries during DevFast builds." FORCE)
+set(CMAKE_SHARED_LINKER_FLAGS_DEVFAST "" CACHE STRING
+    "Flags used by the shared libraries linker during DevFast builds." FORCE)
+mark_as_advanced(
+  CMAKE_CXX_FLAGS_DEVFAST
+  CMAKE_C_FLAGS_DEVFAST
+  CMAKE_EXE_LINKER_FLAGS_DEVFAST
+  CMAKE_SHARED_LINKER_FLAGS_DEVFAST)
+if(CMAKE_BUILD_TYPE STREQUAL "DevFast")
+  message(STATUS "DevFast CXX flags: ${CMAKE_CXX_FLAGS_DEVFAST}")
+endif()
+
+##---------------------------------------------------------------------------##
+## RelWithDebInfo: profiling-friendly flags
+##
+## Targets -O3 (keep optimized code paths) with host -g (already in the
+## CMake default) and -lineinfo on device code so Nsight Compute can map
+## hardware counters back to source lines.
+##---------------------------------------------------------------------------##
+if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+  string(REPLACE "-O2" "-O3"
+    CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+  if(Kokkos_ENABLE_CUDA)
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
+      "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -lineinfo")
+  endif()
+  message(STATUS "RelWithDebInfo CXX flags: ${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 endif()
 
 ##---------------------------------------------------------------------------##
@@ -157,6 +202,21 @@ add_feature_info(Tests Canopy_ENABLE_TESTING "Build unit tests (requires GTest)"
 # Set installing tests to off by default
 option(Canopy_INSTALL_TEST_EXECUTABLES "Install Canopy test executables" OFF)
 
+# MPI rank counts at which each MPI unit test is registered with CTest. The
+# default matches the project-wide minimum test set (see CLAUDE.md). Ranks that
+# exceed MPIEXEC_MAX_NUMPROCS are skipped at configure time.
+set(Canopy_TEST_MPI_RANKS "1;2;3;4;5;6" CACHE STRING
+    "Semicolon-separated MPI rank counts to register each MPI unit test at")
+
+# Optional filter restricting which Kokkos backends tests are built for. Empty
+# (default) builds a test variant for every enabled backend. Each test header
+# is recompiled once per backend, so restricting this (e.g. to SERIAL) is the
+# cheapest way to cut test-compile time while iterating — the costly device
+# (HIP/CUDA) variants are skipped. Entries are intersected with the backends
+# Kokkos actually enables, so an over-broad list is harmless.
+set(Canopy_TEST_DEVICES "" CACHE STRING
+    "Semicolon-separated Kokkos backends to build tests for (empty = all enabled)")
+
 if(Canopy_ENABLE_TESTING)
   find_package(GTest 1.10 REQUIRED)
   # Workaround for FindGTest module in CMake older than 3.20
@@ -169,8 +229,13 @@ if(Canopy_ENABLE_TESTING)
   endif()
   set(TEST_HARNESS_DIR ${CMAKE_SOURCE_DIR}/cmake/test_harness)
   include(cmake/test_harness/test_harness.cmake)
-  add_subdirectory(tests)
+  # enable_testing() must run BEFORE add_subdirectory(tests): CTest only
+  # generates a CTestTestfile.cmake for subdirectories processed after testing
+  # is enabled. With the call below add_subdirectory(tests), none of the unit
+  # tests' add_test() registrations were emitted and `ctest` saw zero unit
+  # tests (only the examples, which are added later in this file).
   enable_testing()
+  add_subdirectory(tests)
 endif()
 
 # enable doxygen
@@ -180,6 +245,55 @@ if(Canopy_ENABLE_DOXYGEN)
   find_package(Doxygen REQUIRED)
   doxygen_add_docs(doxygen src src)
 endif()
+
+##---------------------------------------------------------------------------##
+## Diagnostics / profiling timers
+##---------------------------------------------------------------------------##
+option(Canopy_ENABLE_PROFILING "Profiling" OFF)
+set(Canopy_PROFILING_LEVEL "" CACHE STRING
+    "Profiling detail level: 0=off, 1=basic phases, 2=detailed sub-phases, 3=verbose (reserved)")
+set_property(CACHE Canopy_PROFILING_LEVEL PROPERTY STRINGS "" 0 1 2 3)
+
+# Resolve the effective profiling level. If Canopy_ENABLE_PROFILING is ON and
+# no explicit level was given, default to level 1 (the original behavior).
+# Canopy_ENABLE_PROFILING=OFF is an authoritative kill switch: it forces the
+# level to 0 regardless of any Canopy_PROFILING_LEVEL the user supplied.
+if(NOT Canopy_ENABLE_PROFILING AND NOT Canopy_PROFILING_LEVEL STREQUAL "")
+  set(_canopy_profiling_level 0)
+elseif(Canopy_PROFILING_LEVEL STREQUAL "")
+  if(Canopy_ENABLE_PROFILING)
+    set(_canopy_profiling_level 1)
+  else()
+    set(_canopy_profiling_level 0)
+  endif()
+else()
+  set(_canopy_profiling_level ${Canopy_PROFILING_LEVEL})
+endif()
+
+if(_canopy_profiling_level GREATER 0)
+  set(Canopy_ENABLE_PROFILING ON CACHE BOOL "Profiling" FORCE)
+  add_compile_definitions(CANOPY_ENABLE_PROFILING)
+  add_compile_definitions(CANOPY_PROFILING_LEVEL=${_canopy_profiling_level})
+endif()
+
+add_feature_info(Profiling Canopy_ENABLE_PROFILING
+    "Enable FMM phase timing via MPI_Wtime (level=${_canopy_profiling_level})")
+
+##---------------------------------------------------------------------------##
+## Debug verification gate
+##
+## When ON, enables compile-time-guarded side-by-side correctness checks in
+## algorithmically-divergent hot loops (currently DownwardSweep S3 classify:
+## new MortonKey-decode path vs old h_dc_for_filter-gather path). Doubles the
+## affected work; intended for MultiSolve correctness runs and local debug,
+## NOT for at-scale measurement. Leave OFF for production / perf builds.
+##---------------------------------------------------------------------------##
+option(Canopy_ENABLE_DEBUG "Enable debug-only side-by-side verification" OFF)
+if(Canopy_ENABLE_DEBUG)
+  add_compile_definitions(CANOPY_ENABLE_DEBUG)
+endif()
+add_feature_info(DebugVerify Canopy_ENABLE_DEBUG
+    "Enable compile-gated side-by-side checks in hot loops (S3 classify)")
 
 ##---------------------------------------------------------------------------##
 ## Libraries and Examples
@@ -192,6 +306,8 @@ else()
 endif()
 
 option(Canopy_ENABLE_EXAMPLES "Build tutorial examples" OFF)
+# Set installing examples to off by default
+option(Canopy_INSTALL_EXAMPLES "Install Canopy example executables" OFF)
 add_feature_info(Examples Canopy_ENABLE_EXAMPLES "Build tutorial examples")
 if(Canopy_ENABLE_EXAMPLES)
   add_subdirectory(examples)

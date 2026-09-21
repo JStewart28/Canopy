@@ -9,228 +9,426 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
-#include <Canopy_Solver.hpp>
+#include "Canopy_CommunicationPlan.hpp"
+#include "Canopy_DownwardSweep.hpp"
+#include "Canopy_Helpers.hpp"
+#include "Canopy_LaplaceKernel.hpp"
+#include "Canopy_P2P.hpp"
+#include "Canopy_TreeBuilder.hpp"
+#include "Canopy_TreePartitioner.hpp"
+#include "Canopy_UpwardSweep.hpp"
 
-#include <test_helpers.hpp>
-
+#include <Cabana_Core.hpp>
 #include <Kokkos_Core.hpp>
 
 #include <gtest/gtest.h>
+
+#include <mpi.h>
+
+#include <cmath>
+#include <random>
+#include <vector>
 
 namespace Test
 {
 //---------------------------------------------------------------------------//
 
+using namespace Canopy;
 
-/**
- * Tests that particle-to-particle potentials are calculated correctly at the leaf layer.
- */
-template <int p>
-void testSolver(int points_per_proc_in, bool balanced)
+namespace SingleSolveTest
 {
-    static_assert(p > 0);
 
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+enum FieldIdx
+{
+    Position = 0,
+    Charge = 1
+};
 
-    int comm_size;
-    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+// Expansion order used for all single-solve tests.
+static constexpr int P_ORDER = 8;
 
-    // Create a tree of depth 3. pos/charge/potential/global particle id
-    std::array<scalar_type, 3> global_low_corner = { -3.0, -3.0, -3.0 };
-    std::array<scalar_type, 3> global_high_corner = { 3.0, 3.0, 3.0 };
+} // namespace SingleSolveTest
 
-    static constexpr std::size_t cells_per_tile = 2;
-    std::size_t leaf_tiles, red_factor;
-    red_factor = 2, leaf_tiles = 16;
-    if (red_factor < 2) red_factor = 2;
-    auto tree = Canopy::createSolver<TEST_MEMSPACE, TEST_EXECSPACE, MD_f, cells_per_tile, p>(
-            global_low_corner, global_high_corner, leaf_tiles, red_factor, MPI_COMM_WORLD);
-    
-    // The tree depth should always be at least three, but this check is here just in case.
-    // If the depth is less than 3, this test may not work correctly.
-    // if (rank == 0) printf("R%d: num tree layers: %d\n", rank, tree->numLayers());
-    // ASSERT_EQ(tree->numLayers(), 3) << "testMultipole2Local: Error: Solver depth must be depth 3.";
+//---------------------------------------------------------------------------//
+/**
+ * End-to-end distributed FMM + P2P solve and comparison against a
+ * brute-force O(N²) direct sum.
+ *
+ * NComps controls the number of simultaneous solves (charge components):
+ *   NComps == 1  — one charge and one potential per particle
+ *   NComps == 3  — three charges and three potentials per particle
+ *
+ * The full pipeline is:
+ *   build → partition → rebuild → sort_by_leaf → rebuild → comm_plan
+ *   → UpwardSweep (P2M + M2M) → DownwardSweep (M2L + L2L + L2P, far-field)
+ *   → P2P (direct near-field, one component at a time)
+ *
+ * The combined FMM + P2P result is gathered to rank 0, which computes the
+ * reference N-body sum and checks that the max relative error over all
+ * particles and components is below fmm_tolerance.
+ *
+ * When compute_gradient is true, the same comparison is made for each of
+ * the NComps × 3 gradient components.
+ *
+ * Brute-force potential at particle i, component c:
+ *   phi_ref[i,c] = sum_{j≠i} q[j,c] / |r_i - r_j|
+ *
+ * Brute-force gradient at particle i, component c, spatial axis d:
+ *   grad_ref[i,c,d] = sum_{j≠i} -q[j,c] * (r_i[d] - r_j[d]) / |r_i - r_j|^3
+ */
+template <int NComps>
+void testFullSolve( bool compute_gradient, int num_particles_per_rank,
+                    int ncrit, int max_depth, double tree_tolerance,
+                    int replication_depth, double fmm_tolerance )
+{
+    using namespace SingleSolveTest;
 
-    // Create the data on rank 0. It will automatically be distributed correctly when
-    // filled into the tree. There must be enough particles so that the target point resides
-    // in a cell that has been activated in the mesh. This won't be a problem in the
-    // "real" code because we only evaluate locals where cells are activated.
-    int total_points = points_per_proc_in;
-    int owned_points = (rank == 0) ? (total_points) : 0;
-    Kokkos::View<scalar_type* [3], TEST_MEMSPACE> cart_coords( "cart_coords",
-                                                          owned_points );
-    Kokkos::View<scalar_type*, TEST_MEMSPACE> q( "q", owned_points );
-    
-    Kokkos::Array<scalar_type, 2> charge_bounds = {-10.0, 10.0};
-    scalar_type bound_val = 3.0;
-    Kokkos::Array<scalar_type, 6> coord_bounds = {-bound_val, -bound_val, -bound_val, bound_val, bound_val, bound_val};
-    // If not balanced, fill domain unevenly
-    if (!balanced)
+    using Kernel = LaplaceKernel<double, P_ORDER, NComps>;
+    using DataTypes = Cabana::MemberTypes<double[3], double[NComps]>;
+    using AoSoA_t = Cabana::AoSoA<DataTypes, TEST_MEMSPACE>;
+    using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
+    using UpSweep = UpwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel>;
+    using DwnSweep = DownwardSweep<TEST_MEMSPACE, TEST_EXECSPACE, Kernel>;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    // -----------------------------------------------------------------------
+    // Generate random particles
+    // -----------------------------------------------------------------------
+    AoSoA_ht particles_h( "particles_h", num_particles_per_rank );
     {
-        coord_bounds = {-3.0, -3.0, -0.05, 3.0, 3.0, 0.05};
-    }
-    
-    // Kokkos::Array<scalar_type, 6> coord_bounds1 = {2.3, 2.3, 2.3, bound_val, bound_val, bound_val};
-    fillRandomCoordinates(cart_coords, coord_bounds, 123);
-    fillRandomScalar(q, charge_bounds, 321);
+        auto hp = Cabana::slice<Position>( particles_h );
+        auto hq = Cabana::slice<Charge>( particles_h );
 
-    particle_aosoa_type_f_h particle_aosoa_host("particle_aosoa", owned_points);
-    auto pos_slice_host = Cabana::slice<MD_f::pos>(particle_aosoa_host);
-    auto scalar_slice_host = Cabana::slice<MD_f::in>(particle_aosoa_host);
-    auto potential_slice_host = Cabana::slice<MD_f::out>(particle_aosoa_host);
-    auto force_slice_host = Cabana::slice<MD_f::force>(particle_aosoa_host);
-    auto id_slice_host = Cabana::slice<4>(particle_aosoa_host);
-    Cabana::deep_copy(potential_slice_host, 0.0);
-    Cabana::deep_copy(force_slice_host, 0.0);
-
-    // Fill the particles into the AoSoA
-    auto cart_coords_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cart_coords);
-    auto q_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
-
-    for (int i = 0; i < owned_points; ++i)
-    {
-        for (int j = 0; j < 3; ++j)
+        std::mt19937 gen( 42 + rank * ( NComps + 1 ) );
+        std::uniform_real_distribution<double> pos_dist( 0.0, 1.0 );
+        std::uniform_real_distribution<double> q_dist( -1.0, 1.0 );
+        for ( int i = 0; i < num_particles_per_rank; i++ )
         {
-            pos_slice_host(i, j) = cart_coords_h(i, j);
-        }
-        scalar_slice_host(i) = q_h(i);
-        id_slice_host(i) = i;
-        // printf("R%d: initial particle: p(%0.3lf, %0.3lf, %0.3lf), q(%0.3lf)\n", rank,
-        //     pos_slice_host(i, 0), pos_slice_host(i, 1), pos_slice_host(i, 2), scalar_slice_host(i));
-    }
-
-    // Iterate over particles and calculate potential
-    Kokkos::View<scalar_type*, Kokkos::HostSpace> direct_potentials( "direct_potentials",
-                                                          owned_points );
-    Kokkos::View<scalar_type*[3], Kokkos::HostSpace> direct_forces( "direct_forces",
-                                                          owned_points );
-    Kokkos::deep_copy(direct_potentials, 0.0);
-    Kokkos::deep_copy(direct_forces, 0.0);
-    for (int this_pid = 0; this_pid < owned_points; this_pid++)
-    {
-        // Get the cell this point falls into
-        // Kokkos::Array<std::size_t, 3> this_cell_ijk;
-        // for (int dim = 0; dim < 3; ++dim)
-        // {
-        //     this_cell_ijk[dim] = static_cast<std::size_t>(
-        //         Kokkos::floor((pos_slice_host(this_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
-        // }
-        // printf("this_pid(%d): (%d, %d, %d)\n", this_pid, this_cell_ijk[0], this_cell_ijk[1], this_cell_ijk[2]);
-
-        // Iterate over all particles inserted into the mesh. If it falls into a cell
-        // within 2 cells of the target point's cell, skip it. If not, add its contribution
-        // to the potential at the target point.
-        for (int other_pid = 0; other_pid < owned_points; other_pid++)
-        {
-            if (this_pid == other_pid)
-                continue;
-
-            // Kokkos::Array<int, 3> cell_ijk;
-            // for (int dim = 0; dim < 3; ++dim)
-            // {
-            //     cell_ijk[dim] = static_cast<int>(
-            //         Kokkos::floor((pos_slice_host(other_pid, dim) - global_low_corner[dim]) / cell_size[dim]) );
-            // }
-            
-            // printf("this_pid(%d): other_pid(%d): (%d, %d, %d)\n", this_pid, other_pid, cell_ijk[0], cell_ijk[1], cell_ijk[2]);
-            scalar_type dx = pos_slice_host(other_pid, 0) - pos_slice_host( this_pid, 0 );
-            scalar_type dy = pos_slice_host(other_pid, 1) - pos_slice_host( this_pid, 1 );
-            scalar_type dz = pos_slice_host(other_pid, 2) - pos_slice_host( this_pid, 2 );
-            scalar_type dist = Kokkos::sqrt( dx * dx + dy * dy + dz * dz );
-            // printf("dp(%d) += other(%d): dx/y/z: %.2lf, %.2lf, %.2lf\n", this_pid, other_pid, dx, dy, dz);
-            direct_potentials(this_pid) += q_h( other_pid ) / dist;
-
-            // Force calculation
-            scalar_type dist_inv  = 1.0 / dist;
-            scalar_type dist_inv3 = dist_inv * dist_inv * dist_inv;
-            scalar_type fp = -1 * q_h(this_pid) * q_h(other_pid) * dist_inv3;
-            direct_forces(this_pid, 0) += fp * dx;
-            direct_forces(this_pid, 1) += fp * dy;
-            direct_forces(this_pid, 2) += fp * dz;     
+            hp( i, 0 ) = pos_dist( gen );
+            hp( i, 1 ) = pos_dist( gen );
+            hp( i, 2 ) = pos_dist( gen );
+            for ( int c = 0; c < NComps; c++ )
+                hq( i, c ) = q_dist( gen );
         }
     }
+    AoSoA_t particles( "particles", num_particles_per_rank );
+    Cabana::deep_copy( particles, particles_h );
 
-    // Copy particles to device
-    auto aosoa_device = std::make_shared<particle_aosoa_type_f>("aosoa_device", particle_aosoa_host.size());
-    Cabana::deep_copy(*aosoa_device, particle_aosoa_host);
-        
-    // Fill the tree. This migrates particles to their correct rank.
-    bool run_load_balance = !balanced;
-    tree->solve(aosoa_device, run_load_balance);
+    // -----------------------------------------------------------------------
+    // Pipeline setup
+    // -----------------------------------------------------------------------
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tree_tolerance, tree_tolerance, tree_tolerance, tree_tolerance, tree_tolerance, tree_tolerance}, tree_tolerance );
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+    CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE> comm_plan(
+        MPI_COMM_WORLD );
+    UpSweep upward( MPI_COMM_WORLD );
+    DwnSweep downward( MPI_COMM_WORLD );
+    P2P<TEST_MEMSPACE, TEST_EXECSPACE, Kernel> p2p( MPI_COMM_WORLD );
 
-    // Check mesh information for leaf layer. Must be done after solve or else the tree has
-    // not yet been constructed.
-    int cells_per_dimension_leaf = cells_per_tile * leaf_tiles;
-    Kokkos::Array<scalar_type, 3> cell_size;
-    for (int i = 0; i < 3; ++i)
+    // Step 1: build tree on initial particle distribution
+    auto positions = Cabana::slice<Position>( particles );
+    builder.build( positions, num_particles_per_rank );
+
+    // Step 2: partition (migrates particles across ranks)
+    partitioner.partition( builder, particles, num_particles_per_rank );
+    int num_local = partitioner.num_local_particles();
+
+    // Step 3: rebuild tree for migrated particles
+    positions = Cabana::slice<Position>( particles );
+    builder.build( positions, num_local );
+
+    // Step 4: sort AoSoA so each leaf's particles are contiguous.
+    // particle_keys are stale after this call.
+    partitioner.sort_particles_by_leaf( builder, particles );
+
+    // Step 5: rebuild so particle_keys match the sorted AoSoA order.
+    positions = Cabana::slice<Position>( particles );
+    builder.build( positions, num_local );
+
+    // Step 6: build communication plan
+    comm_plan.build( builder.cells(), partitioner.ownership(),
+                     partitioner.cell_owner_map(), replication_depth );
+
+    // Step 7: setup sweeps and P2P
+    upward.setup( builder.cells(), partitioner.cell_owner_map(),
+                  builder.particle_keys(), num_local );
+    downward.setup( upward, num_local );
+    p2p.setup( builder, partitioner, comm_plan );
+
+    // -----------------------------------------------------------------------
+    // Execute: UpwardSweep → DownwardSweep → P2P
+    // -----------------------------------------------------------------------
+    auto charges = Cabana::slice<Charge>( particles );
+
+    // Upward sweep: P2M at leaves, M2M up the tree
+    upward.execute( charges, positions, comm_plan );
+
+    // Allocate output views.  Both DownwardSweep and P2P ADD to these, so
+    // they must be zero before execute().  A zero-extent gradient view is
+    // passed when gradient evaluation is skipped.
+    using pot_view = typename DwnSweep::potential_view_type;
+    using grad_view = typename DwnSweep::gradient_view_type;
+    pot_view potential( "potential", num_local );
+    grad_view gradient( "gradient", compute_gradient ? num_local : 0 );
+    Kokkos::deep_copy( potential, 0.0 );
+    if ( compute_gradient )
+        Kokkos::deep_copy( gradient, 0.0 );
+
+    // Downward sweep: M2L, L2L, L2P — far-field contribution
+    downward.execute( upward.multipoles(), positions, potential, gradient,
+                      compute_gradient, comm_plan );
+
+    // P2P: near-field (direct) contribution. All NComps are evaluated in
+    // a single execute() call sharing one ghost-particle halo exchange.
+    p2p.execute( positions, charges, potential, gradient, compute_gradient );
+
+    // -----------------------------------------------------------------------
+    // Gather all particle data and results to rank 0 for comparison.
+    //
+    // Use the Canopy helper to copy Cabana slices to host Kokkos views,
+    // then pack into flat double buffers for MPI_Gatherv.
+    // -----------------------------------------------------------------------
+
+    // Copy slices to host (must use Canopy helper; Kokkos::create_mirror_view
+    // does not support Cabana slice sources).
+    auto h_pos = Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                      positions, "h_pos" );
+    auto h_chg = Canopy::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                      charges, "h_chg" );
+
+    // Copy output Kokkos views to host
+    auto h_pot =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), potential );
+    auto h_grad =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), gradient );
+
+    // Pack into flat buffers (row-major: particle outermost)
+    const int chg_stride = NComps;
+    const int pot_stride = NComps;
+    const int grad_stride = NComps * 3;
+
+    std::vector<double> local_pos_buf( 3 * num_local );
+    std::vector<double> local_chg_buf( chg_stride * num_local );
+    std::vector<double> local_pot_buf( pot_stride * num_local );
+    std::vector<double> local_grad_buf;
+    if ( compute_gradient )
+        local_grad_buf.resize( grad_stride * num_local );
+
+    for ( int i = 0; i < num_local; i++ )
     {
-        cell_size[i] = (global_high_corner[i] - global_low_corner[i]) / cells_per_dimension_leaf;
-    }
-    ASSERT_EQ(tree->layer(0)->cellsPerDim(), cells_per_dimension_leaf) << "testMultipole2Local: Error: Unexpected cells_per_leaf_dimension";
-    ASSERT_EQ(tree->layer(0)->tilesPerDim(), leaf_tiles) << "testMultipole2Local: Error: Unexpected leaf_tiles";
-    ASSERT_EQ(tree->layer(0)->cellSize(), cell_size) << "testMultipole2Local: Error: Unexpected cell_size";
-
-
-    // Gather all particles from the tree back to rank 0 for testing
-    auto tmp = Cabana::create_mirror_view_and_copy(Kokkos::HostSpace(), *(tree->data()));
-    particle_aosoa_type_f_h tree_particles("tree_particles", tmp.size());
-    Cabana::deep_copy(tree_particles, tmp);
-
-    // Remove ghost particles
-    tree_particles.resize(tree->numOwnedParticles());
-    
-    // Send particles back to rank 0 for testing
-    Kokkos::View<int*, Kokkos::HostSpace> send_to("send_to", tree->numOwnedParticles());
-    Kokkos::deep_copy(send_to, 0);
-    Cabana::Distributor<Kokkos::HostSpace> distributor(MPI_COMM_WORLD, send_to);
-    Cabana::migrate( distributor, tree_particles );
-
-    // Sort the particles by increasing cell_id
-    auto tree_id_slice = Cabana::slice<4>(tree_particles);
-    auto sort_data = Cabana::sortByKey( tree_id_slice );
-    Cabana::permute( sort_data, tree_particles );
-    tree_id_slice = Cabana::slice<4>(tree_particles);
-    auto tree_potentials = Cabana::slice<MD_f::out>(tree_particles);
-    auto tree_forces = Cabana::slice<MD_f::force>(tree_particles);
-
-    double max_error_potential = 0.0;
-    double max_error_force = 0.0;
-    for (int i = 0; i < owned_points; i++)
-    {
-        auto direct_potential = direct_potentials(i);
-        auto particle_id = tree_id_slice(i);
-        auto solver_potential = tree_potentials(i);
-        EXPECT_NEAR(solver_potential, direct_potential, 0.003) << " at particle " << i;
-        const auto error_p = Kokkos::abs(direct_potential - solver_potential);
-        if (error_p > max_error_potential)
-            max_error_potential = error_p;
-        for (int d = 0; d < 3; d++)
+        local_pos_buf[3 * i + 0] = h_pos( i, 0 );
+        local_pos_buf[3 * i + 1] = h_pos( i, 1 );
+        local_pos_buf[3 * i + 2] = h_pos( i, 2 );
+        for ( int c = 0; c < NComps; c++ )
         {
-            auto direct_force = direct_forces(i, d);
-            auto solver_force = tree_forces(i, d);
-            EXPECT_NEAR(solver_force, direct_force, 0.6) << " at particle " << i;
-            const auto error_f = Kokkos::abs(direct_force - solver_force);
-            if (error_f > max_error_force)
-                max_error_force = error_f;
+            local_chg_buf[i * NComps + c] = h_chg( i, c );
+            local_pot_buf[i * NComps + c] = h_pot( i, c );
         }
-        // printf("i%d, pid %d: direct: %.6lf, mesh: %.6lf\n", i, particle_id, direct_potential, mesh_potential);
+        if ( compute_gradient )
+        {
+            for ( int c = 0; c < NComps; c++ )
+                for ( int d = 0; d < 3; d++ )
+                    local_grad_buf[i * grad_stride + c * 3 + d] =
+                        h_grad( i, c, d );
+        }
     }
-    if (owned_points > 0)
-        printf("Max errors: potential: %.5lf, force: %.5lf\n", max_error_potential, max_error_force);
+
+    // Gather particle counts
+    std::vector<int> all_num_local( nprocs, 0 );
+    MPI_Gather( &num_local, 1, MPI_INT, all_num_local.data(), 1, MPI_INT, 0,
+                MPI_COMM_WORLD );
+
+    // Build displacements and receive buffers on rank 0
+    int total_particles = 0;
+    std::vector<int> pos_counts( nprocs, 0 ), pos_displs( nprocs, 0 );
+    std::vector<int> chg_counts( nprocs, 0 ), chg_displs( nprocs, 0 );
+    std::vector<int> pot_counts( nprocs, 0 ), pot_displs( nprocs, 0 );
+    std::vector<int> grad_counts( nprocs, 0 ), grad_displs( nprocs, 0 );
+    std::vector<double> gathered_pos, gathered_chg, gathered_pot, gathered_grad;
+
+    if ( rank == 0 )
+    {
+        for ( int r = 0; r < nprocs; r++ )
+        {
+            pos_counts[r] = 3 * all_num_local[r];
+            chg_counts[r] = chg_stride * all_num_local[r];
+            pot_counts[r] = pot_stride * all_num_local[r];
+            grad_counts[r] = grad_stride * all_num_local[r];
+            total_particles += all_num_local[r];
+        }
+        for ( int r = 1; r < nprocs; r++ )
+        {
+            pos_displs[r] = pos_displs[r - 1] + pos_counts[r - 1];
+            chg_displs[r] = chg_displs[r - 1] + chg_counts[r - 1];
+            pot_displs[r] = pot_displs[r - 1] + pot_counts[r - 1];
+            grad_displs[r] = grad_displs[r - 1] + grad_counts[r - 1];
+        }
+        gathered_pos.resize( 3 * total_particles );
+        gathered_chg.resize( chg_stride * total_particles );
+        gathered_pot.resize( pot_stride * total_particles );
+        if ( compute_gradient )
+            gathered_grad.resize( grad_stride * total_particles );
+    }
+
+    MPI_Gatherv( local_pos_buf.data(), 3 * num_local, MPI_DOUBLE,
+                 gathered_pos.data(), pos_counts.data(), pos_displs.data(),
+                 MPI_DOUBLE, 0, MPI_COMM_WORLD );
+    MPI_Gatherv( local_chg_buf.data(), chg_stride * num_local, MPI_DOUBLE,
+                 gathered_chg.data(), chg_counts.data(), chg_displs.data(),
+                 MPI_DOUBLE, 0, MPI_COMM_WORLD );
+    MPI_Gatherv( local_pot_buf.data(), pot_stride * num_local, MPI_DOUBLE,
+                 gathered_pot.data(), pot_counts.data(), pot_displs.data(),
+                 MPI_DOUBLE, 0, MPI_COMM_WORLD );
+    if ( compute_gradient )
+        MPI_Gatherv( local_grad_buf.data(), grad_stride * num_local, MPI_DOUBLE,
+                     gathered_grad.data(), grad_counts.data(),
+                     grad_displs.data(), MPI_DOUBLE, 0, MPI_COMM_WORLD );
+
+    // -----------------------------------------------------------------------
+    // On rank 0: compute brute-force N-body sum and compare.
+    // -----------------------------------------------------------------------
+    if ( rank == 0 )
+    {
+        double max_pot_rel_err = 0.0;
+        double max_grad_rel_err = 0.0;
+
+        for ( int i = 0; i < total_particles; i++ )
+        {
+            const double xi = gathered_pos[3 * i + 0];
+            const double yi = gathered_pos[3 * i + 1];
+            const double zi = gathered_pos[3 * i + 2];
+
+            for ( int c = 0; c < NComps; c++ )
+            {
+                double phi_ref = 0.0;
+                double gx_ref = 0.0, gy_ref = 0.0, gz_ref = 0.0;
+
+                for ( int j = 0; j < total_particles; j++ )
+                {
+                    if ( j == i )
+                        continue;
+                    const double dx = xi - gathered_pos[3 * j + 0];
+                    const double dy = yi - gathered_pos[3 * j + 1];
+                    const double dz = zi - gathered_pos[3 * j + 2];
+                    const double r2 = dx * dx + dy * dy + dz * dz;
+                    const double inv_r = 1.0 / std::sqrt( r2 );
+                    const double inv_r3 = inv_r * inv_r * inv_r;
+                    const double qjc = gathered_chg[j * NComps + c];
+
+                    phi_ref += qjc * inv_r;
+                    if ( compute_gradient )
+                    {
+                        gx_ref -= qjc * dx * inv_r3;
+                        gy_ref -= qjc * dy * inv_r3;
+                        gz_ref -= qjc * dz * inv_r3;
+                    }
+                }
+
+                // Potential relative error
+                const double phi_fmm = gathered_pot[i * NComps + c];
+                const double ref_mag = std::abs( phi_ref );
+                const double pot_err = std::abs( phi_fmm - phi_ref );
+                const double pot_rel =
+                    ( ref_mag > 1.0e-10 ) ? pot_err / ref_mag : pot_err;
+                if ( pot_rel > max_pot_rel_err )
+                    max_pot_rel_err = pot_rel;
+
+                // Gradient relative error
+                if ( compute_gradient )
+                {
+                    const double gx_fmm =
+                        gathered_grad[i * grad_stride + c * 3 + 0];
+                    const double gy_fmm =
+                        gathered_grad[i * grad_stride + c * 3 + 1];
+                    const double gz_fmm =
+                        gathered_grad[i * grad_stride + c * 3 + 2];
+
+                    const double grad_mag = std::sqrt(
+                        gx_ref * gx_ref + gy_ref * gy_ref + gz_ref * gz_ref );
+                    const double grad_err =
+                        std::max( { std::abs( gx_fmm - gx_ref ),
+                                    std::abs( gy_fmm - gy_ref ),
+                                    std::abs( gz_fmm - gz_ref ) } );
+                    const double grad_rel =
+                        ( grad_mag > 1.0e-10 ) ? grad_err / grad_mag : grad_err;
+                    if ( grad_rel > max_grad_rel_err )
+                        max_grad_rel_err = grad_rel;
+                }
+            }
+        }
+
+        EXPECT_LT( max_pot_rel_err, fmm_tolerance )
+            << "FMM+P2P potential (NComps=" << NComps
+            << ") deviates from brute-force N-body sum; "
+               "max relative error = "
+            << max_pot_rel_err;
+
+        if ( compute_gradient )
+            EXPECT_LT( max_grad_rel_err, fmm_tolerance )
+                << "FMM+P2P gradient (NComps=" << NComps
+                << ") deviates from brute-force N-body gradient; "
+                   "max relative error = "
+                << max_grad_rel_err;
+    }
 }
 
 //---------------------------------------------------------------------------//
 // RUN TESTS
+//
+// Parameters: num_particles_per_rank, ncrit, max_depth, tree_tolerance,
+//             replication_depth, fmm_tolerance.
+//
+// num_particles_per_rank is kept modest (200) so the O(N²) brute-force
+// reference on rank 0 remains fast.
+//
+// fmm_tolerance of 1e-3 is a conservative bound for P_ORDER=6 with a
+// random uniform particle distribution.
 //---------------------------------------------------------------------------//
 
-TEST( SingleSolve, testSingleSolve_balanced )
-{ 
-    testSolver<6>(500, true);
+/**
+ * Test 1: Laplace single-component (NComps=1) — potential only.
+ * Each particle carries one charge; verify that the combined FMM+P2P
+ * potential matches the brute-force direct sum over all particle pairs.
+ */
+TEST( SingleSolve, PotentialNComps1 )
+{
+    testFullSolve<1>( false, 500, 16, 6, 0.1, 2, 1.0e-3 );
 }
-TEST( SingleSolve, testSingleSolve_unbalanced )
-{ 
-    testSolver<6>(500, false);
+
+/**
+ * Test 2: Laplace single-component (NComps=1) — potential and forces.
+ * Same as Test 1 but also verifies the gradient (force) via the same
+ * brute-force comparison.
+ */
+TEST( SingleSolve, PotentialAndGradientNComps1 )
+{
+    testFullSolve<1>( true, 500, 16, 6, 0.1, 2, 1.0e-3 );
+}
+
+/**
+ * Test 3: Laplace multi-component (NComps=3) — potential only.
+ * Each particle carries three independent charges; the FMM runs all
+ * three simultaneously. Each component's potential is compared
+ * independently against its own brute-force direct sum.
+ */
+TEST( SingleSolve, PotentialNComps3 )
+{
+    testFullSolve<3>( false, 500, 16, 6, 0.1, 2, 1.0e-3 );
+}
+
+/**
+ * Test 4: Laplace multi-component (NComps=3) — potential and forces.
+ * Same as Test 3 but also verifies all nine gradient components
+ * (NComps × 3 spatial directions) against the brute-force reference.
+ */
+TEST( SingleSolve, PotentialAndGradientNComps3 )
+{
+    testFullSolve<3>( true, 500, 16, 6, 0.1, 2, 1.0e-3 );
 }
 
 //---------------------------------------------------------------------------//
