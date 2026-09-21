@@ -1519,3 +1519,204 @@ where they came from — a pre-$p{=}3$ draft of the comment.
   measurement had to go inside the step loop. If a later session wants
   per-build figures without parsing cumulative differences, that is a `src/`
   change and T5 deliberately made none.
+
+## T6 — the derivative ladder validated at $|k| = 6$
+
+One file changed, `tests/tstCartesianTaylor.hpp`. Nothing under `src/`, nothing
+in `tests/tstCartesianTaylorSolve.hpp`, no other test body, no change to the
+flux script, no change to `p_order`.
+
+### What the oracle could not do before
+
+Three separate things, and only the first is the one T6's title names:
+
+1. `max_k = 2 * p_order = 4` stopped the check at degree 4. Fixed with a body-
+   local `fd_max_k = 6`; `p_order` stays 2 because it also sizes the ladder
+   `closed_forms` allocates, and the shift and M2L bodies already choose their
+   own orders explicitly.
+2. **`stencil1D` could not evaluate a per-axis derivative above order 4 and did
+   not say so.** Its `default:` branch returned the order-4 stencil for *any*
+   higher order, and `fdDerivative` then divided by $h^5$ or $h^6$ anyway. Every
+   degree-5 and degree-6 multi-index with a single component of 5 or 6 —
+   $(5,0,0)$, $(6,0,0)$, $(5,1,0)$ and permutations — would have been
+   differenced with the wrong operator and compared against a correct ladder
+   value. This is the failure mode that looks exactly like a recurrence bug, so
+   it is worth being explicit: simply raising `max_k` to 6 without touching
+   `stencil1D` would have produced a *red* test blaming §3. Orders 5 and 6 are
+   now explicit — weights $(-\frac12, 2, -\frac52, 0, \frac52, -2, \frac12)$ and
+   $(1, -6, 15, -20, 15, -6, 1)$ at offsets $-3 \ldots 3$, antisymmetric and
+   symmetric respectively, so both error expansions carry even powers of $h$
+   only and both Richardson steps stay valid unchanged. The arrays in
+   `stencil1D` and the locals in `fdDerivative` widened 5 → 7, and `default:`
+   is now `std::abort()` behind a message naming the order.
+3. The sample set bracketed the $p = 3$ arm's band instead of entering it.
+   `scales` permanently gains 9.276, 15.46 and 74.2 (§T4 measured these once);
+   40 samples → 76.
+
+### The divisor scan, on this machine
+
+Run as a temporary loop inside the body over eleven candidates, read out of
+**job `f3Ze4jwB9ggF`**, then deleted. Worst $|{\rm diff}|/(\varphi/L^{|k|})$
+over all 76 samples, two Richardson steps:
+
+| $h$ | $\vert k\vert = 4$ | $\vert k\vert = 5$ | $\vert k\vert = 6$ |
+| --- | --- | --- | --- |
+| $L/2$ | 3.1895e+01 | 2.1647e+02 | 1.2928e+03 |
+| $L/3$ | 9.0864e-02 | 2.3917e+02 | 1.4189e+03 |
+| $L/4$ | 1.1218e-02 | 1.8076e+00 | 1.0837e+01 |
+| $L/6$ | 7.9408e-04 | 8.2201e-02 | 4.9289e-01 |
+| $L/8$ | 1.3193e-04 | 1.2272e-02 | 7.3593e-02 |
+| $L/12$ | 1.1048e-05 | 9.6088e-04 | 5.7912e-03 |
+| $L/16$ | 1.9448e-06 | 1.6500e-04 | **1.1843e-03** |
+| $L/24$ | **3.0798e-07** | **2.5308e-05** | 6.9018e-03 |
+| $L/32$ | 7.3209e-07 | 6.3866e-05 | 4.3151e-02 |
+| $L/48$ | 3.8231e-06 | 5.2008e-04 | 5.4051e-01 |
+| $L/64$ | 8.3097e-06 | 2.6844e-03 | 2.5210e+00 |
+
+**The floor moves up in $h$ with the degree, and that is the whole case for
+three divisors rather than one.** Roundoff enters as $(L/h)^{|k|}$ while
+truncation still falls as $(h/L)^6$ after both Richardson steps, so the
+crossover shifts coarser at every order. The cost of getting it wrong is
+asymmetric and large: $|k| = 6$ run at $|k| = 4$'s divisor is 36× worse
+(4.3e-2 against 1.2e-3), and at $L/64$ it is off by three orders. A single
+tolerance across the three degrees would have had to be sized for $|k| = 6$ and
+would have loosened $|k| = 4$ by four orders — the outcome step 4 forbids.
+
+Both regimes are visible at every degree, which is what says the floor is a
+real minimum and not the end of the scanned range. Note $L/3$ at $|k| = 5$ and
+$6$ being *worse* than $L/2$: at $h \sim L$ the seven-point stencil samples
+$\varphi$ out to $\pm 3h$, far outside the region the Taylor expansion the
+truncation estimate assumes is valid in, so the "truncation-limited, falling as
+$(h/L)^6$" description only starts holding from about $L/4$ down.
+
+**Measuring on-machine rather than with a replica mattered.** §T1 sized the
+shipped divisor with a standalone replica that reported 4.3e-7 at $|k| = 4$
+where the binary reports 7.321e-7 at the same $h$ — 1.7× optimistic, from
+`-ffp-contract` and libm. At the 10× margin rule used below, that 1.7× is most
+of a degree's headroom.
+
+### Pinned, and the margins achieved
+
+`fd_h_divisor[3]` and `fd_tol[3]`, both indexed by degree − 4, both named on the
+assertion together. From **job `f3Ze6Hh1Fp8X`** (rc 0, 12/12) and reproduced
+exactly by **job `f3Ze8yUzNVSo`** (rc 0, 12/12, the post-revert re-run on the
+tree as committed):
+
+| $\vert k\vert$ | divisor | tol | achieved | multi-index | $(r, b)$ | margin |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4 | $L/24$ | 4e-6 | 3.080e-07 | $(4,0,0)$ | $b = 10^{-6}$, $\vert r\vert/\sqrt b = 74.2$ | 13.0× |
+| 5 | $L/24$ | 3e-4 | 2.531e-05 | $(5,0,0)$ | $b = 6.25\times10^{-4}$, $\vert r\vert/\sqrt b = 100$ | 11.9× |
+| 6 | $L/16$ | 2e-2 | 1.184e-03 | $(6,0,0)$ | $b = 6.25\times10^{-4}$, $\vert r\vert/\sqrt b = 15.46$ | 16.9× |
+
+The rule, stated in the file: **the smallest one-significant-digit value at
+least 10× the measured worst.** Chosen to match T1's 13.7× rather than to round
+to a decade, because a decade would have given $|k| = 6$ an 84× margin — a
+tolerance a regression could drift a long way inside of. No tolerance was
+widened to make a degree pass; none needed to be.
+
+Every worst case is at a **single-axis** multi-index, $(n,0,0)$ at all three
+degrees. That is the oracle's own resolution limit rather than the recurrence's:
+a single-axis derivative uses the widest 1-D stencil (7 points, weight sum 64 at
+order 6) and the largest $1/h^n$, so it carries the most cancellation. Mixed
+indices like $(2,2,2)$ spread the same total order over three narrow stencils
+and come out better.
+
+**$|k| = 4$ ended up sharper than it shipped**, 3.080e-07 against T1's
+7.321e-07. This is not the interior scales: $L/32$ still measures
+7.3209e-07 on the 76-sample set, matching T1 and T4 to four digits. It is that
+T1's four-point scan $\{8, 16, 32, 64\}$ straddled a floor that sits at 24.
+
+**The deviation grows about 40× per degree** (3.1e-7 → 2.5e-5 → 1.2e-3). Read
+this as oracle resolution, not recurrence conditioning: it tracks the roundoff
+floor of a $|k|$-th difference, which is exactly what rises with $|k|$, and the
+perturbation figures below show the recurrence itself is being resolved to well
+inside each bound.
+
+### `closed_forms`, re-pinned
+
+Both bodies read `buildSamples`, so the interior scales moved this one too:
+**76 samples, worst 5.465e-15 at $k = (3,0,0)$** against the unchanged
+$10^{-12}$, a 183× margin. The 40-sample 2.911e-15 is not carried forward. The
+figure now appears in the body's header comment as well as in its printf, which
+it did not before. It agrees with §T4's one-off measurement of the same thing.
+
+### The perturbation, at each degree
+
+**Job `f3Ze7qtDXeRD`, rc 8.** The §3 coefficient $k_j(k_j-1)$ multiplied by
+1.001 — one coefficient, 0.1%, and deliberately *not* T1's perturbation, so the
+two cover different terms of the recurrence. A 0.1% error is also a far subtler
+probe than T1's $-2 \to -1$, which is the point: the question is whether degrees
+5 and 6 are exercised, not whether they notice a broken recurrence.
+
+| $\vert k\vert$ | perturbed deviation | tolerance | over by |
+| --- | --- | --- | --- |
+| 4 | 2.600e-02 | 4e-6 | 6500× |
+| 5 | 2.739e-01 | 3e-4 | 913× |
+| 6 | 2.843e+00 | 2e-2 | 142× |
+
+All three fire, so the two new degrees are exercised and no single low-degree
+slot is carrying the failure. `closed_forms` also failed, at $(1,0,2)$,
+$|k| = 3$ — correct, since the perturbed term first contributes at target degree
+3 (it needs $k_j \ge 2$, so $|k| \ge 2$, so $|k+e_i| \ge 3$), which is also why
+$|k| \le 2$ stayed green. `m2l_ell0_closed_forms` and `m2l_p1_contraction`
+failed downstream; `index_map_bijection` correctly did not.
+
+**Reading the per-degree evidence required a second temporary edit.**
+`ASSERT_LE` inside the sample loop aborts the body at the first failure, which
+under a perturbation is always degree 4 — the run would have proved degree 4 and
+said nothing about 5 and 6. For the perturbation job only, the in-loop assertion
+was suppressed and three `EXPECT_LE(worst[d], fd_tol[d])` added after the
+per-degree printf, giving one failure line per degree. Both that edit and the
+`src/` perturbation were reverted **by inverting them**, never by
+`git checkout`, which would have discarded this task's uncommitted work;
+`src/Canopy_CartesianTaylorBasis.hpp` verified identical to `git HEAD` and
+`tests/tstCartesianTaylor.hpp` byte-identical (`cmp`) to the pre-perturbation
+checkpoint, and `f3Ze8yUzNVSo` then reproduced `f3Ze6Hh1Fp8X`'s figures exactly
+on that tree.
+
+### Flux jobs
+
+| job | what | rc |
+| --- | --- | --- |
+| `f3Ze4jwB9ggF` | the 11-divisor scan; `finite_difference` red on purpose, still on placeholder tolerances | 8 |
+| `f3Ze6Hh1Fp8X` | the pinned divisors and tolerances, scan loop deleted | 0 |
+| `f3Ze7qtDXeRD` | the 0.1% perturbation of $k_j(k_j-1)$ + the per-degree probe | 8 |
+| `f3Ze8yUzNVSo` | re-run after both edits were inverted, on the committed tree | 0 |
+
+All four via `scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux`,
+**unchanged**. Its header comment lists only T1's three bodies and says T2 and
+T3 reuse it, while the target now has twelve — stale, deliberately left for
+whoever next edits that file, since it is not a T6 edit.
+
+### R8
+
+**Closed for $p = 3$.** The $\theta = 0.3$ gating arm of
+`tstCartesianTaylorSolve.hpp` runs at $p = 3$, its ladder runs to $|k| = 6$, and
+every degree of it is now measured against an oracle that is independent of the
+§3 recurrence, at the $(r, b)$ scales the arm actually uses, with a
+double-digit margin at each degree and a demonstrated failure at each degree.
+R8's predicted presentation — the FD check failing above $|k| = 4$, worst at
+small $|r|/\sqrt b$ where $w$ is smallest — did not occur: the ladder holds, and
+the growth with $|k|$ that is present is the oracle's, not the recurrence's.
+
+**R8 remains open above $p = 3$**, on the same terms as before, with one
+improvement: the oracle no longer degrades silently there. `stencil1D` aborts on
+per-axis order 7 naming the order, so a session that raises $p$ gets a
+diagnostic instead of a mis-differenced comparison. Raising $p$ means adding
+stencils, re-scanning the divisor at each new degree, and re-pinning — the
+divisor table above is the shape to expect, not figures to reuse.
+
+**Affects:**
+
+- **Any session raising $p$ above 3** — do all three of: add the per-axis
+  stencils (the abort tells you which order), extend `fd_max_k` and the two
+  length-3 constant arrays, and re-scan the divisor **per degree** on-machine.
+  The floor moves coarser with every order; do not carry $L/16$ over.
+- **Anyone re-measuring $|k| = 4$ against T1's record** — the shipped divisor is
+  now $L/24$ and the figure 3.080e-07, not $L/32$ and 7.321e-07. T1's number is
+  still reproducible at $L/32$ on the current sample set and the log above says
+  so; the change is the divisor, not the arithmetic.
+- **`closed_forms`' worst figure is 5.465e-15 over 76 samples.** Any later
+  session adding to `buildSamples` moves both bodies and must re-pin both, in
+  the printf *and* in the two header comments.
+- **Nothing in `src/` changed**, so no solve figure anywhere in this log moves.

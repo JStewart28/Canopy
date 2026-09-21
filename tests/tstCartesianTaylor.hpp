@@ -8,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <type_traits>
 #include <vector>
 
@@ -23,7 +24,9 @@ namespace CartesianTaylorTest
 //                        tensors, |k| <= 3, at every sampled (r, b).
 //   finite_difference    above |k| = 3 the only oracle is a central finite
 //                        difference of phi itself, Richardson-extrapolated.
-//                        Checked at |k| = 4 .. 2p with p = 2.
+//                        Checked at |k| = 4 .. 6 -- 2p at the p = 3 the
+//                        theta = 0.3 solve arm runs at (T6 of the same
+//                        document, closing risk R8 for p = 3).
 //
 // Pure host math over no MPI and no Kokkos parallel dispatch; TEST_MEMSPACE
 // and TEST_EXECSPACE are unused here.
@@ -47,6 +50,12 @@ constexpr int max_k = 2 * p_order;
 // §2 stand alone), a generic unit vector, and the diagonal. r = 0 exactly is
 // included, which is legal because b > 0. The b -> 0 limit is NOT sampled:
 // b > 0 is a precondition.
+//
+// 9.276, 15.46 and 74.2 are the INTERIOR scales (T6 step 3). The p = 3 solve
+// arm of tstCartesianTaylorSolve.hpp runs at |r|/sqrt(b) in [9.28, 74.2],
+// which lies entirely between the 1.0 and the 100.0 above; risk R8 requires
+// the oracle be measured at the scales actually in use, not only at scales
+// that bracket them. They take the sample count from 40 to 76.
 //---------------------------------------------------------------------------//
 struct Sample
 {
@@ -57,7 +66,7 @@ struct Sample
 std::vector<Sample> buildSamples()
 {
     const double bs[] = { 1.0e-6, 6.25e-4, 1.0e-2, 1.0 };
-    const double scales[] = { 0.01, 1.0, 100.0 };
+    const double scales[] = { 0.01, 1.0, 9.276, 15.46, 74.2, 100.0 };
     const double inv_sqrt3 = 1.0 / std::sqrt( 3.0 );
     const double dirs[][3] = { { 1.0, 0.0, 0.0 },
                                { 0.36, -0.48, 0.80 },
@@ -174,10 +183,20 @@ double referenceClosedForm( const int k[3], const double r[3], double b )
 // leaves no usable margin. Two steps reach the roundoff floor at h = L/32:
 // see the measured figures on fd_tol below.
 //
+// Orders 0..6 are carried explicitly, which is what lets the oracle run to
+// |k| = 6: degrees 5 and 6 contain multi-indices with a single component of 5
+// or 6 -- (5,0,0), (6,0,0), (5,1,0) and their permutations -- so an order-4
+// fallback would difference them with the wrong operator and then divide by
+// h^5 or h^6. Every stencil here is the standard O(h^2)-accurate central one,
+// antisymmetric for odd order and symmetric for even, so each error expansion
+// carries even powers of h only and both Richardson steps stay valid. An
+// unsupported order aborts loudly rather than falling through: raising p
+// above 3 must give a diagnostic, not a silently mis-differenced oracle.
+//
 // Returns the point count; offs[] are integer multiples of h and wts[] are the
 // weights BEFORE the 1/h^order scaling, which fdDerivative applies once.
 //---------------------------------------------------------------------------//
-int stencil1D( int order, int offs[5], double wts[5] )
+int stencil1D( int order, int offs[7], double wts[7] )
 {
     switch ( order )
     {
@@ -199,20 +218,50 @@ int stencil1D( int order, int offs[5], double wts[5] )
         offs[2] = 1;  wts[2] = -1.0;
         offs[3] = 2;  wts[3] = 0.5;
         return 4;
-    default:
+    case 4:
         offs[0] = -2; wts[0] = 1.0;
         offs[1] = -1; wts[1] = -4.0;
         offs[2] = 0;  wts[2] = 6.0;
         offs[3] = 1;  wts[3] = -4.0;
         offs[4] = 2;  wts[4] = 1.0;
         return 5;
+    case 5:
+        offs[0] = -3; wts[0] = -0.5;
+        offs[1] = -2; wts[1] = 2.0;
+        offs[2] = -1; wts[2] = -2.5;
+        offs[3] = 0;  wts[3] = 0.0;
+        offs[4] = 1;  wts[4] = 2.5;
+        offs[5] = 2;  wts[5] = -2.0;
+        offs[6] = 3;  wts[6] = 0.5;
+        return 7;
+    case 6:
+        offs[0] = -3; wts[0] = 1.0;
+        offs[1] = -2; wts[1] = -6.0;
+        offs[2] = -1; wts[2] = 15.0;
+        offs[3] = 0;  wts[3] = -20.0;
+        offs[4] = 1;  wts[4] = 15.0;
+        offs[5] = 2;  wts[5] = -6.0;
+        offs[6] = 3;  wts[6] = 1.0;
+        return 7;
+    default:
+        std::fprintf( stderr,
+                      "[cartesian-taylor] stencil1D: no central stencil for "
+                      "per-axis order %d; orders 0..6 are supported. The "
+                      "finite-difference oracle cannot evaluate this "
+                      "derivative. Raising p above 3 requires adding the "
+                      "stencil here -- falling back to a lower order would "
+                      "difference with the wrong operator and still divide by "
+                      "h^%d.\n",
+                      order, order );
+        std::fflush( stderr );
+        std::abort();
     }
 }
 
 double fdDerivative( const double r0[3], double b, const int k[3], double h )
 {
-    int ox[5], oy[5], oz[5];
-    double wx[5], wy[5], wz[5];
+    int ox[7], oy[7], oz[7];
+    double wx[7], wy[7], wz[7];
     const int nx = stencil1D( k[0], ox, wx );
     const int ny = stencil1D( k[1], oy, wy );
     const int nz = stencil1D( k[2], oz, wz );
@@ -343,6 +392,10 @@ void testIndexMapBijection()
 // identically at the sampled r (any r_a = 0 kills the odd terms) and a
 // relative test would divide by zero there. closed_form_tol is a few hundred
 // ulp of that scale; the achieved maximum is printed below for the record.
+//
+// Measured over the 76-sample set (T6; the three interior scales added there
+// took it from 40): worst 5.465e-15 at k = (3,0,0), a 183x margin against the
+// 1e-12 below. The 40-sample figure this replaces was 2.911e-15.
 //---------------------------------------------------------------------------//
 constexpr double closed_form_tol = 1.0e-12;
 
@@ -403,56 +456,86 @@ void testClosedForms()
 }
 
 //---------------------------------------------------------------------------//
-// Test 3 -- the finite-difference check, |k| = 4 .. 2p.
+// Test 3 -- the finite-difference check, |k| = 4 .. 6.
 //
-// At p = 2 that is |k| = 4 exactly. The lower bound is 4 because §2 covers
+// 6 is 2p at the p = 3 the theta = 0.3 solve arm of
+// tests/tstCartesianTaylorSolve.hpp runs at, so this is the arm's ladder
+// checked end to end. It is fd_max_k below rather than 2 * p_order because
+// p_order also sizes the ladder closed_forms allocates and every later body
+// picks its own order explicitly. The lower bound is 4 because §2 covers
 // everything below it exactly and the FD oracle is strictly worse there.
 //
-// Step: h = L / fd_h_divisor with L = sqrt(w), the length scale phi actually
-// varies on at this (r, b). Nondimensionalizing the step this way is what
-// makes one tolerance hold across four decades of b and four of |r|/sqrt(b).
+// Step: h = L / fd_h_divisor[|k| - 4] with L = sqrt(w), the length scale phi
+// actually varies on at this (r, b). Nondimensionalizing the step this way is
+// what makes one tolerance hold across four decades of b and four of
+// |r|/sqrt(b).
 //
-// Tolerance, measured against the same scale = phi / L^|k| as test 2. The
-// divisor was chosen by scanning it over this exact sample set at |k| = 4,
-// worst case over all of it:
+// Tolerance, measured against the same scale = phi / L^|k| as test 2, and
+// PINNED PER DEGREE. A 6th difference amplifies cancellation far more than a
+// 4th -- the roundoff floor rises as (L/h)^|k| while truncation still falls as
+// (h/L)^6 -- so the optimal h moves up with the degree and one tolerance
+// across all three would loosen |k| = 4 well below the margin it holds on its
+// own. Divisors and tolerances are therefore three of each, indexed by
+// degree - 4.
 //
-//   h = L/8    1.3e-4      truncation-limited, falling as (h/L)^6
-//   h = L/16   1.9e-6
-//   h = L/32   4.3e-7      the floor -- truncation and roundoff balanced here
-//   h = L/64   7.2e-6      roundoff-limited, rising as (L/h)^4
+// Scanned ON THIS MACHINE over the exact 76-sample set above, worst case over
+// all of it, two Richardson steps (T6, flux job f3Ze4jwB9ggF; the full
+// 11-divisor table is in cartesian-taylor-basis-progress-log.md §T6):
 //
-// so fd_tol sits ~23x above the achieved 4.3e-7, which is as much margin as
-// a double-precision 4th-derivative difference has to give.
+//   h        |k| = 4     |k| = 5     |k| = 6
+//   L/4      1.1218e-02  1.8076e+00  1.0837e+01    truncation-limited
+//   L/8      1.3193e-04  1.2272e-02  7.3593e-02
+//   L/16     1.9448e-06  1.6500e-04  1.1843e-03  <- the |k| = 6 floor
+//   L/24     3.0798e-07  2.5308e-05  6.9018e-03  <- the |k| = 4, 5 floor
+//   L/32     7.3209e-07  6.3866e-05  4.3151e-02
+//   L/64     8.3097e-06  2.6844e-03  2.5210e+00    roundoff-limited
 //
-// Risk R8 of tasks/cartesian-taylor-basis.md: this tolerance is
-// SCALE-DEPENDENT and is the instrument for the forward recurrence's
-// conditioning. If p is ever raised above 2, re-measure it at the (r, b)
-// scales actually in use -- do not assume it, and do not widen it to
-// accommodate a failure. The achieved maximum is printed below.
+// The floor moves UP in h with the degree, which is the whole reason for
+// three divisors: roundoff enters as (L/h)^|k| while truncation still falls
+// as (h/L)^6 after both Richardson steps, so the crossover shifts to a
+// coarser step at every order. Running |k| = 6 at the |k| = 4 divisor costs
+// it 36x (4.3e-2 against 1.2e-3); running |k| = 4 at the |k| = 6 divisor
+// costs it 6.3x. Each tolerance below is the smallest one-significant-digit
+// value at least 10x its measured worst -- 13.0x, 11.9x and 16.9x achieved,
+// the same sharpness T1 pinned |k| = 4 at (13.7x).
+//
+// Risk R8 of tasks/cartesian-taylor-basis.md: these tolerances are
+// SCALE-DEPENDENT and are the instrument for the forward recurrence's
+// conditioning. If p is ever raised above 3, re-measure at the (r, b) scales
+// actually in use -- do not assume them, and do not widen one to accommodate
+// a failure: this check's sharpness is what bounds how small an index-map or
+// recurrence error has to be to slip through (R2). The achieved maximum at
+// each degree is printed below.
 //---------------------------------------------------------------------------//
-constexpr double fd_h_divisor = 32.0;
-constexpr double fd_tol = 1.0e-5;
+constexpr int fd_max_k = 6;
+
+// Indexed by degree - 4: entry 0 is |k| = 4, entry 2 is |k| = 6.
+constexpr double fd_h_divisor[3] = { 24.0, 24.0, 16.0 };
+constexpr double fd_tol[3] = { 4.0e-6, 3.0e-4, 2.0e-2 };
 
 void testFiniteDifference()
 {
     const auto samples = buildSamples();
-    std::vector<double> bk( CT::num_slots( max_k ) );
+    std::vector<double> bk( CT::num_slots( fd_max_k ) );
 
-    double worst = 0.0;
-    int worst_k[3] = { 0, 0, 0 };
-    double worst_b = 0.0;
+    double worst[3] = { 0.0, 0.0, 0.0 };
+    int worst_k[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    double worst_b[3] = { 0.0, 0.0, 0.0 };
+    double worst_rscale[3] = { 0.0, 0.0, 0.0 };
 
     for ( const auto& smp : samples )
     {
-        CT::derivative_ladder( smp.r, smp.b, max_k, bk.data() );
+        CT::derivative_ladder( smp.r, smp.b, fd_max_k, bk.data() );
 
         const double w = wOf( smp.r, smp.b );
         const double L = std::sqrt( w );
         const double phi0 = 1.0 / L;
-        const double h = L / fd_h_divisor;
+        const double rscale = std::sqrt( w - smp.b ) / std::sqrt( smp.b );
 
-        for ( int n = 4; n <= max_k; ++n )
+        for ( int n = 4; n <= fd_max_k; ++n )
         {
+            const int d = n - 4;
+            const double h = L / fd_h_divisor[d];
             const double scale = phi0 / std::pow( L, static_cast<double>( n ) );
 
             for ( int kx = 0; kx <= n; ++kx )
@@ -464,35 +547,39 @@ void testFiniteDifference()
                     const double want = fdRichardson( smp.r, smp.b, k, h );
                     const double err = std::abs( got - want ) / scale;
 
-                    if ( err > worst )
+                    if ( err > worst[d] )
                     {
-                        worst = err;
-                        worst_k[0] = kx;
-                        worst_k[1] = ky;
-                        worst_k[2] = kz;
-                        worst_b = smp.b;
+                        worst[d] = err;
+                        worst_k[d][0] = kx;
+                        worst_k[d][1] = ky;
+                        worst_k[d][2] = kz;
+                        worst_b[d] = smp.b;
+                        worst_rscale[d] = rscale;
                     }
 
-                    ASSERT_LE( err, fd_tol )
+                    ASSERT_LE( err, fd_tol[d] )
                         << "canopy-questions.md §3 recurrence disagrees with "
                         << "the Richardson-extrapolated central difference of "
                         << "phi at multi-index (" << kx << "," << ky << ","
                         << kz << "), |k| = " << n << ": recurrence " << got
                         << ", finite difference " << want
                         << ", |diff| / (phi/L^|k|) = " << err << " > "
-                        << fd_tol << "; at r = (" << smp.r[0] << ","
-                        << smp.r[1] << "," << smp.r[2] << "), b = " << smp.b
-                        << ", h = L/" << fd_h_divisor
-                        << ", two Richardson steps";
+                        << "the |k| = " << n << " tolerance " << fd_tol[d]
+                        << " (measured at h = L/" << fd_h_divisor[d]
+                        << ", two Richardson steps); at r = (" << smp.r[0]
+                        << "," << smp.r[1] << "," << smp.r[2]
+                        << "), b = " << smp.b;
                 }
         }
     }
 
-    std::printf( "[cartesian-taylor] finite difference |k| = 4..%d: worst "
-                 "|diff|/(phi/L^|k|) = %.3e at k = (%d,%d,%d), b = %.3e, "
-                 "h = L/%.0f, tol = %.1e\n",
-                 max_k, worst, worst_k[0], worst_k[1], worst_k[2], worst_b,
-                 fd_h_divisor, fd_tol );
+    for ( int d = 0; d < 3; ++d )
+        std::printf( "[cartesian-taylor] finite difference |k| = %d: worst "
+                     "|diff|/(phi/L^|k|) = %.3e at k = (%d,%d,%d), b = %.3e, "
+                     "|r|/sqrt(b) = %.4g, h = L/%.0f, tol = %.1e\n",
+                     d + 4, worst[d], worst_k[d][0], worst_k[d][1],
+                     worst_k[d][2], worst_b[d], worst_rscale[d],
+                     fd_h_divisor[d], fd_tol[d] );
 }
 
 //===========================================================================//

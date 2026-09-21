@@ -1346,7 +1346,7 @@ for the `m2l_n_unique_ops()` guard).
 
 ---
 
-### T6 — Validate the derivative ladder at $|k| = 6$ — **NOT STARTED**
+### T6 — Validate the derivative ladder at $|k| = 6$ — **DONE**
 
 **Depends on:** T5.
 
@@ -1429,6 +1429,61 @@ push the reported deviation above tolerance at **each** of degrees 4, 5 and 6 �
 which is what says the two new degrees are exercised rather than merely
 enumerated, and not that one low-degree slot carries the whole failure.
 `scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux` runs this unchanged.
+
+**Met.** `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` builds and
+`ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes all 12 bodies (job
+`f3Ze8yUzNVSo`, rc 0, on the reverted tree). Only
+`tests/tstCartesianTaylor.hpp` changed; nothing under `src/`.
+
+The finite-difference oracle now runs at $|k| = 4 \ldots 6$ under its own
+`fd_max_k = 6` — `p_order` is untouched at 2. `stencil1D` carries explicit
+central stencils through per-axis order 6 (the arrays widened from 5 to 7) and
+aborts loudly on anything higher instead of silently reusing the order-4
+stencil, which is what made $(5,0,0)$ and $(6,0,0)$ unevaluable before.
+`buildSamples` permanently carries the three interior scales 9.276, 15.46 and
+74.2, so the $p = 3$ arm's band $|r|/\sqrt b \in [9.28, 74.2]$ is sampled from
+the inside rather than bracketed; 76 samples, not 40.
+
+The Richardson divisor was scanned **on this machine** over eleven candidates
+from $L/2$ to $L/64$ at each degree (job `f3Ze4jwB9ggF`) and the floor is at a
+**different** $h$ per degree, as step 4 anticipated: $L/24$ at $|k| = 4$ and
+$|k| = 5$, $L/16$ at $|k| = 6$. Each degree carries its own divisor and its own
+tolerance, both stated on the assertion:
+
+| $\vert k\vert$ | divisor | tolerance | achieved worst | at | margin |
+| --- | --- | --- | --- | --- | --- |
+| 4 | $L/24$ | $4\times10^{-6}$ | $3.080\times10^{-7}$ | $k = (4,0,0)$, $b = 10^{-6}$, $\vert r\vert/\sqrt b = 74.2$ | 13.0× |
+| 5 | $L/24$ | $3\times10^{-4}$ | $2.531\times10^{-5}$ | $k = (5,0,0)$, $b = 6.25\times10^{-4}$, $\vert r\vert/\sqrt b = 100$ | 11.9× |
+| 6 | $L/16$ | $2\times10^{-2}$ | $1.184\times10^{-3}$ | $k = (6,0,0)$, $b = 6.25\times10^{-4}$, $\vert r\vert/\sqrt b = 15.46$ | 16.9× |
+
+No tolerance was widened to make a degree pass: every one is the smallest
+one-significant-digit value at least 10× its measured worst, which is the
+sharpness T1 pinned $|k| = 4$ at (13.7×). $|k| = 4$ is in fact **sharper** than
+it shipped — $3.080\times10^{-7}$ against T1's $7.321\times10^{-7}$, because
+the eleven-point scan located a floor the four-point scan straddled, not
+because the samples changed ($L/32$ still measures $7.3209\times10^{-7}$ on the
+76-sample set).
+
+`closed_forms` shares `buildSamples` and was re-pinned to this run: 76 samples,
+worst $5.465\times10^{-15}$ at $k = (3,0,0)$ against $10^{-12}$, a 183× margin.
+The 40-sample $2.911\times10^{-15}$ was not carried forward.
+
+**Failure direction confirmed at all three degrees.** Perturbing the one §3
+coefficient $k_j(k_j-1)$ by $+0.1\%$ (job `f3Ze7qtDXeRD`, rc 8) pushed the
+reported deviation to $2.600\times10^{-2}$ at $|k| = 4$ (6500× over tolerance),
+$2.739\times10^{-1}$ at $|k| = 5$ (913×) and $2.843$ at $|k| = 6$ (142×). All
+three new figures are above their own bound, so degrees 5 and 6 are exercised
+rather than enumerated. The edit was reverted by inversion and the tree
+verified byte-identical to the checkpoint.
+
+**R8 is closed for $p = 3$.** The $\theta = 0.3$ gating arm's full ladder is now
+measured against an independent oracle at every degree it reaches. R8's
+predicted failure mode — error growing with $|k|$, worst where $w$ is smallest
+— is visible and bounded: the achieved deviation grows about 40× per degree
+(3.1e-7 → 2.5e-5 → 1.2e-3), which is oracle resolution loss rather than
+recurrence error, since it tracks the roundoff floor of a $|k|$-th difference
+and not the conditioning of the ladder. R8 remains open above $p = 3$: raising
+$p$ again needs new stencils, which now abort rather than mis-differencing.
 
 **Checkpoint commit** at the end of this task.
 
@@ -1549,6 +1604,10 @@ ever raised above 2. Do not widen its tolerance to accommodate a failure —
 re-measure at the specific $(r, b)$ scales in use and report. $b > 0$ bounds
 $w \ge b$ away from zero, so this is a conditioning question and never a division
 by zero.
+
+**R8 WAS LIVE AND IS NOW CLOSED FOR $p = 3$** — T6 ran the instrument below at
+$|k| = 6$ and the arm's full ladder holds against it with 13.0×, 11.9× and
+16.9× margins at degrees 4, 5 and 6. The original statement follows.
 
 **R8 IS NOW LIVE.** T4 raised its $\theta = 0.3$ arm to $p = 3$, whose ladder
 runs to $|k| = 6$, while T1's finite-difference oracle is validated at
