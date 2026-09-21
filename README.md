@@ -380,6 +380,51 @@ measured +18% M2L regression from a comparable one, with two candidate
 micro-causes tested and excluded. So the table must be measured against the
 recompute it replaces rather than assumed faster.
 
+### The M2L operator cache empties on every build for a level-keyed basis
+
+`DownwardSweep::set_root_half_width` clears the **entire** persistent M2L
+operator cache whenever the root half-width changes, and does so only for a
+basis declaring `key_needs_level = true`
+(`src/Canopy_DownwardSweep.hpp:406-416`). `Solver::_push_root_half_width`
+(`src/Canopy_Solver.hpp:756-770`) pushes the current box in before every
+`_downward.setup()`, and the comparison is an exact double. On any moving
+particle distribution the bounding box is recomputed from the particles and so
+drifts at every rebuild — which means the cache empties at every rebuild, for
+exactly the workload it exists to serve.
+
+**Measured, and it is total.** T5 of
+[tasks/cartesian-taylor-basis.md](tasks/cartesian-taylor-basis.md) ran a
+four-solve `CartesianTaylorBasis` solve at np 1-6 and two admissibilities: at
+every one of 336 builds the per-step increment in
+`m2l_op_keys_built_count()` equalled `m2l_op_cache_size()` after that build
+*exactly*, so **zero** cached operators survived a rebuild and each rank
+constructed $3.9\times$ its cached key count over the run (per-rank figures in
+[tasks/cartesian-taylor-basis-progress-log.md](tasks/cartesian-taylor-basis-progress-log.md)
+§T5). The same counters on `LaplaceKernel`, which is level-blind, measure zero
+keys rebuilt across a topology change (§T9 of
+[tasks/abstract-solver-backend-progress-log.md](tasks/abstract-solver-backend-progress-log.md)).
+
+Two candidate fixes, and one of them is already ruled out by measurement:
+
+- **Key the cache on the physical operator scale** rather than on the level —
+  i.e. on the width the operator was actually built at, so a box that returns
+  to a previous width hits the cache. Untested.
+- **Tolerate a root-width change that is an exact power of two**, which would
+  leave the level-indexed widths unchanged. **Measured not to fire:** the
+  realized drift is a smooth monotone contraction of 0.18% to 0.40% per build,
+  which is what recomputing a bounding box from moving particles produces, and
+  nowhere near a power of two.
+
+This is not a correctness issue, and the clearing is not gratuitous — it is
+what stops a level-keyed basis from evaluating operators built at a width it no
+longer has. Any fix has to preserve that (risk **R5** in the same document) and
+has $3.9\times$ to beat, which is to say it must turn four operator
+constructions into one. Nothing has **timed** the rebuild: the counters above
+are the whole of what is measured. Whoever prices it should read
+`TIMER_ILIST_S4_OP_TABLE_BUILD` in `build-tuolumne-prof/` — the host operator
+build lies outside `run_m2l_all`'s scope, so the `M2L kernel (all depths)` row
+is the wrong number for this.
+
 ---
 
 ## Known Issues
