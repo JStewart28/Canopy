@@ -370,7 +370,7 @@ at r = (1e-05,0,0), b = 1e-06
 
 This is exactly the predicted direction: $|k| \le 1$ is untouched because the
 perturbed sum is empty at $k = 0$, and the error appears at $|k| = 2$. Worth
-noting how *small* it is — $10^{-4}$ of scale, four decades above the tolerance
+noting how *small* it is — $10^{-4}$ of scale, eight decades above the tolerance
 but nowhere near an obvious blow-up. A test built on a loose relative tolerance
 would have missed it.
 
@@ -841,8 +841,8 @@ belongs at the point of use.
 Every figure is against the **sum of the term magnitudes** of the check, not
 against its result. The terms alternate in sign and cancel, so a relative test
 against the result would be a test of the cancellation rather than of the
-operator. Tolerance $10^{-13}$ of that scale throughout; all four sit three
-decades or more below it.
+operator. Tolerance $10^{-13}$ of that scale throughout; the tightest of the
+three finite figures sits 84x below it, the other two at 500x or better.
 
 | Body | Check | Achieved |
 | --- | --- | --- |
