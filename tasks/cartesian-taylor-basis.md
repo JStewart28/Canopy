@@ -1,6 +1,6 @@
 # A Cartesian-Taylor far-field basis for Canopy
 
-**Status:** IN PROGRESS — T1, T2, T3 and T4 DONE; T5 next
+**Status:** IN PROGRESS — T1, T2, T3 and T4 DONE; T5 next, then T6
 
 ## Problem
 
@@ -1236,38 +1236,123 @@ Record its deviation in the log beside the new basis's.
 
 **Depends on:** T4.
 
-**Fill in:** `tests/tstCartesianTaylorSolve.hpp` — one measurement body and its
-printed line. No file under `src/` changes.
+**Fill in:** `tests/tstCartesianTaylorSolve.hpp` — two measurement bodies, a
+per-step counter line inside the harness's step loop, and a defaulted `dt`
+parameter on `with_cartesian_taylor_solve` and `runArm`. No file under `src/`
+changes.
 
 **Reference:** `src/Canopy_DownwardSweep.hpp:406-416` for `set_root_half_width`'s
-cache-clearing rule, `:421-447` for the counters, and
+cache-clearing rule, `:420-455` for the counters, and
 [abstract-solver-backend-progress-log.md](abstract-solver-backend-progress-log.md)
 §T9 for the mechanism and for the baseline it measured on a
 `key_needs_level = false` basis (zero keys rebuilt across an
-`invalidate_interaction_list()`).
+`invalidate_interaction_list()`). All three counters are reached through
+`Solver::downward()` (`src/Canopy_Solver.hpp:514`), which is how the harness
+already reaches `m2l_n_unique_ops()`.
 
 **Do:**
 
 1. Run a multi-step solve whose particles move enough that the root bounding box
-   drifts between steps, and record `m2l_op_keys_built_count()`,
-   `m2l_op_cache_size()` and `interaction_list_build_count()` after each build,
-   per rank, at np 1-6.
-2. Print them on a single provenance line per rank so a later session can read
-   the numbers out of a `ctest -V` log without a rebuild.
-3. **Do not design or implement a fix**, and do not touch
+   drifts visibly between steps. The larger `dt` is supplied **per body**,
+   through a new defaulted parameter on `with_cartesian_taylor_solve` and
+   `runArm` whose default leaves the two shipped gating arms on the trajectory
+   they already run; `pos_half_span`
+   (`tests/tstCartesianTaylorSolve.hpp:764`) is the pattern to follow. **Do not
+   raise the `CTS_DT` constant** (`:154`): `cts_dt_for_half_span` (`:232-236`)
+   reads it on behalf of both gating arms, and `CTS_DEV_TOL_THETA_REF` (`:307`)
+   and `CTS_DEV_TOL_THETA_CANOPY` (`:308`) were both measured at
+   `CTS_DT = 1.0e-5` — the first of them being the 1e-3 bar itself, met with a
+   1.41x margin. Keep the $L^{3/2}$ scaling through `cts_dt_for_half_span`
+   rather than fixing an absolute `dt`.
+2. Sample `m2l_op_keys_built_count()`, `m2l_op_cache_size()`,
+   `interaction_list_build_count()` and the root half-width **inside the step
+   loop** (`:462-500`), after each `solve()`, and print one line per step per
+   rank. A single end-of-run read cannot meet this: the existing `[ct-solve]`
+   line is emitted after the loop (`:519-529`) and `_m2l_op_keys_built` is
+   cumulative and never reset by `clear_m2l_op_cache()`
+   (`src/Canopy_DownwardSweep.hpp:682-686`), so it carries totals and not
+   per-build figures. The harness is shared, so both gating arms emit the
+   per-step line as well; that is harmless — the line is echo-only and asserts
+   nothing.
+3. Measure at **two** arms, both at $p = 2$ (`CTS_P`): `mac_theta = 0.5`
+   (`CTS_THETA_CANOPY`), Canopy's own default admissibility, and
+   `mac_theta = 0.3` (`CTS_THETA_REF`), the reference treecode's. The pair
+   brackets both admissibilities at the order the reference itself runs
+   (`treecode.py:103`), and neither arm evaluates the ladder above $|k| = 4$, so
+   **R8** does not bear on this measurement. No shipped gating arm exists at
+   this combination — the $\theta = 0.3$ gating arm runs at
+   `CTS_P_THETA_REF = 3` — and the harness's parameterization on order already
+   admits it.
+4. **Do not design or implement a fix**, and do not touch
    `src/Canopy_DownwardSweep.hpp`. The behaviour is understood; what is missing
    is its magnitude on a realistic distribution. See **R6** for what the numbers
    mean.
-4. Record the measured numbers in the log against **R6**, and state whether the
+5. Record the measured numbers in the log against **R6**, and state whether the
    cache retained anything at all across a drifting box.
 
 **Exit criterion:** `ctest -V -R Canopy_Test_CartesianTaylorSolve_MPI_SERIAL`
-passes at np 1-6 with the measurement line present at every rank, and the
-progress log carries the per-rank `m2l_op_keys_built_count()` figures across at
-least two consecutive rebuilds with a drifting root box, stated against the T9
-baseline. **Failure direction:** the body must assert
-`m2l_op_keys_built_count() > 0` after the first build — a zero there would mean
-no operator was ever constructed and the measurement is vacuous.
+passes at np 1-6 with the per-step measurement line present at every rank of
+both arms, and the progress log carries the per-rank
+`m2l_op_keys_built_count()` figures across at least two consecutive rebuilds
+with a drifting root box, stated against the T9 baseline. **Failure direction:**
+the body must check `m2l_op_keys_built_count() > 0` after the first build — a
+zero there would mean no operator was ever constructed and the measurement is
+vacuous. Spell it `EXPECT`, not `ASSERT`: a fatal assertion returns from the
+harness and the gather below it is collective, so one rank leaving early hangs
+every other rank until the walltime and destroys the log the numbers have to be
+read out of (`tests/tstCartesianTaylorSolve.hpp:540-548` states the same reason
+for the `m2l_n_unique_ops()` guard).
+
+**Checkpoint commit** at the end of this task.
+
+---
+
+### T6 — Validate the derivative ladder at $|k| = 6$ — **NOT STARTED**
+
+**Depends on:** T5.
+
+**Fill in:** `tests/tstCartesianTaylor.hpp` — the `finite_difference` body and
+its two constants. No file under `src/` changes.
+
+**Reference:** **R8** for the gap and the instrument.
+[cartesian-taylor-basis-progress-log.md](cartesian-taylor-basis-progress-log.md)
+§T1 for the divisor scan that sized the oracle at $|k| = 4$ and for why the
+second Richardson step is there, §T4 for the $p = 3$ arm that opened the gap.
+
+**Do:**
+
+1. Extend the finite-difference check to $|k| = 6$ — the $2p$ of the $p = 3$
+   the $\theta = 0.3$ solve arm runs at (`CTS_P_THETA_REF`,
+   `tests/tstCartesianTaylorSolve.hpp:147`). Give the body its own maximum
+   order rather than raising `p_order` (`tests/tstCartesianTaylor.hpp:36-37`):
+   `max_k = 2 * p_order` sizes the ladder every other body in the file
+   allocates, and the shift and M2L bodies choose their own orders explicitly.
+2. **Re-measure the Richardson step divisor at the new order.** Do not carry
+   $h = L/32$ over (`fd_h_divisor`, `tests/tstCartesianTaylor.hpp:433`) and do
+   not widen `fd_tol` (`:434`) to accommodate a failure: this check is the only
+   oracle above $|k| = 3$, and its sharpness is what bounds how small an
+   index-map or recurrence error has to be to slip through (**R2**, **R8**). At
+   $|k| = 4$ the scan over $h \in \{L/8, L/16, L/32, L/64\}$ gave
+   $1.3\times10^{-4}$, $1.9\times10^{-6}$, $4.3\times10^{-7}$ and
+   $7.2\times10^{-6}$ — a floor at $L/32$, truncation-limited above it and
+   roundoff-limited below. A 6th difference amplifies cancellation more, so the
+   floor is higher and need not sit at the same $h$; find it rather than
+   assuming it.
+3. Report the worst deviation and the multi-index it occurs at **per degree**,
+   4 through 6, rather than one figure over all of them, so the margin at each
+   new order is readable and the two orders stay comparable in one log.
+4. Record the scan and the achieved margin at each degree in the log.
+
+**Exit criterion:** `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` succeeds and
+`ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes every body, with the
+finite-difference check running at $|k| = 4 \ldots 6$ and its tolerance stated
+on the assertion together with the divisor it was measured at, and the progress
+log carries the divisor scan and the per-degree margins. **Failure direction:**
+perturbing one §3 recurrence coefficient must push the reported deviation above
+tolerance at **each** of degrees 4, 5 and 6 — which is what says the two new
+degrees are exercised rather than merely enumerated, and not that one low-degree
+slot carries the whole failure.
+`scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux` runs this unchanged.
 
 **Checkpoint commit** at the end of this task.
 
@@ -1387,7 +1472,7 @@ by zero.
 **R8 IS NOW LIVE.** T4 raised its $\theta = 0.3$ arm to $p = 3$, whose ladder
 runs to $|k| = 6$, while T1's finite-difference oracle is validated at
 $|k| = 4$ and nowhere else. That arm is therefore gating on arithmetic the
-oracle has not checked. The instrument above must be re-run at `max_k = 6` —
-re-measuring the Richardson step divisor at the new order rather than widening
-the tolerance — before anything leans further on $p = 3$. This is the one
-verification gap T4 left open; see the progress log's T4 **Affects:** line.
+oracle has not checked. **T6 closes it** with the instrument above — the FD
+check re-run at $|k| = 6$, the Richardson step divisor re-measured at the new
+order rather than the tolerance widened. Nothing should lean further on
+$p = 3$ until it is done.
