@@ -1260,3 +1260,262 @@ declares unsafe for it.
   admissible pair at $R \gg \varepsilon$ makes `CartesianTaylorBasis` and
   `LaplaceKernel` indistinguishable, and a test written there proves nothing
   while looking green.
+
+## T5 — the operator cache across a drifting bounding box
+
+Added two measurement bodies and a per-step `[ct-cache]` line to
+`tests/tstCartesianTaylorSolve.hpp`, a `dt_scale` parameter threading through
+the harness and `runArm`, the constant `CTS_DT_SCALE_DRIFT`, and
+`scripts/tuolumne/run_ctest_cartesian_taylor_t5.flux`. One stale comment in
+that test corrected. **No file under `src/` changed** — T5 measures **R6**'s
+magnitude and designs no fix.
+
+Flux jobs, all `pdebug`: `f3ZcosWuders` (the `dt_scale` probe, np 1-2,
+`--time-limit=8`, backfilled immediately), `f3ZcrXqDFqZH` (the measurement
+every figure below is quoted from, np 1-6, `--time-limit=20`) and
+`f3ZcvgKiGjaw` (the same job re-run on the **exact committed tree** — the only
+difference from `f3ZcrXqDFqZH` is comment text and three wrapped lines, and it
+reproduces every counter digit for digit: 336 builds, 0 keys retained,
+`keys_built` 7370 / 14830 / 22230 / 30012 and
+25406 / 50962 / 76786 / 103254 at np = 1). Every queue was short, unlike every
+T4 job. `ctest -V -R Canopy_Test_CartesianTaylorSolve_MPI_SERIAL`: **6/6
+passed** on both, 76.1 s.
+
+### The headline: the cache retains nothing, and the figure is exactly zero
+
+At **every one of the 336 builds** in the exit-criterion job — 4 solves x
+(1+2+3+4+5+6) ranks x 4 arms — the per-step increment in
+`m2l_op_keys_built_count()` equals `m2l_op_cache_size()` after that build,
+**exactly**. Summed over all of them, the number of cached operators that
+survived a rebuild is **0**.
+
+That is **R6** confirmed in full and at face value: `key_needs_level = true`
+means `set_root_half_width` empties the entire cache on any change to the root
+half-width (`src/Canopy_DownwardSweep.hpp:406-416`), the box drifts on every
+rebuild of a moving-particle solve, and `Solver::_push_root_half_width()`
+(`src/Canopy_Solver.hpp:756-770`) pushes the new width in before every
+`_downward.setup()`. Both root half-widths on the `[ct-cache]` line — the
+sweep's own copy, which is what the clearing rule compares, and the builder's
+box — agreed on all 336 lines, so the mechanism is visible end to end rather
+than inferred.
+
+**Per-rank `m2l_op_keys_built_count()` after the 4th build, against the cache
+size at that point** (`f3ZcrXqDFqZH`, `dt_scale = 3`, both arms $p = 2$):
+
+$\theta = 0.5$ (`CTS_THETA_CANOPY`):
+
+| np | keys_built, per rank | cache_size, per rank | ratio |
+| --- | --- | --- | --- |
+| 1 | 30012 | 7782 | 3.86 |
+| 2 | 26409, 23238 | 6755, 6006 | 3.89 |
+| 3 | 25704, 21234, 19928 | 6549, 5459, 5154 | 3.90 |
+| 4 | 24150, 19945, 21219, 18996 | 6117, 5143, 5473, 4870 | 3.90 |
+| 5 | 22362, 21183, 18313, 19793, 17443 | 5776, 5335, 4734, 5083, 4458 | 3.90 |
+| 6 | 21217, 20077, 17475, 19655, 19647, 15188 | 5413, 5045, 4547, 5172, 4910, 3912 | 3.91 |
+
+$\theta = 0.3$ (`CTS_THETA_REF`):
+
+| np | keys_built, per rank | cache_size, per rank | ratio |
+| --- | --- | --- | --- |
+| 1 | 103254 | 26468 | 3.90 |
+| 2 | 83702, 81025 | 21223, 20701 | 3.93 |
+| 3 | 76161, 73354, 66226 | 19234, 18815, 16813 | 3.93 |
+| 4 | 67280, 64223, 65429, 61031 | 16835, 16443, 16576, 15902 | 3.92 |
+| 5 | 60585, 68126, 56784, 60019, 53389 | 15497, 16892, 14684, 15136, 13816 | 3.93 |
+| 6 | 53326, 61543, 51616, 55490, 60309, 46020 | 13402, 15303, 13443, 14652, 14988, 12047 | 3.92 |
+
+The ratio is **the number of builds**, 4, less the few percent by which the key
+set grows over the run. `interaction_list_build_count()` is 1/2/3/4 across the
+four solves at every rank, so there is one operator construction per
+interaction-list build and never a reuse.
+
+**The two consecutive rebuilds the exit criterion asks for, in full**
+(`f3ZcrXqDFqZH`, np = 1, per build: cumulative `keys_built`, the increment, and
+the cache size after it):
+
+| build | $\theta = 0.5$ | $\theta = 0.3$ |
+| --- | --- | --- |
+| 1 | 7370 (+7370, cache 7370) | 25406 (+25406, cache 25406) |
+| 2 | 14830 (+7460, cache 7460) | 50962 (+25556, cache 25556) |
+| 3 | 22230 (+7400, cache 7400) | 76786 (+25824, cache 25824) |
+| 4 | 30012 (+7782, cache 7782) | 103254 (+26468, cache 26468) |
+
+The increment tracks the *current* key count, which moves by a few percent as
+the tree changes — so R6's "climbing by roughly the full key count at every
+build" is right, with "roughly" doing no work beyond that drift in the key set
+itself.
+
+### Stated against T9's baseline, which is not like-for-like
+
+T9 measured `m2l_op_keys_built_count() == m2l_op_cache_size()` at every rank of
+every rank count with `interaction_list_build_count() == 2` — **zero keys
+rebuilt** ([abstract-solver-backend-progress-log.md](abstract-solver-backend-progress-log.md)
+§T9). Here the same two counters give **100% rebuilt at every build**: 3.9x the
+cached key count constructed over four solves where T9's basis constructed 1.0x
+over two.
+
+**The comparison is legitimate but it is not apples to apples, and the
+difference cuts both ways.** T9 drove `DownwardSweep` directly on
+`LaplaceKernel` (`key_needs_level = false`), across one
+`invalidate_interaction_list()`, with a root box that **never moved** — not
+through a moving-particle solve. So T9's zero isolates the cache's own
+behaviour under a topology change, while T5's 3.9x is the compound of a basis
+that keys on level and a box that drifts. Neither number alone says what a
+level-keyed basis would do on a *static* box: `set_root_half_width` is a no-op
+on an unchanged value, so a static distribution would give T9's zero on this
+basis too. **The cost measured here is the cost of motion, not of the basis.**
+
+### The trajectory: `CTS_DT` was not raised, and a multiplier was added instead
+
+T4's **Affects:** line told this session to raise `CTS_DT`. That would have
+moved the trajectory under `CTS_DEV_TOL_THETA_REF` (the 1e-3 bar itself, met
+with a 1.41x margin) and `CTS_DEV_TOL_THETA_CANOPY`, both measured at
+`CTS_DT = 1.0e-5`, because `cts_dt_for_half_span` reads the constant on behalf
+of both gating arms. So `CTS_DT` is **untouched** and the amplification is a
+runtime multiplier — `CTS_DT_SCALE_DRIFT`, applied to the $L^{3/2}$-scaled `dt`
+inside the step loop and defaulting to 1.0 on `runArm`, which leaves both
+gating arms on the exact trajectory they were measured on.
+
+**`CTS_DT_SCALE_DRIFT = 3.0` is pinned from a sweep, not chosen.** Probe
+`f3ZcosWuders`, $\theta = 0.5$, $p = 2$, np 1-2, reading
+`builder_root_half_width` at step 0..3 (displacement goes as $dt^2$ under
+symplectic Euler from rest, so drift is quadratic in the multiplier):
+
+| `dt_scale` | per-step drift in the root half-width | net | verdict |
+| --- | --- | --- | --- |
+| 1 | -0.020%, -0.039%, -0.059% | -0.118% | too small |
+| **3** | **-0.177%, -0.349%, -0.399%** | **-0.922%** | **shipped** |
+| 10 | -1.574%, -2.927%, -4.630% | -8.879% | saturates the cap |
+| 30 | -12.9%, -29.0%, **+252%** | +118% | degenerate |
+
+`dt_scale = 10` was the first choice and was **rejected on measurement**: at
+$\theta = 0.3$ its cache reaches 32528 and then *exactly* 32768 operators — the
+effective operator-count cap — so the cache overflows, is emptied and refilled,
+which overlays that mechanism (T9's `opTableByteBudget` path) on the R6
+measurement and clamps `n_unique_ops`. The $\theta = 0.5$ arm is unaffected at
+10, but one constant keeps the two arms comparable. At 30 the cloud collapses
+through its own centre and re-expands, the box more than doubling on the last
+step, and the distribution is no longer the one the configuration was chosen
+for. At 3 the 4th significant figure of the box moves at every build, the cap
+stays unbound in both arms, and the contraction is monotone and under 1%.
+
+**The conclusion does not depend on the constant.** Retention was zero at
+`dt_scale` 1, 3, 10 and 30 alike, and zero in the two *gating* arms as well
+(they emit `[ct-cache]` at `dt_scale = 1`: $\theta = 0.3$ builds
+25406 / 25428 / 25438 / 25438 for a cumulative 101710). The multiplier only
+buys a box whose drift is legible in the log.
+
+### A correction to T4's characterization of the drift
+
+T4 recorded that "the root half-width differs between the two arms in its 8th
+significant figure, 0.138419475 against 0.138419418" and inferred the shipped
+trajectory was barely enough. **That figure is the difference between the two
+arms' final boxes, not the drift.** Measured per step here, the box on the
+shipped trajectory goes 0.138583467 → 0.138555330 → 0.138500974 →
+0.138419418, a **-0.118%** drift in its **4th** significant figure — ten
+thousand times the inter-arm difference, and already more than enough to empty
+the cache at every build. The knobs comment in the test now says both things
+and distinguishes them.
+
+### What this says about the two fixes R6 suggests
+
+**R6 floats two candidate fixes and the measurement bears on one of them.**
+Tolerating "a root-width change that is an exact power of two" would **not
+fire on this workload**: the realized drift is a smooth monotone contraction of
+0.18% to 0.40% per build, nowhere near a power of two, and the same is true of
+any distribution whose bounding box is recomputed from moving particles. The
+other candidate — keying the cache on the physical $R$ rather than on the level
+— is untouched by anything measured here. A fix has 3.9x to beat, which is to
+say it has to turn four operator constructions into one.
+
+### The bodies, and one departure from the task statement
+
+The two measurement bodies, `operatorCacheAcrossDriftThetaCanopy` and
+`operatorCacheAcrossDriftThetaRef`, call `with_cartesian_taylor_solve`
+**directly** rather than through `runArm`, with a no-op callback. They make no
+accuracy claim and assert no deviation: they run a longer trajectory than the
+gating arms, and neither pinned tolerance was measured on it. Both run at
+`CTS_P = 2`, so — the consequence worth holding onto — **no arm added here
+evaluates the derivative ladder above $|k| = 4$ and R8 does not bear on any
+number above.**
+
+**Departure:** `dt_scale` is a **required** positional parameter on
+`with_cartesian_taylor_solve` and defaulted only on `runArm`, where the task
+entry asks for it defaulted on both. A default is unusable there because the
+parameter precedes the `Fn&& after` callback. This is exactly the shape
+`pos_half_span` already has — required on the harness, defaulted on `runArm` —
+which is the pattern the task entry names, and the requirement it exists for is
+met: both gating bodies call `runArm` without the argument and run at
+`dt_scale = 1.0`.
+
+The per-step line is tagged **`[ct-cache]`** and not `[ct-solve]`: the latter
+belongs to the once-per-run configuration echo and the once-per-run deviation
+line, and a later session greps for one or the other.
+
+### The gating arms came through unmoved
+
+Both reproduce T4's figures at all six rank counts, to every digit printed:
+
+| arm | potential | gradient | T4 (`f3Yg13MRtyp3`) |
+| --- | --- | --- | --- |
+| $\theta = 0.3$, $p = 3$ | 1.9263340835e-05 | 7.0717918545e-04 | identical |
+| $\theta = 0.5$, $p = 2$ | 9.9666798509e-04 | 1.8651556395e-02 | identical |
+
+(np 3-6 differ from np 1-2 in the 12th significant figure of the potential,
+1.9263340835103815e-05 against 1.9263340835190165e-05, exactly as T4 recorded.)
+The added `[ct-cache]` line is echo-only and the one assertion added to the
+shared harness holds in every arm, so nothing about what the gating bodies
+compute moved.
+
+### The failure-direction outcome
+
+`EXPECT_GT( m2l_op_keys_built_count(), 0 )` after the first build, spelled
+`EXPECT` and not `ASSERT` for the reason the `n_unique_ops` guard beside it
+gives — a fatal assertion returns from the harness and the `MPI_Gather` /
+`MPI_Gatherv` below it are collective, so one rank leaving early hangs the rest
+until the walltime and destroys the log the numbers have to be read out of.
+
+**It held at every rank of every rank count**, smallest observed value 3757
+(np = 6, rank 5, $\theta = 0.5$). **No perturbation was run to make it fire**,
+and the honest reason is that it cannot be made to fire independently in the
+current code: at the first build there is no prior cache, so
+`m2l_op_keys_built_count() == 0` implies `m2l_n_unique_ops() == 0`, which the
+pre-existing guard catches first. It is a redundancy against a future change —
+a pre-populated or shared operator table would zero it while the far field
+stayed live — and it is what makes "3.9x rebuilt" a statement about a real
+cache rather than a difference of zeros.
+
+### The stale comment corrected
+
+`tests/tstCartesianTaylorSolve.hpp`, on `matchesDirectSumThetaCanopy`, stated
+the measured $\theta = 0.5$ arm as "8.67e-04 potential, 2.16e-02 gradient".
+Neither figure appears anywhere in T4's record, and both are inconsistent with
+the shipped `CTS_DEV_TOL_THETA_CANOPY = 3.74e-02` (2x the measured worst) and
+with the constant's own provenance comment twenty lines above it. Replaced with
+9.9667e-04 and 1.8652e-02 and the job they came from. The "2.6x the theta = 0.3
+gradient and 3.3x its potential" clause was recomputed against the log's
+$\theta = 0.3$ figures and is now 26x and 52x — but it is **stated with the
+caveat that it conflates two variables**, because that arm runs at $p = 3$ and
+this one at $p = 2$, so the ratio is not a measurement of admissibility alone.
+The old ratios were consistent with the $p = 2$ $\theta = 0.3$ diagnostic
+figures (2.07x and 3.75x against 8.996e-03 and 2.655e-04), which is most likely
+where they came from — a pre-$p{=}3$ draft of the comment.
+
+**Affects:**
+
+- **T6 — nothing measured here changes it.** T6 re-runs T1's
+  finite-difference oracle at $|k| = 6$ because the $\theta = 0.3$ **gating**
+  arm runs at $p = 3$ (**R8**), and that arm is untouched by this task: it runs
+  at `dt_scale = 1` on the trajectory it was measured on and reproduces T4's
+  figures exactly. Both arms T5 **added** are at $p = 2$, so they reach only
+  $|k| = 4$ and R8 does not reach them. T6 starts exactly as written.
+- **Any session extending the drift measurement** — `dt_scale` above ~10
+  stops measuring R6 cleanly: the $\theta = 0.3$ cache saturates the 32768
+  operator-count cap and the overflow-and-refill path overlays the level-keying
+  one. Raise the cap first, or stay at or below 3.
+- **Whoever fixes R6** — the target is 3.9x, and the "exact power of two"
+  tolerance R6 suggests does not fire on a moving-particle box. See above.
+- **`m2l_op_keys_built_count()` has no per-build reset**, which is why the
+  measurement had to go inside the step loop. If a later session wants
+  per-build figures without parsing cumulative differences, that is a `src/`
+  change and T5 deliberately made none.

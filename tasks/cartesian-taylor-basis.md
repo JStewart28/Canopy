@@ -399,10 +399,16 @@ is unaffected throughout.
 - **`unit_w` reaches the operator builder.** `Solver::_push_root_half_width`
   (`:756-770`) hands `DownwardSweep` the largest of the three half extents of
   `root_box()`, and the sweep turns it into `unit_w[d] = w_root / 2^d`.
-- **The operator cache persists across topology changes.** Measured at T9: after
-  one solve, `invalidate_interaction_list()`, and a second solve,
+- **The operator cache persists across topology changes — but not for this
+  basis, and not on a moving distribution.** Measured at T9: after one solve,
+  `invalidate_interaction_list()`, and a second solve,
   `interaction_list_build_count() == 2` while `m2l_op_keys_built_count()` equals
   the cache size — **zero keys rebuilt** — at every rank of every rank count.
+  That was `LaplaceKernel` (`key_needs_level = false`) with a root box that
+  never moved. T5 measured the other side on this basis: **zero keys retained**
+  at every one of 336 builds, 3.9x the cached key count constructed over four
+  solves, because the box drifts and `set_root_half_width` then empties the
+  whole cache for a `key_needs_level` basis. See **R6**.
 - **The only complete worked non-harmonic basis is
   `tests/CanopyTest_MonopoleBasis.hpp`** (910 lines). It is the shape to copy:
   real `coeff_type`, `scalars_per_coeff = 1`, a struct-template
@@ -1232,7 +1238,40 @@ Record its deviation in the log beside the new basis's.
 
 ---
 
-### T5 — Measure the operator-cache behaviour across a rebalance — **NOT STARTED**
+### T5 — Measure the operator-cache behaviour across a rebalance — **DONE**
+
+**Met.** `ctest -V -R Canopy_Test_CartesianTaylorSolve_MPI_SERIAL` passes
+6/6 at np 1-6 (jobs `f3ZcrXqDFqZH` and `f3ZcvgKiGjaw`, the latter on the exact
+committed tree and reproducing every counter) with the per-step `[ct-cache]` line
+present at every rank of both measurement arms and of both gating arms. **The
+operator cache retains nothing:** at every one of the 336 builds in that job the
+per-step increment in `m2l_op_keys_built_count()` equals `m2l_op_cache_size()`
+after that build *exactly*, so the number of cached operators surviving a
+rebuild is **0**. Over four solves each rank builds 3.9x its cached key count —
+$\theta = 0.5$, np 1: 7370 / +7460 / +7400 / +7782 for a cumulative 30012
+against 7782 cached; $\theta = 0.3$: 25406 / +25556 / +25824 / +26468 for
+103254 against 26468 — with `interaction_list_build_count()` 1/2/3/4 and the
+sweep's root half-width agreeing with the builder's box on all 336 lines. That
+is **R6** at face value, stated against T9's measured zero keys rebuilt, which
+is **not like-for-like**: T9 drove the sweeps directly on `LaplaceKernel`
+(`key_needs_level = false`) across one `invalidate_interaction_list()` with a
+root box that never moved. The cost measured here is the cost of *motion* —
+`set_root_half_width` is a no-op on an unchanged width, so a static
+distribution would give T9's zero on this basis too. `CTS_DT` was **not**
+raised; the trajectory is amplified by a runtime `CTS_DT_SCALE_DRIFT = 3.0`
+pinned from a sweep (job `f3ZcosWuders`; `dt_scale = 10` was rejected because
+the $\theta = 0.3$ cache saturates the 32768 operator cap and overlays the
+overflow path, and 30 is degenerate), so both gating arms run their measured
+trajectory and reproduce T4's deviations to every printed digit at all six rank
+counts. Both added arms are at $p = 2$, so **R8** bears on none of it. The
+failure-direction guard `EXPECT_GT( m2l_op_keys_built_count(), 0 )` held at
+every rank, smallest value 3757. **No file under `src/` changed**, and no fix
+was designed — but the measurement does bear on one R6 suggests: a tolerance
+for root-width changes that are exact powers of two would not fire, because the
+realized drift is a smooth 0.18-0.40%-per-build contraction. Full figures,
+including the per-rank tables at every rank count, in
+[cartesian-taylor-basis-progress-log.md](cartesian-taylor-basis-progress-log.md)
+§T5.
 
 **Depends on:** T4.
 
@@ -1437,7 +1476,12 @@ workload the cache exists for — the cache therefore empties on each rebuild.
 **Presents as:** correct answers throughout and `m2l_op_keys_built_count()`
 climbing by roughly the full key count at every build, against T9's measured zero
 for a level-blind basis. **Not a correctness bug**, and **no task here fixes it**:
-T5 measures its magnitude and nothing more. Designing a fix means changing
+T5 measures its magnitude and nothing more. **Measured at T5 and it is total** —
+zero keys retained at every one of 336 builds, 3.9x the cached key count
+constructed over four solves, per-rank figures in the log §T5. One detail for a
+fix: the realized drift is a smooth 0.18-0.40%-per-build contraction, so
+tolerating a root-width change that is an exact power of two — the second
+candidate below — **would not fire** on a moving-particle box. Designing a fix means changing
 `src/Canopy_DownwardSweep.hpp` — plausibly by keying the cache on the physical
 $R$ rather than on the level, or by tolerating a root-width change that is an
 exact power of two — and that is separate work with its own gate.

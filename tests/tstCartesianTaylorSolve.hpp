@@ -215,11 +215,15 @@ static constexpr double CTS_DT = 1.0e-5;
 // calibration. That is deliberate and costs nothing here — no claim this file
 // makes depends on dt, which only has to move the root box (so that
 // set_root_half_width empties the operator cache for a key_needs_level basis,
-// R5) and perturb the topology. It does: the root half-width differs between
-// the two arms in its 8th significant figure, 0.138419475 against 0.138419418,
-// which is the particles having moved under two different fields. A session
-// wanting a visibly drifting box — T5 does — should raise CTS_DT rather than
-// assume this one is generous.
+// R5) and perturb the topology. It does, in two separate senses that T4
+// conflated: the root half-width differs between the two ARMS in its 8th
+// significant figure, 0.138419475 against 0.138419418, which is the particles
+// having moved under two different fields — but it also drifts ACROSS STEPS by
+// -0.118% on this trajectory (0.138583467 to 0.138419475 over the four solves,
+// measured per step by T5 on job f3ZcosWuders), which is the 4th significant
+// figure and not the 8th. A body wanting a MORE visibly drifting box asks for
+// one through CTS_DT_SCALE_DRIFT, a runtime multiplier; CTS_DT itself is not
+// raised, because both pinned tolerances were measured at this value.
 // ---------------------------------------------------------------------------
 static constexpr double CTS_POS_CENTER = 0.5;
 static constexpr double CTS_POS_HALF_SPAN = 0.1155;
@@ -234,6 +238,59 @@ inline double cts_dt_for_half_span( double half_span )
     const double ratio = half_span / CTS_POS_HALF_SPAN;
     return CTS_DT * ratio * std::sqrt( ratio );
 }
+
+// ---------------------------------------------------------------------------
+// THE TRAJECTORY AMPLIFIER FOR THE OPERATOR-CACHE MEASUREMENT (T5, risk R6),
+// AND WHY IT IS A MULTIPLIER RATHER THAN A LARGER CTS_DT.
+//
+// The cache measurement needs a root bounding box that drifts VISIBLY between
+// rebuilds, which the shipped trajectory does not give: at dt_scale = 1 the
+// root half-width moves in its 8th significant figure over the four solves,
+// enough to trip set_root_half_width's exact-double comparison but not enough
+// to distinguish "the box moved" from "the box's last bit moved".
+//
+// CTS_DT IS NOT RAISED, deliberately. cts_dt_for_half_span above reads it on
+// behalf of BOTH gating arms, and CTS_DEV_TOL_THETA_REF (the 1e-3 bar itself,
+// met with a 1.41x margin) and CTS_DEV_TOL_THETA_CANOPY were both measured at
+// CTS_DT = 1.0e-5. Raising the constant would move the trajectory under those
+// pinned tolerances and silently change what the T4 gate means. So the
+// amplification is a RUNTIME multiplier on the L^(3/2)-scaled dt, defaulting
+// to 1.0 on runArm, which leaves both gating arms on the exact trajectory
+// they were measured on while letting a measurement body ask for a longer
+// one. The L^(3/2) scaling stays in cts_dt_for_half_span, so a measurement
+// arm at another span still runs a constant dimensionless trajectory.
+//
+// 3.0 IS PINNED FROM A SWEEP, NOT CHOSEN. Probe job f3ZcosWuders, theta = 0.5,
+// p = 2, np 1-2, reading builder_root_half_width off the [ct-cache] lines at
+// step 0..3 (displacement goes as dt^2 under symplectic Euler from rest, so
+// the drift is quadratic in this multiplier):
+//
+//   dt_scale  per-step drift in the root half-width   net      verdict
+//   1         -0.020%, -0.039%, -0.059%               -0.118%  too small
+//   3         -0.177%, -0.349%, -0.399%               -0.922%  SHIPPED
+//   10        -1.574%, -2.927%, -4.630%               -8.879%  caps out
+//   30        -12.9%,  -29.0%,  +252%                 +118%    degenerate
+//
+// At 1 the box moves only in its 5th significant figure per build. At 10 the
+// theta = 0.3 arm's cache reaches 32528 and then EXACTLY 32768 operators — the
+// effective operator-count cap — so the cache overflows, is emptied and
+// refilled, which overlays that mechanism on the R6 measurement and clamps
+// n_unique_ops; the same run at theta = 0.5 is fine, but one constant keeps
+// the two arms comparable. At 30 the cloud collapses through its own centre
+// and re-expands (the box more than doubles on the last step) and the
+// distribution is no longer the one the configuration was chosen for. 3 moves
+// the 4th significant figure at every build, leaves the cap unbound in both
+// arms, and keeps the contraction monotone and under 1%.
+//
+// Worth recording because the T4 note here previously implied otherwise: the
+// drift at dt_scale = 1 is NOT eighth-figure. That figure was the difference
+// between the two ARMS' final boxes at a shared trajectory; the drift ACROSS
+// STEPS is -0.118%, the 4th significant figure, already enough to empty the
+// cache. And the measurement's conclusion does not depend on this constant at
+// all — the cache retained zero keys at every dt_scale in the sweep above.
+// See section T5 of tasks/cartesian-taylor-basis-progress-log.md.
+// ---------------------------------------------------------------------------
+static constexpr double CTS_DT_SCALE_DRIFT = 3.0;
 
 // The softening LENGTH, eps. b = eps^2 is what is added to r^2. The
 // downstream solver's value; stated as a length because that is what
@@ -363,7 +420,7 @@ struct GatheredState
 template <class MemorySpace, class ExecutionSpace, int P,
           template <class, int, int> class Basis, class Fn>
 void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
-                                  Fn&& after )
+                                  double dt_scale, Fn&& after )
 {
     using Scalar = double;
     using DataTypes = Cabana::MemberTypes<Scalar[3],          // Position
@@ -464,6 +521,82 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
         solver.template solve<Position, Charge>( particles,
                                                  /*compute_gradient=*/true );
 
+        // -------------------------------------------------------------------
+        // THE PER-STEP OPERATOR-CACHE MEASUREMENT (T5, risk R6).
+        //
+        // Tagged [ct-cache] and NOT [ct-solve]: that tag belongs to the
+        // once-per-run configuration echo below the loop, and a later session
+        // greps for one or the other.
+        //
+        // Read INSIDE the loop, after each solve(). A single end-of-run read
+        // cannot substitute for this: _m2l_op_keys_built is CUMULATIVE and is
+        // never reset by clear_m2l_op_cache()
+        // (src/Canopy_DownwardSweep.hpp:682-686), so an end-of-run value is a
+        // total over every build and carries no per-build figure. The
+        // per-step INCREMENT of keys_built, read against cache_size, is what
+        // says whether the cache retained anything across a rebuild: on a
+        // basis whose cache survived, keys_built stops climbing while
+        // ilist_builds keeps going up (that is exactly T9's measured zero,
+        // tasks/abstract-solver-backend-progress-log.md section T9).
+        //
+        // Both root half-widths are printed because the CLEARING RULE reads
+        // the sweep's copy: Solver::_push_root_half_width()
+        // (src/Canopy_Solver.hpp:756-770) pushes the builder's box into
+        // DownwardSweep::set_root_half_width() before every _downward.setup(),
+        // and that setter empties the whole cache on ANY change — an exact
+        // double comparison — for a key_needs_level basis
+        // (src/Canopy_DownwardSweep.hpp:406-416). This basis declares
+        // key_needs_level = true, so the two numbers agreeing while they drift
+        // is the mechanism R6 describes, visible in one line.
+        //
+        // The harness is shared, so both gating arms emit this line too. That
+        // is harmless: it is echo-only, and the one assertion below holds in
+        // every arm.
+        // -------------------------------------------------------------------
+        {
+            const auto& ds_step = solver.downward();
+            const auto& step_box = solver.builder().root_box();
+            double step_root_hw = 0.0;
+            for ( int d = 0; d < 3; d++ )
+                step_root_hw =
+                    std::max( step_root_hw,
+                              0.5 * ( step_box.max[d] - step_box.min[d] ) );
+
+            std::printf( "[ct-cache] theta=%.17g p_order=%d half_span=%.17g "
+                         "nprocs=%d rank=%d step=%d dt_scale=%.17g dt=%.17g "
+                         "keys_built=%lld cache_size=%d ilist_builds=%d "
+                         "n_unique_ops=%d sweep_root_half_width=%.17g "
+                         "builder_root_half_width=%.17g\n",
+                         mac_theta, P, pos_half_span, nprocs, rank, step,
+                         dt_scale,
+                         dt_scale * cts_dt_for_half_span( pos_half_span ),
+                         ds_step.m2l_op_keys_built_count(),
+                         ds_step.m2l_op_cache_size(),
+                         ds_step.interaction_list_build_count(),
+                         ds_step.m2l_n_unique_ops(),
+                         ds_step.root_half_width(), step_root_hw );
+            std::fflush( stdout );
+
+            // THE FAILURE DIRECTION FOR THIS MEASUREMENT. A zero here would
+            // mean no operator was ever constructed, so every per-step
+            // increment below is a difference of zeros and the whole
+            // measurement is vacuous — a green run that measured nothing.
+            //
+            // EXPECT and not ASSERT, for the same reason the n_unique_ops
+            // guard below the loop is non-fatal: a fatal assertion returns
+            // from this function and the MPI_Gather/MPI_Gatherv below are
+            // COLLECTIVE, so one rank leaving early hangs every other rank
+            // until the job's walltime and destroys the log these numbers
+            // have to be read out of.
+            if ( step == 0 )
+                EXPECT_GT( ds_step.m2l_op_keys_built_count(), 0 )
+                    << "m2l_op_keys_built_count() is 0 after the first "
+                       "solve: no M2L operator was ever built, so the "
+                       "per-step cache measurement is vacuous (theta="
+                    << mac_theta << " nprocs=" << nprocs
+                    << " rank=" << rank << ")";
+        }
+
         if ( step + 1 == CTS_NUM_STEPS )
             break;
 
@@ -476,7 +609,8 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
         auto positions = Cabana::slice<Position>( particles );
         auto velocities = Cabana::slice<Velocity>( particles );
         auto grad = solver.gradient();
-        const double dt_local = cts_dt_for_half_span( pos_half_span );
+        const double dt_local =
+            dt_scale * cts_dt_for_half_span( pos_half_span );
         Kokkos::parallel_for(
             "CartesianTaylorSolve::integrate",
             Kokkos::RangePolicy<ExecutionSpace>( 0, n_local ),
@@ -761,10 +895,11 @@ inline void direct_softened_sum( const GatheredState& gs,
 template <class MemorySpace, class ExecutionSpace, int P,
           template <class, int, int> class Basis>
 void runArm( double mac_theta, double tol, const char* arm,
-             double pos_half_span = CTS_POS_HALF_SPAN )
+             double pos_half_span = CTS_POS_HALF_SPAN,
+             double dt_scale = 1.0 )
 {
     with_cartesian_taylor_solve<MemorySpace, ExecutionSpace, P, Basis>(
-        mac_theta, pos_half_span,
+        mac_theta, pos_half_span, dt_scale,
         [mac_theta, tol, arm, pos_half_span]( const GatheredState& gs,
                                               int nprocs, int rank )
         {
@@ -850,12 +985,15 @@ TEST( CartesianTaylorSolve, matchesDirectSumThetaRef )
 //---------------------------------------------------------------------------//
 // np 1-6, mac_theta = 0.5 — Canopy's own default and the value
 // tstLaplaceSolve freezes. Measured and pinned beside the 0.3 arm, and it
-// lands ABOVE the reference bar on both fields (8.67e-04 potential,
-// 2.16e-02 gradient) because this MAC admits pairs at R ~ 6.93 W where the
-// p = 2 Taylor truncation is largest — 2.6x the theta = 0.3 gradient and
-// 3.3x its potential. That ordering is the expected one and is the point of
-// running two arms: the 1e-3 figure transfers at matched admissibility and
-// nowhere else. This arm PASSES against its own pinned constant.
+// lands ABOVE the reference bar on both fields (9.9667e-04 potential,
+// 1.8652e-02 gradient, job f3Yg13MRtyp3, np 1-6) because this MAC admits
+// pairs at R ~ 6.93 W where the p = 2 Taylor truncation is largest — 26x the
+// theta = 0.3 arm's gradient and 52x its potential, though that arm runs at
+// p = 3, so those ratios mix expansion order with admissibility and are not
+// a measurement of admissibility alone. That ordering is the expected one and
+// is the point of running two arms: the 1e-3 figure transfers at matched
+// admissibility and nowhere else. This arm PASSES against its own pinned
+// constant.
 //---------------------------------------------------------------------------//
 TEST( CartesianTaylorSolve, matchesDirectSumThetaCanopy )
 {
@@ -864,6 +1002,61 @@ TEST( CartesianTaylorSolve, matchesDirectSumThetaCanopy )
                                      Canopy::CartesianTaylorBasis>(
         CartesianTaylorSolveTest::CTS_THETA_CANOPY,
         CartesianTaylorSolveTest::CTS_DEV_TOL_THETA_CANOPY, "theta_canopy" );
+}
+
+//---------------------------------------------------------------------------//
+// THE OPERATOR-CACHE MEASUREMENT (T5, risk R6), np 1-6, TWO ARMS.
+//
+// What is measured, and where to read it: the [ct-cache] line the harness
+// prints after every solve() carries m2l_op_keys_built_count(),
+// m2l_op_cache_size(), interaction_list_build_count() and the root half-width,
+// per step and per rank. R6 predicts keys_built climbing by roughly the full
+// key count at EVERY build once the box drifts, because this basis declares
+// key_needs_level = true and set_root_half_width therefore empties the entire
+// operator cache whenever the root half-width changes
+// (src/Canopy_DownwardSweep.hpp:406-416), which
+// Solver::_push_root_half_width() makes happen before every _downward.setup()
+// (src/Canopy_Solver.hpp:756-770). The baseline it is stated against is T9's
+// measurement on a key_needs_level = FALSE basis: ZERO keys rebuilt across an
+// invalidate_interaction_list(), i.e. keys_built == cache_size at every rank
+// (tasks/abstract-solver-backend-progress-log.md section T9).
+//
+// THESE BODIES MAKE NO ACCURACY CLAIM AND ASSERT NO DEVIATION, which is why
+// they call the harness directly rather than through runArm. They run a
+// LONGER trajectory than the gating arms (CTS_DT_SCALE_DRIFT) precisely so
+// the box drifts visibly, and neither pinned tolerance was measured on that
+// trajectory. The only assertions they carry are the harness's two non-fatal
+// guards: m2l_n_unique_ops() > 0 (the far field was live) and
+// m2l_op_keys_built_count() > 0 after the first solve (an operator was built,
+// so the per-step increments are not a difference of zeros).
+//
+// BOTH ARMS RUN AT CTS_P = 2. The pair brackets both admissibilities at the
+// order the reference treecode itself runs, and — the consequence worth
+// holding onto — no arm here evaluates the derivative ladder above |k| = 4,
+// so risk R8 (the recurrence's accuracy at |k| = 6, still open) does not bear
+// on these numbers. The theta = 0.3 GATING arm runs at p = 3 and this one
+// does not; that is deliberate, since nothing here is compared to a bar.
+//---------------------------------------------------------------------------//
+TEST( CartesianTaylorSolve, operatorCacheAcrossDriftThetaCanopy )
+{
+    CartesianTaylorSolveTest::with_cartesian_taylor_solve<
+        TEST_MEMSPACE, TEST_EXECSPACE, CartesianTaylorSolveTest::CTS_P,
+        Canopy::CartesianTaylorBasis>(
+        CartesianTaylorSolveTest::CTS_THETA_CANOPY,
+        CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
+        CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT,
+        []( const CartesianTaylorSolveTest::GatheredState&, int, int ) {} );
+}
+
+TEST( CartesianTaylorSolve, operatorCacheAcrossDriftThetaRef )
+{
+    CartesianTaylorSolveTest::with_cartesian_taylor_solve<
+        TEST_MEMSPACE, TEST_EXECSPACE, CartesianTaylorSolveTest::CTS_P,
+        Canopy::CartesianTaylorBasis>(
+        CartesianTaylorSolveTest::CTS_THETA_REF,
+        CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
+        CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT,
+        []( const CartesianTaylorSolveTest::GatheredState&, int, int ) {} );
 }
 
 //---------------------------------------------------------------------------//
