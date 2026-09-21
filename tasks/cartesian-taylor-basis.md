@@ -1,6 +1,6 @@
 # A Cartesian-Taylor far-field basis for Canopy
 
-**Status:** IN PROGRESS — T1, T2, T3 and T4 DONE; T5 next, then T6
+**Status:** IN PROGRESS — T1 through T5 DONE; T6 next
 
 ## Problem
 
@@ -1351,12 +1351,16 @@ for the `m2l_n_unique_ops()` guard).
 **Depends on:** T5.
 
 **Fill in:** `tests/tstCartesianTaylor.hpp` — the `finite_difference` body and
-its two constants. No file under `src/` changes.
+its per-degree constants; the two finite-difference helpers `stencil1D`
+(`:180-210`) and `fdDerivative` (`:212-232`), neither of which can evaluate a
+derivative above 4th order today; and the sample set `buildSamples` (`:57-79`),
+which both this body and `closed_forms` read. No file under `src/` changes.
 
 **Reference:** **R8** for the gap and the instrument.
 [cartesian-taylor-basis-progress-log.md](cartesian-taylor-basis-progress-log.md)
 §T1 for the divisor scan that sized the oracle at $|k| = 4$ and for why the
-second Richardson step is there, §T4 for the $p = 3$ arm that opened the gap.
+second Richardson step is there, §T4 for the $p = 3$ arm that opened the gap and
+for the interior $(r, b)$ scales step 3 makes permanent.
 
 **Do:**
 
@@ -1364,33 +1368,66 @@ second Richardson step is there, §T4 for the $p = 3$ arm that opened the gap.
    the $\theta = 0.3$ solve arm runs at (`CTS_P_THETA_REF`,
    `tests/tstCartesianTaylorSolve.hpp:147`). Give the body its own maximum
    order rather than raising `p_order` (`tests/tstCartesianTaylor.hpp:36-37`):
-   `max_k = 2 * p_order` sizes the ladder every other body in the file
-   allocates, and the shift and M2L bodies choose their own orders explicitly.
-2. **Re-measure the Richardson step divisor at the new order.** Do not carry
-   $h = L/32$ over (`fd_h_divisor`, `tests/tstCartesianTaylor.hpp:433`) and do
-   not widen `fd_tol` (`:434`) to accommodate a failure: this check is the only
-   oracle above $|k| = 3$, and its sharpness is what bounds how small an
-   index-map or recurrence error has to be to slip through (**R2**, **R8**). At
-   $|k| = 4$ the scan over $h \in \{L/8, L/16, L/32, L/64\}$ gave
-   $1.3\times10^{-4}$, $1.9\times10^{-6}$, $4.3\times10^{-7}$ and
-   $7.2\times10^{-6}$ — a floor at $L/32$, truncation-limited above it and
-   roundoff-limited below. A 6th difference amplifies cancellation more, so the
-   floor is higher and need not sit at the same $h$; find it rather than
-   assuming it.
-3. Report the worst deviation and the multi-index it occurs at **per degree**,
+   `max_k = 2 * p_order` also sizes the ladder `closed_forms` allocates
+   (`:352`), while the shift and M2L bodies choose their own orders explicitly
+   (`:1099`, `:1717`).
+2. **Extend the 1-D stencils to per-axis orders 5 and 6**, which the oracle
+   does not have. `stencil1D` (`:180-210`) carries explicit cases for orders 0
+   through 4 and a `default:` branch returning the order-4 stencil for anything
+   higher, and `fdDerivative` (`:212-232`) sizes its per-axis locals `ox[5]`,
+   `wx[5]` to match. Degrees 5 and 6 contain multi-indices with a single
+   component of 5 or 6 — $(5,0,0)$, $(6,0,0)$, $(5,1,0)$ and their permutations
+   — so without this the oracle differences them with a 4th-order stencil and
+   divides by $h^5$ or $h^6$. Widen both the parameter arrays and the locals
+   from 5 to 7 and add the standard 2nd-order-accurate central stencils:
+   order 5, weights $(-\tfrac12, 2, -\tfrac52, 0, \tfrac52, -2, \tfrac12)$ at
+   offsets $-3 \ldots 3$; order 6, weights $(1, -6, 15, -20, 15, -6, 1)$ at the
+   same offsets. Both are antisymmetric and symmetric about zero respectively,
+   so their error expansions carry even powers of $h$ only — the property both
+   Richardson steps rest on (`:163-165`) — and the extrapolation is unchanged.
+   Replace the `default:` fallthrough with a loud abort naming the unsupported
+   order, so raising $p$ again gives a diagnostic rather than a silently
+   mis-differenced oracle.
+3. **Add the interior scales 9.276, 15.46 and 74.2 to `buildSamples`' `scales`
+   array** (`:60`), permanently. The $p = 3$ gating arm runs at
+   $|r|/\sqrt b \in [9.28, 74.2]$, lying entirely between the shipped set's
+   `1.0` and `100.0`, and **R8** requires the oracle be measured at the scales
+   actually in use. Those three were measured once already (§T4): they take
+   `closed_forms` from 40 to 76 samples and move its worst deviation from
+   $2.911\times10^{-15}$ to $5.465\times10^{-15}$ against its $10^{-12}$
+   tolerance, leaving $|k| = 4$ unchanged at $7.321\times10^{-7}$. Both bodies
+   read `buildSamples`, so re-pin `closed_forms`' recorded worst figure and
+   sample count to what this run measures.
+4. **Re-measure the Richardson step divisor at each new order, and pin the
+   tolerance and the divisor per degree** — three of each, indexed by degree 4,
+   5 and 6, rather than one pair across all of them. A 6th difference amplifies
+   cancellation more than a 4th, so a single tolerance sized for $|k| = 6$
+   would loosen the $|k| = 4$ check well below the 13.7x margin it holds today,
+   and that check is the only validated oracle above $|k| = 3$. Each degree's
+   floor need not sit at the same $h$, so each degree gets its own divisor,
+   scanned over the sample set step 3 ships. Do not carry $h = L/32$ over
+   (`fd_h_divisor`, `tests/tstCartesianTaylor.hpp:433`) and do not widen any
+   tolerance (`fd_tol`, `:434`) to accommodate a failure: this check's
+   sharpness is what bounds how small an index-map or recurrence error has to
+   be to slip through (**R2**, **R8**). The $|k| = 4$ scan over
+   $h \in \{L/8, L/16, L/32, L/64\}$ gave $1.3\times10^{-4}$,
+   $1.9\times10^{-6}$, $4.3\times10^{-7}$ and $7.2\times10^{-6}$ — a floor at
+   $L/32$, truncation-limited above it and roundoff-limited below. That is the
+   shape to look for at each degree, not a figure to reuse.
+5. Report the worst deviation and the multi-index it occurs at **per degree**,
    4 through 6, rather than one figure over all of them, so the margin at each
-   new order is readable and the two orders stay comparable in one log.
-4. Record the scan and the achieved margin at each degree in the log.
+   new order is readable and the three degrees stay comparable in one log.
+6. Record the scan and the achieved margin at each degree in the log.
 
 **Exit criterion:** `make -j 4 Canopy_Test_CartesianTaylor_SERIAL` succeeds and
 `ctest -V -R '^Canopy_Test_CartesianTaylor_SERIAL$'` passes every body, with the
-finite-difference check running at $|k| = 4 \ldots 6$ and its tolerance stated
-on the assertion together with the divisor it was measured at, and the progress
-log carries the divisor scan and the per-degree margins. **Failure direction:**
-perturbing one §3 recurrence coefficient must push the reported deviation above
-tolerance at **each** of degrees 4, 5 and 6 — which is what says the two new
-degrees are exercised rather than merely enumerated, and not that one low-degree
-slot carries the whole failure.
+finite-difference check running at $|k| = 4 \ldots 6$, each degree's tolerance
+stated on the assertion together with the divisor that degree was measured at,
+and the progress log carrying the per-degree divisor scan and the per-degree
+margins. **Failure direction:** perturbing one §3 recurrence coefficient must
+push the reported deviation above tolerance at **each** of degrees 4, 5 and 6 —
+which is what says the two new degrees are exercised rather than merely
+enumerated, and not that one low-degree slot carries the whole failure.
 `scripts/tuolumne/run_ctest_cartesian_taylor_serial.flux` runs this unchanged.
 
 **Checkpoint commit** at the end of this task.
