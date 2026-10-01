@@ -223,6 +223,31 @@ static constexpr double LS_CROSS_RANK_R8_THRESHOLD = 1.0e-9;
 static constexpr int LS_BUDGET_KEYS = 64;
 static constexpr double LS_BUDGET_POTENTIAL_TOL = 5.0e-2;
 
+// ---------------------------------------------------------------------------
+// The M2L key-DEMAND checks (testM2LKeyDemandConstrained and
+// testM2LKeyDemandDefault). Like the pair above these configure a solve of
+// the same problem beside the frozen one and reach no reference file.
+//
+// LS_DEMAND_BUDGET_KEYS is ONE column, deliberately the smallest cap that is
+// still a cap: the merge admits the first key it sees and refuses every one
+// after it, so m2l_n_unique_ops() is pinned at exactly 1 on every rank and
+// the demanded count is free to be whatever the tree wants. That makes
+// "demand > realized" a statement with a known left-hand side rather than a
+// comparison of two measurements, and it holds at every rank count without
+// re-measuring: the frozen configuration realizes 111-686 keys per rank, so
+// no rank can fail to have a second key to refuse. A budget of 64 columns —
+// what LS_BUDGET_KEYS uses — would NOT do: at a larger cap some rank at some
+// rank count overflows nothing (measured at 256 columns, rank 1 at np=3), and
+// then the strict inequality is vacuous rather than false.
+//
+// These cases assert on m2l_n_demanded_ops(), which is -1 in a build without
+// CANOPY_ENABLE_PROFILING. Both bodies branch on that define: under it they
+// assert the demand relation, and without it they assert the SENTINEL, so the
+// same suite is meaningful in both builds and a `~profiling` build cannot
+// quietly report 0 and be read as "this tree wants no keys".
+// ---------------------------------------------------------------------------
+static constexpr int LS_DEMAND_BUDGET_KEYS = 1;
+
 static const char* const LS_DATA_FILE =
     CANOPY_TEST_DATA_DIR "/laplace_solve_P6.txt";
 
@@ -1752,6 +1777,195 @@ void testOpTableByteBudget()
            "consequence of the budget";
 }
 
+//---------------------------------------------------------------------------//
+// The key-demand counter at a cap of ONE column.
+//
+// Demand is what the tree asks the operator table for; m2l_n_unique_ops() is
+// what the cap grants. At the default budget the two are equal and neither
+// can tell you which it is, so this body squeezes the cap to a single column
+// and checks that the realized count follows the cap while the demanded count
+// does not.
+//
+// It also PRINTS everything a second build has to agree with: the realized
+// count, the realized key list, the fallback pair count and the effective
+// cap. The demand counter must change no answer, and that is checked by
+// diffing those figures between a +profiling and a ~profiling build rather
+// than by reading the instrumentation — an accidental write into ops or
+// key_to_op would move the overflow set and present as a tolerance failure
+// somewhere else entirely.
+//---------------------------------------------------------------------------//
+template <class MemorySpace, class ExecutionSpace>
+void testM2LKeyDemandConstrained()
+{
+    using Kernel = Canopy::LaplaceKernel<double, LS_P, LS_NCOMPS>;
+
+    // DERIVED, never a literal, for the reason testOpTableByteBudget gives:
+    // a basis whose coefficient width changes must not silently change which
+    // cap this test is exercising.
+    constexpr std::size_t bytes_per_key = Kernel::bytes_per_key;
+    const std::size_t one_column_budget =
+        bytes_per_key * static_cast<std::size_t>( LS_DEMAND_BUDGET_KEYS );
+
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    int realized = -1;
+    int demanded = -2;
+    int eff_cap = -1;
+    bool saturated = true;
+    long long fallback = -1;
+    std::vector<int> cells_at_depth;
+    std::string realized_keys;
+
+    with_laplace_solve<MemorySpace, ExecutionSpace>(
+        [&]( const auto& outcome, const auto& ds )
+        {
+            realized = outcome.bits.n_unique_ops;
+            fallback = outcome.bits.fallback_pairs;
+            demanded = ds.m2l_n_demanded_ops();
+            saturated = ds.m2l_demand_saturated();
+            eff_cap = ds.m2l_effective_op_cap();
+            cells_at_depth = ds.m2l_cells_at_depth();
+
+            // The realized key list, verbatim and in column order. This is
+            // the artifact the two builds are compared on; it is a string so
+            // one printf carries it whatever the count turns out to be.
+            std::ostringstream ks;
+            for ( const auto& k : ds.m2l_realized_keys() )
+                ks << "{" << k.max_d << "," << k.dd << "," << k.ii << ","
+                   << k.jj << "," << k.kk << "}";
+            realized_keys = ks.str();
+        },
+        one_column_budget );
+
+    std::ostringstream ds_str;
+    for ( std::size_t d = 0; d < cells_at_depth.size(); ++d )
+        ds_str << ( d ? "," : "" ) << cells_at_depth[d];
+
+    // The evidence line. Printed on every rank and at every rank count, so
+    // `ctest -V` carries it into the log whether or not anything failed.
+    std::printf( "[laplace-solve] nprocs=%d rank=%d m2l_demand_constrained "
+                 "budget=%zu eff_cap=%d realized=%d demanded=%d "
+                 "saturated=%d fallback=%lld realized_keys=%s "
+                 "cells_at_depth=[%s]\n",
+                 nprocs, rank, one_column_budget, eff_cap, realized,
+                 demanded, saturated ? 1 : 0, fallback,
+                 realized_keys.c_str(), ds_str.str().c_str() );
+    std::fflush( stdout );
+
+    // The cap must actually bind at one column, or everything below is
+    // vacuous.
+    EXPECT_EQ( eff_cap, LS_DEMAND_BUDGET_KEYS )
+        << "a budget of " << one_column_budget << " B at " << bytes_per_key
+        << " B per key did not produce a cap of " << LS_DEMAND_BUDGET_KEYS
+        << " column";
+    EXPECT_EQ( realized, LS_DEMAND_BUDGET_KEYS )
+        << "np=" << nprocs << " rank=" << rank
+        << " a one-column cap must realize exactly one operator column: the "
+           "merge admits the first key and refuses every later one, and the "
+           "frozen configuration gives every rank more than one key";
+    EXPECT_GT( fallback, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a one-column cap routed no pair to the per-pair fallback, so "
+           "this case is comparing a solve against itself";
+
+    // The occupied-depth vector is ungated state and must be there in both
+    // builds; it is what explains a level-keyed basis's key total.
+    EXPECT_FALSE( cells_at_depth.empty() )
+        << "m2l_cells_at_depth() is empty after a solve";
+
+#ifdef CANOPY_ENABLE_PROFILING
+    EXPECT_GT( demanded, realized )
+        << "np=" << nprocs << " rank=" << rank
+        << " the demanded key count (" << demanded
+        << ") is not strictly greater than the one column the cap allowed. "
+           "Either the counter is reading the admitted set instead of the "
+           "seen set, or it is being inserted into after the cap test rather "
+           "than before it";
+    EXPECT_FALSE( saturated )
+        << "np=" << nprocs << " rank=" << rank
+        << " the demanded set hit M2L_DEMAND_COUNT_CAP on a 600-particle "
+           "tree, so the count is a lower bound and the inequality above "
+           "means less than it appears to";
+#else
+    EXPECT_EQ( demanded, -1 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a build without CANOPY_ENABLE_PROFILING must report the "
+           "unavailable sentinel -1 and never 0: zero demand is a legal "
+           "measurement (a tree with no M2L pairs), so a 0 here would read "
+           "as 'this tree wants no keys' and retire the question with a "
+           "wrong answer";
+    EXPECT_FALSE( saturated )
+        << "np=" << nprocs << " rank=" << rank
+        << " a build without CANOPY_ENABLE_PROFILING counts nothing and so "
+           "cannot have saturated";
+#endif
+}
+
+//---------------------------------------------------------------------------//
+// The key-demand counter at the DEFAULT budget, where nothing overflows.
+//
+// The complement of the case above and the one that catches a counter that
+// over-counts: if demand exceeded realized here, the counter would be seeing
+// keys the merge does not — a canonicalization applied twice, say — and every
+// demand figure measured with it would be inflated.
+//---------------------------------------------------------------------------//
+template <class MemorySpace, class ExecutionSpace>
+void testM2LKeyDemandDefault()
+{
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    int realized = -1;
+    int demanded = -2;
+    int eff_cap = -1;
+    bool saturated = true;
+    long long fallback = -1;
+
+    // Budget omitted: FmmConfig's default, which is the frozen
+    // configuration's own budget.
+    with_laplace_solve<MemorySpace, ExecutionSpace>(
+        [&]( const auto& outcome, const auto& ds )
+        {
+            realized = outcome.bits.n_unique_ops;
+            fallback = outcome.bits.fallback_pairs;
+            demanded = ds.m2l_n_demanded_ops();
+            saturated = ds.m2l_demand_saturated();
+            eff_cap = ds.m2l_effective_op_cap();
+        } );
+
+    std::printf( "[laplace-solve] nprocs=%d rank=%d m2l_demand_default "
+                 "eff_cap=%d realized=%d demanded=%d saturated=%d "
+                 "fallback=%lld\n",
+                 nprocs, rank, eff_cap, realized, demanded,
+                 saturated ? 1 : 0, fallback );
+    std::fflush( stdout );
+
+    EXPECT_GT( realized, 0 );
+    EXPECT_EQ( fallback, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " the default-budget solve routed pairs to the per-pair fallback, "
+           "so 'nothing overflowed' is not the configuration being tested";
+
+#ifdef CANOPY_ENABLE_PROFILING
+    EXPECT_EQ( demanded, realized )
+        << "np=" << nprocs << " rank=" << rank
+        << " nothing overflowed at the default budget, so every key the "
+           "merge saw got a column and demand must equal realized. A demand "
+           "above realized means the counter sees keys the merge does not — "
+           "a key canonicalized a second time, or counted per pair instead "
+           "of per distinct key";
+    EXPECT_FALSE( saturated );
+#else
+    EXPECT_EQ( demanded, -1 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a build without CANOPY_ENABLE_PROFILING must report -1, not 0";
+    EXPECT_FALSE( saturated );
+#endif
+}
+
 } // namespace LaplaceSolveTest
 
 //---------------------------------------------------------------------------//
@@ -1780,6 +1994,22 @@ TEST( LaplaceSolve, matchesDirectSum )
 TEST( LaplaceSolve, opTableByteBudget )
 {
     LaplaceSolveTest::testOpTableByteBudget<TEST_MEMSPACE, TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+
+TEST( LaplaceSolve, m2lKeyDemandConstrained )
+{
+    LaplaceSolveTest::testM2LKeyDemandConstrained<TEST_MEMSPACE,
+                                                  TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+
+TEST( LaplaceSolve, m2lKeyDemandDefault )
+{
+    LaplaceSolveTest::testM2LKeyDemandDefault<TEST_MEMSPACE,
+                                              TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

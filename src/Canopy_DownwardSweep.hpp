@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Canopy
@@ -549,6 +550,17 @@ class DownwardSweep
     // -----------------------------------------------------------------------
     static constexpr int M2L_OP_COUNT_CAP = 32768;
 
+    // Bound on the DIAGNOSTIC demanded-key set, which exists only under
+    // CANOPY_ENABLE_PROFILING and feeds nothing in the solve. 2^20 keys is
+    // about 56 MB of unordered_set, and it is chosen to exceed what the 2 GB
+    // default byte budget could ever buy: at the CartesianTaylor basis's
+    // 3200 B per key that budget is 671088 columns, so a demanded count that
+    // SATURATES this bound is already an answer — it says the tree wants more
+    // keys than any admissible table could hold, without needing the exact
+    // figure. Saturation is reported through _m2l_demand_saturated and is
+    // never folded into the count, which stays a lower bound in that case.
+    static constexpr int M2L_DEMAND_COUNT_CAP = 1048576;
+
     // Default per-rank byte budget for the operator table: 2 GB. Overridden
     // through FmmConfig::m2l_op_table_byte_budget, which Solver routes to
     // set_m2l_op_table_byte_budget().
@@ -698,6 +710,27 @@ class DownwardSweep
     // build_interaction_list_device purely as a read-only diagnostic
     // surface (see m2l_realized_keys()); nothing in the solve reads it.
     std::vector<M2LKey> _m2l_realized_keys;
+
+    // The DEMANDED key count from the last build_interaction_list_device():
+    // the number of distinct canonical keys the serial merge SAW, independent
+    // of how many it ADMITTED. This is what the column cap would have to be
+    // to give every key its own operator; _m2l_realized_keys.size() is what
+    // the cap actually allowed, and the two differ by exactly the keys routed
+    // to the per-pair fallback.
+    //
+    // -1 MEANS "NOT COMPILED WITH PROFILING", never "no keys". Zero is a
+    // legal demand: a tree with no M2L pairs realizes and demands no keys, so
+    // a sentinel of 0 would read as a measurement. Counted only under
+    // CANOPY_ENABLE_PROFILING; outside it this member is never written and
+    // stays -1 for the life of the sweep.
+    int _m2l_demanded_op_count = -1;
+
+    // Whether the demanded-key set hit M2L_DEMAND_COUNT_CAP and stopped
+    // counting. When true, _m2l_demanded_op_count is a LOWER BOUND equal to
+    // that cap and not the peak. Kept separate from the count on purpose:
+    // conflating them would make a saturated measurement indistinguishable
+    // from a tree that happens to want exactly 2^20 keys.
+    bool _m2l_demand_saturated = false;
 
     // Tier 2 fused-kernel layout: target-major CSRs partitioned by target
     // sharedness. One Kokkos team per target walks its source slice and
@@ -934,6 +967,57 @@ class DownwardSweep
     int m2l_n_unique_ops() const
     {
         return static_cast<int>( _m2l_realized_keys.size() );
+    }
+
+    // Number of distinct M2L operator keys the last
+    // build_interaction_list_device() DEMANDED — the count the column cap
+    // would have to be to admit every key, as opposed to
+    // m2l_n_unique_ops(), which is the count the cap actually admitted. The
+    // difference is the keys whose pairs went to the per-pair fallback.
+    //
+    // RANK-LOCAL AND UNREDUCED. The key set is per rank, so a figure without
+    // its rank count is unreadable, and a mean over ranks would hide the rank
+    // that overflows.
+    //
+    // COUNTED OVER CANONICAL KEYS, the same keys m2l_realized_keys() holds,
+    // so the two are directly comparable and demand >= realized always.
+    //
+    // RETURNS -1 WHEN UNAVAILABLE, i.e. when Canopy was built without
+    // CANOPY_ENABLE_PROFILING, and never 0 for that reason: zero demand is a
+    // legal measurement (a tree with no M2L pairs), so a caller must test for
+    // -1 before reading this as a count. Also -1 before the first build.
+    //
+    // A LOWER BOUND when m2l_demand_saturated() is true.
+    int m2l_n_demanded_ops() const { return _m2l_demanded_op_count; }
+
+    // Whether the demanded-key count above stopped at M2L_DEMAND_COUNT_CAP.
+    // True means m2l_n_demanded_ops() is a lower bound equal to that cap and
+    // not the tree's actual demand. Always false in a build without
+    // CANOPY_ENABLE_PROFILING, where the count is -1 and means nothing.
+    bool m2l_demand_saturated() const { return _m2l_demand_saturated; }
+
+    // Occupied-cell counts per depth for the cells this rank processes:
+    // entry d is the number of cells at depth d, one entry per depth from 0
+    // to max_depth. Empty before setup().
+    //
+    // Exposed because the OCCUPIED-DEPTH COUNT is what explains a
+    // level-keyed basis's key total: a basis whose canonicalize_key retains
+    // the absolute level (KernelType::key_needs_level) gives two pairs with
+    // the same integer offset at different levels different operators, so
+    // every occupied depth multiplies the realized key count. A demand
+    // figure read without this is a number with no mechanism behind it.
+    //
+    // UNGATED — it reads state the sweep maintains for the solve itself, so
+    // there is nothing to compile out. Returned BY VALUE:
+    // _all_at_depth_local holds per-depth cell-index LISTS, and the per-depth
+    // count vector exists nowhere as state, so there is nothing to hand back
+    // by const reference.
+    std::vector<int> m2l_cells_at_depth() const
+    {
+        std::vector<int> counts( _all_at_depth_local.size() );
+        for ( std::size_t d = 0; d < _all_at_depth_local.size(); ++d )
+            counts[d] = static_cast<int>( _all_at_depth_local[d].size() );
+        return counts;
     }
 
     // -----------------------------------------------------------------------
@@ -1601,6 +1685,32 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         // sum of distinct keys per thread (in practice ~16 k globally), so
         // this is tiny relative to the 550 M-pair classify pass.
         std::vector<std::vector<int>> local_to_global( nthreads );
+
+#ifdef CANOPY_ENABLE_PROFILING
+        // THE DEMANDED KEY SET. Read-only instrumentation: it is inserted
+        // into below BEFORE the cap test, so it sees every distinct canonical
+        // key this merge sees whether or not the key gets a column, and it is
+        // read by nothing — not ops, not key_to_op, not local_to_global, not
+        // pair_op_idx, not _m2l_realized_keys, not the operator cache and not
+        // the fallback tables. Its only consumer is _m2l_demanded_op_count
+        // after the loop. A write from here into any of those would move the
+        // overflow set and present as a tolerance failure in unrelated code
+        // (risk R1 in tasks/add-canopy-t6.md in the Beatnik repo), which is
+        // why the two builds' realized output is compared rather than
+        // inspected.
+        //
+        // The keys in local_ops[t] are ALREADY CANONICAL — canonicalization
+        // happens once at the classify pass's single hash site and is
+        // guaranteed there — so this inserts them as they are and does not
+        // apply canonicalize_key a second time.
+        std::unordered_set<M2LKey, M2LKeyHash> demanded;
+        demanded.reserve( S3_PER_THREAD_KEYMAP_RESERVE );
+
+        // Both figures are PER BUILD, so clear the flag here rather than
+        // letting one saturating build make every later one look saturated.
+        _m2l_demand_saturated = false;
+#endif
+
         for ( int t = 0; t < nthreads; ++t )
         {
             local_to_global[t].resize( local_ops[t].size() );
@@ -1608,6 +1718,20 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                   lo < static_cast<int>( local_ops[t].size() ); ++lo )
             {
                 const M2LKey& key = local_ops[t][lo];
+
+#ifdef CANOPY_ENABLE_PROFILING
+                // Before the cap test, deliberately: the demand is what the
+                // tree asks for, not what the table grants. Stop inserting at
+                // M2L_DEMAND_COUNT_CAP rather than letting an adversarial
+                // tree exhaust memory in a diagnostic (risk R2), and say so
+                // through the flag so the count reads as a lower bound.
+                if ( static_cast<int>( demanded.size() ) <
+                     M2L_DEMAND_COUNT_CAP )
+                    demanded.insert( key );
+                else
+                    _m2l_demand_saturated = true;
+#endif
+
                 auto it = key_to_op.find( key );
                 int g;
                 if ( it != key_to_op.end() )
@@ -1641,6 +1765,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                 local_to_global[t][lo] = g;
             }
         }
+
+#ifdef CANOPY_ENABLE_PROFILING
+        _m2l_demanded_op_count = static_cast<int>( demanded.size() );
+#endif
 
         // Parallel local->global op-idx remap over the disjoint pair slices.
         Kokkos::parallel_for(
@@ -1677,11 +1805,20 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // (it zeroes max_d). A level-carrying basis realizes strictly more keys on
     // the same tree — measured at 4628 against 2572, a factor of 1.8, on one
     // 694-cell tree (T7) — so it is printed beside the count that it explains.
+    //
+    // n_demanded_ops is the count the merge SAW against the n_unique_ops it
+    // ADMITTED. They are equal exactly when nothing overflowed; when they
+    // differ, n_demanded_ops is the cap the tree actually wants and
+    // n_unique_ops is pinned at effective_cap by construction, which is why
+    // the realized figure alone cannot size the cap. demand_saturated=1 makes
+    // n_demanded_ops a lower bound of M2L_DEMAND_COUNT_CAP.
     std::printf( "[Canopy Diagnostics] M2L operator table: rank %d "
-                 "n_unique_ops=%d bytes_per_key=%zu table_bytes=%zu "
+                 "n_unique_ops=%d n_demanded_ops=%d demand_saturated=%d "
+                 "bytes_per_key=%zu table_bytes=%zu "
                  "effective_cap=%d count_cap=%d byte_budget=%zu "
                  "key_needs_level=%d\n",
-                 _rank, n_unique_ops,
+                 _rank, n_unique_ops, _m2l_demanded_op_count,
+                 _m2l_demand_saturated ? 1 : 0,
                  static_cast<std::size_t>( KernelType::bytes_per_key ),
                  static_cast<std::size_t>( n_unique_ops ) *
                      KernelType::bytes_per_key,
