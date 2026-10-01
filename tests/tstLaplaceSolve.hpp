@@ -2192,6 +2192,138 @@ void testM2LOpCountCapBounds()
     std::fflush( stdout );
 }
 
+//---------------------------------------------------------------------------//
+// The PER-REASON fallback breakdown, and the sum identity it has to satisfy.
+//
+// Every pair that reaches the per-pair m2l_translate path does so for exactly
+// one of two reasons, and the counters that separate them are the instrument
+// T8b in tasks/add-canopy-t6.md (in the Beatnik repo) needs: a level-4 FMM
+// configuration there shows non-zero fallback at ranks where NO rank reaches
+// the count cap, so the cap cannot be the reason and something else is.
+//
+//   range guard   the classify pass never hashed a key for the pair, because
+//                 max_d or one of dd, ii, jj, kk fell outside the key
+//                 encoding's bounds. A REPRESENTABILITY limit.
+//   count cap     the key was hashed and the merge then refused it a column.
+//                 A BUDGET.
+//
+// This case drives the COUNT CAP reason, by reusing the configuration
+// testM2LOpCountCapConstrained established: a cap of LS_COUNT_CAP_KEYS
+// columns against the default 2 GB byte budget, which that case already shows
+// realizes exactly that many columns with non-zero fallback at every rank
+// count. On this frozen 600-particle tree the range guard is not expected to
+// fire at all -- a healthy MAC traversal produces no out-of-range pair -- so
+// the breakdown here should read fb_count_cap == fallback and
+// fb_range_guard == 0. Both are asserted; the point is the IDENTITY, not
+// either value.
+//
+// THE DROPPED COUNTER MUST BE ZERO. A refused pair whose target depth lies
+// outside [0, max_depth] is placed in neither an operator column nor the
+// fallback table, so it is invisible to total_fallback_pair_count() and its
+// contribution is never evaluated anywhere. That is a wrong velocity rather
+// than a slow one, and the sum identity is what catches it.
+//
+// THE FAILURE DIRECTION IS WHY THIS CASE EXISTS IN BOTH TREES. In a
+// ~profiling build all three counters are the -1 SENTINEL and not 0, and the
+// identity is SKIPPED rather than evaluated: -1 + -1 == fallback is false for
+// any real fallback, and a check that "passed" on a row of sentinels would be
+// a vacuous pass. The #else branch therefore asserts the sentinels explicitly
+// and asserts nothing about the sum (risk R7).
+//---------------------------------------------------------------------------//
+template <class MemorySpace, class ExecutionSpace>
+void testM2LFallbackReasonBreakdown()
+{
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    int realized = -1;
+    int eff_cap = -1;
+    long long fallback = -1;
+    long long fb_range = -2;
+    long long fb_cap = -2;
+    long long fb_dropped = -2;
+
+    // Budget argument 0: leave FmmConfig's default in place, so the COUNT cap
+    // is unambiguously what refused every refused key.
+    with_laplace_solve<MemorySpace, ExecutionSpace>(
+        [&]( const auto& outcome, const auto& ds )
+        {
+            realized = outcome.bits.n_unique_ops;
+            fallback = outcome.bits.fallback_pairs;
+            eff_cap = ds.m2l_effective_op_cap();
+            fb_range = ds.m2l_n_fallback_pairs_range_guard();
+            fb_cap = ds.m2l_n_fallback_pairs_count_cap();
+            fb_dropped = ds.m2l_n_fallback_pairs_depth_dropped();
+        },
+        0, LS_COUNT_CAP_KEYS );
+
+    std::printf( "[laplace-solve] nprocs=%d rank=%d m2l_fallback_reasons "
+                 "count_cap=%d eff_cap=%d realized=%d fallback=%lld "
+                 "fb_range_guard=%lld fb_count_cap=%lld fb_dropped=%lld "
+                 "breakdown_available=%d\n",
+                 nprocs, rank, LS_COUNT_CAP_KEYS, eff_cap, realized, fallback,
+                 fb_range, fb_cap, fb_dropped, ( fb_range >= 0 ) ? 1 : 0 );
+    std::fflush( stdout );
+
+    // UNGATED: the cap bound and pairs were refused, which is profiling-
+    // independent and is the precondition that makes the breakdown worth
+    // reading at all.
+    EXPECT_EQ( eff_cap, LS_COUNT_CAP_KEYS );
+    EXPECT_GT( fallback, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a cap of " << LS_COUNT_CAP_KEYS
+        << " columns refused no pair, so there is no breakdown to check";
+
+#ifdef CANOPY_ENABLE_PROFILING
+    // THE IDENTITY. Asserted rather than inspected: a breakdown that does not
+    // account for every fallback pair is a breakdown that can name the wrong
+    // reason and read as a measurement.
+    EXPECT_EQ( fb_range + fb_cap, fallback )
+        << "np=" << nprocs << " rank=" << rank
+        << " the per-reason fallback counters (" << fb_range << " range-guard + "
+        << fb_cap << " count-cap = " << ( fb_range + fb_cap )
+        << ") do not sum to total_fallback_pair_count() (" << fallback
+        << "), so some pair reaches the fallback path for a reason neither "
+           "counter is counting";
+    EXPECT_EQ( fb_dropped, 0 )
+        << "np=" << nprocs << " rank=" << rank << " " << fb_dropped
+        << " refused pair(s) have a target depth outside [0, max_depth] and "
+           "were placed in NEITHER an operator column nor the fallback "
+           "table. Their contribution is never evaluated: this is a wrong "
+           "velocity, not a slow one";
+    EXPECT_GT( fb_cap, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " the count cap bound (eff_cap=" << eff_cap
+        << ", realized=" << realized
+        << ") yet no fallback pair is attributed to it, so the two reasons "
+           "are being told apart wrongly";
+    EXPECT_EQ( fb_range, 0 )
+        << "np=" << nprocs << " rank=" << rank << " " << fb_range
+        << " pair(s) exceeded the key encoding's own bounds on this frozen "
+           "600-particle tree, where a healthy MAC traversal should produce "
+           "none. Not a failure of the counter -- a finding about the tree";
+#else
+    // R7, in all three counters: -1 is "this Canopy build carries no
+    // profiling" and 0 is a legal count, so a 0 here would read as "no pair
+    // took the fallback for that reason" -- a measurement this build did not
+    // make. And the sum identity above is deliberately NOT evaluated: it
+    // would be checking -1 + -1 against a real fallback total.
+    EXPECT_EQ( fb_range, -1 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a build without CANOPY_ENABLE_PROFILING must report the "
+           "unavailable sentinel -1 for the range-guard counter, never 0";
+    EXPECT_EQ( fb_cap, -1 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a build without CANOPY_ENABLE_PROFILING must report the "
+           "unavailable sentinel -1 for the count-cap counter, never 0";
+    EXPECT_EQ( fb_dropped, -1 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a build without CANOPY_ENABLE_PROFILING must report the "
+           "unavailable sentinel -1 for the dropped counter, never 0";
+#endif
+}
+
 } // namespace LaplaceSolveTest
 
 //---------------------------------------------------------------------------//
@@ -2251,6 +2383,14 @@ TEST( LaplaceSolve, m2lOpCountCapConstrained )
 TEST( LaplaceSolve, m2lOpCountCapBounds )
 {
     LaplaceSolveTest::testM2LOpCountCapBounds<TEST_MEMSPACE, TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+
+TEST( LaplaceSolve, m2lFallbackReasonBreakdown )
+{
+    LaplaceSolveTest::testM2LFallbackReasonBreakdown<TEST_MEMSPACE,
+                                                     TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

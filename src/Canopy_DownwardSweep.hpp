@@ -788,6 +788,43 @@ class DownwardSweep
     // from a tree that happens to want exactly 2^20 keys.
     bool _m2l_demand_saturated = false;
 
+    // THE PER-REASON FALLBACK PAIR BREAKDOWN from the last
+    // build_interaction_list_device(). Every pair that reaches the per-pair
+    // m2l_translate path does so for exactly one of two reasons, and the two
+    // are only distinguishable at the local->global remap, where a pair's
+    // local op index is still visible beside the global one it maps to:
+    //
+    //   RANGE GUARD   the classify pass never hashed a key for the pair at
+    //                 all, because max_d fell outside [0, _max_depth] or one
+    //                 of dd, ii, jj, kk exceeded its bound. A
+    //                 REPRESENTABILITY limit of the key encoding, not a
+    //                 budget: raising the count cap cannot move it.
+    //
+    //   COUNT CAP     the pair's key WAS hashed and the merge then refused it
+    //                 a column because ops.size() had reached
+    //                 m2l_effective_op_cap(). A budget, and the one the cap
+    //                 moves.
+    //
+    // The two together are exactly total_fallback_pair_count(), EXCEPT for
+    // pairs the fallback-table assembly drops: a refused pair whose
+    // pair_target_depth is outside [0, _max_depth] is placed in neither an
+    // operator column nor the fallback table, so it is invisible to that
+    // total. Those are counted separately and must be zero -- a non-zero
+    // reading there is a DROPPED pair, a wrong velocity rather than a slow
+    // one, and the sum identity above is what catches it.
+    //
+    // -1 MEANS "NOT COMPILED WITH PROFILING", never "no such pairs". Zero is
+    // a legal count for all three, so a caller must test for -1 before
+    // reading any of them as a count. Counted only under
+    // CANOPY_ENABLE_PROFILING; outside it these members are never written.
+    //
+    // PER RANK AND UNREDUCED here, as every other figure on this sweep is.
+    // (Beatnik's adapter reduces them, because the identity it checks is
+    // against a globally reduced fallback total.)
+    long long _m2l_fallback_pairs_range_guard = -1;
+    long long _m2l_fallback_pairs_count_cap = -1;
+    long long _m2l_fallback_pairs_depth_dropped = -1;
+
     // Tier 2 fused-kernel layout: target-major CSRs partitioned by target
     // sharedness. One Kokkos team per target walks its source slice and
     // accumulates T(:, :, op_idx) @ M(source) into a scratch local, then
@@ -1059,6 +1096,41 @@ class DownwardSweep
     // not the tree's actual demand. Always false in a build without
     // CANOPY_ENABLE_PROFILING, where the count is -1 and means nothing.
     bool m2l_demand_saturated() const { return _m2l_demand_saturated; }
+
+    // The per-reason breakdown of the pairs that took the per-pair
+    // m2l_translate fallback in the last build, in PAIRS and not in keys, so
+    // that the first two sum to total_fallback_pair_count() exactly. See the
+    // _m2l_fallback_pairs_* declarations for what each reason tests and why
+    // the two are only separable at the remap.
+    //
+    // ALL THREE RETURN -1 WHEN UNAVAILABLE (Canopy built without
+    // CANOPY_ENABLE_PROFILING), and never 0 for that reason: zero is a legal
+    // count for each of them. Also -1 before the first build.
+
+    // Pairs refused a key by the classify pass's RANGE GUARD -- a
+    // representability limit of the key encoding (KernelType::m2l_key_dd_max
+    // and M2L_KEY_OFFSET_MAX), which no cap can raise.
+    long long m2l_n_fallback_pairs_range_guard() const
+    {
+        return _m2l_fallback_pairs_range_guard;
+    }
+
+    // Pairs whose key was hashed and then refused a column by the merge's
+    // COUNT CAP -- a budget, and the one m2l_op_count_cap() moves.
+    long long m2l_n_fallback_pairs_count_cap() const
+    {
+        return _m2l_fallback_pairs_count_cap;
+    }
+
+    // Refused pairs the fallback-table assembly DROPPED, because their target
+    // depth is outside [0, max_depth]. Placed in neither an operator column
+    // nor the fallback table, so invisible to total_fallback_pair_count().
+    // MUST BE ZERO: a non-zero reading is a pair whose contribution is never
+    // evaluated at all.
+    long long m2l_n_fallback_pairs_depth_dropped() const
+    {
+        return _m2l_fallback_pairs_depth_dropped;
+    }
 
     // Occupied-cell counts per depth for the cells this rank processes:
     // entry d is the number of cells at depth d, one entry per depth from 0
@@ -1834,6 +1906,23 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         _m2l_demanded_op_count = static_cast<int>( demanded.size() );
 #endif
 
+#ifdef CANOPY_ENABLE_PROFILING
+        // THE PER-REASON FALLBACK BREAKDOWN, accumulated in the remap below
+        // because THIS IS THE ONLY PLACE THE TWO REASONS ARE STILL
+        // DISTINGUISHABLE: a pair's local op index `lo` is visible here
+        // beside the global index it maps to, and after this loop both
+        // refusals are the same -1 in pair_op_idx. Read-only instrumentation
+        // in the same sense as the demanded set above -- it reads pair_op_idx
+        // and pair_target_depth and writes neither, and touches none of ops,
+        // key_to_op, local_to_global, _m2l_realized_keys, the operator cache
+        // or the fallback tables (risk R1 in tasks/add-canopy-t6.md in the
+        // Beatnik repo). One slot per thread rather than an atomic, since the
+        // pair slices are disjoint by construction; summed after the fence.
+        std::vector<long long> fb_range_guard_per_thread( nthreads, 0 );
+        std::vector<long long> fb_count_cap_per_thread( nthreads, 0 );
+        std::vector<long long> fb_dropped_per_thread( nthreads, 0 );
+#endif
+
         // Parallel local->global op-idx remap over the disjoint pair slices.
         Kokkos::parallel_for(
             "ilist_s3_remap",
@@ -1848,8 +1937,37 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                     const int lo = pair_op_idx[p];
                     pair_op_idx[p] =
                         ( lo >= 0 ) ? l2g[lo] : -1;
+#ifdef CANOPY_ENABLE_PROFILING
+                    if ( pair_op_idx[p] < 0 )
+                    {
+                        // The depth test FIRST, and with the same bounds the
+                        // fallback-table assembly below uses, so that the two
+                        // reason counters hold exactly the pairs that table
+                        // will place and their sum is
+                        // total_fallback_pair_count() with nothing left over.
+                        const int d = pair_target_depth[p];
+                        if ( d < 0 || d > _max_depth )
+                            ++fb_dropped_per_thread[t];
+                        else if ( lo < 0 )
+                            ++fb_range_guard_per_thread[t];
+                        else
+                            ++fb_count_cap_per_thread[t];
+                    }
+#endif
                 }
             } );
+
+#ifdef CANOPY_ENABLE_PROFILING
+        _m2l_fallback_pairs_range_guard = 0;
+        _m2l_fallback_pairs_count_cap = 0;
+        _m2l_fallback_pairs_depth_dropped = 0;
+        for ( int t = 0; t < nthreads; ++t )
+        {
+            _m2l_fallback_pairs_range_guard += fb_range_guard_per_thread[t];
+            _m2l_fallback_pairs_count_cap += fb_count_cap_per_thread[t];
+            _m2l_fallback_pairs_depth_dropped += fb_dropped_per_thread[t];
+        }
+#endif
     }
 
     const int n_unique_ops = static_cast<int>( ops.size() );
@@ -1876,13 +1994,22 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // n_unique_ops is pinned at effective_cap by construction, which is why
     // the realized figure alone cannot size the cap. demand_saturated=1 makes
     // n_demanded_ops a lower bound of M2L_DEMAND_COUNT_CAP.
+    //
+    // fb_range_guard and fb_count_cap are the per-reason breakdown of the
+    // pairs that took the per-pair fallback, in PAIRS; they sum to
+    // total_fallback_pair_count() exactly, and fb_dropped (which must be 0)
+    // is the refused pairs that reached neither table.
     std::printf( "[Canopy Diagnostics] M2L operator table: rank %d "
                  "n_unique_ops=%d n_demanded_ops=%d demand_saturated=%d "
+                 "fb_range_guard=%lld fb_count_cap=%lld fb_dropped=%lld "
                  "bytes_per_key=%zu table_bytes=%zu "
                  "effective_cap=%d count_cap=%d byte_budget=%zu "
                  "key_needs_level=%d\n",
                  _rank, n_unique_ops, _m2l_demanded_op_count,
                  _m2l_demand_saturated ? 1 : 0,
+                 _m2l_fallback_pairs_range_guard,
+                 _m2l_fallback_pairs_count_cap,
+                 _m2l_fallback_pairs_depth_dropped,
                  static_cast<std::size_t>( KernelType::bytes_per_key ),
                  static_cast<std::size_t>( n_unique_ops ) *
                      KernelType::bytes_per_key,
