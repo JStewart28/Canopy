@@ -81,7 +81,7 @@ struct FmmConfig
     // The downward sweep builds one dense operator column per distinct
     // translation key; this bounds how much memory that table may occupy.
     // The cap that actually binds is the smaller of this budget's worth of
-    // columns and the sweep's M2L_OP_COUNT_CAP (32768) — see
+    // columns and m2l_op_count_cap below — see
     // DownwardSweep::m2l_effective_op_cap(). Pairs beyond the cap are refused
     // a column and fall back to the per-pair M2L translation, which is the
     // same mathematics evaluated pair by pair; they are counted by
@@ -89,10 +89,31 @@ struct FmmConfig
     //
     // A column costs the basis's bytes_per_key: num_coeffs_per_cell *
     // m2l_num_src_coeffs * sizeof(coeff_type), which is 21952 B at P = 6 and
-    // 58320 B at P = 8 in double precision. At the 2 GB default the count cap
-    // binds first at every order this solver supports, so lowering this is
-    // the only way to make the budget the binding constraint.
+    // 58320 B at P = 8 in double precision. At the 2 GB default and the
+    // default count cap the count cap binds first at every order this solver
+    // supports, so lowering this is the only way to make the budget the
+    // binding constraint.
     std::size_t m2l_op_table_byte_budget = 2ull * 1024ull * 1024ull * 1024ull;
+
+    // Per-rank cap on the NUMBER of M2L operator columns: the companion of
+    // the byte budget above, and the constraint that actually binds. The cap
+    // in force is the smaller of the two — see
+    // DownwardSweep::m2l_effective_op_cap() — and pairs beyond it are refused
+    // a column and fall back to the per-pair M2L translation exactly as a
+    // byte-budget overflow does.
+    //
+    // The default is the sweep's M2L_OP_COUNT_CAP, the cap that has always
+    // been in force, so every configuration that leaves this alone keeps
+    // today's overflow set bit for bit. Raise it for a level-keyed basis on a
+    // deep tree: such a basis's keys carry the absolute level, so every
+    // occupied depth multiplies the COUNT while the per-key byte cost is
+    // unchanged, and at the CartesianTaylor basis's 3200 B per key the 2 GB
+    // budget is worth 671088 columns — twenty times this cap, which is
+    // therefore the only constraint that ever binds there.
+    //
+    // 0 is legal and builds no column at all; a negative value is rejected
+    // by DownwardSweep::set_m2l_op_count_cap() rather than clamped.
+    int m2l_op_count_cap = 32768;
 };
 
 // ============================================================================
@@ -190,6 +211,10 @@ class Solver
         // knobs a subsystem has to be told about; the sweep's own default
         // applies to a sweep driven directly by a test.
         _downward.set_m2l_op_table_byte_budget( cfg.m2l_op_table_byte_budget );
+
+        // Column-count cap for the same table, routed here for the same
+        // reason. Throws on a negative value rather than clamping it.
+        _downward.set_m2l_op_count_cap( cfg.m2l_op_count_cap );
 
         // Explicit softening (including an explicit 0 for an unsoftened run):
         // apply it now. A negative value defers to the distribution-based

@@ -88,6 +88,7 @@
 #include <map>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -247,6 +248,29 @@ static constexpr double LS_BUDGET_POTENTIAL_TOL = 5.0e-2;
 // quietly report 0 and be read as "this tree wants no keys".
 // ---------------------------------------------------------------------------
 static constexpr int LS_DEMAND_BUDGET_KEYS = 1;
+
+// ---------------------------------------------------------------------------
+// The M2L operator COUNT-CAP checks (testM2LOpCountCapConstrained and
+// testM2LOpCountCapBounds, and the default-cap assertion in
+// testM2LKeyDemandDefault).
+//
+// LS_COUNT_CAP_KEYS is the small cap the constrained case drives, with the
+// byte budget left at FmmConfig's 2 GB default so the COUNT is unambiguously
+// the constraint that bound: 2 GB at 21952 B per key is 97 823 columns, four
+// orders of magnitude above this, so a realized count of 4 can only have come
+// from the count cap. Four rather than one so the case is distinguishable
+// from the one-column byte-budget case above — a cap of 1 would pass equally
+// if the count cap were silently ignored and the budget had been applied
+// instead.
+//
+// LS_DEFAULT_OP_COUNT_CAP is DownwardSweep::M2L_OP_COUNT_CAP written out as a
+// literal, deliberately, and it is the one place in this file where a derived
+// value would be weaker than a literal: the claim being asserted is that the
+// default cap did not MOVE when it became configurable, and a value read off
+// the class would track any move and assert nothing.
+// ---------------------------------------------------------------------------
+static constexpr int LS_COUNT_CAP_KEYS = 4;
+static constexpr int LS_DEFAULT_OP_COUNT_CAP = 32768;
 
 static const char* const LS_DATA_FILE =
     CANOPY_TEST_DATA_DIR "/laplace_solve_P6.txt";
@@ -750,15 +774,24 @@ struct SolveOutcome
 // the callback so a mismatch can dump the full arrays without solving a
 // second time.
 // ---------------------------------------------------------------------------
-// `m2l_op_table_byte_budget` is the ONE configuration knob this driver takes,
-// and 0 means "leave FmmConfig's default in place" — which is what the three
-// bodies gating the frozen configuration pass, so their solves are the same
-// solve they always were. Only testOpTableByteBudget passes a non-zero value,
-// to make the operator table's byte budget bind before its count cap. The
-// frozen-configuration block above is untouched by it: a budget changes which
-// pairs get an operator column, not the problem being solved.
+// `m2l_op_table_byte_budget` and `m2l_op_count_cap` are the TWO configuration
+// knobs this driver takes — the two halves of the operator table's cap — and
+// 0 means "leave FmmConfig's default in place" for either, which is what the
+// three bodies gating the frozen configuration pass, so their solves are the
+// same solve they always were. testOpTableByteBudget passes a non-zero budget,
+// to make the table's byte budget bind before its count cap;
+// testM2LOpCountCapConstrained passes a non-zero count cap, to make the count
+// cap bind at a generous budget. The frozen-configuration block above is
+// untouched by either: a cap changes which pairs get an operator column, not
+// the problem being solved.
+//
+// 0 as "leave the default" means a count cap of 0 — legal in FmmConfig, and
+// meaning no column at all — cannot be driven through here. That case is
+// checked directly on a sweep by testM2LOpCountCapBounds, which needs no
+// solve to see zero columns.
 template <class MemorySpace, class ExecutionSpace, class Fn>
-void with_laplace_solve( Fn&& after, std::size_t m2l_op_table_byte_budget = 0 )
+void with_laplace_solve( Fn&& after, std::size_t m2l_op_table_byte_budget = 0,
+                         int m2l_op_count_cap = 0 )
 {
     constexpr int P = LS_P;
     using Scalar = double;
@@ -872,6 +905,8 @@ void with_laplace_solve( Fn&& after, std::size_t m2l_op_table_byte_budget = 0 )
     cfg.softening = 0.0;
     if ( m2l_op_table_byte_budget > 0 )
         cfg.m2l_op_table_byte_budget = m2l_op_table_byte_budget;
+    if ( m2l_op_count_cap > 0 )
+        cfg.m2l_op_count_cap = m2l_op_count_cap;
 
     Solver_t solver( MPI_COMM_WORLD, cfg );
     solver.template setup<Position, Charge>( particles, n_local_initial );
@@ -1073,13 +1108,14 @@ void with_laplace_solve( Fn&& after, std::size_t m2l_op_table_byte_budget = 0 )
     std::printf( "[laplace-solve] nprocs=%d rank=%d steps=%d n_unique_ops=%d "
                  "fallback_pairs=%lld locals_ext=(%zu,%zu,%zu) "
                  "optab_ext=(%zu,%zu,%zu) a_extent=%zu initial_hash=%s "
-                 "op_budget=%zu op_cap=%d\n",
+                 "op_budget=%zu op_count_cap=%d op_cap=%d\n",
                  r.nprocs, r.rank, LS_NUM_STEPS, r.n_unique_ops,
                  r.fallback_pairs, r.locals_ext[0], r.locals_ext[1],
                  r.locals_ext[2], r.optab_ext[0], r.optab_ext[1],
                  r.optab_ext[2], r.a_bits.size(),
                  hex64( initial_hash ).c_str(),
-                 cfg.m2l_op_table_byte_budget, ds.m2l_effective_op_cap() );
+                 cfg.m2l_op_table_byte_budget, cfg.m2l_op_count_cap,
+                 ds.m2l_effective_op_cap() );
     std::fflush( stdout );
 
     SolveOutcome<DS> outcome;
@@ -1949,6 +1985,18 @@ void testM2LKeyDemandDefault()
         << " the default-budget solve routed pairs to the per-pair fallback, "
            "so 'nothing overflowed' is not the configuration being tested";
 
+    // The count cap became configurable; its DEFAULT must not have moved,
+    // because the default is the whole reason every existing configuration's
+    // overflow set is unchanged. Ungated on purpose: this is a claim about
+    // the effective cap, not about the demand counter, so it holds in a build
+    // without CANOPY_ENABLE_PROFILING too and is checked in both.
+    EXPECT_EQ( eff_cap, LS_DEFAULT_OP_COUNT_CAP )
+        << "np=" << nprocs << " rank=" << rank
+        << " a configuration that sets neither cap must still run at the "
+           "operator-column cap this sweep has always had. A different value "
+           "here means the default moved, and with it which pairs overflow "
+           "in every configuration that never asked for a change";
+
 #ifdef CANOPY_ENABLE_PROFILING
     EXPECT_EQ( demanded, realized )
         << "np=" << nprocs << " rank=" << rank
@@ -1964,6 +2012,184 @@ void testM2LKeyDemandDefault()
         << " a build without CANOPY_ENABLE_PROFILING must report -1, not 0";
     EXPECT_FALSE( saturated );
 #endif
+}
+
+//---------------------------------------------------------------------------//
+// The operator COUNT cap, driven small against a generous byte budget.
+//
+// The complement of testOpTableByteBudget and of the two demand cases above:
+// those make the BYTE budget bind, this makes the COUNT cap bind while the
+// budget is left at FmmConfig's 2 GB default — worth 97823 columns at this
+// basis's bytes_per_key, four orders of magnitude above the cap. So a
+// realized count of LS_COUNT_CAP_KEYS here can only have come from the count
+// cap, and a count cap that was accepted and then ignored would present as a
+// realized count in the hundreds rather than as a crash.
+//
+// The realized and effective-cap assertions are UNGATED: they are claims
+// about the cap in force and the columns it admitted, neither of which is
+// profiling state. Only the demand comparison sits under the define.
+//---------------------------------------------------------------------------//
+template <class MemorySpace, class ExecutionSpace>
+void testM2LOpCountCapConstrained()
+{
+    using Kernel = Canopy::LaplaceKernel<double, LS_P, LS_NCOMPS>;
+
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    int realized = -1;
+    int demanded = -2;
+    int eff_cap = -1;
+    bool saturated = true;
+    long long fallback = -1;
+    std::size_t budget = 0;
+    std::string realized_keys;
+
+    // Budget argument 0: leave FmmConfig's default in place. The cap is the
+    // only knob this case moves.
+    with_laplace_solve<MemorySpace, ExecutionSpace>(
+        [&]( const auto& outcome, const auto& ds )
+        {
+            realized = outcome.bits.n_unique_ops;
+            fallback = outcome.bits.fallback_pairs;
+            demanded = ds.m2l_n_demanded_ops();
+            saturated = ds.m2l_demand_saturated();
+            eff_cap = ds.m2l_effective_op_cap();
+            budget = ds.m2l_op_table_byte_budget();
+
+            std::ostringstream ks;
+            for ( const auto& k : ds.m2l_realized_keys() )
+                ks << "{" << k.max_d << "," << k.dd << "," << k.ii << ","
+                   << k.jj << "," << k.kk << "}";
+            realized_keys = ks.str();
+        },
+        0, LS_COUNT_CAP_KEYS );
+
+    std::printf( "[laplace-solve] nprocs=%d rank=%d m2l_count_cap_constrained "
+                 "count_cap=%d budget=%zu eff_cap=%d realized=%d demanded=%d "
+                 "saturated=%d fallback=%lld realized_keys=%s\n",
+                 nprocs, rank, LS_COUNT_CAP_KEYS, budget, eff_cap, realized,
+                 demanded, saturated ? 1 : 0, fallback,
+                 realized_keys.c_str() );
+    std::fflush( stdout );
+
+    // The budget must NOT be what bound, or this case is testing the knob
+    // beside the one it names.
+    const std::size_t columns_from_budget =
+        budget / static_cast<std::size_t>( Kernel::bytes_per_key );
+    EXPECT_GT( columns_from_budget,
+               static_cast<std::size_t>( LS_COUNT_CAP_KEYS ) )
+        << "the default byte budget of " << budget << " B at "
+        << Kernel::bytes_per_key << " B per key buys " << columns_from_budget
+        << " columns, which is not generous against a count cap of "
+        << LS_COUNT_CAP_KEYS;
+
+    EXPECT_EQ( eff_cap, LS_COUNT_CAP_KEYS )
+        << "np=" << nprocs << " rank=" << rank
+        << " the configured count cap did not reach m2l_effective_op_cap(), "
+           "so either FmmConfig::m2l_op_count_cap is not routed to the sweep "
+           "or the effective cap is still reading the constant";
+    EXPECT_EQ( realized, LS_COUNT_CAP_KEYS )
+        << "np=" << nprocs << " rank=" << rank
+        << " a cap of " << LS_COUNT_CAP_KEYS
+        << " columns must realize exactly that many: the merge admits the "
+           "first keys it sees and refuses every one after, and the frozen "
+           "configuration gives every rank 111-686 keys to choose from";
+    EXPECT_GT( fallback, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a cap of " << LS_COUNT_CAP_KEYS
+        << " columns routed no pair to the per-pair fallback, so the cap did "
+           "not bind and this case is comparing a solve against itself";
+
+#ifdef CANOPY_ENABLE_PROFILING
+    EXPECT_GT( demanded, LS_COUNT_CAP_KEYS )
+        << "np=" << nprocs << " rank=" << rank
+        << " the demanded key count (" << demanded
+        << ") is not strictly greater than the " << LS_COUNT_CAP_KEYS
+        << " columns the cap allowed, so nothing was actually refused";
+    EXPECT_FALSE( saturated )
+        << "np=" << nprocs << " rank=" << rank
+        << " the demanded set hit M2L_DEMAND_COUNT_CAP on a 600-particle "
+           "tree, so the count above is a lower bound";
+#else
+    EXPECT_EQ( demanded, -1 )
+        << "np=" << nprocs << " rank=" << rank
+        << " a build without CANOPY_ENABLE_PROFILING must report the "
+           "unavailable sentinel -1 and never 0";
+#endif
+}
+
+//---------------------------------------------------------------------------//
+// The count cap's boundary behaviour, checked on a bare sweep.
+//
+// No solve: every claim here is about what set_m2l_op_count_cap() does to
+// m2l_effective_op_cap(), which needs no tree. That also lets this case cover
+// a cap of 0 — legal, and meaning no column at all — which with_laplace_solve
+// cannot drive, since 0 is its "leave the default" sentinel.
+//
+// The negative case is the one worth having: a cap below 0 must RAISE rather
+// than clamp to 0, because clamping would turn a caller's typo into a run
+// where every pair takes the fallback path and the only symptom is that it is
+// slow.
+//---------------------------------------------------------------------------//
+template <class MemorySpace, class ExecutionSpace>
+void testM2LOpCountCapBounds()
+{
+    using Scalar = double;
+    using Solver_t =
+        Canopy::Solver<MemorySpace, ExecutionSpace, Scalar, LS_P, LS_NCOMPS>;
+    using DS = typename Solver_t::downward_type;
+    using Kernel = Canopy::LaplaceKernel<Scalar, LS_P, LS_NCOMPS>;
+
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    DS ds( MPI_COMM_WORLD );
+
+    // Untouched: the default cap, and the default budget that does not floor
+    // it.
+    EXPECT_EQ( ds.m2l_op_count_cap(), LS_DEFAULT_OP_COUNT_CAP );
+    EXPECT_EQ( ds.m2l_effective_op_cap(), LS_DEFAULT_OP_COUNT_CAP )
+        << "a sweep handed no cap and no budget must run at the cap this "
+           "sweep has always had";
+
+    // 0 columns: legal, and every pair takes the overflow path because the
+    // merge's admit test is `ops.size() < effective_op_cap`, which no key
+    // can satisfy at 0.
+    ds.set_m2l_op_count_cap( 0 );
+    EXPECT_EQ( ds.m2l_effective_op_cap(), 0 )
+        << "a count cap of 0 must yield zero columns, not one";
+
+    ds.set_m2l_op_count_cap( LS_COUNT_CAP_KEYS );
+    EXPECT_EQ( ds.m2l_effective_op_cap(), LS_COUNT_CAP_KEYS );
+
+    // The byte budget still floors the count cap: a cap far above what the
+    // budget buys must not raise the effective cap past the budget.
+    ds.set_m2l_op_count_cap( LS_DEFAULT_OP_COUNT_CAP );
+    ds.set_m2l_op_table_byte_budget(
+        static_cast<std::size_t>( Kernel::bytes_per_key ) *
+        static_cast<std::size_t>( LS_DEMAND_BUDGET_KEYS ) );
+    EXPECT_EQ( ds.m2l_effective_op_cap(), LS_DEMAND_BUDGET_KEYS )
+        << "the count cap stopped being floored by the byte budget, so a "
+           "configuration can now ask for more columns than its memory "
+           "budget allows";
+
+    // Negative: raise, do not clamp.
+    EXPECT_THROW( ds.set_m2l_op_count_cap( -1 ), std::runtime_error )
+        << "a negative count cap was accepted; clamping it to 0 would make a "
+           "caller typo present as a full-fallback run rather than an error";
+    // And the rejected value must not have been stored.
+    EXPECT_EQ( ds.m2l_op_count_cap(), LS_DEFAULT_OP_COUNT_CAP )
+        << "a rejected count cap was written to the sweep anyway";
+
+    std::printf( "[laplace-solve] nprocs=%d rank=%d m2l_count_cap_bounds "
+                 "default_cap=%d zero_cap_eff=%d floored_eff=%d "
+                 "negative_raises=1\n",
+                 nprocs, rank, LS_DEFAULT_OP_COUNT_CAP, 0,
+                 ds.m2l_effective_op_cap() );
+    std::fflush( stdout );
 }
 
 } // namespace LaplaceSolveTest
@@ -2010,6 +2236,21 @@ TEST( LaplaceSolve, m2lKeyDemandDefault )
 {
     LaplaceSolveTest::testM2LKeyDemandDefault<TEST_MEMSPACE,
                                               TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+
+TEST( LaplaceSolve, m2lOpCountCapConstrained )
+{
+    LaplaceSolveTest::testM2LOpCountCapConstrained<TEST_MEMSPACE,
+                                                   TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+
+TEST( LaplaceSolve, m2lOpCountCapBounds )
+{
+    LaplaceSolveTest::testM2LOpCountCapBounds<TEST_MEMSPACE, TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

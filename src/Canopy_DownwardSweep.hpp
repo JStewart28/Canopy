@@ -29,6 +29,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -293,7 +294,8 @@ class DownwardSweep
     //
     // Cap the hashed M2L operator table at `bytes` per rank. The cap that
     // actually binds is m2l_effective_op_cap(), the smaller of this budget's
-    // worth of columns and M2L_OP_COUNT_CAP; pairs beyond it are refused a
+    // worth of columns and the configured count cap (see
+    // set_m2l_op_count_cap()); pairs beyond it are refused a
     // column and take the basis's overflow path (for
     // M2LOverflow::PerPairTranslate, the per-pair m2l_translate fallback,
     // counted by total_fallback_pair_count()).
@@ -318,15 +320,56 @@ class DownwardSweep
         return _m2l_op_table_byte_budget;
     }
 
+    // -----------------------------------------------------------------------
+    // set_m2l_op_count_cap()
+    //
+    // Cap the hashed M2L operator table at `cap` COLUMNS per rank. The
+    // companion of the byte budget above and the other half of
+    // m2l_effective_op_cap(), which takes the smaller of the two; pairs
+    // beyond it are refused a column and take the basis's overflow path
+    // exactly as a byte-budget overflow does.
+    //
+    // This is the constraint a level-keyed basis on a deep tree actually runs
+    // out of: its keys carry the absolute level, so every occupied depth
+    // multiplies the key count while the per-key BYTE cost is unchanged.
+    //
+    // Solver calls this from its constructor with FmmConfig::m2l_op_count_cap,
+    // whose default is M2L_OP_COUNT_CAP — the cap this sweep has always
+    // had — so a configuration that sets nothing keeps today's overflow set.
+    // Changing the cap invalidates the interaction list, since the table it
+    // sizes is built there; in the Solver path that is redundant with
+    // setup().
+    //
+    // 0 is legal and means what it says: no operator column is built at all
+    // and every pair takes the overflow path, matching the byte budget's
+    // "smaller than one column" behaviour. A NEGATIVE cap is rejected rather
+    // than clamped — it is not a smaller cap, it is a caller mistake, and
+    // silently reading it as 0 would turn a typo into a full-fallback run
+    // that merely looks slow.
+    // -----------------------------------------------------------------------
+    void set_m2l_op_count_cap( int cap )
+    {
+        if ( cap < 0 )
+            throw std::runtime_error(
+                "Canopy::DownwardSweep::set_m2l_op_count_cap: the M2L "
+                "operator column cap must be >= 0 (0 means no column is "
+                "built and every pair takes the overflow path)" );
+        _m2l_op_count_cap = cap;
+        _interaction_list_dirty = true;
+    }
+
+    int m2l_op_count_cap() const { return _m2l_op_count_cap; }
+
     // The operator-column cap actually in force: the byte budget's worth of
-    // columns, floored by the count cap. bytes_per_key is the basis's and is
+    // columns, floored by the configured count cap (M2L_OP_COUNT_CAP unless
+    // set_m2l_op_count_cap() moved it). bytes_per_key is the basis's and is
     // derived from its coeff_type, so a basis running in single precision
     // gets twice as many columns out of the same budget, as it should.
     int m2l_effective_op_cap() const
     {
         const std::size_t from_bytes =
             _m2l_op_table_byte_budget / KernelType::bytes_per_key;
-        const std::size_t cap = static_cast<std::size_t>( M2L_OP_COUNT_CAP );
+        const std::size_t cap = static_cast<std::size_t>( _m2l_op_count_cap );
         return static_cast<int>( from_bytes < cap ? from_bytes : cap );
     }
 
@@ -530,23 +573,36 @@ class DownwardSweep
     // How many operator columns this sweep will build, and what happens to the
     // pairs it refuses.
     //
-    // TWO CAPS, AND THE SMALLER BINDS. M2L_OP_COUNT_CAP is a bound on the
+    // TWO CAPS, AND THE SMALLER BINDS. _m2l_op_count_cap is a bound on the
     // column COUNT; _m2l_op_table_byte_budget is a bound on the table's SIZE,
     // converted to a count by dividing by the basis's bytes_per_key. The
     // effective cap is the minimum of the two — see m2l_effective_op_cap().
     //
-    // The count cap is retained as a floor deliberately, and removing it is
+    // THE COUNT CAP IS CONFIGURABLE, AND M2L_OP_COUNT_CAP IS ITS DEFAULT.
+    // Both _m2l_op_count_cap and FmmConfig::m2l_op_count_cap initialize to
+    // this constant, so a configuration that sets nothing gets the cap this
+    // sweep has always had. Set it through set_m2l_op_count_cap(), which
+    // Solver routes FmmConfig::m2l_op_count_cap to.
+    //
+    // The count cap stays a COUNT, and is still a floor under the byte
+    // budget rather than a replacement for it, deliberately; removing it is
     // not a simplification. Which pairs overflow decides which pairs take the
     // per-pair fallback path, and that path is DIFFERENT ARITHMETIC from the
     // table path (the same mathematics, reassociated). A pure byte budget
     // would move that boundary for every existing configuration and change
-    // answers that have nothing to do with memory. With the 2 GB default and
-    // 58 KB per key at P = 8 the count cap binds first, so today's overflow
-    // set is provably unchanged: 32768 * 58320 B is 1.9 GB, under the budget.
+    // answers that have nothing to do with memory. The default preserves that
+    // property exactly: with the 2 GB default budget and 58 KB per key at
+    // P = 8 the count cap binds first, so today's overflow set is provably
+    // unchanged (32768 * 58320 B is 1.9 GB, under the budget), and it moves
+    // only for a configuration that explicitly asks for a different cap.
     //
     // Both caps are a defense against a pathological tree, not a tuning knob
     // for a healthy one. A healthy MAC traversal at theta = 0.5 realizes
-    // hundreds of keys per rank, not tens of thousands.
+    // hundreds of keys per rank, not tens of thousands — but a level-keyed
+    // basis on a deep tree realizes strictly more keys on the same tree (the
+    // key carries the absolute level), and the column COUNT, not the byte
+    // budget, is what it runs out of. That is the configuration the knob
+    // exists for.
     // -----------------------------------------------------------------------
     static constexpr int M2L_OP_COUNT_CAP = 32768;
 
@@ -789,6 +845,14 @@ class DownwardSweep
     // set_m2l_op_table_byte_budget(); a sweep driven directly by a test and
     // never handed a budget runs at the default.
     std::size_t _m2l_op_table_byte_budget = DEFAULT_M2L_OP_TABLE_BYTE_BUDGET;
+
+    // Per-rank cap on the NUMBER of operator columns, the companion of the
+    // budget above. Converted to the binding cap by m2l_effective_op_cap(),
+    // which takes the smaller of the two. Set through
+    // set_m2l_op_count_cap(); a sweep driven directly by a test and never
+    // handed a cap runs at M2L_OP_COUNT_CAP, which is also
+    // FmmConfig::m2l_op_count_cap's default, so nothing moves by omission.
+    int _m2l_op_count_cap = M2L_OP_COUNT_CAP;
 
     // Count of actual rebuilds done by build_interaction_list_device (does
     // not increment on the early-return path). Surfaced by
@@ -1409,8 +1473,8 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     bool overflow_warned = false;
 
     // The column cap in force for this build: the byte budget's worth of
-    // columns, floored by M2L_OP_COUNT_CAP. Read once here so every key in
-    // the serial merge below is tested against the same number.
+    // columns, floored by the configured count cap. Read once here so every
+    // key in the serial merge below is tested against the same number.
     const int effective_op_cap = m2l_effective_op_cap();
 
     {
@@ -1753,10 +1817,10 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                         std::fprintf(
                             stderr,
                             "[Canopy] M2L op count exceeded cap %d "
-                            "(count cap %d, byte budget %zu B at %zu B "
-                            "per key); remaining pairs route to fallback "
-                            "path.\n",
-                            effective_op_cap, M2L_OP_COUNT_CAP,
+                            "(configured count cap %d, byte budget %zu B "
+                            "at %zu B per key); remaining pairs route to "
+                            "fallback path.\n",
+                            effective_op_cap, _m2l_op_count_cap,
                             _m2l_op_table_byte_budget,
                             KernelType::bytes_per_key );
                         overflow_warned = true;
@@ -1822,7 +1886,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
                  static_cast<std::size_t>( KernelType::bytes_per_key ),
                  static_cast<std::size_t>( n_unique_ops ) *
                      KernelType::bytes_per_key,
-                 effective_op_cap, M2L_OP_COUNT_CAP,
+                 effective_op_cap, _m2l_op_count_cap,
                  _m2l_op_table_byte_budget,
                  KernelType::key_needs_level ? 1 : 0 );
     std::fflush( stdout );

@@ -301,14 +301,28 @@ a task in this document.
   tightly are named per task in the [Conventions](#conventions) row rather than
   left to a whole-tree build to catch.
 - **The operator-count cap is retained alongside the byte budget.** T8 makes the
-  cap a memory budget, but keeps `M2L_OP_COUNT_CAP`
-  (`src/Canopy_DownwardSweep.hpp:343`) as a floor:
-  `effective_cap = min(M2L_OP_COUNT_CAP, byte_budget / bytes_per_key)`. A pure
+  cap a memory budget, but keeps the count cap as a floor:
+  `effective_cap = min(count_cap, byte_budget / bytes_per_key)`. A pure
   byte budget would change *which* pairs overflow into the per-pair fallback path
   — which is different arithmetic — and so would break the bit-for-bit
-  requirement for reasons unrelated to the abstraction. With a 2 GB default
-  budget and 58 KB per key at $P=8$, the count cap binds first and today's
-  overflow set is provably unchanged.
+  requirement for reasons unrelated to the abstraction.
+
+  The count cap is now **configurable** rather than a hard constant:
+  `FmmConfig::m2l_op_count_cap` (`src/Canopy_Solver.hpp:116`) is routed to
+  `DownwardSweep::set_m2l_op_count_cap()` (`:350`) and read by
+  `m2l_effective_op_cap()` (`:368-374`). It is still a **count** and still
+  floored by the byte budget, and its default is still `M2L_OP_COUNT_CAP`
+  (`src/Canopy_DownwardSweep.hpp:607`, 32768), so every configuration that sets
+  nothing keeps today's overflow set bit for bit and this deviation's property
+  is preserved by the default rather than by the constant.
+
+  The orders-of-magnitude claim depends on the basis, and the solid-harmonic
+  figure is the weaker case: with a 2 GB default budget and 58 KB per key at
+  $P=8$ the count cap binds first, by a factor of about 1.1. At the
+  **CartesianTaylor** basis's 3200 B per key the same budget buys 671 088
+  columns, so the count cap binds by a factor of **20** and is the only
+  constraint that ever binds on that basis — which is why making it
+  configurable mattered at all.
 - **`m2l_apply_operator` (`src/Canopy_LaplaceKernel.hpp:639-672`) is repurposed,
   not deleted.** It has no callers, but it is the operator-apply interface the
   fused kernel should have been going through and is roughly 80% of the
