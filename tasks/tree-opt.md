@@ -540,6 +540,13 @@ shows the excess enters through the far field. No `fmm_tolerance` bound was
 moved. Steps 2, 4 and 5 and the deviation reports are in place; step 3 is
 measured but not applied. See `tree-opt-progress-log.md` section V1.
 
+**Revisit V1 once `fix-hang-rebalance.md` is done.** That design resolves the
+two defects blocking it: the np-3 `MultiSolve` hang (H1, H2), and the
+AutoRebalance excess (E1, E2). E2 either fixes the far field or corrects the
+step-1 derivation above with the measurement that justifies it. When both are
+**DONE**, re-run V1 from step 1: re-measure, because a fix to the partition or
+the far field moves the figures recorded in the log, then pin the bounds.
+
 **Depends on:** T1 **DONE**.
 **Fill in:** `tests/tstMultiSolve.hpp` (the six `fmm_tolerance` call sites,
 `SolveFusedM2L.matchesPriorReference`'s bounds, `SolveFusedM2L.FP32_smokeTest`,
