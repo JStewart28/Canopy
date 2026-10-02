@@ -75,8 +75,10 @@ needs is measured rather than assumed (**chain C**).
   coverage, and each task's exit criterion below names the stems and rank counts
   it must pass — that list is the task's gate, and nothing wider is required of
   it. The `regression` label keeps its single member, `MultiSolve`
-  (`tests/CMakeLists.txt:65-67`); **V2 is the sole exception**, and asking is
-  its first step.
+  (`tests/CMakeLists.txt:65-67`). `CartesianTaylorBasis`'s coverage stays in the
+  `unit` tier, and B1's and B2's exit criteria are what hold it: both name
+  `CartesianTaylorSolve` as the authority on the basis they change, precisely
+  because `MultiSolve` would pass with that basis wholly broken.
 
 ## Approach
 
@@ -85,11 +87,11 @@ and the middle step is not optional: the payoff of every mechanism change here
 is currently unknown and countable, and the tests that would have to catch a
 mistake are in several places too loose to do it.
 
-The work is four groups of tasks. **T1** establishes the fixture the rest
-measure on. **V1** and **V2** sharpen what the mechanism changes will be
-verified against — without them a chain-A or chain-B regression of a few percent
-passes every existing check (**R9**, **R10**). Then the three mechanism chains,
-which are independent of each other and may land in any order:
+The work is three mechanism chains, preceded by two tasks that serve all of
+them. **T1** establishes the fixture the rest measure on. **V1** sharpens what
+the mechanism changes will be verified against — without it a chain-A or chain-B regression of a few percent passes
+every existing check (**R9**, **R10**). Then the three mechanism chains, which
+are independent of each other and may land in any order:
 
 | | removes | tasks |
 | --- | --- | --- |
@@ -166,7 +168,7 @@ drifting level index with a stable one.
 | Balancing knob default | the off value, until A3 | A2 must not move any existing result. A knob whose default is the current behavior is a change with no runtime surface until something sets it, which is what makes A2's exit criterion checkable against the existing stems, unmodified. |
 | Root-width quantization | `std::ldexp`/`std::frexp`, never `pow(2, round(log2(w)))` | Exact in binary floating point. A rounded `pow` reintroduces the drift the quantization exists to remove, and would do it only on some inputs. |
 | Where a refused pair goes | unchanged — `m2l_overflow_policy` | `CartesianTaylorBasis` selects `PerPairTranslate` (`src/Canopy_CartesianTaylorBasis.hpp:516`) and that stays. Nothing here changes what happens to a refused pair, only how many pairs are refused. |
-| New test tier | `unit`, with **V2 the sole exception** | Every task here adds a component-level claim, and none of them relabels an existing test. `regression` has one member, `MultiSolve` (`tests/CMakeLists.txt:65-67`), and moving a test between labels needs confirmation per `CLAUDE.md` — which is V2's first step and the reason it is last in the sequence rather than beside the measurement it follows from. |
+| New test tier | `unit`, always | Every task here adds a component-level claim, and none of them relabels an existing test. `regression` has one member, `MultiSolve` (`tests/CMakeLists.txt:65-67`); moving a test between labels needs confirmation per `CLAUDE.md`, and no task here asks for it. Each task's exit criterion names the stems it must pass, which is what makes the `unit` tier sufficient. |
 | New test registration | append the stem to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:49-59`) | The macro call below it applies the label and the 1-6 rank sweep, so a stem added to the list is registered everywhere for free. |
 | Fixture determinism | report per `(nprocs, rank)`, never a mean, and state reproducibility across two runs | The tree/partition path is run-to-run nondeterministic at np $\ge$ 3; see **R6**. A single draw is not the number. |
 | Formatting | never run clang-format | `CLAUDE.md`: "Do not clang format." Write in the style of the surrounding code. |
@@ -340,7 +342,10 @@ Also true now:
   `regression`-labeled test instantiates `CartesianTaylorBasis.`** Its only direct-sum coverage is
   `CartesianTaylorSolve.matchesDirectSumThetaRef` and
   `...ThetaCanopy` (`tests/tstCartesianTaylorSolve.hpp:976-1006`), both in the
-  `unit` tier.
+  `unit` tier, and that is where its coverage stays. So a chain-B change is
+  checked by the `unit` tier alone: B1's and B2's exit criteria are the only
+  thing standing between a broken `CartesianTaylorBasis` and a green run of
+  whatever stems some other task happens to name.
 - **The two operator-cache drift cases assert no accuracy at all.**
   `CartesianTaylorSolve.operatorCacheAcrossDriftThetaCanopy` and
   `...ThetaRef` (`tests/tstCartesianTaylorSolve.hpp:1040-1060`) state in place
@@ -944,52 +949,6 @@ it wrongly, asserted by the increment equalling `m2l_n_unique_ops()` in that
 case; and the quantized root half-width is asserted to be $\ge$ the unquantized
 one on a sweep of inputs, so a rounding that shrank the box fails here rather
 than as a particle escape later.
-
----
-
-### V2 — Give `CartesianTaylorBasis` `regression`-labeled coverage — **NOT STARTED**
-
-**Depends on:** V1 **DONE**. **Blocked on a decision that is not this task's to
-make** — see below.
-**Fill in:** `tests/CMakeLists.txt` (`REGRESSION_MPI_TESTS`, `:65-67`), or
-`tests/tstMultiSolve.hpp` if the chosen route is a basis arm rather than a
-relabeling.
-**Reference:** the `regression` label's single stem and the macro call that
-applies it (`tests/CMakeLists.txt:65-67`, `:75`); `Solver`'s default
-`FarField = LaplaceKernel` (`src/Canopy_Solver.hpp:146-148`), which is why no
-`regression`-labeled test instantiates the other basis.
-**Do:**
-1. **Ask first.** `CLAUDE.md` requires confirmation before a test is moved
-   between labels. Present the two routes and their costs rather than choosing:
-   - **Relabel** `CartesianTaylorSolve` to `regression`. One line in
-     `tests/CMakeLists.txt`. The stem already runs at 1-6 ranks as `unit`, so
-     nothing new executes and no task that does not select the label pays
-     anything; what changes is that `-L regression` then selects a
-     `CartesianTaylorBasis` solve, so a task choosing the full-pipeline label
-     gets both bases rather than one.
-   - **Add a CartesianTaylor arm to `MultiSolve`**, so the `regression`-labeled
-     stem itself covers both bases. Keeps that label at one stem, but
-     `MultiSolve` is a trajectory test whose `1.0e-8` bound is weak as a force
-     check (**R10**), so the arm would need its own bound and is more work than
-     the relabeling.
-2. Implement whichever is chosen, and nothing else.
-3. If neither is wanted, **record that decision and its consequence in the
-   log**: no `regression`-labeled test covers `CartesianTaylorBasis`, so every
-   chain-B change is checked by the `unit` tier alone and the exit criteria in
-   B1 and B2 are the only thing standing between a broken basis and a green run.
-
-**Additional information needed:** what `ctest -L regression -R MPI_SERIAL`
-costs in wall time now, and what it would cost under the relabeling. Measure it
-before asking, so the question comes with its cost attached.
-
-**Exit criterion:** either
-`ctest --output-on-failure -L regression -R MPI_SERIAL` includes at least one
-test instantiating `CartesianTaylorBasis` and passes at ranks 1-6, with its
-before and after wall times recorded; **or** the log records the decision not to
-and names what is unprotected as a result. Failure direction: if the relabeling
-route is taken, confirm that selection **fails** when a `CartesianTaylorBasis`
-direct-sum bound is deliberately violated — a relabeling that does not change
-what the selection can catch is a wall-time increase and nothing else.
 
 ## Known risks
 
