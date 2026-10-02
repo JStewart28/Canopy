@@ -9,12 +9,12 @@ re-derives the bounds the tree/key optimization chains are verified against.
 V1 resumes once both are resolved.
 
 **1. `Canopy_Test_MultiSolve_MPI_SERIAL_np_3` hangs intermittently.** Over the
-12 np-3 runs with surviving logs, 4 hung and 8 completed. No other rank count
-has hung. The two hangs run with `ctest -V`, `f3bkWYfR6Ao9` and
-`f3bn8EK66YaK`, both stopped after `[ RUN      ] MultiSolve.LargeMotion_Rebuild`
-and before that case printed anything. That case is the only one that calls
-`Solver::rebuild` on every step. The other two hangs, `f3XHShznrAEs` and
-`f3XUPJqSuqdh`, ran without `-V`, so their stall point is unrecorded.
+14 np-3 runs with surviving logs, 5 hung and 9 completed. No other rank count
+has hung. The three hangs run with `ctest -V` (`f3bkWYfR6Ao9`, `f3bn8EK66YaK`,
+and H1's `f3bnfasqQDAo`) all stopped in `MultiSolve.LargeMotion_Rebuild`, the
+only case that calls `Solver::rebuild` on every step. The other two hangs,
+`f3XHShznrAEs` and `f3XUPJqSuqdh`, ran without `-V`, so their stall point is
+unrecorded.
 
 The hang is also **not contained**. `ctest --timeout` kills the `flux run`
 client, but the flux sub-job it launched keeps running and keeps the node
@@ -51,8 +51,8 @@ more steeply than the floor ratio. The per-site figures are in
 - The `SingleSolve`-coupled np-3 deadlock. README "Known Issues" records it as
   occurring only when `SingleSolve` shares the ctest process. Every task here
   runs `MultiSolve` alone.
-- Making Zoltan2's partition deterministic. It is relevant here only if H2's
-  stacks implicate it.
+- Making Zoltan2's partition deterministic. H2 records whether the host-node
+  partition reproduces, and goes no further.
 - Moving any `MultiSolve` bound. That is V1's work.
 
 ## Approach
@@ -110,6 +110,7 @@ ejected particle (mechanisms a and c) and says nothing about (b).
 | Build directory | `build-tuolumne/` (profiling ON); check the cache, not the script | A profiling-OFF build reads `-1` from every per-reason counter, indistinguishable from a reading. |
 | Determinism | report per `(nprocs, rank)` from **two** runs, and state whether they agree | The partition is nondeterministic at np >= 3 (README "Known Issues"). V1 measured the accuracy figures as reproducible to ≤ 2.5 %. |
 | Failure behavior | a violated precondition throws or aborts with a message naming it; never a silent repair, a retry, or a longer timeout | A hang "fixed" by retrying is still present. |
+| Isolation from E1 | H2 works in its own git worktree at `../Canopy-h2`, branch `fix-hang-h2` cut from `investigate-m2l-cap`, with its own `build-tuolumne-h2/` configured by `run_cmake_tuolumne.sh`. Its job scripts set `CANOPY_SRC` and `CANOPY_BUILD` to that checkout. It pushes `fix-hang-h2` and does not merge it into `investigate-m2l-cap`. | E1 edits `tests/tstMultiSolve.hpp` and rebuilds `build-tuolumne/tests/Canopy_Test_MultiSolve_MPI_SERIAL` in the main checkout, and may do so while H2 runs. A shared tree would compile each task's uncommitted edits into the other's binary. Every existing flux script hardcodes the main checkout's paths. |
 | Formatting | never run clang-format | `CLAUDE.md`. |
 | Comments | units, signs and ranges on every declaration added | Probe quantities are relative or absolute depending on normalization. Say which. |
 
@@ -220,42 +221,60 @@ progress log, section H1.
 ### H2 — Name the hang's mechanism and fix it — **NOT STARTED**
 
 **Depends on:** H1 **DONE**.
-**Fill in:** decided by H1's stacks. Likely `src/Canopy_TreePartitioner.hpp`
-or `src/Canopy_Solver.hpp`; README "Known Issues", the np-3 hang entry
-(remove it when fixed).
+**Fill in:** `src/Canopy_TreePartitioner.hpp`: the Zoltan2 adapter type at
+`:367`. A copy of `scripts/tuolumne/run_ctest_h1.flux` with `CANOPY_SRC` and
+`CANOPY_BUILD` pointing at the H2 checkout (Conventions, "Isolation from E1").
+README "Known Issues": remove the np-3 hang entry when fixed, and add an entry
+for Zoltan2 still running on HIP under a HIP `ExecutionSpace`.
 **Reference:** the collectives on the rebuild path. These are the bounding-box
 `MPI_Allreduce`s (`src/Canopy_TreeBuilder.hpp:345-346`), the per-depth count
 `MPI_Allreduce` (`:743`), `partition_leaves`'s `MPI_Bcast`
 (`src/Canopy_TreePartitioner.hpp:431`) and the migration `MPI_Alltoall`
 (`:613`).
-**Do:** read the three stacks against these candidates. The stacks decide;
-none of these is established:
-- **Ranks in different collectives, or one collective with different
-  counts.** For example, ranks disagree on `num_leaves` and enter the `:431`
-  broadcast with different lengths. Fix the disagreement, and add a loud check
-  that `num_leaves` agrees across ranks before the broadcast.
-- **Rank 0 inside Zoltan2 while the others wait in `:431`.** The rank-0 solve
-  itself spins. Rank 0's frames say where.
-- **All ranks inside Kokkos/HIP**, not MPI. This shares a signature with the
-  `SingleSolve` deadlock (README). Record it and decide with the user before
-  changing anything: that entry says the cause lies outside `MultiSolve`.
+**Do:** H1's stacks (progress log, section H1) show one rank inside
+`Zoltan2::PartitioningProblem::solve`, stuck in `hipDeviceSynchronize` called
+from a `Kokkos::deep_copy` in `AlgMJ::mj_get_new_cut_coordinates`. The other two
+ranks wait in `partition_leaves`'s `MPI_Bcast` (`:431`). Every Zoltan2 frame is
+on `KokkosDeviceWrapperNode<Kokkos::HIP>`. That is because `:367` builds the
+adapter on `Tpetra::Map<int, int64_t>`, whose default node is HIP, even in
+`TreePartitioner<Kokkos::HostSpace, Kokkos::Serial>`. This Trilinos instantiates
+Tpetra for Serial and OpenMP nodes too (`HAVE_TPETRA_INST_SERIAL`,
+`HAVE_TPETRA_INST_OPENMP`, `TpetraCore_config.h:136,138` in the spack view).
+1. **Leading candidate: Zoltan2 on the wrong execution space.** Template the
+   adapter's `Tpetra::Map` on
+   `Tpetra::KokkosCompat::KokkosDeviceWrapperNode<ExecutionSpace>`, so Zoltan2
+   runs where the partitioner runs. `static_assert` that the node's execution
+   space equals `ExecutionSpace`. A HIP `ExecutionSpace` still runs Zoltan2 on
+   HIP. That case is out of scope and goes in README "Known Issues".
+2. The stacks did not show these alternatives. Fall back to them only if the
+   leading candidate fails its exit criterion:
+   - **Ranks in different collectives, or one collective with different
+     counts**, e.g. disagreement on `num_leaves` at `:431`. The fix is a loud
+     check that `num_leaves` agrees across ranks before the broadcast.
+   - **All ranks inside Kokkos/HIP**, not MPI. This shares a signature with the
+     `SingleSolve` deadlock (README). Record it and decide with the user before
+     changing anything: that entry places the cause outside `MultiSolve`.
+3. Run the solve twice at np 3-6 on the host node and state in the log whether
+   the leaf partition reproduces. Do not pursue determinism: that stays out of
+   scope.
 
 The fix must remove the cause. A retry, a longer timeout or a skipped case is
 not a fix.
 
-**Additional information needed:** the mechanism, which only H1's stacks
-supply. Size the fix after reading them. If it is larger than one session,
-split it and say so in the log.
+The node change moves the partition at np >= 3 (R3). H2's log section states
+that the partition path changed, and that any E1 or V1 figure at np >= 3
+measured before `fix-hang-h2` merges is stale.
 
 **Exit criterion:** both directions.
 - **Fixed:** 15 consecutive
   `ctest --timeout 300 -R '^Canopy_Test_MultiSolve_MPI_SERIAL_np_3$'` runs
   complete under the watchdog with no cancellation. Unfixed at ~1 in 3, that
   passes by chance with probability $(2/3)^{15} \approx 2 \times 10^{-3}$.
-- **Checked:** the loud check added for the violated precondition fires when
-  the precondition is broken deliberately (for example, one rank's leaf count
-  perturbed in a temporary edit, then reverted), and it fails with its message,
-  not with a hang.
+- **Checked:** with the node change temporarily reverted, the
+  `run_ctest_h1.flux` 20-run np-3 loop reproduces at least one hang that the
+  watchdog cancels. At ~1 in 3 it misses one with probability
+  $(2/3)^{20} \approx 3 \times 10^{-4}$. If the reverted build does not hang in
+  20 runs, the result is inconclusive: stop and report.
 
 ### E1 — Classify the AutoRebalance excess — **NOT STARTED**
 
@@ -333,14 +352,6 @@ cannot be designed before it.
 
 ## Known risks
 
-**R1 — `gstack` cannot attach on a compute node.** ptrace scope is `0` on the
-login node, but nothing has checked a compute node. Presentation: H1's
-self-test cancels `sleep` but prints empty stacks or `ptrace: Operation not
-permitted`. Response: try `eu-stack`, then `gdb -batch -ex 'thread apply all
-bt' -p`. If none can attach, record it and switch the capture to
-`flux job kill --signal=SIGABRT` with core files. That is a design change, so
-ask first.
-
 **R2 — Observation changes the hang rate.** The watchdog's polling, or `-V`
 output, shifts timing, and 20 runs see no hang. Presentation: H1's loop
 completes clean. That is indistinguishable from a hang that went away on its
@@ -348,11 +359,13 @@ own, so record it as "not reproduced at 20" and never as "fixed".
 Distinguishing measurement: the rate in surviving logs, 4 hangs in 12 runs,
 spans runs with and without `-V`.
 
-**R3 — H2's fix moves every np >= 3 accuracy figure.** If the fix changes the
-partition, every `[multisolve-dev]` figure V1 recorded at np >= 3 is stale.
-Presentation: V1 resumes and its table no longer reproduces. Response: H2's log
-section states whether the partition path changed. V1 re-measures before
-pinning anything.
+**R3 — H2's fix moves every np >= 3 accuracy figure.** Moving Zoltan2 onto the
+host node changes the partition. Every `[multisolve-dev]` figure V1 recorded at
+np >= 3 is then stale, and so is any E1 figure at np >= 3 measured in the main
+checkout before `fix-hang-h2` merges. Presentation: V1 or E1 resumes and its
+np >= 3 figures no longer reproduce. Response: H2's log section states that the
+partition path changed. E1 and V1 re-measure np >= 3 on the merged tree before
+classifying or pinning anything.
 
 **R4 — Amplification and a defect present at once.** Mechanism (a) is real at
 some particles while (b) or (c) inflates others. Presentation: E1 finds a close
