@@ -20,8 +20,10 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace Test
@@ -157,8 +159,15 @@ inline void testMultiStepGravity(
     // The next three knobs are used by the bin-edge regression test.
     // clustered: draw 80% of particles from a tight Gaussian blob in
     //   one corner (forces deep refinement in that octant) and 20%
-    //   uniform — produces same-depth M2L pairs at integer offsets
-    //   beyond M2L_BIN_RANGE, which feeds the m2l_translate fallback.
+    //   uniform — produces M2L pairs the key encoding cannot represent,
+    //   which feed the per-pair m2l_translate fallback. Two bounds can
+    //   refuse such a pair, and which one does is reported per solve by
+    //   the probe below: |dd| > KernelType::m2l_key_dd_max (a signed
+    //   depth difference, 6 for LaplaceKernel at double) or any of
+    //   |ii|,|jj|,|kk| > M2L_KEY_OFFSET_MAX = 32 (a center-to-center
+    //   offset in half-widths at the deeper of the two cells' depths).
+    //   Both are the classify pass's range guard
+    //   (Canopy_DownwardSweep.hpp:1704-1716); neither is a count cap.
     // mac_theta_override: if positive, replaces get_test_mac_theta();
     //   a tighter theta admits more far-field pairs and amplifies the
     //   fallback population.
@@ -203,9 +212,11 @@ inline void testMultiStepGravity(
         // corner of [0,1]^3 (clipped to (0.01, 0.99) so particles stay
         // inside the bounding box) and 20% from the same uniform used by
         // the standard tests. The blob density triggers refinement deep
-        // into one octant, which produces same-depth M2L pairs at integer
-        // offsets > M2L_BIN_RANGE — the tail that the m2l_translate
-        // fallback path handles.
+        // into one octant, which produces M2L pairs the key encoding
+        // refuses — either |dd| > KernelType::m2l_key_dd_max or an
+        // offset component > M2L_KEY_OFFSET_MAX = 32 half-widths at the
+        // deeper cell's depth — the tail that the m2l_translate fallback
+        // path handles.
         std::normal_distribution<double> blob_dist( 0.15, 0.05 );
         auto sample_pos = [&]( int idx ) {
             if ( !clustered )
@@ -347,12 +358,44 @@ inline void testMultiStepGravity(
                                                  /*compute_gradient=*/true );
 
         // Fallback-count probe. Each rank's downward sweep tracks how many
-        // out-of-bin pairs it carried through m2l_translate this build;
+        // refused pairs it carried through m2l_translate this build;
         // sum those across ranks to get the global tally. Tracked as a
         // running max so the regression test can assert >0 without caring
         // which solve produced the work.
+        //
+        // The per-reason line below is the measurement T1 step 1 exists for:
+        // it names WHICH bound refused these pairs. range_guard counts the
+        // classify pass's representability refusals (|dd| or an offset
+        // component out of range), count_cap counts pairs whose key was
+        // hashed and then refused a column by the operator-count budget, and
+        // the two sum to the total exactly. Printed per (nprocs, rank) and
+        // per solve because the tree and partition path is run-to-run
+        // nondeterministic at np >= 3, so a mean over ranks is not a number
+        // anyone can reproduce. All three read -1 without
+        // CANOPY_ENABLE_PROFILING.
         if ( out_max_fallback_total != nullptr )
         {
+            const auto& ds = solver.downward();
+            const std::vector<int> cells_at_depth = ds.m2l_cells_at_depth();
+            std::string depth_occ;
+            for ( std::size_t d = 0; d < cells_at_depth.size(); ++d )
+            {
+                depth_occ += std::to_string( cells_at_depth[d] );
+                if ( d + 1 < cells_at_depth.size() )
+                    depth_occ += ",";
+            }
+            std::printf(
+                "[m2l-fallback-reason] nprocs %d rank %d step %d "
+                "range_guard %lld count_cap %lld depth_dropped %lld "
+                "total %lld unique_ops %d cells_at_depth [%s]\n",
+                nprocs, rank, step,
+                ds.m2l_n_fallback_pairs_range_guard(),
+                ds.m2l_n_fallback_pairs_count_cap(),
+                ds.m2l_n_fallback_pairs_depth_dropped(),
+                ds.total_fallback_pair_count(), ds.m2l_n_unique_ops(),
+                depth_occ.c_str() );
+            std::fflush( stdout );
+
             const long long local_fb =
                 solver.downward().total_fallback_pair_count();
             long long global_fb = 0;
@@ -665,23 +708,28 @@ TEST( MultiSolve, AutoRebalance )
 }
 
 //---------------------------------------------------------------------------//
-// Test 5: Bin-edge fallback — exercise the per-pair m2l_translate path.
+// Test 5: Key-refusal fallback — exercise the per-pair m2l_translate path.
 //
-// The batched-GEMM M2L pipeline assigns each (target, source) pair to a
-// translation-operator bin keyed on the integer offset
-//   (i, j, k) = round((src_center - tgt_center) / cell_width)
-// with |i|,|j|,|k| <= M2L_BIN_RANGE = 3. Pairs that fall outside that
-// stencil are routed through the on-the-fly m2l_translate kernel. A
-// silent regression in that fallback (e.g. the atomic-accumulation race
+// The batched-GEMM M2L pipeline gives each (target, source) pair a
+// canonical key { max_d, dd, ii, jj, kk }: the deeper of the two depths,
+// the signed depth difference d_src - d_tgt, and the center-to-center
+// offset in half-widths at depth max_d. Two bounds in the classify pass's
+// range guard (Canopy_DownwardSweep.hpp:1704-1716) can refuse a pair a
+// key: |dd| <= KernelType::m2l_key_dd_max (6 for LaplaceKernel at double,
+// 4 at float) and |ii|,|jj|,|kk| <= M2L_KEY_OFFSET_MAX = 32. A refused
+// pair is routed to the on-the-fly m2l_translate kernel instead. A silent
+// regression in that fallback (e.g. the atomic-accumulation race
 // previously fixed in m2l_translate) would only surface in a workload
-// that actually generates bin == -1 pairs.
+// that actually produces refused pairs.
 //
 // Configuration: clustered particle distribution to force deep refinement
 // in one octant, tight MAC theta = 0.3 to admit more far-field pairs at
 // large offsets, and ncrit/max_depth that match the existing tests'
-// scale. The probe inside testMultiStepGravity sums fallback pairs across
-// ranks each solve and reports the running max; we assert it's strictly
-// positive.
+// scale. The column cap is left at its default, so no refusal here can be
+// a count-cap refusal. The probe inside testMultiStepGravity sums
+// fallback pairs across ranks each solve and reports the running max; we
+// assert it's strictly positive, and it prints the per-reason breakdown
+// per (nprocs, rank) so which bound fired is on the record.
 //---------------------------------------------------------------------------//
 TEST( MultiSolve, M2L_BinEdge_Fallback )
 {
@@ -701,10 +749,15 @@ TEST( MultiSolve, M2L_BinEdge_Fallback )
     if ( rank == 0 )
     {
         EXPECT_GT( max_fallback, 0 )
-            << "no out-of-bin M2L pairs were produced — the m2l_translate "
+            << "no refused M2L pairs were produced — the m2l_translate "
                "fallback path was not exercised, so this regression is a "
                "no-op. Either the clustered distribution stopped reaching "
-               "deep enough or M2L_BIN_RANGE was widened.";
+               "deep enough to put a pair outside the range guard "
+               "(|dd| > KernelType::m2l_key_dd_max, or an offset "
+               "component > M2L_KEY_OFFSET_MAX = 32 half-widths at the "
+               "deeper depth), or one of those two bounds was raised. "
+               "The [m2l-fallback-reason] lines above say which of the "
+               "two was carrying this test's refusals.";
     }
 }
 

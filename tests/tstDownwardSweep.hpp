@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace Test
@@ -1368,6 +1369,370 @@ TEST( DownwardSweepLayout, layoutTagIsLayoutRight )
 {
     DownwardSweepTest::testLayoutTagIsLayoutRight<TEST_MEMSPACE,
                                                   TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+// DownwardSweepTwoScale: the non-uniform fixture the tree-opt measurements
+// are taken on (T1 of tasks/tree-opt.md).
+//
+// WHY A NEW DRAW RATHER THAN THE CLUSTERED ONE IN tstMultiSolve.hpp. That
+// draw's refusals were measured per-reason first (T1 step 1, recorded in
+// tasks/tree-opt-progress-log.md): all of them are range-guard refusals, and
+// within the range guard all of them are OFFSET refusals -- its occupancy
+// never passes depth 6, so |dd| can never exceed LaplaceKernel's
+// m2l_key_dd_max of 6 and the dd half of the guard is unreachable there. It
+// has no large depth difference to offer, which is the one property the tasks
+// built on this fixture need. Hence a two-scale draw: a dense cluster that
+// refines several levels below ncrit, beside a sparse halo whose cells reach
+// ncrit immediately and stop as shallow leaves. A single Gaussian does not
+// guarantee that; a large density ratio over a short distance does.
+//---------------------------------------------------------------------------//
+
+namespace DownwardSweepTest
+{
+
+// Geometry of the two-scale draw, in DOMAIN units on [0,1)^3.
+//
+// The blob is a cube of half-width TWO_SCALE_BLOB_HALF_WIDTH centred on
+// TWO_SCALE_BLOB_CENTER. Its edge, 2 * 0.01 = 0.02, is shorter than a cell at
+// depth 5 (width 2^-5 = 0.031), so with ncrit = 8 the refinement inside it
+// does not terminate until depth 7-8 -- while the uniform halo, a few hundred
+// particles over the whole domain, reaches ncrit at depth 2-4. That spread is
+// the fixture's reason for existing; testTwoScaleTreeHasShallowAndDeepLeaves
+// asserts it rather than trusting it.
+constexpr double TWO_SCALE_BLOB_CENTER = 0.15;
+constexpr double TWO_SCALE_BLOB_HALF_WIDTH = 0.01;
+// Particles in the blob, as a fraction of the per-rank count. The remainder
+// is the halo.
+constexpr double TWO_SCALE_BLOB_FRACTION = 0.875;
+
+// Two-scale positions in [0, 1)^3 with strictly positive charges in
+// [0.1, 1.0], seeded per rank so each rank draws a different halo while the
+// blob stays in the same corner for all of them.
+void generate_two_scale_particles( AoSoA_t& particles, int num_particles,
+                                   int rank )
+{
+    AoSoA_ht particles_h( "particles_h", num_particles );
+    auto h_pos = Cabana::slice<Position>( particles_h );
+    auto h_q = Cabana::slice<Charge>( particles_h );
+
+    std::mt19937 gen( 42 + rank * 7919 );
+    std::uniform_real_distribution<double> halo_dist( 0.0, 1.0 );
+    std::uniform_real_distribution<double> blob_dist(
+        TWO_SCALE_BLOB_CENTER - TWO_SCALE_BLOB_HALF_WIDTH,
+        TWO_SCALE_BLOB_CENTER + TWO_SCALE_BLOB_HALF_WIDTH );
+    std::uniform_real_distribution<double> q_dist( 0.1, 1.0 );
+
+    const int num_blob =
+        static_cast<int>( TWO_SCALE_BLOB_FRACTION * num_particles );
+
+    for ( int i = 0; i < num_particles; i++ )
+    {
+        const bool in_blob = ( i < num_blob );
+        for ( int d = 0; d < 3; d++ )
+            h_pos( i, d ) = in_blob ? blob_dist( gen ) : halo_dist( gen );
+        h_q( i, 0 ) = q_dist( gen );
+    }
+
+    particles.resize( num_particles );
+    Cabana::deep_copy( particles, particles_h );
+}
+
+// The fixture: a built tree, partition, communication plan and upward sweep
+// over the two-scale draw, with the downward sweep set up and ready to
+// execute. Same shape as CachingFixture above, and the same two-phase build
+// (global tree, partition, rebuild on the local particles).
+//
+// TEMPLATED ON THE FAR-FIELD TYPE, not fixed to this file's `Kernel`, because
+// B0 reads its numbers out of this same fixture for both CartesianTaylorBasis
+// and LaplaceKernel and the two must be the same tree. The particle AoSoA is
+// shared with the rest of the file, so a far-field type with a different
+// component count would silently mis-size the charge slice; the static_assert
+// makes that a compile error instead.
+//
+// THE COLUMN CAP IS LEFT AT ITS DEFAULT, deliberately. An uncapped sweep can
+// refuse a pair a column for exactly one reason, representability, so a
+// non-zero range_guard reading here is unambiguous and count_cap must be 0.
+template <class TEST_MS, class TEST_ES, class FarField = Kernel>
+struct TwoScaleFixture
+{
+    using kernel = FarField;
+    static_assert( FarField::num_components == Kernel::num_components,
+                   "TwoScaleFixture: the far-field type's component count "
+                   "must match the particle AoSoA's charge extent" );
+
+    // GLOBAL particle count, split across ranks below -- NOT per rank. The
+    // tree is built from the global set, so a per-rank count would make the
+    // tree deeper and the blob's interaction list larger at every added rank:
+    // measured, a per-rank 1200 ran the two cases in 8 s at np 4 and had not
+    // finished at 300 s by np 5. A fixed global count also makes the rank
+    // counts comparable to each other, which is the whole point of reading
+    // B0/A1/C1's numbers per (nprocs, rank) off one fixture.
+    int num_particles_global = 1200;
+    int ncrit = 8;          // leaf capacity, in particles (global count)
+    int max_depth = 8;      // depth cap; the blob reaches 7-8 at this ncrit
+    double tolerance = 0.1; // tree bounding-box padding, domain units
+    int replication_depth = 2;
+    // MAC opening angle. Tighter than the 0.5 default on purpose: a tighter
+    // theta descends further before admitting a pair, which is what puts
+    // admitted pairs at the deep end of the tree where an offset can exceed
+    // M2L_KEY_OFFSET_MAX = 32 half-widths at that depth.
+    double mac_theta = 0.3;
+
+    AoSoA_t particles{ "particles", 0 };
+    TreeBuilder<TEST_MS, TEST_ES> builder;
+    TreePartitioner<TEST_MS, TEST_ES> partitioner;
+    CommunicationPlan<TEST_MS, TEST_ES> comm_plan;
+    UpwardSweep<TEST_MS, TEST_ES, kernel> upward;
+    DownwardSweep<TEST_MS, TEST_ES, kernel> downward;
+    int num_local = 0;
+
+    TwoScaleFixture()
+        : builder( MPI_COMM_WORLD, ncrit, max_depth,
+                   std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance, tolerance, tolerance },
+                   tolerance )
+        , partitioner( MPI_COMM_WORLD, replication_depth )
+        , comm_plan( MPI_COMM_WORLD, mac_theta )
+        , upward( MPI_COMM_WORLD )
+        , downward( MPI_COMM_WORLD )
+    {
+        int rank, nprocs;
+        MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+        MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+        // Split the global count across ranks, remainder to the low ranks,
+        // so the global set is the same size at every rank count.
+        const int num_particles = num_particles_global / nprocs +
+                                  ( rank < num_particles_global % nprocs );
+
+        particles = AoSoA_t( "particles", num_particles );
+        generate_two_scale_particles( particles, num_particles, rank );
+
+        auto positions = Cabana::slice<Position>( particles );
+        builder.build( positions, num_particles );
+        partitioner.partition( builder, particles, num_particles );
+        num_local = partitioner.num_local_particles();
+
+        positions = Cabana::slice<Position>( particles );
+        builder.build( positions, num_local );
+
+        comm_plan.build( builder.cells(), partitioner.ownership(),
+                         partitioner.cell_owner_map(), replication_depth );
+
+        upward.setup( builder.cells(), partitioner.cell_owner_map(),
+                      builder.particle_keys(), num_local );
+        upward.execute( Cabana::slice<Charge>( particles ),
+                        Cabana::slice<Position>( particles ), comm_plan );
+
+        downward.setup( upward, num_local );
+    }
+
+    // Run one solve, which is what populates every counter below: the
+    // per-reason fallback tallies are set by build_interaction_list_device(),
+    // which execute() drives.
+    void solve()
+    {
+        auto positions = Cabana::slice<Position>( particles );
+        auto pot = downward.allocate_potential( num_local );
+        auto grad = downward.allocate_gradient( num_local );
+        Kokkos::deep_copy( pot, 0.0 );
+        downward.execute( upward.multipoles(), positions, pot, grad, false,
+                          comm_plan );
+    }
+};
+
+// THE FIXTURE'S CONTRACT, and the reason it is an assertion and not a print:
+// a later change to ncrit, to max_depth or to the draw could flatten this tree
+// to a uniform one, on which the range-guard counter reads 0 everywhere and
+// every measurement built on the fixture becomes a measurement of nothing that
+// still passes. Risk R7 in tasks/tree-opt.md. So the geometry is asserted at
+// the source.
+template <class TEST_MS, class TEST_ES>
+void testTwoScaleTreeHasShallowAndDeepLeaves()
+{
+    TwoScaleFixture<TEST_MS, TEST_ES> fix;
+    fix.solve();
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    const std::vector<int> cells_at_depth = fix.downward.m2l_cells_at_depth();
+
+    // Occupied depths, and the shallowest and deepest of them. Depth 0 is the
+    // root and is occupied on every tree, so it is the depths BELOW it that
+    // carry the claim.
+    int n_occupied = 0;
+    int deepest = -1;
+    for ( std::size_t d = 0; d < cells_at_depth.size(); ++d )
+    {
+        if ( cells_at_depth[d] <= 0 )
+            continue;
+        ++n_occupied;
+        deepest = static_cast<int>( d );
+    }
+
+    // The shallowest depth at which refinement STOPS for some cell: occupancy
+    // falls from d to d+1, so at least one occupied cell at d has no children
+    // and is a leaf. "Shallowest OCCUPIED depth" would not do -- depth 0 is
+    // the root and is occupied on every tree ever built, uniform ones
+    // included, so asserting on it asserts nothing.
+    int shallowest_leaf = -1;
+    for ( std::size_t d = 1; d + 1 < cells_at_depth.size(); ++d )
+    {
+        if ( cells_at_depth[d] > 0 &&
+             cells_at_depth[d] > cells_at_depth[d + 1] )
+        {
+            shallowest_leaf = static_cast<int>( d );
+            break;
+        }
+    }
+
+    std::string depth_occ;
+    for ( std::size_t d = 0; d < cells_at_depth.size(); ++d )
+    {
+        depth_occ += std::to_string( cells_at_depth[d] );
+        if ( d + 1 < cells_at_depth.size() )
+            depth_occ += ",";
+    }
+
+    // Step 8's record line: every number a later task reads out of this
+    // fixture, on one line, per (nprocs, rank). Printed before the assertions
+    // so a failing rank still contributes its numbers to the log.
+    std::printf( "[two-scale] nprocs %d rank %d num_local %d "
+                 "range_guard %lld count_cap %lld depth_dropped %lld "
+                 "total_fallback %lld unique_ops %d demanded_ops %d "
+                 "realized_keys %d occupied_depths %d shallowest_leaf %d "
+                 "deepest %d cells_at_depth [%s]\n",
+                 nprocs, rank, fix.num_local,
+                 fix.downward.m2l_n_fallback_pairs_range_guard(),
+                 fix.downward.m2l_n_fallback_pairs_count_cap(),
+                 fix.downward.m2l_n_fallback_pairs_depth_dropped(),
+                 fix.downward.total_fallback_pair_count(),
+                 fix.downward.m2l_n_unique_ops(),
+                 fix.downward.m2l_n_demanded_ops(),
+                 static_cast<int>( fix.downward.m2l_realized_keys().size() ),
+                 n_occupied, shallowest_leaf, deepest, depth_occ.c_str() );
+    std::fflush( stdout );
+
+    EXPECT_GE( n_occupied, 3 )
+        << "the two-scale tree has fewer than three occupied depths, so it is "
+           "not the shallow-beside-deep geometry every tree-opt measurement "
+           "assumes (cells_at_depth = [" << depth_occ << "])";
+
+    // A shallow leaf beside a deep subtree, stated as its two halves. Both
+    // matter -- a uniformly deep tree has no shallow leaf and a uniformly
+    // shallow one has no deep subtree, and neither carries a level
+    // difference.
+    ASSERT_GE( shallowest_leaf, 1 )
+        << "occupancy never falls going deeper, so no cell below the root "
+           "terminated as a leaf and this tree is uniformly refined "
+           "(cells_at_depth = [" << depth_occ << "])";
+    EXPECT_LE( shallowest_leaf, 4 )
+        << "the shallowest leaf is deeper than level 4: the halo did not "
+           "reach ncrit early, so there are no shallow leaves "
+           "(cells_at_depth = [" << depth_occ << "])";
+    EXPECT_GE( deepest, 6 )
+        << "no deep occupied depth: the blob did not force refinement below "
+           "the halo's level (cells_at_depth = [" << depth_occ << "])";
+    EXPECT_GE( deepest - shallowest_leaf, 2 )
+        << "a shallow leaf and the deepest cell are under 2 levels apart, so "
+           "no pair in this tree carries the depth difference the fixture "
+           "exists to produce (cells_at_depth = [" << depth_occ << "])";
+}
+
+// The refusal claim: on this geometry the range guard actually fires, and the
+// count cap -- left at its default, so unbounded -- does not. The second half
+// is what makes the first unambiguous.
+template <class TEST_MS, class TEST_ES>
+void testTwoScaleRefusalsAreRangeGuard()
+{
+    TwoScaleFixture<TEST_MS, TEST_ES> fix;
+    fix.solve();
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    const long long range_guard =
+        fix.downward.m2l_n_fallback_pairs_range_guard();
+    const long long count_cap =
+        fix.downward.m2l_n_fallback_pairs_count_cap();
+    const long long depth_dropped =
+        fix.downward.m2l_n_fallback_pairs_depth_dropped();
+    const long long total = fix.downward.total_fallback_pair_count();
+
+    std::printf( "[two-scale-refusals] nprocs %d rank %d range_guard %lld "
+                 "count_cap %lld depth_dropped %lld total_fallback %lld "
+                 "op_count_cap %d\n",
+                 nprocs, rank, range_guard, count_cap, depth_dropped, total,
+                 fix.downward.m2l_op_count_cap() );
+    std::fflush( stdout );
+
+#ifdef CANOPY_ENABLE_PROFILING
+    // Sum over ranks: the assertion the exit criterion names is "at least one
+    // rank", because the partition decides which rank carries the deep
+    // subtree and that assignment is not reproducible above two ranks
+    // (risk R6). A per-rank EXPECT_GT would be asserting the partition.
+    long long global_range_guard = 0;
+    MPI_Allreduce( &range_guard, &global_range_guard, 1, MPI_LONG_LONG,
+                   MPI_SUM, MPI_COMM_WORLD );
+
+    EXPECT_GT( global_range_guard, 0 )
+        << "no pair in the two-scale tree was refused a key by the range "
+           "guard, so this fixture measures nothing. Either the tree "
+           "flattened (see testTwoScaleTreeHasShallowAndDeepLeaves) or "
+           "M2L_KEY_OFFSET_MAX / KernelType::m2l_key_dd_max was raised past "
+           "what this geometry produces";
+
+    // The column cap is at its default here, so a budget refusal is not
+    // available and every refusal above is a representability refusal.
+    EXPECT_EQ( count_cap, 0 )
+        << "a pair was refused a column by the count cap on a sweep whose "
+           "cap was never set, which would make the range_guard reading "
+           "above ambiguous";
+
+    // A dropped pair is a contribution that is never evaluated at all -- not
+    // through a column and not through the fallback.
+    EXPECT_EQ( depth_dropped, 0 )
+        << "a refused pair was placed in neither an operator column nor the "
+           "fallback table, so its contribution is missing from the solve";
+
+    // The two reasons partition the fallback population exactly.
+    EXPECT_EQ( range_guard + count_cap, total )
+        << "the per-reason counters do not sum to the fallback total, so at "
+           "least one refusal path is unaccounted for";
+#else
+    // Built without CANOPY_ENABLE_PROFILING: all three read -1, the
+    // "unavailable" sentinel, and NEVER 0 -- 0 is a legal count for each of
+    // them, so a 0 here would be indistinguishable from a real measurement of
+    // no refusals.
+    EXPECT_EQ( range_guard, -1 );
+    EXPECT_EQ( count_cap, -1 );
+    EXPECT_EQ( depth_dropped, -1 );
+
+    // The sum identity is SKIPPED, not evaluated: -1 + -1 against a real
+    // total is a claim about nothing, and a check that "passed" on sentinels
+    // would be a vacuous pass.
+    if ( rank == 0 )
+        std::printf( "[two-scale-refusals] sum identity SKIPPED: built "
+                     "without CANOPY_ENABLE_PROFILING, counters are "
+                     "sentinels\n" );
+    std::fflush( stdout );
+#endif
+}
+} // namespace DownwardSweepTest
+
+TEST( DownwardSweepTwoScale, treeHasShallowAndDeepLeaves )
+{
+    DownwardSweepTest::testTwoScaleTreeHasShallowAndDeepLeaves<
+        TEST_MEMSPACE, TEST_EXECSPACE>();
+}
+
+TEST( DownwardSweepTwoScale, refusalsAreRangeGuard )
+{
+    DownwardSweepTest::testTwoScaleRefusalsAreRangeGuard<TEST_MEMSPACE,
+                                                         TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

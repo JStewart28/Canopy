@@ -421,7 +421,7 @@ that way and what was already tried.
 
 ## Task sequence
 
-### T1 — A fixture whose tree has shallow leaves beside deep subtrees — **NOT STARTED**
+### T1 — A fixture whose tree has shallow leaves beside deep subtrees — **DONE**
 
 **Depends on:** none.
 **Fill in:** `tests/tstMultiSolve.hpp` (the per-reason report on the existing
@@ -472,6 +472,51 @@ listed under [Current state](#current-state).
    fallback total, the per-depth occupancy and the realized key count, so later
    tasks read their numbers out of this fixture's log rather than re-deriving
    them.
+
+**Met.** Step 1 settled the open question first, on the clustered fixture
+unchanged at its own `ncrit = 8`, `max_depth = 8`, `mac_theta = 0.3`: **every
+refusal there is a range-guard refusal**, with `count_cap == 0` and
+`depth_dropped == 0` on all 42 `(nprocs, rank, step)` readings and
+`range_guard == total` on every one of them. Within the range guard they are
+**offset** refusals specifically — that tree's occupancy never passes depth 6,
+so `|dd|` cannot exceed `LaplaceKernel`'s `m2l_key_dd_max` of 6 and that half
+of the guard is geometrically unreachable. The four stale `M2L_BIN_RANGE = 3`
+comment sites and the `EXPECT_GT` failure message now name
+`M2L_KEY_OFFSET_MAX = 32` (half-widths at the deeper cell's depth) and
+`KernelType::m2l_key_dd_max`, and the message points at the per-reason lines
+instead of anticipating a condition that cannot occur.
+
+That answer put step 2 on the "new two-scale distribution" branch of this
+task's own decision rule, so `DownwardSweepTest::TwoScaleFixture<MS, ES,
+FarField = Kernel>` was built in `tests/tstDownwardSweep.hpp` — a cube of
+half-width 0.01 holding 87.5 % of a **global** 1200-particle set beside a
+uniform halo, templated on the far-field type so B0 can read the same tree for
+both `CartesianTaylorBasis` and `LaplaceKernel`. Verified on it, at ranks 1-6
+over **two separate runs** of the same binary: `deepest == 8` and the
+shallowest *leaf* depth 1 or 2 on every rank of every rank count, an
+occupied-depth span of 6-7 levels; `range_guard > 0` with `count_cap == 0`,
+`depth_dropped == 0` and `range_guard + count_cap == total_fallback_pair_count()`
+exactly, at a column cap left at its default (32768, measured) so no refusal
+can be a budget refusal. The geometry contract is asserted on the depth at
+which refinement *stops*, not on the shallowest occupied depth — depth 0 is
+occupied on every tree, uniform ones included, so the latter is a vacuous pass
+of exactly the kind **R7** describes. The failure direction was run in a
+separate `build-tuolumne-noprof/`: all six rank counts pass with all three
+counters reading **-1** and the sum identity reported SKIPPED, six of six.
+
+**Two qualifications, both recorded in the log.** First, the two runs agree
+field-for-field at np 1, 2, 3, 5 and 6 but **disagree at np 4** — a per-rank
+`range_guard` moved by up to 25 % — which is **R6** and sets the spread any
+later before/after comparison on this fixture must be read against. Second,
+**the `MultiSolve` arm of the criterion below does not pass, and did not before
+T1**: seven tests fail the `1e-8` multi-step check at every rank count, all
+seven already recorded in README "Known Issues" with error values this run
+reproduces to every digit. T1 did not touch that tolerance — sharpening those
+bounds is V1's task, and loosening one to green a gate would change what
+**DONE** means invisibly. `M2L_BinEdge_Fallback`'s own fallback assertion
+passes; it fails only on the shared accuracy check inside
+`testMultiStepGravity`. The `DownwardSweep` arm passes at ranks 1-6 in both
+runs. See `tree-opt-progress-log.md` `## T1`.
 
 **Exit criterion:** stems `MultiSolve`, `DownwardSweep` pass at ranks 1-6 —
 
