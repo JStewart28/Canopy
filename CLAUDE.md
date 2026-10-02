@@ -50,35 +50,44 @@ create) the doc before proceeding.
    test (e.g. an `examples/` problem), ask the user for the example name and
    args, then plug them into sections 4 and 5.
 
-The required tests themselves (names + MPI rank counts) are project-wide and
-live in [Minimum test set](#minimum-test-set) below, not in the per-system
-doc. The per-system doc only describes *how* to run any given test on that
-machine.
+Which tests a change must pass is specified by the task being worked (its exit
+criterion), not by this file and not by the per-system doc. The per-system doc
+only describes *how* to run any given test on that machine.
 
-## Minimum test set
+## Builds
 
-The required gate before any code change ships is **every test carrying the
-`regression` CTest label**, run on the SERIAL backend at MPI ranks 1–6:
+**Only build the targets a task explicitly needs. Never a full build** — a
+whole-project `make -j` here takes long enough that it is never the right
+default, and a task that names two test stems needs two targets.
+
+- Build exactly the targets named by the task's exit criterion, and nothing
+  else. `cmake/test_harness/test_harness.cmake` generates one target per
+  (stem, backend): `Canopy_Test_<Stem>_MPI_SERIAL` for an MPI stem,
+  `Canopy_Test_<Stem>_SERIAL` for a non-MPI one.
+- `ctest -N` lists what is registered without building or running anything.
+- If something outside the task's list looks like it needs building, say why
+  and ask before building it.
+
+## Tests
+
+The tests that must pass are **whatever the task specifies**. A task's exit
+criterion names the stems and the MPI rank counts, and that list is the gate
+for that change — do not substitute a broader or a narrower run for it.
+
+Match ctest entries with an **anchored** regex, or an unanchored stem name
+pulls in its neighbours (`-R MultiSolve` also matches `SolveFusedM2L`'s host
+stem, `-R CartesianTaylor` also matches `CartesianTaylorSolve`):
 
 ```bash
-ctest --output-on-failure -L regression -R MPI_SERIAL
+ctest --output-on-failure -R '^Canopy_Test_(StemA|StemB)_MPI_SERIAL_np_[1-6]$'
 ```
 
-The `regression` label covers the full-pipeline FMM solve (`MultiSolve`) — it
-composes the entire pipeline end-to-end, so if it passes the pipeline is
-correct. Tests are tagged in [tests/CMakeLists.txt](tests/CMakeLists.txt); use
-the run command and batch template from the active system's
-`systems/<system>/claude.md` to execute them (the
-`scripts/<system>/run_ctest_minset.*` wrappers run exactly this gate).
-
-The complementary `unit` label covers utilities, math kernels, and individual
-FMM-phase/component tests (`ctest -L unit`), including the single-tree
-`SingleSolve` solve. These are not part of the ship gate but are the diagnostic
-layer — run them to localize *which* phase a regression failure comes from, and
-when changing a specific component. (`SingleSolve` is currently a Known Issue —
-see README — so do not add it to the gate yet.) If you believe a new test
-should be promoted into the `regression` gate, confirm with the user before
-relabeling it.
+Tests carry CTest labels in [tests/CMakeLists.txt](tests/CMakeLists.txt), and
+the labels stay useful for selecting a diagnostic sweep — `ctest -L unit`
+covers utilities, math kernels and individual FMM-phase/component tests, which
+is how you localize *which* phase a failure comes from. Relabeling a test
+changes what other work is held to, so confirm with the user before moving one
+between labels.
 
 ## Plans
 

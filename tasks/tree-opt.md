@@ -71,10 +71,12 @@ needs is measured rather than assumed (**chain C**).
 - **Not scale-normalization of `CartesianTaylorBasis`.** It is unreachable for
   that basis; see [Why `CartesianTaylorBasis` cannot be
   level-blind](#why-cartesiantaylorbasis-cannot-be-level-blind).
-- **Not a change to the ship gate's membership.** The gate stays
-  `ctest --output-on-failure -L regression -R MPI_SERIAL` at ranks 1-6, i.e.
-  `MultiSolve` (`tests/CMakeLists.txt:65-67`). Every task here adds `unit`-tier
-  coverage only.
+- **Not a relabeling of any existing test.** Every task here adds `unit`-tier
+  coverage, and each task's exit criterion below names the stems and rank counts
+  it must pass — that list is the task's gate, and nothing wider is required of
+  it. The `regression` label keeps its single member, `MultiSolve`
+  (`tests/CMakeLists.txt:65-67`); **V2 is the sole exception**, and asking is
+  its first step.
 
 ## Approach
 
@@ -161,10 +163,10 @@ drifting level index with a stable one.
 | Trait default | none — every basis states it explicitly | `key_needs_level` has no default either. A silent default on a correctness-critical trait is how a new basis gets the wrong one; the conformance test in B1 fails a basis that omits it. |
 | Trait/`canonicalize_key` agreement | asserted, never trusted | `expectKeyTraitsAgree` (`tests/tstFarFieldContract.hpp:925-958`) already enforces this for `key_needs_level`; B1 extends the same function rather than adding a second one. |
 | Balancing knob name | `FmmConfig::tree_balance_max_level_delta` | `FmmConfig` is where every other tree and table knob lives (`src/Canopy_Solver.hpp`), and the name states the invariant as a number rather than as a mode, so "2:1" is the value 1 and "off" is a large value rather than a second boolean. |
-| Balancing knob default | the off value, until A3 | A2 must not move any existing result. A knob whose default is the current behavior is a change with no runtime surface until something sets it, which is what makes A2's exit criterion checkable against the unmodified gate. |
+| Balancing knob default | the off value, until A3 | A2 must not move any existing result. A knob whose default is the current behavior is a change with no runtime surface until something sets it, which is what makes A2's exit criterion checkable against the existing stems, unmodified. |
 | Root-width quantization | `std::ldexp`/`std::frexp`, never `pow(2, round(log2(w)))` | Exact in binary floating point. A rounded `pow` reintroduces the drift the quantization exists to remove, and would do it only on some inputs. |
 | Where a refused pair goes | unchanged — `m2l_overflow_policy` | `CartesianTaylorBasis` selects `PerPairTranslate` (`src/Canopy_CartesianTaylorBasis.hpp:516`) and that stays. Nothing here changes what happens to a refused pair, only how many pairs are refused. |
-| New test tier | `unit`, with **V2 the sole exception** | Every task here adds a component-level claim, and none of them may change what the ship gate runs. `regression` has one member, `MultiSolve` (`tests/CMakeLists.txt:65-67`), and promoting anything into it needs confirmation per `CLAUDE.md` — which is V2's first step and the reason it is last in the sequence rather than beside the measurement it follows from. |
+| New test tier | `unit`, with **V2 the sole exception** | Every task here adds a component-level claim, and none of them relabels an existing test. `regression` has one member, `MultiSolve` (`tests/CMakeLists.txt:65-67`), and moving a test between labels needs confirmation per `CLAUDE.md` — which is V2's first step and the reason it is last in the sequence rather than beside the measurement it follows from. |
 | New test registration | append the stem to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:49-59`) | The macro call below it applies the label and the 1-6 rank sweep, so a stem added to the list is registered everywhere for free. |
 | Fixture determinism | report per `(nprocs, rank)`, never a mean, and state reproducibility across two runs | The tree/partition path is run-to-run nondeterministic at np $\ge$ 3; see **R6**. A single draw is not the number. |
 | Formatting | never run clang-format | `CLAUDE.md`: "Do not clang format." Write in the style of the surrounding code. |
@@ -284,8 +286,9 @@ Gaussian blob in one corner, 20 % uniform (`tests/tstMultiSolve.hpp:158-167`,
 `:205-220`) — and `MultiSolve.M2L_BinEdge_Fallback`
 (`tests/tstMultiSolve.hpp:686-700`) drives it at `ncrit = 8`, `max_depth = 8`
 and `mac_theta = 0.3`, asserting that the fallback population is non-zero
-(`:703-708`). That test is **in the ship gate**. T1 extends this fixture rather
-than inventing one.
+(`:703-708`). That test is the `regression` label's only member
+(`tests/CMakeLists.txt:65-67`). T1 extends this fixture rather than inventing
+one.
 
 **Which guard fires there is unknown**, and T1's first job is to find out. The
 test's rationale is stated in terms of same-depth pairs at integer offsets
@@ -328,12 +331,13 @@ Also true now:
   half-extent of the global particle bounding box
   (`src/Canopy_TreeBuilder.hpp:608-635`) and is not quantized.
 - **There is no `FmmConfig` knob for tree balance.**
-- **The ship gate exercises `LaplaceKernel` only.** `REGRESSION_MPI_TESTS` is
+- **The `regression`-labeled stem exercises `LaplaceKernel` only.**
+  `REGRESSION_MPI_TESTS` is
   the single stem `MultiSolve` (`tests/CMakeLists.txt:65-67`), and
   `tstMultiSolve.hpp` instantiates `Canopy::Solver<..., Scalar, P, 1>`
   (`:744-745`) without a far-field argument, so it takes the default
-  `FarField = LaplaceKernel` (`src/Canopy_Solver.hpp:146-148`). **No gate test
-  instantiates `CartesianTaylorBasis.`** Its only direct-sum coverage is
+  `FarField = LaplaceKernel` (`src/Canopy_Solver.hpp:146-148`). **No
+  `regression`-labeled test instantiates `CartesianTaylorBasis.`** Its only direct-sum coverage is
   `CartesianTaylorSolve.matchesDirectSumThetaRef` and
   `...ThetaCanopy` (`tests/tstCartesianTaylorSolve.hpp:976-1006`), both in the
   `unit` tier.
@@ -506,7 +510,7 @@ absence of any accuracy claim (`:1040-1060`).
    $10^{-3}$ bar alone — it is an accuracy *claim* about the method, not a
    regression bound, and tightening it would change what the test asserts.
 3. **Assert the per-reason fallback breakdown where the fixture already
-   produces it.** T1 reports it on the gate's clustered test; turn that report
+   produces it.** T1 reports it on the clustered test in the `MultiSolve` stem; turn that report
    into an assertion on the reason T1 identified, so a later change that
    silently moves refusals from one reason to the other fails rather than
    prints. Keep the sum identity and the `depth_dropped == 0` assertion, and
@@ -726,7 +730,8 @@ assertions (`tests/tstFarFieldContract.hpp:934-937`).
    factor B0 predicted.
 
 **Exit criterion:** six stems, and **`CartesianTaylorSolve` is the authority
-here while `MultiSolve` is not** — the gate instantiates `LaplaceKernel` only, so
+here while `MultiSolve` is not** — the `MultiSolve` stem instantiates
+`LaplaceKernel` only, so
 it would pass with `CartesianTaylorBasis` wholly broken, and
 `CartesianTaylorSolve`'s two direct-sum arms are the only checks this change can
 fail on accuracy. `MultiSolve` and `LaplaceSolve` are here to prove the other
@@ -843,7 +848,7 @@ fallback-to-GEMM time ratio, both in the log.
    inputs — this is the one task whose correct answer is a number from an
    earlier task and not a design choice.
 2. If the arithmetic favours balancing, change the default to 1 and re-run the
-   gate. If it does not, **leave the default off and say so**: a knob that is
+   seven stems below. If it does not, **leave the default off and say so**: a knob that is
    measured not to pay is a successful outcome for this task, not a failure, and
    the measurement belongs in the log either way.
 3. Update `README.md` per `CLAUDE.md`'s keep-in-sync rule, since this changes a
@@ -886,7 +891,7 @@ per-level `unit_w` array the operator builder indexes by `max_d`
    geometry, so snapping it moves the cell set **for every basis**, not only
    for the one whose key this chain is about. Left unconditional, this task
    would silently shift every existing result — the bit-for-bit hashes, both
-   direct-sum arms and the gate's trajectory alike — and the exit criterion
+   direct-sum arms and `MultiSolve`'s trajectory alike — and the exit criterion
    below could not distinguish that from a relabelling bug. Name it beside
    A2's knob in `FmmConfig`.
 2. Quantize the root half-width: round it **up** to the next power of two with
@@ -942,49 +947,49 @@ than as a particle escape later.
 
 ---
 
-### V2 — Give `CartesianTaylorBasis` gate-tier coverage — **NOT STARTED**
+### V2 — Give `CartesianTaylorBasis` `regression`-labeled coverage — **NOT STARTED**
 
 **Depends on:** V1 **DONE**. **Blocked on a decision that is not this task's to
 make** — see below.
 **Fill in:** `tests/CMakeLists.txt` (`REGRESSION_MPI_TESTS`, `:65-67`), or
 `tests/tstMultiSolve.hpp` if the chosen route is a basis arm rather than a
-promotion.
-**Reference:** the gate's single stem and the macro call that labels it
-(`tests/CMakeLists.txt:65-67`, `:75`); `Solver`'s default
+relabeling.
+**Reference:** the `regression` label's single stem and the macro call that
+applies it (`tests/CMakeLists.txt:65-67`, `:75`); `Solver`'s default
 `FarField = LaplaceKernel` (`src/Canopy_Solver.hpp:146-148`), which is why no
-gate test instantiates the other basis.
+`regression`-labeled test instantiates the other basis.
 **Do:**
-1. **Ask first.** `CLAUDE.md` requires confirmation before anything is promoted
-   into the `regression` gate, and this task changes what every future change
-   in the repository must pass. Present the two routes and their costs rather
-   than choosing:
-   - **Promote** `CartesianTaylorSolve` to `regression`. One line in
-     `tests/CMakeLists.txt`. Adds its full 1-6 rank sweep to every change's
-     gate; the stem already runs there as `unit`, so the cost is gate wall time
-     and nothing else.
-   - **Add a CartesianTaylor arm to `MultiSolve`**, so the existing gate stem
-     covers both bases. Keeps the gate at one stem, but `MultiSolve` is a
-     trajectory test whose `1.0e-8` bound is weak as a force check
-     (**R10**), so the arm would need its own bound and is more work than the
-     promotion.
+1. **Ask first.** `CLAUDE.md` requires confirmation before a test is moved
+   between labels. Present the two routes and their costs rather than choosing:
+   - **Relabel** `CartesianTaylorSolve` to `regression`. One line in
+     `tests/CMakeLists.txt`. The stem already runs at 1-6 ranks as `unit`, so
+     nothing new executes and no task that does not select the label pays
+     anything; what changes is that `-L regression` then selects a
+     `CartesianTaylorBasis` solve, so a task choosing the full-pipeline label
+     gets both bases rather than one.
+   - **Add a CartesianTaylor arm to `MultiSolve`**, so the `regression`-labeled
+     stem itself covers both bases. Keeps that label at one stem, but
+     `MultiSolve` is a trajectory test whose `1.0e-8` bound is weak as a force
+     check (**R10**), so the arm would need its own bound and is more work than
+     the relabeling.
 2. Implement whichever is chosen, and nothing else.
 3. If neither is wanted, **record that decision and its consequence in the
-   log**: the gate does not cover `CartesianTaylorBasis`, so every chain-B
-   change is gated on the `unit` tier alone and the exit criteria in B1 and B2
-   are the only thing standing between a broken basis and a green gate.
+   log**: no `regression`-labeled test covers `CartesianTaylorBasis`, so every
+   chain-B change is checked by the `unit` tier alone and the exit criteria in
+   B1 and B2 are the only thing standing between a broken basis and a green run.
 
-**Additional information needed:** the gate's current wall time, and what it
-would become under the promotion. Measure it before asking, so the question
-comes with its cost attached.
+**Additional information needed:** what `ctest -L regression -R MPI_SERIAL`
+costs in wall time now, and what it would cost under the relabeling. Measure it
+before asking, so the question comes with its cost attached.
 
-**Exit criterion:** either the gate
-(`ctest --output-on-failure -L regression -R MPI_SERIAL`) includes at least one
+**Exit criterion:** either
+`ctest --output-on-failure -L regression -R MPI_SERIAL` includes at least one
 test instantiating `CartesianTaylorBasis` and passes at ranks 1-6, with its
 before and after wall times recorded; **or** the log records the decision not to
-and names what is unprotected as a result. Failure direction: if the promotion
-route is taken, confirm the gate **fails** when a `CartesianTaylorBasis`
-direct-sum bound is deliberately violated — a promotion that does not change
-what the gate can catch is a wall-time increase and nothing else.
+and names what is unprotected as a result. Failure direction: if the relabeling
+route is taken, confirm that selection **fails** when a `CartesianTaylorBasis`
+direct-sum bound is deliberately violated — a relabeling that does not change
+what the selection can catch is a wall-time increase and nothing else.
 
 ## Known risks
 
@@ -999,12 +1004,12 @@ implements anything, and A2's own assertion that the multiplier matches the
 prediction. If they disagree, the cost model is wrong and A3's arithmetic cannot
 be trusted.
 
-**R2 — Balancing changes accuracy, and the gate does not notice.** A balanced
+**R2 — Balancing changes accuracy, and `MultiSolve` does not notice.** A balanced
 tree is a different tree: cells that were leaves become internal, so pairs move
 between the P2P and M2L paths and the far-field approximation applies at
 different scales. Presentation: a shifted accuracy figure in `MultiSolve`, or no
 visible change at all if its tolerance is loose enough to absorb it. The second
-is worse. Distinguishing measurement: A3 compares the gate's own accuracy
+is worse. Distinguishing measurement: A3 compares `MultiSolve`'s own accuracy
 figures before and after the default changes, rather than reading a pass as
 evidence of no change.
 
@@ -1086,7 +1091,7 @@ accuracy: `SolveFusedM2L.matchesPriorReference` runs at `5.0e-2` potential and
 complete-regression bug" rather than a degradation
 (`tests/tstMultiSolve.hpp:915-932`); `CartesianTaylorSolve`'s
 `theta_canopy` arm is pinned to its own measured `9.9667e-04` potential and
-`1.8652e-02` gradient; and the gate's `MultiSolve` tests compare **positions and
+`1.8652e-02` gradient; and the `MultiSolve` tests compare **positions and
 velocities after a short integration** at `1.0e-8`
 (`tests/tstMultiSolve.hpp:542-548`), which at `dt = 1.0e-4` over five steps
 bounds a force error only very weakly, since the particles barely move.

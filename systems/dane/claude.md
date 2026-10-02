@@ -79,9 +79,9 @@ configuration:
 make -j [TARGET]
 ```
 
-The user specifies the target when appropriate (e.g.
-`make -j Canopy_Test_MultiSolve_MPI_SERIAL`). For a full build, plain
-`make -j` is fine.
+Always name the target — `make -j Canopy_Test_MultiSolve_MPI_SERIAL`, and one
+`-j` invocation can name several. **Never a bare `make -j`**: per `CLAUDE.md`,
+only the targets a task explicitly needs are built.
 
 ## 4. Run command for binaries
 
@@ -145,14 +145,13 @@ cd ${CANOPY_BUILD}
 srun --cpus-per-task=${OMP_NUM_THREADS} [EXECUTABLE] [EXTRA_ARGS]
 ```
 
-For the minimum test set (`Canopy_Test_MultiSolve_MPI_SERIAL` at 1–6 ranks),
-loop the `srun` line over `-n 1 … 6` (those tests use the Serial backend, so
+For a SERIAL-backend test stem at 1–6 ranks, loop the `srun` line over `-n 1 … 6` (those tests use the Serial backend, so
 `OMP_NUM_THREADS` is ignored — the affinity vars are still harmless to set).
 
 ### Preferred: drive the suite with CTest
 
-Every unit test is registered with CTest at the required rank counts (1–6),
-so the minimum test set is a single command inside an allocation:
+Every test is registered with CTest at the required rank counts (1–6), so a
+stem's whole rank sweep is a single command inside an allocation:
 
 ```bash
 ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'
@@ -160,8 +159,8 @@ ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'
 
 [scripts/dane/run_ctest_minset.slurm](../../scripts/dane/run_ctest_minset.slurm)
 is the batch wrapper — submit with `sbatch run_ctest_minset.slurm`. Change the
-`-R` regex to select a different suite or drop it to run everything; `ctest -N`
-lists what is registered without running anything.
+`-R` regex to select the stems the task names — anchored, per `CLAUDE.md`;
+`ctest -N` lists what is registered without running anything.
 
 Unlike Tuolumne, Dane needs **no** `MPIEXEC_*` overrides: CMake auto-detects
 `srun`, which is the native Slurm launcher and nests correctly inside an

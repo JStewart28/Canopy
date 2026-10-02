@@ -54,9 +54,9 @@ configuration:
 make -j [TARGET]
 ```
 
-The user specifies the target when appropriate (e.g.
-`make -j Canopy_Test_MultiSolve_MPI_SERIAL`). For a full build, plain
-`make -j` is fine.
+Always name the target — `make -j Canopy_Test_MultiSolve_MPI_SERIAL`, and one
+`-j` invocation can name several. **Never a bare `make -j`**: per `CLAUDE.md`,
+only the targets a task explicitly needs are built.
 
 ## 4. Run command for binaries
 
@@ -70,8 +70,8 @@ flux run --ntasks=[N] --nodes=1 --exclusive \
   [EXECUTABLE] [EXTRA_ARGS]
 ```
 
-For CPU-only / SERIAL-backend binaries (which is what the minimum test set
-uses), drop `--gpus-per-task` and shrink `--cores-per-task` to match:
+For CPU-only / SERIAL-backend binaries (which is what the MPI_SERIAL test
+stems use), drop `--gpus-per-task` and shrink `--cores-per-task` to match:
 
 ```bash
 flux run --ntasks=[N] --nodes=1 --exclusive \
@@ -153,8 +153,7 @@ flux run --ntasks=[NTASKS] --nodes=[NODES] --exclusive \
   [EXECUTABLE] [EXTRA_ARGS]
 ```
 
-For the minimum test set (`Canopy_Test_MultiSolve_MPI_SERIAL` at 1–6
-ranks), use the CPU/SERIAL variant of section 4 inside the batch script
+For a SERIAL-backend test stem at 1–6 ranks, use the CPU/SERIAL variant of section 4 inside the batch script
 rather than the HIP variant above.
 
 ### Preferred: drive the suite with CTest
@@ -162,8 +161,8 @@ rather than the HIP variant above.
 When the build is configured with [run_cmake_tuolumne.sh](../../run_cmake_tuolumne.sh),
 every unit test is registered with CTest at the required rank counts, and
 `ctest` launches each one via `flux run --ntasks N --nodes=1 --exclusive
---cores-per-task=1` (the `MPIEXEC_*` overrides in that script). So the whole
-minimum test set is one command inside an allocation:
+--cores-per-task=1` (the `MPIEXEC_*` overrides in that script). So a stem's
+whole 1–6 rank sweep is one command inside an allocation:
 
 ```bash
 ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'
@@ -172,9 +171,9 @@ ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'
 [scripts/tuolumne/run_ctest_minset.flux](../../scripts/tuolumne/run_ctest_minset.flux)
 is the batch wrapper for this — it activates the env, exports the static-TLS
 workaround, and runs the `ctest` line above. Submit with `flux batch
-run_ctest_minset.flux`. Change the `-R` regex to select a different suite
-(e.g. `TreePartitioner`) or drop it to run everything. `ctest -N` lists what is
-registered without running anything.
+run_ctest_minset.flux`. Change the `-R` regex to select the stems the task
+names — anchored, per `CLAUDE.md`. `ctest -N` lists what is registered without
+running anything.
 
 **Important:** the `MPIEXEC_*` overrides are what make this work. If CTest is
 left to auto-detect the launcher it picks the flux_wrappers `srun`, which runs
