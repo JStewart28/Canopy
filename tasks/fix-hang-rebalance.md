@@ -105,7 +105,7 @@ ejected particle (mechanisms a and c) and says nothing about (b).
 | Floor | $\theta^{P+1}$, `1.95e-3` at `theta = 0.5`, `P_ORDER = 8` | The figure every task here reads against, stated once. |
 | Watchdog | `scripts/tuolumne/flux_watchdog.sh`, **sourced** by a batch script; starts a background loop and exports `watchdog_stop` | A copy per script drifts. The loop already exists inline at `scripts/tuolumne/run_ctest_v1.flux:69-90`, which H1 replaces with the sourced helper. |
 | Watchdog threshold | `WATCHDOG_S=300`, equal to ctest `--timeout` | ~20x the slowest observed np runtime (15.4 s), so a slow pass is never cancelled. |
-| Batch preamble | copied verbatim from `scripts/tuolumne/run_ctest_t1.flux`, plus `flux_watchdog.sh` | Includes the static-TLS workaround, without which every binary aborts before `main`. Walltime option is `--time-limit` (≤ 60 min on pdebug); `--flags=waitable` is rejected; wait with `flux job status <id>`. |
+| Batch preamble | copied verbatim from `scripts/tuolumne/run_ctest_v1.flux:40-65`, plus `flux_watchdog.sh` | Includes the static-TLS workaround, without which every binary aborts before `main`. Walltime option is `--time-limit` (≤ 60 min on pdebug); `--flags=waitable` is rejected; wait with `flux job status <id>`. |
 | Provenance | every job echoes `spack env status`, `CC --version`, commit SHA, `git status --porcelain`, submit command and the build's `Canopy_ENABLE_PROFILING` from `CMakeCache.txt` | A number with no provenance cannot be re-derived. |
 | Build directory | `build-tuolumne/` (profiling ON); check the cache, not the script | A profiling-OFF build reads `-1` from every per-reason counter, indistinguishable from a reading. |
 | Determinism | report per `(nprocs, rank)` from **two** runs, and state whether they agree | The partition is nondeterministic at np >= 3 (README "Known Issues"). V1 measured the accuracy figures as reproducible to ≤ 2.5 %. |
@@ -137,7 +137,7 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   `run_cmake_tuolumne.sh:10-12`. The batch script runs on the same single node
   as its sub-jobs, so `pgrep` and `gstack` there see every rank. `gstack`,
   `gdb` and `eu-stack` are in `/usr/bin` on the login node, with
-  `kernel.yama.ptrace_scope = 0`. **Neither has been checked on a compute
+  `kernel.yama.ptrace_scope = 0`. **None has been checked on a compute
   node.**
 - `Solver::rebuild` (`src/Canopy_Solver.hpp:399-404`) is `_full_setup`
   (`:549-635`). It rebuilds the tree, re-runs the Zoltan2 partition
@@ -181,8 +181,12 @@ README "Known Issues", the np-3 hang entry.
 1. Write `flux_watchdog.sh`. Every 15 s it lists running sub-jobs of the
    enclosing instance (`flux jobs --filter=running --no-header -o '{id}
    {runtime}'`). For each one older than `WATCHDOG_S`, it first runs `gstack`
-   on every PID matching `CANOPY_WATCHDOG_PGREP` (default `Canopy_Test_`),
-   then `flux cancel`s it. Each capture goes to stdout between
+   on that sub-job's own processes, then `flux cancel`s it. "Its own" means
+   descendants of that job's `flux-shell` on this node whose process name
+   matches `CANOPY_WATCHDOG_PGREP` (default `Canopy_Test_`), matched on the
+   name and not with `pgrep -f`. A node-wide name match also catches the
+   watchdog's own `sleep 15`, and a full-command-line match also catches
+   `ctest` (its `-R` regex) and the `flux run` client. Each capture goes to stdout between
    `### watchdog stacks <subjob> ###` markers, with PID, runtime and a
    timestamp. It exports `watchdog_stop` to kill the loop.
 2. `run_ctest_h1.flux` does two things in one allocation. **Self-test:** set
@@ -197,8 +201,9 @@ README "Known Issues", the np-3 hang entry.
    last gtest case and the last `[multisolve-dev]` line before it.
 
 **Exit criterion:** one `run_ctest_h1.flux` job whose log shows:
-- the self-test sub-job cancelled between 300 and 330 s, with three `sleep`
-  stacks and the np-4 follow-on started;
+- the self-test sub-job cancelled between 300 and 330 s, with exactly three
+  `sleep` stacks, each a child of the self-test sub-job's shell, and the np-4
+  follow-on started;
 - at least one real np-3 hang cancelled, with a non-empty `gstack` for each of
   its three ranks.
 
