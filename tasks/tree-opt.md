@@ -284,28 +284,25 @@ retention or occupied depth.
 
 **A non-uniform fixture already exists, and it already produces refusals.**
 `testMultiStepGravity` takes a `clustered` flag — 80 % of particles from a tight
-Gaussian blob in one corner, 20 % uniform (`tests/tstMultiSolve.hpp:158-167`,
-`:205-220`) — and `MultiSolve.M2L_BinEdge_Fallback`
-(`tests/tstMultiSolve.hpp:686-700`) drives it at `ncrit = 8`, `max_depth = 8`
+Gaussian blob in one corner, 20 % uniform (`tests/tstMultiSolve.hpp:159-171`,
+`:211-233`) — and `MultiSolve.M2L_BinEdge_Fallback`
+(`tests/tstMultiSolve.hpp:734-748`) drives it at `ncrit = 8`, `max_depth = 8`
 and `mac_theta = 0.3`, asserting that the fallback population is non-zero
-(`:703-708`). That test is the `regression` label's only member
-(`tests/CMakeLists.txt:65-67`). T1 extends this fixture rather than inventing
-one.
+(`:751-762`). That test is the `regression` label's only member
+(`tests/CMakeLists.txt:65-67`).
 
-**Which guard fires there is unknown**, and T1's first job is to find out. The
-test's rationale is stated in terms of same-depth pairs at integer offsets
-beyond a bound called `M2L_BIN_RANGE = 3` (`tests/tstMultiSolve.hpp:673`,
-`:158-161`, `:205-208`), and **`M2L_BIN_RANGE` no longer exists in `src/`** — it
-appears in that file's comments and nowhere else. Today's offset bound is
-`M2L_KEY_OFFSET_MAX = 32` (`src/Canopy_DownwardSweep.hpp:570`), an order of
-magnitude looser, which is the condition the test's own failure message
-anticipates as the reason it would stop measuring anything ("Either the
-clustered distribution stopped reaching deep enough or `M2L_BIN_RANGE` was
-widened", `:707`). It nevertheless still passes, so the refusals it counts come
-from something its comments do not describe. The per-reason counters settle it
-in one run, and the uniform fixtures remain the control: on those the
-range-guard counter reads **0**, and the only refusals are count-cap refusals
-driven by a deliberately tiny cap.
+**Every refusal on that fixture is an offset refusal.** The range guard carries
+all of them — the count-cap and dropped counters read 0 on every reading — and
+within the guard it is the offset bound that fires rather than the `dd` bound:
+that tree's occupancy never passes depth 6, so `|dd|` cannot exceed
+`LaplaceKernel`'s `m2l_key_dd_max` of 6 and that half of the guard is
+geometrically unreachable. The bound in force is `M2L_KEY_OFFSET_MAX = 32`
+(`src/Canopy_DownwardSweep.hpp:570`), in half-widths at the deeper cell's depth,
+and the test's comments and its failure message name it. The uniform fixtures
+remain the control: on those the range-guard counter reads **0**, and the only
+refusals are count-cap refusals driven by a deliberately tiny cap. The fixture
+that carries a large *depth* difference is a separate two-scale distribution in
+`tests/tstDownwardSweep.hpp`; see T1.
 
 Also true now:
 
@@ -537,51 +534,109 @@ reported as skipped.
 ### V1 — Sharpen the checks these chains will be verified against — **NOT STARTED**
 
 **Depends on:** T1 **DONE**.
-**Fill in:** `tests/tstCartesianTaylorSolve.hpp` (the two direct-sum arms'
-bounds, and the two drift cases); `tests/tstMultiSolve.hpp`
-(`SolveFusedM2L.matchesPriorReference`'s bounds, and the clustered test's
-per-reason assertion).
-**Reference:** the measured deviations and bounds recorded in place —
-`SolveFusedM2L.matchesPriorReference` at `5.0e-2` / `1.0e-1`
-(`tests/tstMultiSolve.hpp:915-932`), the `theta_canopy` arm's pinned
-`9.9667e-04` / `1.8652e-02` and the `theta_ref` arm's `1e-3` bar
-(`tests/tstCartesianTaylorSolve.hpp:971-1006`), the drift cases' explicit
-absence of any accuracy claim (`:1040-1060`).
+**Fill in:** `tests/tstMultiSolve.hpp` (the six `fmm_tolerance` call sites,
+`SolveFusedM2L.matchesPriorReference`'s bounds, `SolveFusedM2L.FP32_smokeTest`,
+and the clustered test's per-reason assertion);
+`tests/tstCartesianTaylorSolve.hpp` (the two direct-sum arms' bounds, and the
+two drift cases); `README.md` (the disabled FP32 case).
+**Reference:** the measured deviations and bounds recorded in place — the six
+`fmm_tolerance` call sites at `1.0e-8` (`tests/tstMultiSolve.hpp:610`, `:626`,
+`:643`, `:660`, `:696`, `:742`), applied to `max_pos_rel` and `max_vel_rel` at
+`:585-589`; `SolveFusedM2L.matchesPriorReference` at `5.0e-2` / `1.0e-1`
+(`:962-983`); `CTS_DEV_TOL_THETA_CANOPY = 3.74e-02`
+(`tests/tstCartesianTaylorSolve.hpp:365`), which the rationale block above it
+(`:334-363`) records as **2x the worst measured figure** — gradient
+`1.8651556395e-02`, potential `9.9666798509e-04`, the six rank counts agreeing
+to 15 significant figures; `CTS_DEV_TOL_THETA_REF`, the `1e-3` bar itself
+(`:364`); the two arms that consume them (`:976`, `:998`); the drift cases'
+explicit absence of any accuracy claim (`:1040-1062`).
 **Do:**
-1. **Bound each loose check at its measured deviation plus a stated margin**,
-   rather than at a round number chosen to be safe.
+1. **Re-derive the six `fmm_tolerance` bounds, one per call site.** `1.0e-8` has
+   no derivation behind it, and the prose at `tests/tstMultiSolve.hpp:684` still
+   documents a prior value of `2e-2` that no call site passes. Set each site's
+   bound at its own measured deviation over **at least three runs** (**R6** — it
+   moves at np $\ge$ 3) times a margin stated in the comment, with the measured
+   figures beside it, and correct the `:684` prose in the same change. Per call
+   site and not one shared value: the parameter is already per-site, the
+   configurations differ materially — `nsteps` 2/5/8, `drift_multiplier`
+   1.0/2.0/5.0, uniform against clustered — and the measured errors span roughly
+   30x, so a single bound at the worst observed would pass a regression at the
+   best-behaved site.
+
+   **The derivation each bound is read against.** The far-field truncation floor
+   at `MultiSolveTest::P_ORDER = 8` (`:54`) and `get_test_mac_theta() = 0.5`
+   (`:38-43`) is near $\theta^{P+1}$, and the trajectory check damps a gradient
+   error further still: the driver integrates `v += dt * g` and then
+   `r += dt * drift_multiplier * v` at `dt = 1.0e-4` over a handful of steps, so
+   a relative error in `g` reaches `max_pos_rel` reduced by the step size twice
+   over. `1.0e-8` is below what a finite-order FMM can deliver at that order and
+   admissibility, which is why these sites fail — not because the method is
+   wrong.
+
+   **Stop and report if a measurement exceeds that derivation.** If a measured
+   deviation is *larger* than the truncation floor and the integrator's damping
+   together account for, the far field is wrong and the bound is not the defect.
+   Record the finding in the log, report it, and stop — fixing it is its own
+   sequence of tasks and must not be folded in here. A bound widened to cover a
+   real defect is indistinguishable in the diff from one derived correctly,
+   which is the failure mode this whole task exists to close.
+2. **Disable `SolveFusedM2L.FP32_smokeTest`, and leave it disabled.** It is the
+   stem's only FP32 case (`tests/tstMultiSolve.hpp:1121-1161`) and fails at
+   np 2-6 with a max relative gradient error of $\approx 0.277$ against its own
+   `5.0e-2` budget — 5.5x over, not marginal, and reproducing on two platforms.
+   Nothing in this task can move it: it is not an `fmm_tolerance` test, and its
+   magnitude together with its rank-count dependence points at a multi-rank FP32
+   accumulation defect whose triage is a separate sequence of tasks. Comment the
+   case out, with a block naming the measured figure, the budget it is against,
+   and the `README.md` entry that carries it; record in `README.md` that the
+   FP32 case is disabled pending that investigation. **Do not re-justify the
+   FP32 budget here** — a widened budget would retire the only signal that
+   defect has.
+3. **Bound each remaining loose check at its measured deviation plus a stated
+   margin**, rather than at a round number chosen to be safe.
    `SolveFusedM2L.matchesPriorReference` is the clearest case: its own comment
    says `5.0e-2` exists to catch "a complete-regression bug", which is a
    different job from noticing a tree change that costs a few percent. Measure
-   the actual deviation over **at least three runs** (**R6** — it moves at
-   np $\ge$ 3), and set the bound at the worst observed times a margin you
-   state in the comment, with the measured figures beside it.
-2. Do the same for the `theta_canopy` arm. Leave the `theta_ref` arm's
-   $10^{-3}$ bar alone — it is an accuracy *claim* about the method, not a
-   regression bound, and tightening it would change what the test asserts.
-3. **Assert the per-reason fallback breakdown where the fixture already
+   the actual deviation over **at least three runs** and set the bound at the
+   worst observed times a margin you state in the comment, with the measured
+   figures beside it.
+4. **Confirm the `theta_canopy` bound rather than redoing it.**
+   `CTS_DEV_TOL_THETA_CANOPY` is already a measured deviation times a stated
+   margin, in exactly the form step 3 prescribes, at 2x the worst of the two
+   fields. Verify that is still what the constant and its rationale block say,
+   record that the step was satisfied by prior work, and leave the value alone
+   unless you can state why a tighter margin is warranted — step 7 governs it.
+   Leave the `theta_ref` arm's $10^{-3}$ bar alone: it is an accuracy *claim*
+   about the method, not a regression bound, and tightening it would change what
+   the test asserts.
+5. **Assert the per-reason fallback breakdown where the fixture already
    produces it.** T1 reports it on the clustered test in the `MultiSolve`
    stem; turn that report into an assertion on the reason T1 identified, so a
    later change that
    silently moves refusals from one reason to the other fails rather than
    prints. Keep the sum identity and the `depth_dropped == 0` assertion, and
    keep both skipped under the $-1$ sentinel.
-4. Record every bound this task moves in the log, old and new, with the runs
+6. Record every bound this task moves in the log, old and new, with the runs
    the new one came from. A later session that finds one of these tests failing
    needs to know whether it is reading a real regression or a bound that was
    drawn too tightly here.
-5. **Do not tighten a bound you cannot explain.** If a measured deviation is
+7. **Do not tighten a bound you cannot explain.** If a measured deviation is
    much smaller than the bound and you cannot say why the bound was set where
    it was, say so in the log and leave it; a bound tightened onto noise fails
    on an unrelated change and gets widened again by someone with less context.
 
-**Additional information needed:** whether any of these deviations is stable
-enough at np $\ge$ 3 to carry a tightened bound at all. Step 1's three runs
-answer it per test. A test whose deviation moves by more than the margin between
-runs cannot be tightened and must be left as it is, with that recorded.
+**Additional information needed:** whether the deviations this task still has to
+measure — `matchesPriorReference`'s and the six `fmm_tolerance` sites' — are
+stable enough at np $\ge$ 3 to carry a tightened bound at all. Step 1's and
+step 3's three runs answer it per test. A test whose deviation moves by more
+than the margin between runs cannot be tightened and must be left as it is, with
+that recorded. The `theta_canopy` arm needs no such measurement: its six rank
+counts agree to 15 significant figures, recorded on the constant.
 
 **Exit criterion:** stems `CartesianTaylorSolve`, `MultiSolve` pass at ranks 1-6
-with the tightened bounds, three times in succession —
+with the re-derived bounds, three times in succession, with
+`SolveFusedM2L.FP32_smokeTest` commented out per step 2 so that carve-out is
+visible in the diff rather than hidden behind a gtest filter —
 
 ```bash
 make -j Canopy_Test_CartesianTaylorSolve_MPI_SERIAL Canopy_Test_MultiSolve_MPI_SERIAL
@@ -591,7 +646,10 @@ for i in 1 2 3; do
 done
 ```
 
-— and the log records each moved bound with its measured deviations. Failure
+— every case in both stems passes with no failure carried: the six
+`fmm_tolerance` sites green against their re-derived bounds, and the FP32 case
+absent from the binary. The log records each moved bound with its measured
+deviations, and `README.md` records the disabled FP32 case. Failure
 direction: inflate one measured deviation artificially (widen `mac_theta` on one
 arm, say) and confirm the tightened bound **fails**, where the old bound would
 have passed; revert, and record which bound was demonstrated this way. A
@@ -714,7 +772,7 @@ the tree builder's tests). No `src/` change.
    far field, so comparing their fields costs one extra comparison and closes
    the gap that chains A and B both rest on. Nothing in the suite asserts this
    today: `MultiSolve.M2L_BinEdge_Fallback` asserts the fallback is
-   *exercised* (`tests/tstMultiSolve.hpp:703-708`), not that it produces the
+   *exercised* (`tests/tstMultiSolve.hpp:751-762`), not that it produces the
    same answer as the tabulated path. **Chain A's entire purpose is to move
    pairs between those two paths**, so without this assertion a chain-A change
    that silently broke one of them would present as an accuracy shift with no
@@ -1061,11 +1119,13 @@ looks like success. Presentation: a clean pass that measures nothing.
 Distinguishing measurement: T1 step 3 asserts the tree's occupied-depth
 structure and step 4 asserts `range_guard > 0`, so a flattened fixture fails
 loudly at the source rather than silently downstream. A1's failure direction
-asserts a neighbour level difference of at least 2 for the same reason. Note
-that the clustered fixture's own guard against this
-(`tests/tstMultiSolve.hpp:703-708`) names a bound, `M2L_BIN_RANGE`, that no
-longer exists — a guard written against a condition that cannot occur is not a
-guard, which is why T1 step 1 corrects it.
+asserts a neighbour level difference of at least 2 for the same reason. The
+clustered fixture's own guard against this
+(`tests/tstMultiSolve.hpp:751-762`) names the bounds actually in force,
+`M2L_KEY_OFFSET_MAX` and `KernelType::m2l_key_dd_max`, and points at the
+per-reason lines rather than at a condition that cannot occur — a guard written
+against one of those is not a guard, which is what V1 step 5 turns from a report
+into an assertion.
 
 **R8 — The fallback's cost is assumed rather than measured, and chain A is sized
 from the wrong number.** "1.58 % of pairs" is a pair count; the time share
@@ -1093,11 +1153,11 @@ these chains are checked against are loose relative to the method's measured
 accuracy: `SolveFusedM2L.matchesPriorReference` runs at `5.0e-2` potential and
 `1.0e-1` gradient and says in place that it exists to catch "a
 complete-regression bug" rather than a degradation
-(`tests/tstMultiSolve.hpp:915-932`); `CartesianTaylorSolve`'s
-`theta_canopy` arm is pinned to its own measured `9.9667e-04` potential and
-`1.8652e-02` gradient; and the `MultiSolve` tests compare **positions and
+(`tests/tstMultiSolve.hpp:962-983`); `CartesianTaylorSolve`'s
+`theta_canopy` arm is pinned at `3.74e-02`, 2x its own worst measured figure;
+and the `MultiSolve` tests compare **positions and
 velocities after a short integration** at `1.0e-8`
-(`tests/tstMultiSolve.hpp:542-548`), which at `dt = 1.0e-4` over five steps
+(`tests/tstMultiSolve.hpp:585-589`), which at `dt = 1.0e-4` over five steps
 bounds a force error only very weakly, since the particles barely move.
 Presentation: a tree or key change degrades the far field by a few percent and
 every bound still passes. Distinguishing measurement: record the **measured
