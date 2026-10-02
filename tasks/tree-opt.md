@@ -345,7 +345,7 @@ Also true now:
   whatever stems some other task happens to name.
 - **The two operator-cache drift cases assert no accuracy at all.**
   `CartesianTaylorSolve.operatorCacheAcrossDriftThetaCanopy` and
-  `...ThetaRef` (`tests/tstCartesianTaylorSolve.hpp:1040-1060`) state in place
+  `...ThetaRef` (`tests/tstCartesianTaylorSolve.hpp:1040-1062`) state in place
   that they "MAKE NO ACCURACY CLAIM AND ASSERT NO DEVIATION"; their only
   assertions are that the far field was live and that at least one operator was
   built. They also run a **longer** trajectory than the gating arms, precisely
@@ -531,7 +531,14 @@ reported as skipped.
 
 ---
 
-### V1 — Sharpen the checks these chains will be verified against — **NOT STARTED**
+### V1 — Sharpen the checks these chains will be verified against — **BLOCKED**
+
+**Blocked.** Step 1's stop-and-report branch fired:
+`MultiSolve.AutoRebalance` exceeds the undamped truncation floor at np 5-6
+(velocity `1.71e-2` at np 6, 8.8x $\theta^{P+1}$), and a `mac_theta` sweep
+shows the excess enters through the far field. No `fmm_tolerance` bound was
+moved. Steps 2, 4 and 5 and the deviation reports are in place; step 3 is
+measured but not applied. See `tree-opt-progress-log.md` section V1.
 
 **Depends on:** T1 **DONE**.
 **Fill in:** `tests/tstMultiSolve.hpp` (the six `fmm_tolerance` call sites,
@@ -1023,7 +1030,7 @@ per-level `unit_w` array the operator builder indexes by `max_d`
    than the input.
 6. **Add a direct-sum deviation assertion to the drift trajectory.** The two
    `operatorCacheAcrossDrift*` cases assert no accuracy today
-   (`tests/tstCartesianTaylorSolve.hpp:1040-1060`), and they run the trajectory
+   (`tests/tstCartesianTaylorSolve.hpp:1040-1062`), and they run the trajectory
    on which this task's relabelling operates — so a column reused at the wrong
    width would change only the `keys_built` figure those cases print and would
    corrupt the field silently (**R4**, **R9**). Give them the same
@@ -1138,7 +1145,7 @@ A3 is blocked on C1 for exactly that reason.
 **R9 — The one trajectory that exercises cache reuse has no correctness check.**
 `CartesianTaylorSolve.operatorCacheAcrossDriftThetaCanopy` and `...ThetaRef`
 assert only that the far field was live and that an operator was built
-(`tests/tstCartesianTaylorSolve.hpp:1040-1060`), and they deliberately run a
+(`tests/tstCartesianTaylorSolve.hpp:1040-1062`), and they deliberately run a
 longer trajectory than the gating arms so the bounding box drifts — which is
 exactly the condition B2 changes the handling of. Presentation: B2 lands, the
 `keys_built` figure improves, every test passes, and the field is wrong wherever

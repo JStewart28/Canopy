@@ -475,12 +475,33 @@ and reuse a committed assignment.
 
 `ctest --output-on-failure -L regression -R MPI_SERIAL` does not currently pass.
 Six tests fail the multi-step position/velocity comparison at
-`fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:542,546`) with measured relative
-errors of 3e-7 to 9e-6, at **all six** rank counts:
-`MultiSolve.StableTree_Migrate`, `IntermediateMotion_Rebalance`,
+`fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:651,655`) at **all six** rank
+counts: `MultiSolve.StableTree_Migrate`, `IntermediateMotion_Rebalance`,
 `LargeMotion_Rebuild`, `AutoMaintain`, `AutoRebalance`, `M2L_BinEdge_Fallback`.
-A seventh test, `SolveFusedM2L.FP32_smokeTest`, fails alongside them at np 2-6 —
-see the entry below.
+The measured deviations are printed unconditionally on a `[multisolve-dev]`
+line (`tests/tstMultiSolve.hpp:644`) and span 3e-11 to 1.7e-2 across sites and
+rank counts; at np 1 they are the 3e-7 to 9e-6 first recorded here.
+
+**The `1e-8` bound is not the only defect, so it has not been re-derived.**
+Task V1 in `tasks/tree-opt.md` was to replace `1e-8` with per-site measured
+bounds, read against the far-field truncation floor
+$\theta^{P+1} \approx 1.95 \times 10^{-3}$ at `P_ORDER = 8`, `theta = 0.5`,
+which the integrator can only damp. `MultiSolve.AutoRebalance` exceeds the
+*undamped* floor: max relative velocity deviation `6.41e-3`-`6.57e-3` at np 5
+and `1.709e-2` at np 6 (3.3x and 8.8x the floor), and position `3.15e-3` at np 6,
+reproducing across three passes. The excess grows with rank count — ~2000x from
+np 1 to np 6 at that site — while the per-solve far-field gradient error
+(`SolveFusedM2L.matchesPriorReference`, 7e-5 to 3e-4) is flat across rank
+counts. Sweeping `CANOPY_MAC_THETA` shows the deviation *is* far-field-driven
+(it falls at 0.4 and rises 24-3000x at 0.7, against a floor ratio of 20.7x;
+`M2L_BinEdge_Fallback`, which pins its own theta, does not move), so the excess
+enters through the far field on the multi-step, multi-rank path. Not yet
+attributed; unmeasured candidates are per-particle normalization where $|g|$
+cancels, and trajectory amplification across the tree changes of the
+`dt = 1e-3` cases. Full figures are in `tasks/tree-opt-progress-log.md` section
+V1. Reproduce with `scripts/tuolumne/run_ctest_v1.flux` (three `ctest -V`
+passes) and `scripts/tuolumne/run_ctest_v1_theta_gain.flux` (the theta sweep).
+Do not widen a bound over it.
 
 This is **pre-existing**: checking out `src/Canopy_DownwardSweep.hpp` at
 `a6c90de`, the commit before the Laplace-solve harness work began, rebuilding
@@ -508,15 +529,29 @@ only when `SingleSolve` shares the `ctest` process; this one occurs with
 run-to-run variation is shared with the partitioner non-determinism above, which
 is the first thing to rule out.
 
-### `SolveFusedM2L.FP32_smokeTest` fails at ≥ 2 ranks
+**`ctest --timeout` does not contain the hang under flux.** On timeout ctest
+kills the `flux run` client, but the flux job it launched keeps running and
+holds the node `--exclusive`, so every later rank count sits in state `S` behind
+it and also times out without ever starting. Measured in flux job
+`f3bn8EK66YaK`: the np 3 sub-job was still running at 19.5 min while np 4, 5 and
+6 waited, and cancelling it inside the allocation
+(`flux proxy <jobid> flux cancel <subjob>`) let np 4 finish in 11 s.
+`scripts/tuolumne/run_ctest_v1.flux` runs a watchdog that cancels any sub-job
+older than 300 s, so a hang costs one rank count rather than the rest of the
+pass.
 
-In the `Canopy_Test_MultiSolve_MPI_SERIAL` suite, `SolveFusedM2L.FP32_smokeTest`
-passes at 1 rank but fails at 2–6 ranks: the FP32 max relative gradient error is
-≈ 0.277 at np=2, rising to ≈ 0.339 at np=3, well over the test's `5e-2` budget
-(`tstMultiSolve.hpp:1104`). It is not the suite's only failure — the six
-`MultiSolve` tests of the entry above fail at every rank count, the
-migrate/rebalance paths (`MultiSolve.StableTree_Migrate`, `AutoRebalance`,
-`IntermediateMotion_Rebalance`, `LargeMotion_Rebuild`) among them.
+### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
+
+**The case is commented out** (`tests/tstMultiSolve.hpp:1210`), not filtered,
+so it is absent from the `Canopy_Test_MultiSolve_MPI_SERIAL` binary, pending
+the investigation below. Re-enable it as written once the defect is fixed — do
+**not** re-enable it by widening its `5e-2` budget, which would retire the only
+signal this defect has.
+
+It passes at 1 rank but fails at 2–6 ranks: the FP32 max relative gradient error
+is ≈ 0.277 at np=2, rising to ≈ 0.339 at np=3, well over the test's `5e-2`
+budget. It is not the suite's only failure — the six `MultiSolve` tests of the
+entry above fail at every rank count.
 
 This is a **pre-existing** failure, not a regression from the
 registration-coalesced migration work (issue #22): checking out the parent

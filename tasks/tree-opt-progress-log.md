@@ -320,3 +320,217 @@ means invisibly. `M2L_BinEdge_Fallback`'s own `EXPECT_GT( max_fallback, 0 )`
 - **Everything measuring on this fixture at np >= 3** — report two runs. np 4
   disagreed between two back-to-back runs of the same binary by up to 25 % on a
   per-rank `range_guard`.
+
+## V1
+
+**Outcome: the stop-and-report branch.** Step 1's derivation check fired, so
+**no `fmm_tolerance` bound was moved** and V1 is not done. The six sites still
+pass `1.0e-8`. The independent steps (2, 4, 5, the doc corrections) are in the
+working tree; step 3 was measured but not applied, for the reason given under it.
+
+Provenance for every figure below: commit `08653ef` plus this section's
+uncommitted test edits, `build-tuolumne` (cache read directly:
+`Canopy_ENABLE_PROFILING:BOOL=ON`, `Canopy_PROFILING_LEVEL:STRING=2`),
+Cray clang 20.0.0, env `tuolumne_trilinos`, SERIAL backend. Each job's log
+echoes the same provenance at its head.
+
+### Decisions recorded (made before the session, not reopened)
+
+- **Bounds are per call site, not one shared value.** The parameter is already
+  per-site, the six configurations differ (`nsteps` 2/4/5/8, `drift_multiplier`
+  1/2/5/50, uniform against clustered), and the measured errors span far more
+  than 30x (table below). A single bound at the worst observed would pass a
+  regression at the best-behaved site.
+- **`SolveFusedM2L.FP32_smokeTest` is commented out and stays commented out**,
+  and `README.md` records it as disabled pending investigation. Its budget was
+  not re-justified.
+- **The `theta_canopy` bound is confirmed, not redone** (step 4, below).
+- **The `theta_ref` arm's `1e-3` bar is untouched.** It is an accuracy claim,
+  not a regression bound.
+
+### Measurement machinery added
+
+`testMultiStepGravity` gained a `case_label` parameter (second, after `mode`)
+and prints `[multisolve-dev] case <label> nprocs N nsteps N drift D
+max_pos_rel X max_vel_rel Y tol T` on rank 0 **unconditionally**, before its two
+`EXPECT_LT`s. `SolveFusedM2L.matchesPriorReference` prints
+`[fusedm2l-dev] ... pot_err X grad_err Y` the same way. Both are readable on a
+pass, which is what R10, A3 and B2 need. `CartesianTaylorSolve` already printed
+`[ct-solve] ... direct_softened_sum max_pot_dev ... max_grad_dev` unconditionally.
+
+### Step 1 — the six `fmm_tolerance` sites, three passes
+
+Flux job `f3bmo4JYikKh` (`scripts/tuolumne/run_ctest_v1.flux`): three passes of
+both stems in succession, `ctest -V --timeout 300`. No hang in any pass.
+Max over the three passes, `max_pos_rel / max_vel_rel`, dimensionless:
+
+| site | np 1 | np 2 | np 3 | np 4 | np 5 | np 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `StableTree_Migrate` (Migrate, nsteps 5, dt 1e-4, drift 1) | 3.14e-11 / 3.49e-07 | 1.20e-10 / 5.45e-07 | 4.97e-10 / 2.39e-06 | 1.01e-09 / 2.97e-06 | 3.21e-09 / 8.39e-06 | 3.39e-09 / 6.18e-06 |
+| `IntermediateMotion_Rebalance` (Rebalance, nsteps 5, dt 1e-3, drift 5) | 6.84e-07 / 1.41e-06 | 2.11e-06 / 2.99e-06 | 1.56e-05 / 4.36e-05 | 1.80e-04 / 2.77e-04 | 2.96e-04 / 8.28e-04 | 9.66e-05 / 3.38e-04 |
+| `LargeMotion_Rebuild` (Rebuild, nsteps 4, dt 1e-3, drift 50) | 2.86e-06 / 2.91e-06 | 7.69e-05 / 1.34e-04 | 1.09e-04 / 1.49e-04 | 1.73e-03 / 1.60e-03 | 5.95e-04 / 9.23e-04 | 6.16e-05 / 8.50e-05 |
+| `AutoMaintain` (Auto, nsteps 5, dt 1e-3, drift 5) | 6.84e-07 / 1.41e-06 | 2.11e-06 / 2.87e-06 | 1.56e-05 / 4.36e-05 | 1.80e-04 / 2.77e-04 | 2.96e-04 / 8.28e-04 | 9.66e-05 / 3.38e-04 |
+| `AutoRebalance` (Auto, tree_tol 0.3, nsteps 8, dt 1e-3, drift 2) | 9.19e-06 / 8.55e-06 | 9.12e-05 / 1.36e-04 | 1.82e-04 / 3.00e-04 | 5.11e-05 / 5.06e-04 | 7.15e-04 / **6.57e-03** | **3.15e-03** / **1.71e-02** |
+| `M2L_BinEdge_Fallback` (Migrate, clustered, theta 0.3, nsteps 2, dt 1e-4, drift 1) | 2.51e-11 / 4.75e-07 | 9.28e-11 / 7.22e-07 | 4.13e-10 / 1.66e-06 | 3.18e-10 / 1.13e-06 | 3.65e-10 / 1.04e-06 | 1.71e-09 / 9.16e-07 |
+
+**Run-to-run spread: at most 2.5 %** (AutoRebalance np 5 velocity,
+6.41e-3 / 6.41e-3 / 6.57e-3); every other reading agrees across the three
+passes to 5 or more significant figures, np 3-6 included. R6 moves the counters
+by up to ±25 % but barely moves these accuracy figures, so **stability is not
+what blocks tightening here**. The np 1 figures reproduce the README's to every
+digit (`3.485035e-07`, `6.841953e-07`, `9.194797e-06`).
+
+**Read against the derivation.** The floor at `P_ORDER = 8`, `theta = 0.5` is
+$\theta^{P+1} = 1.95 \times 10^{-3}$, a bound on the relative gradient error.
+The integrator can only shrink that in velocity: `v` changes by `dt * g` per
+step, so its relative error is at most the gradient's, and equals it only when
+the field dominates `v`. **`AutoRebalance` exceeds the *undamped* floor** at
+np 5 (velocity 6.41e-3 to 6.57e-3, 3.3x) and np 6 (velocity 1.71e-2, 8.8x;
+position 3.15e-3, 1.6x). Every other reading sits below the raw floor. The
+dt = 1e-3 sites also grow steeply with rank count (AutoRebalance velocity
+~2000x from np 1 to np 6, global N 200 to 1200), while the directly measured
+per-solve far-field gradient error does not
+(`matchesPriorReference`, step 3: 7.3e-5 to 3.1e-4 over np 1-6, flat).
+
+### The theta sweep: the excess is far-field-driven
+
+Flux job `f3bn8EK66YaK` (`scripts/tuolumne/run_ctest_v1_theta_gain.flux`):
+`CANOPY_MAC_THETA` 0.4 and 0.7, no rebuild. The floor ratio against 0.5 is
+0.134x at 0.4 and 20.7x at 0.7. Velocity deviation ratio against theta 0.5:
+
+| site | theta 0.4 (np 1-3) | theta 0.7 (np 1-6) |
+| --- | --- | --- |
+| `StableTree_Migrate` | 0.039, 0.058, 0.15 | 312, 60, 73, 90, 83, 39 |
+| `IntermediateMotion_Rebalance` | 0.16, 0.058, 0.14 | 146, 61, 80, 40, 43, 119 |
+| `LargeMotion_Rebuild` | 0.050, 0.0073, — | 2990, 135, 63, 211, 24, 79 |
+| `AutoMaintain` | 0.16, 0.060, — | 146, 63, 80, 40, 43, 119 |
+| `AutoRebalance` | 0.0032, 0.029, — | 23, 25, 47, 169, 54, 24 |
+| `M2L_BinEdge_Fallback` (pins theta 0.3) | 1, 1, 1 | 1 at every np |
+
+At theta 0.7, AutoRebalance's velocity reached 0.41 at np 6, and LargeMotion's
+0.34 at np 4.
+
+Every site that reads the env var moves in the floor's direction, and the
+control site does not move at all. So the deviation **enters through the far
+field**, and it does not come from migration, maintenance or the integrator on
+their own. But the response is steeper than the floor (up to ~150x the floor
+ratio at 0.7), so the deviation is not "floor times a fixed gain below 1" either.
+Unmeasured candidates, recorded here and **not** pursued:
+(a) per-particle normalization, since all-positive charges make $|g|$ cancel at
+interior particles, which inflates a relative gradient error well past the floor
+the same way `matchesPriorReference`'s potential figure is inflated (step 3);
+(b) trajectory amplification through the tree changes of the dt = 1e-3 cases.
+Telling them apart needs a per-particle, per-step gradient error printed beside
+$|g|$, and that is its own task.
+
+**Per the task, stopped here.** A bound set over the AutoRebalance figures would
+be indistinguishable in the diff from a correct one. Setting bounds at the five
+sites that fit was also not done: they share the driver, and the defect has
+not been located.
+
+### Step 2 — `FP32_smokeTest` disabled
+
+Commented out in place (`tests/tstMultiSolve.hpp:1210`) under a block naming
+the ~0.277 (np 2) / 0.339 (np 3) gradient error, the `5.0e-2` budget it
+fails, and the README entry. README "Known Issues" retitled to
+"`SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks", with the
+re-enable condition. The rebuilt binary compiles; whether the case is absent from
+`--gtest_list_tests` was not checked, because the session stopped before the
+next job.
+
+### Step 3 — `matchesPriorReference`: measured, not applied
+
+From `f3bmo4JYikKh`, three passes, bit-identical at np 1, 2, 4, 6 and to 10+
+digits at 3, 5:
+
+| np | 1 | 2 | 3 | 4 | 5 | 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `pot_err` | 8.93e-04 | 2.43e-03 | 2.26e-02 | 6.77e-04 | **4.33e-02** | 1.77e-02 |
+| `grad_err` | 7.26e-05 | 1.29e-04 | **3.07e-04** | 2.38e-04 | 1.61e-04 | 2.56e-04 |
+
+- **The `5.0e-2` potential bound is not loose**, contrary to **R10**. The worst
+  reading, 4.33e-2 at np 5, uses 0.87 of it. The figure is per-particle
+  relative with mixed-sign charges (`q ~ U(-1, 1)`), so $|\phi| \to 0$ inflates
+  it, and the 64x spread across rank counts is that cancellation, not the far
+  field. Step 3's own recipe (2x the worst) would *loosen* it to 8.7e-2.
+  Leave it as it is (step 7).
+- **The `1.0e-1` gradient bound is 325x loose.** 2x the worst would be
+  `6.2e-4`, and the figure is stable enough to carry it. **Not applied**,
+  because the task stopped at step 1. It is the first bound to move when V1
+  resumes, since it does not depend on the step-1 finding: this test is the
+  per-solve far-field check that came out healthy.
+
+### Step 4 — `theta_canopy`: confirmed, satisfied by prior work
+
+Three passes × np 1-6: `theta_canopy` gradient `1.8651556395e-02` and potential
+`9.9666798509e-04`, identical at all 18 readings and matching the rationale
+block to every printed digit. `3.74e-02` is 2.005x the gradient. Constant
+and block unchanged.
+
+Found while there: the block's **`theta_ref` figures are stale**. It records
+gradient `7.0132e-04` / potential `1.8963e-05` (job `f3YfvsefN86T`), and this
+session measures `7.0717918545e-04` / `1.9263340835e-05`, identical at all 18
+readings. The arm still clears its untouched `1e-3` bar, at 1.41x rather than
+1.43x. The prose was left alone, since the decision covers the bar and the
+re-measure was not asked for. A later edit to that block should update it.
+
+### Step 5 — per-reason fallback assertion: implemented, compiled, not run
+
+In the probe block of `testMultiStepGravity` (only `M2L_BinEdge_Fallback`
+enables it), per rank and per solve: under `CANOPY_ENABLE_PROFILING`,
+`count_cap == 0`, `depth_dropped == 0`, and `range_guard + count_cap ==
+total_fallback_pair_count()`. Together with the existing `max_fallback > 0`,
+this pins every refusal to the range guard, the reason T1 identified, without
+asserting which rank holds the deep subtree. The `#else` branch asserts all
+three at `-1`, prints `sum identity SKIPPED` once, and never evaluates the sum,
+because `total_fallback_pair_count()` is ungated. **Both branches compile**
+(`build-tuolumne` and `build-tuolumne-noprof`, target
+`Canopy_Test_MultiSolve_MPI_SERIAL`). **Neither has been run.** T1's 42
+readings all satisfy the ON-branch assertions, but that is not a run of this
+code.
+
+### Doc corrections
+
+`tasks/tree-opt.md`: the `operatorCacheAcrossDrift*` citation
+`tstCartesianTaylorSolve.hpp:1040-1060` corrected to `:1040-1062` in
+**Current state**, B2 step 6 and **R9**. `:684`'s stale `fmm_tol=2e-2` prose
+is **not** corrected. It belongs with the bound change that did not happen.
+
+### Bugs only running revealed
+
+**`ctest --timeout 300` does not contain the np-3 hang under flux, it spreads
+it.** In `f3bn8EK66YaK` at theta 0.4, np 3 hung. ctest killed its `flux run`
+client at 300 s, but the flux sub-job kept running `--exclusive`, so np 4, 5
+and 6 sat in state `S` and each timed out at 300 s without starting
+(`flux proxy f3bn8EK66YaK flux jobs -a`: np 3 at 19.33 min `R`, the rest `S`).
+`flux cancel` on the sub-job freed the node, and np 4 then completed in 11 s
+into a client that was already gone. Net loss: np 3-6 at theta 0.4. The
+assumption in T1's log and in `run_ctest_t1.flux`, that 300 s bounds a hang
+without costing the other rank counts, is false on this system.
+`run_ctest_v1.flux` now runs a background watchdog that `flux cancel`s any
+sub-job running longer than 300 s. **The watchdog itself has not been run yet.**
+README's hang entry records this.
+
+Also: pdebug rejects `--time-limit` above 1 h at submit. Three passes of both
+stems take 424 s with no hang.
+
+**Affects:**
+- **V1** — resumes only once the AutoRebalance excess is attributed. When it
+  does, apply step 3's gradient bound (`6.2e-4`), keep the potential at
+  `5.0e-2`, run step 5's assertions and the watchdog script, and correct the
+  `:684` prose with the bound change.
+- **New task, before V1 resumes** — attribute AutoRebalance's np 5-6 deviation:
+  per-particle, per-step gradient error beside $|g|$ on that configuration, to
+  separate normalization from amplification from a far-field defect on the
+  multi-rank multi-step path.
+- **B1, A2, B2** — the six `fmm_tolerance` sites are still at `1.0e-8` and fail,
+  so they cannot gate these tasks. Use the `[multisolve-dev]` and
+  `[fusedm2l-dev]` before/after figures (deterministic to <=2.5 %) instead of
+  pass/fail.
+- **A3** — R10's before/after comparison can read `[multisolve-dev]` directly.
+  The spread to read against is <=2.5 %, not R6's ±25 %.
+- **R10** — `matchesPriorReference`'s potential bound is not loose (0.87
+  used). Only its gradient bound is.
+- **Every task whose script runs `MultiSolve` at np >= 3** — copy the watchdog
+  from `run_ctest_v1.flux`. `--timeout` alone loses every later rank count to
+  one hang.

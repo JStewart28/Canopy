@@ -152,7 +152,8 @@ dispatch_maintain( Solver& solver, AoSoA& particles, MultiSolveTest::Mode mode )
 }
 
 inline void testMultiStepGravity(
-    MultiSolveTest::Mode mode, int num_particles_per_rank, int num_steps,
+    MultiSolveTest::Mode mode, const char* case_label,
+    int num_particles_per_rank, int num_steps,
     double dt, double drift_multiplier, int ncrit, int max_depth,
     double tree_tolerance, int replication_depth, double fmm_tolerance,
     int* out_action_counts = nullptr,
@@ -396,6 +397,53 @@ inline void testMultiStepGravity(
                 depth_occ.c_str() );
             std::fflush( stdout );
 
+            // T1 step 1 found every refusal on this clustered fixture to be a
+            // RANGE-GUARD refusal (tasks/tree-opt-progress-log.md section
+            // T1). Asserted per rank rather than reported, so a change that
+            // moves refusals from one reason to another fails here instead
+            // of printing. Combined with the caller's max_fallback > 0, this
+            // pins range_guard > 0 too, without asserting which rank the
+            // partition gave the deep subtree to (risk R6).
+            const long long fb_range_guard =
+                ds.m2l_n_fallback_pairs_range_guard();
+            const long long fb_count_cap = ds.m2l_n_fallback_pairs_count_cap();
+            const long long fb_depth_dropped =
+                ds.m2l_n_fallback_pairs_depth_dropped();
+#ifdef CANOPY_ENABLE_PROFILING
+            // The column cap is at its default, so no budget refusal can
+            // occur and range_guard is the only reason available.
+            EXPECT_EQ( fb_count_cap, 0 )
+                << "nprocs " << nprocs << " rank " << rank << " step "
+                << step << ": a pair was refused a column by the count cap "
+                   "on a solve whose cap was never set, so the fallback "
+                   "population is no longer all range-guard refusals";
+            // A dropped pair is evaluated by neither a column nor the
+            // fallback, so its contribution is missing from the solve.
+            EXPECT_EQ( fb_depth_dropped, 0 )
+                << "nprocs " << nprocs << " rank " << rank << " step "
+                << step << ": a refused pair reached neither an operator "
+                   "column nor the fallback table";
+            EXPECT_EQ( fb_range_guard + fb_count_cap,
+                       ds.total_fallback_pair_count() )
+                << "nprocs " << nprocs << " rank " << rank << " step "
+                << step << ": the per-reason counters do not sum to the "
+                   "fallback total, so a refusal path is unaccounted for";
+#else
+            // Built without CANOPY_ENABLE_PROFILING: all three read -1, the
+            // "unavailable" sentinel, and NEVER 0. The sum identity is
+            // SKIPPED, not evaluated: total_fallback_pair_count() is NOT
+            // profiling-gated and reads a real count here, so -1 + -1
+            // against it is a claim about nothing.
+            EXPECT_EQ( fb_range_guard, -1 );
+            EXPECT_EQ( fb_count_cap, -1 );
+            EXPECT_EQ( fb_depth_dropped, -1 );
+            if ( rank == 0 && step == 0 )
+                std::printf( "[m2l-fallback-reason] sum identity SKIPPED: "
+                             "built without CANOPY_ENABLE_PROFILING, "
+                             "counters are sentinels\n" );
+            std::fflush( stdout );
+#endif
+
             const long long local_fb =
                 solver.downward().total_fallback_pair_count();
             long long global_fb = 0;
@@ -582,6 +630,24 @@ inline void testMultiStepGravity(
                 max_vel_rel = vrel;
         }
 
+        // UNCONDITIONAL. The bounds below are measured bounds, so the
+        // figures they are measured from have to be readable on a PASS and
+        // not only out of a failure message (risk R10: the distinguishing
+        // measurement is the deviation, not the pass/fail). Printed on rank
+        // 0 only, which is the only rank that holds the brute-force shadow.
+        //   max_pos_rel, max_vel_rel: dimensionless relative deviations,
+        //     >= 0, each the max over all particles of |fmm - brute| / |brute|
+        //     on the final state (position and velocity respectively);
+        //     the |brute| < 1e-10 particles fall back to the absolute
+        //     deviation, same units as the state itself.
+        //   tol: the per-call-site fmm_tolerance the two are checked against.
+        std::printf( "[multisolve-dev] case %s nprocs %d nsteps %d "
+                     "drift %.17g max_pos_rel %.17g max_vel_rel %.17g "
+                     "tol %.17g\n",
+                     case_label, nprocs, num_steps, drift_multiplier,
+                     max_pos_rel, max_vel_rel, fmm_tolerance );
+        std::fflush( stdout );
+
         EXPECT_LT( max_pos_rel, fmm_tolerance )
             << "FMM multi-step position deviates from brute-force; "
                "max relative error = "
@@ -603,6 +669,7 @@ inline void testMultiStepGravity(
 TEST( MultiSolve, StableTree_Migrate )
 {
     testMultiStepGravity( MultiSolveTest::Mode::Migrate,
+                          /*case=*/"StableTree_Migrate",
                           /*npp=*/200, /*nsteps=*/5,
                           /*dt=*/1.0e-4, /*drift_multiplier=*/1.0,
                           /*ncrit=*/16, /*max_depth=*/6,
@@ -619,6 +686,7 @@ TEST( MultiSolve, StableTree_Migrate )
 TEST( MultiSolve, IntermediateMotion_Rebalance )
 {
     testMultiStepGravity( MultiSolveTest::Mode::Rebalance,
+                          /*case=*/"IntermediateMotion_Rebalance",
                           /*npp=*/200, /*nsteps=*/5,
                           /*dt=*/1.0e-3, /*drift_multiplier=*/5.0,
                           /*ncrit=*/16, /*max_depth=*/6,
@@ -636,6 +704,7 @@ TEST( MultiSolve, IntermediateMotion_Rebalance )
 TEST( MultiSolve, LargeMotion_Rebuild )
 {
     testMultiStepGravity( MultiSolveTest::Mode::Rebuild,
+                          /*case=*/"LargeMotion_Rebuild",
                           /*npp=*/200, /*nsteps=*/4,
                           /*dt=*/1.0e-3, /*drift_multiplier=*/50.0,
                           /*ncrit=*/16, /*max_depth=*/6,
@@ -653,6 +722,7 @@ TEST( MultiSolve, AutoMaintain )
 {
     int counts[3] = { 0, 0, 0 };
     testMultiStepGravity( MultiSolveTest::Mode::Auto,
+                          /*case=*/"AutoMaintain",
                           /*npp=*/200, /*nsteps=*/5,
                           /*dt=*/1.0e-3, /*drift_multiplier=*/5.0,
                           /*ncrit=*/16, /*max_depth=*/6,
@@ -689,6 +759,7 @@ TEST( MultiSolve, AutoRebalance )
 {
     int counts[3] = { 0, 0, 0 };
     testMultiStepGravity( MultiSolveTest::Mode::Auto,
+                          /*case=*/"AutoRebalance",
                           /*npp=*/200, /*nsteps=*/8,
                           /*dt=*/1.0e-3, /*drift_multiplier=*/2.0,
                           /*ncrit=*/16, /*max_depth=*/6,
@@ -728,13 +799,16 @@ TEST( MultiSolve, AutoRebalance )
 // scale. The column cap is left at its default, so no refusal here can be
 // a count-cap refusal. The probe inside testMultiStepGravity sums
 // fallback pairs across ranks each solve and reports the running max; we
-// assert it's strictly positive, and it prints the per-reason breakdown
-// per (nprocs, rank) so which bound fired is on the record.
+// assert it's strictly positive. The probe also prints the per-reason
+// breakdown per (nprocs, rank) and ASSERTS it: every refusal is a range-guard
+// refusal (count_cap == 0, depth_dropped == 0, and the reasons sum to the
+// total), skipped under the -1 sentinel when profiling is off.
 //---------------------------------------------------------------------------//
 TEST( MultiSolve, M2L_BinEdge_Fallback )
 {
     long long max_fallback = 0;
     testMultiStepGravity( MultiSolveTest::Mode::Migrate,
+                          /*case=*/"M2L_BinEdge_Fallback",
                           /*npp=*/300, /*nsteps=*/2,
                           /*dt=*/1.0e-4, /*drift_multiplier=*/1.0,
                           /*ncrit=*/8, /*max_depth=*/8,
@@ -979,6 +1053,21 @@ TEST( SolveFusedM2L, matchesPriorReference )
     // complete-regression bug in the fused kernel — even a ~5% bound
     // would fire on, e.g., a sign error in the conjugate-symmetry
     // expansion or an op_idx misalignment.
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+    if ( rank == 0 )
+    {
+        // UNCONDITIONAL, same reason as [multisolve-dev] above: the bounds
+        // below are measured, so the figures must be readable on a pass.
+        // pot_err, grad_err: dimensionless relative deviations, >= 0, each
+        // the max over particles of |fmm - brute| / |brute| in potential and
+        // in gradient magnitude. Broadcast from rank 0 by the harness.
+        std::printf( "[fusedm2l-dev] case matchesPriorReference nprocs %d "
+                     "pot_err %.17g grad_err %.17g\n",
+                     nprocs, pot_err, grad_err );
+        std::fflush( stdout );
+    }
     EXPECT_LT( pot_err, 5.0e-2 );
     EXPECT_LT( grad_err, 1.0e-1 );
 }
@@ -1118,47 +1207,61 @@ TEST( SolveFusedM2L, multipleSolvesIdempotent )
 }
 
 //---------------------------------------------------------------------------//
-// SolveFusedM2L.FP32_smokeTest: the kernel templates support Scalar=float.
-// After scale-normalization (M̄ = M/w^{n+1}, L̄ = L·w^j) per-coefficient
-// intermediates are O(q · 2^max_d) — linear in depth, not geometric — so
-// FP32 stays well-conditioned. The |dd|-dependent factor 2^{j·|dd|} in
-// T̃ caps precision loss at ~8 bits when |dd| ≤ 4, which is what the FP32
-// path of M2L_KEY_DD_MAX enforces.
+// DISABLED: SolveFusedM2L.FP32_smokeTest, pending investigation of a multi-rank
+// FP32 accuracy defect. Commented out rather than filtered so the carve-out
+// is visible in the diff and the case is absent from the binary.
 //
-// At P=4, the Greengard truncation floor is already ~5e-3 for a uniform
-// 400-particle problem; FP32 round-off adds maybe ~1e-4 relative, so a
-// 1e-2 bound on max-rel error is robust.
+// It passes at np 1 and fails at np 2-6 with a max relative GRADIENT error of
+// ~0.277 at np 2 (0.339 at np 3) against its own 5.0e-2 budget -- 5.5x over,
+// not marginal, and identical to FP32 noise on Tuolumne and Dane. That
+// magnitude and its rank-count dependence point at a multi-rank FP32
+// accumulation defect in the fused-M2L solve, which README.md "Known Issues"
+// ("SolveFusedM2L.FP32_smokeTest is disabled ...") carries.
+//
+// DO NOT re-enable by widening the 5.0e-2 budget: a widened budget retires
+// the only signal that defect has. Re-enable as written once the defect is
+// fixed. (tasks/tree-opt.md V1 step 2.)
 //---------------------------------------------------------------------------//
-TEST( SolveFusedM2L, FP32_smokeTest )
-{
-    double max_pot_rel = 0.0, max_grad_rel = 0.0;
-    MultiSolveTest::run_fmm_and_compare<4, float>(
-        /*num_particles=*/400, /*mac_theta=*/0.5, /*ncrit=*/16,
-        /*max_depth=*/6, max_pot_rel, max_grad_rel );
-
-    int rank;
-    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
-    if ( rank == 0 )
-    {
-        // Both thresholds are deliberately loose. Three error sources
-        // stack on top of the Greengard P=4 truncation floor:
-        //   1. FP32 round-off in M2L/L2L/M2M (~few × 10^{-3} per pair).
-        //   2. Non-deterministic cross-rank summation order (grows with
-        //      nprocs; at np=6 we see ~1e-2 on potential).
-        //   3. Gradient is via finite differences at h=1e-5, which loses
-        //      most of FP32's mantissa.
-        // 5e-2 is the smoke-test budget: tight enough to catch a wrong
-        // scale exponent in any of P2M / M2M / M2L / L2L / L2P, loose
-        // enough to not false-fail on np ∈ [1, 6]. Production FP32
-        // verification belongs in a problem-specific oracle.
-        EXPECT_LT( max_pot_rel, 5.0e-2 )
-            << "FP32 max relative potential error " << max_pot_rel
-            << " exceeds the 5e-2 budget";
-        EXPECT_LT( max_grad_rel, 5.0e-2 )
-            << "FP32 max relative gradient error " << max_grad_rel
-            << " exceeds the 5e-2 budget";
-    }
-}
+// // SolveFusedM2L.FP32_smokeTest: the kernel templates support Scalar=float.
+// // After scale-normalization (M̄ = M/w^{n+1}, L̄ = L·w^j) per-coefficient
+// // intermediates are O(q · 2^max_d) — linear in depth, not geometric — so
+// // FP32 stays well-conditioned. The |dd|-dependent factor 2^{j·|dd|} in
+// // T̃ caps precision loss at ~8 bits when |dd| ≤ 4, which is what the FP32
+// // path of M2L_KEY_DD_MAX enforces.
+// //
+// // At P=4, the Greengard truncation floor is already ~5e-3 for a uniform
+// // 400-particle problem; FP32 round-off adds maybe ~1e-4 relative, so a
+// // 1e-2 bound on max-rel error is robust.
+// TEST( SolveFusedM2L, FP32_smokeTest )
+// {
+//     double max_pot_rel = 0.0, max_grad_rel = 0.0;
+//     MultiSolveTest::run_fmm_and_compare<4, float>(
+//         /*num_particles=*/400, /*mac_theta=*/0.5, /*ncrit=*/16,
+//         /*max_depth=*/6, max_pot_rel, max_grad_rel );
+//
+//     int rank;
+//     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+//     if ( rank == 0 )
+//     {
+//         // Both thresholds are deliberately loose. Three error sources
+//         // stack on top of the Greengard P=4 truncation floor:
+//         //   1. FP32 round-off in M2L/L2L/M2M (~few × 10^{-3} per pair).
+//         //   2. Non-deterministic cross-rank summation order (grows with
+//         //      nprocs; at np=6 we see ~1e-2 on potential).
+//         //   3. Gradient is via finite differences at h=1e-5, which loses
+//         //      most of FP32's mantissa.
+//         // 5e-2 is the smoke-test budget: tight enough to catch a wrong
+//         // scale exponent in any of P2M / M2M / M2L / L2L / L2P, loose
+//         // enough to not false-fail on np ∈ [1, 6]. Production FP32
+//         // verification belongs in a problem-specific oracle.
+//         EXPECT_LT( max_pot_rel, 5.0e-2 )
+//             << "FP32 max relative potential error " << max_pot_rel
+//             << " exceeds the 5e-2 budget";
+//         EXPECT_LT( max_grad_rel, 5.0e-2 )
+//             << "FP32 max relative gradient error " << max_grad_rel
+//             << " exceeds the 5e-2 budget";
+//     }
+// }
 
 //---------------------------------------------------------------------------//
 
