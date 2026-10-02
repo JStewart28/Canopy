@@ -334,15 +334,15 @@ Also true now:
   (`src/Canopy_TreeBuilder.hpp:608-635`) and is not quantized.
 - **There is no `FmmConfig` knob for tree balance.**
 - **The `regression`-labeled stem exercises `LaplaceKernel` only.**
-  `REGRESSION_MPI_TESTS` is
-  the single stem `MultiSolve` (`tests/CMakeLists.txt:65-67`), and
-  `tstMultiSolve.hpp` instantiates `Canopy::Solver<..., Scalar, P, 1>`
-  (`:744-745`) without a far-field argument, so it takes the default
-  `FarField = LaplaceKernel` (`src/Canopy_Solver.hpp:146-148`). **No
-  `regression`-labeled test instantiates `CartesianTaylorBasis.`** Its only direct-sum coverage is
-  `CartesianTaylorSolve.matchesDirectSumThetaRef` and
-  `...ThetaCanopy` (`tests/tstCartesianTaylorSolve.hpp:976-1006`), both in the
-  `unit` tier, and that is where its coverage stays. So a chain-B change is
+  `REGRESSION_MPI_TESTS` is the single stem `MultiSolve`
+  (`tests/CMakeLists.txt:65-67`), and `tstMultiSolve.hpp` instantiates
+  `Canopy::Solver<..., Scalar, P, 1>` (`:744-745`) without a far-field
+  argument, so it takes the default `FarField = LaplaceKernel`
+  (`src/Canopy_Solver.hpp:146-148`). **No `regression`-labeled test
+  instantiates `CartesianTaylorBasis.`** Its only direct-sum coverage is
+  `CartesianTaylorSolve.matchesDirectSumThetaRef` and `...ThetaCanopy`
+  (`tests/tstCartesianTaylorSolve.hpp:976-1006`), both in the `unit` tier, and
+  that is where its coverage stays. So a chain-B change is
   checked by the `unit` tier alone: B1's and B2's exit criteria are the only
   thing standing between a broken `CartesianTaylorBasis` and a green run of
   whatever stems some other task happens to name.
@@ -515,8 +515,9 @@ absence of any accuracy claim (`:1040-1060`).
    $10^{-3}$ bar alone — it is an accuracy *claim* about the method, not a
    regression bound, and tightening it would change what the test asserts.
 3. **Assert the per-reason fallback breakdown where the fixture already
-   produces it.** T1 reports it on the clustered test in the `MultiSolve` stem; turn that report
-   into an assertion on the reason T1 identified, so a later change that
+   produces it.** T1 reports it on the clustered test in the `MultiSolve`
+   stem; turn that report into an assertion on the reason T1 identified, so a
+   later change that
    silently moves refusals from one reason to the other fails rather than
    prints. Keep the sum identity and the `depth_dropped == 0` assertion, and
    keep both skipped under the $-1$ sentinel.
@@ -736,11 +737,10 @@ assertions (`tests/tstFarFieldContract.hpp:934-937`).
 
 **Exit criterion:** six stems, and **`CartesianTaylorSolve` is the authority
 here while `MultiSolve` is not** — the `MultiSolve` stem instantiates
-`LaplaceKernel` only, so
-it would pass with `CartesianTaylorBasis` wholly broken, and
-`CartesianTaylorSolve`'s two direct-sum arms are the only checks this change can
-fail on accuracy. `MultiSolve` and `LaplaceSolve` are here to prove the other
-basis did **not** move.
+`LaplaceKernel` only, so it would pass with `CartesianTaylorBasis` wholly
+broken, and `CartesianTaylorSolve`'s two direct-sum arms are the only checks
+this change can fail on accuracy. `MultiSolve` and `LaplaceSolve` are here to
+prove the other basis did **not** move.
 
 ```bash
 make -j Canopy_Test_CartesianTaylorSolve_MPI_SERIAL Canopy_Test_FarFieldContract_MPI_SERIAL \
@@ -853,9 +853,9 @@ fallback-to-GEMM time ratio, both in the log.
    inputs — this is the one task whose correct answer is a number from an
    earlier task and not a design choice.
 2. If the arithmetic favours balancing, change the default to 1 and re-run the
-   seven stems below. If it does not, **leave the default off and say so**: a knob that is
-   measured not to pay is a successful outcome for this task, not a failure, and
-   the measurement belongs in the log either way.
+   seven stems below. If it does not, **leave the default off and say so**: a
+   knob that is measured not to pay is a successful outcome for this task, not
+   a failure, and the measurement belongs in the log either way.
 3. Update `README.md` per `CLAUDE.md`'s keep-in-sync rule, since this changes a
    public configuration default.
 
@@ -963,14 +963,14 @@ implements anything, and A2's own assertion that the multiplier matches the
 prediction. If they disagree, the cost model is wrong and A3's arithmetic cannot
 be trusted.
 
-**R2 — Balancing changes accuracy, and `MultiSolve` does not notice.** A balanced
-tree is a different tree: cells that were leaves become internal, so pairs move
-between the P2P and M2L paths and the far-field approximation applies at
-different scales. Presentation: a shifted accuracy figure in `MultiSolve`, or no
-visible change at all if its tolerance is loose enough to absorb it. The second
-is worse. Distinguishing measurement: A3 compares `MultiSolve`'s own accuracy
-figures before and after the default changes, rather than reading a pass as
-evidence of no change.
+**R2 — Balancing changes accuracy, and `MultiSolve` does not notice.** A
+balanced tree is a different tree: cells that were leaves become internal, so
+pairs move between the P2P and M2L paths and the far-field approximation
+applies at different scales. Presentation: a shifted accuracy figure in
+`MultiSolve`, or no visible change at all if its tolerance is loose enough to
+absorb it. The second is worse. Distinguishing measurement: A3 compares
+`MultiSolve`'s own accuracy figures before and after the default changes,
+rather than reading a pass as evidence of no change.
 
 **R3 — `key_needs_dd = false` on a basis whose operator does depend on `dd`.**
 That aliases two different operators onto one column, and the symptom is a
