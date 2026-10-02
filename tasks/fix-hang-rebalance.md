@@ -110,7 +110,6 @@ ejected particle (mechanisms a and c) and says nothing about (b).
 | Build directory | `build-tuolumne/` (profiling ON); check the cache, not the script | A profiling-OFF build reads `-1` from every per-reason counter, indistinguishable from a reading. |
 | Determinism | report per `(nprocs, rank)` from **two** runs, and state whether they agree | The partition is nondeterministic at np >= 3 (README "Known Issues"). V1 measured the accuracy figures as reproducible to ≤ 2.5 %. |
 | Failure behavior | a violated precondition throws or aborts with a message naming it; never a silent repair, a retry, or a longer timeout | A hang "fixed" by retrying is still present. |
-| Isolation from E1 | H2 works in its own git worktree at `../Canopy-h2`, branch `fix-hang-h2` cut from `investigate-m2l-cap`, with its own `build-tuolumne-h2/` configured by `run_cmake_tuolumne.sh`. Its job scripts set `CANOPY_SRC` and `CANOPY_BUILD` to that checkout. It pushes `fix-hang-h2` and does not merge it into `investigate-m2l-cap`. | E1 edits `tests/tstMultiSolve.hpp` and rebuilds `build-tuolumne/tests/Canopy_Test_MultiSolve_MPI_SERIAL` in the main checkout, and may do so while H2 runs. A shared tree would compile each task's uncommitted edits into the other's binary. Every existing flux script hardcodes the main checkout's paths. |
 | Formatting | never run clang-format | `CLAUDE.md`. |
 | Comments | units, signs and ranges on every declaration added | Probe quantities are relative or absolute depending on normalization. Say which. |
 
@@ -222,8 +221,8 @@ progress log, section H1.
 
 **Depends on:** H1 **DONE**.
 **Fill in:** `src/Canopy_TreePartitioner.hpp`: the Zoltan2 adapter type at
-`:367`. A copy of `scripts/tuolumne/run_ctest_h1.flux` with `CANOPY_SRC` and
-`CANOPY_BUILD` pointing at the H2 checkout (Conventions, "Isolation from E1").
+`:367`. New `scripts/tuolumne/run_ctest_h2.flux`, which sources the
+watchdog and runs against `build-tuolumne/`.
 README "Known Issues": remove the np-3 hang entry when fixed, and add an entry
 for Zoltan2 still running on HIP under a HIP `ExecutionSpace`.
 **Reference:** the collectives on the rebuild path. These are the bounding-box
@@ -262,8 +261,8 @@ The fix must remove the cause. A retry, a longer timeout or a skipped case is
 not a fix.
 
 The node change moves the partition at np >= 3 (R3). H2's log section states
-that the partition path changed, and that any E1 or V1 figure at np >= 3
-measured before `fix-hang-h2` merges is stale.
+that the partition path changed. V1's recorded np >= 3 figures are then stale,
+and E1 measures on the post-H2 partition.
 
 **Exit criterion:** both directions.
 - **Fixed:** 15 consecutive
@@ -278,8 +277,9 @@ measured before `fix-hang-h2` merges is stale.
 
 ### E1 — Classify the AutoRebalance excess — **NOT STARTED**
 
-**Depends on:** H1 **DONE**. Its watchdog keeps an np-3 hang from costing
-np 4-6 of a measurement pass.
+**Depends on:** H1 **DONE**: its watchdog keeps an np-3 hang from costing
+np 4-6 of a measurement pass. H2 **DONE**: H2 changes the np >= 3 partition
+that E1 measures.
 **Fill in:** `tests/tstMultiSolve.hpp`: two helpers beside `get_test_mac_theta`
 (`:38-43`); a per-step probe in the time loop of `testMultiStepGravity`
 (`:354` onward, after `solve()` and before the integrate kernel); the
@@ -364,11 +364,10 @@ spans runs with and without `-V`.
 
 **R3 — H2's fix moves every np >= 3 accuracy figure.** Moving Zoltan2 onto the
 host node changes the partition. Every `[multisolve-dev]` figure V1 recorded at
-np >= 3 is then stale, and so is any E1 figure at np >= 3 measured in the main
-checkout before `fix-hang-h2` merges. Presentation: V1 or E1 resumes and its
-np >= 3 figures no longer reproduce. Response: H2's log section states that the
-partition path changed. E1 and V1 re-measure np >= 3 on the merged tree before
-classifying or pinning anything.
+np >= 3 is then stale. Presentation: V1 resumes and its np >= 3 table no
+longer reproduces. Response: H2's log section states that the partition path
+changed. E1 runs after H2 and measures on the new partition. V1 re-measures
+np >= 3 before pinning anything.
 
 **R4 — Amplification and a defect present at once.** Mechanism (a) is real at
 some particles while (b) or (c) inflates others. Presentation: E1 finds a close
