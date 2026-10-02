@@ -317,9 +317,12 @@ records one classification with its deciding figures. Both directions:
 - **Measuring:** at np 1, `CANOPY_MAC_THETA=0.7` raises the per-step
   field-scale error above its theta-0.5 value. This shows the probe measures
   the far field.
-- **Inert when off:** with the probe unset, the np 1-2 `[multisolve-dev]`
-  figures of all six sites match the V1 table (`tree-opt-progress-log.md`
-  section V1) to every printed digit. np 1-2 are deterministic.
+- **Inert when off:** with the probe unset, the 12 np 1-2 `[multisolve-dev]`
+  lines (six sites, two rank counts) match the corresponding lines of
+  `canopy-v1.f3bmo4JYikKh.log` (repo root, untracked; V1's step-1 job) character
+  for character. np 1-2 are deterministic: all three passes of that job print
+  each of the 12 identically. The V1 table in `tree-opt-progress-log.md` is
+  rounded to three figures and cannot decide this.
 
 ### E2 — Resolve the excess per E1's classification — **NOT STARTED**
 
