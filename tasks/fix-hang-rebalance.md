@@ -1,6 +1,6 @@
 # The np-3 `MultiSolve` hang, and `AutoRebalance`'s excess deviation
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 
 ## Problem
 
@@ -103,7 +103,7 @@ ejected particle (mechanisms a and c) and says nothing about (b).
 | Probe output | one line per step on rank 0, tag `[multisolve-probe]`, printed with `%.17g` | Matches `[multisolve-dev]` (`:644`). A line must be diffable across runs. |
 | Normalization | report **both** the per-particle max relative error and the field-scale error $\max_i \lvert\Delta g_i\rvert / \max_i \lvert g_i\rvert$ | Per-particle relative error is inflated wherever $\lvert g_i\rvert$ cancels, the way `matchesPriorReference`'s potential figure is (V1 log). The field-scale rule is the suite's own: `field_scales` (`tests/tstLaplaceSolve.hpp:1162-1184`), whose comment makes the same cancellation argument. Reading one figure without the other is how a normalization artifact gets reported as a defect. |
 | Floor | $\theta^{P+1}$, `1.95e-3` at `theta = 0.5`, `P_ORDER = 8` | The figure every task here reads against, stated once. |
-| Watchdog | `scripts/tuolumne/flux_watchdog.sh`, **sourced** by a batch script; starts a background loop and exports `watchdog_stop` | A copy per script drifts. The loop already exists inline at `scripts/tuolumne/run_ctest_v1.flux:69-90`, which H1 replaces with the sourced helper. |
+| Watchdog | `scripts/tuolumne/flux_watchdog.sh`, **sourced** by a batch script after setting `WATCHDOG_S`; starts a background loop; `watchdog_stop` ends it, and `watchdog_wait_idle` blocks until no sub-job is running | A copy per script drifts. Call `watchdog_wait_idle` after any ctest that may have timed out: ctest returns before the watchdog has stacked and cancelled the hung sub-job. |
 | Watchdog threshold | `WATCHDOG_S=300`, equal to ctest `--timeout` | ~20x the slowest observed np runtime (15.4 s), so a slow pass is never cancelled. |
 | Batch preamble | copied verbatim from `scripts/tuolumne/run_ctest_v1.flux:40-65`, plus `flux_watchdog.sh` | Includes the static-TLS workaround, without which every binary aborts before `main`. Walltime option is `--time-limit` (≤ 60 min on pdebug); `--flags=waitable` is rejected; wait with `flux job status <id>`. |
 | Provenance | every job echoes `spack env status`, `CC --version`, commit SHA, `git status --porcelain`, submit command and the build's `Canopy_ENABLE_PROFILING` from `CMakeCache.txt` | A number with no provenance cannot be re-derived. |
@@ -128,17 +128,15 @@ ejected particle (mechanisms a and c) and says nothing about (b).
 
 ## Current state
 
-- `scripts/tuolumne/run_ctest_v1.flux:69-90` runs an inline watchdog that
-  cancels sub-jobs older than 300 s. **It has never run**, and it captures no
-  stacks. `scripts/tuolumne/run_ctest_t1.flux` and every other script have no
-  watchdog.
+- `scripts/tuolumne/flux_watchdog.sh` stacks, then cancels, any sub-job older
+  than `WATCHDOG_S`. `run_ctest_v1.flux` and `run_ctest_h1.flux` source it;
+  every other script has no watchdog.
 - ctest launches each MPI test as `flux run --ntasks N --nodes=1 --exclusive
   --cores-per-task=1` through the `MPIEXEC_*` overrides in
   `run_cmake_tuolumne.sh:10-12`. The batch script runs on the same single node
-  as its sub-jobs, so `pgrep` and `gstack` there see every rank. `gstack`,
-  `gdb` and `eu-stack` are in `/usr/bin` on the login node, with
-  `kernel.yama.ptrace_scope = 0`. **None has been checked on a compute
-  node.**
+  as its sub-jobs, so `gstack` there sees every rank. `kernel.yama.ptrace_scope`
+  is `0` on the compute nodes, and `gstack` attaches to the test ranks
+  (`fix-hang-rebalance-progress-log.md` section H1).
 - `Solver::rebuild` (`src/Canopy_Solver.hpp:399-404`) is `_full_setup`
   (`:549-635`). It rebuilds the tree, re-runs the Zoltan2 partition
   (`TreePartitioner::partition_leaves`, `src/Canopy_TreePartitioner.hpp:314-440`),
@@ -169,7 +167,7 @@ signature, or reopening a question this document treats as settled.
 
 ## Task sequence
 
-### H1 — Contain the np-3 hang and capture its stacks — **NOT STARTED**
+### H1 — Contain the np-3 hang and capture its stacks — **DONE**
 
 **Depends on:** none.
 **Fill in:** new `scripts/tuolumne/flux_watchdog.sh`;
@@ -210,6 +208,14 @@ README "Known Issues", the np-3 hang entry.
 Failure direction: the self-test proves the watchdog cancels and captures. If
 20 np-3 runs complete with no hang, record that as the finding, with its
 $(2/3)^{20}$ odds, and stop; do not run more to force one.
+
+**Met.** Job `f3bnfasqQDAo`. The self-test sub-job was cancelled at a runtime
+of 303.6 s with exactly three `sleep` stacks, each a direct child of its
+`flux-shell` (`matched=3 children=3 nonempty=3`), and the np-4 `hostname`
+follow-on then ran. In the np-3 loop, run 1 completed and run 2 hung in
+`MultiSolve.LargeMotion_Rebuild`. The watchdog cancelled it at 302.2 s with
+non-empty `gstack` captures of all three ranks. The stacks are verbatim in the
+progress log, section H1.
 
 ### H2 — Name the hang's mechanism and fix it — **NOT STARTED**
 

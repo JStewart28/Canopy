@@ -536,9 +536,19 @@ it and also times out without ever starting. Measured in flux job
 `f3bn8EK66YaK`: the np 3 sub-job was still running at 19.5 min while np 4, 5 and
 6 waited, and cancelling it inside the allocation
 (`flux proxy <jobid> flux cancel <subjob>`) let np 4 finish in 11 s.
-`scripts/tuolumne/run_ctest_v1.flux` runs a watchdog that cancels any sub-job
-older than 300 s, so a hang costs one rank count rather than the rest of the
-pass.
+`scripts/tuolumne/flux_watchdog.sh`, sourced by a flux batch script, contains
+it. The watchdog stacks (`gstack`) and then cancels any sub-job older than
+`WATCHDOG_S`, so a hang costs one rank count rather than the rest of the pass.
+`scripts/tuolumne/run_ctest_v1.flux` and `run_ctest_h1.flux` source it.
+
+**Captured stacks.** `scripts/tuolumne/run_ctest_h1.flux` (flux job
+`f3bnfasqQDAo`) hung on its second np=3 run, in
+`MultiSolve.LargeMotion_Rebuild`. One rank sat inside Zoltan2 MJ
+(`TreePartitioner::partition_leaves` → `PartitioningProblem::solve`) in a
+`hipDeviceSynchronize`. The other two waited in `partition_leaves`'s
+`MPI_Bcast`. The stacks, verbatim, are in
+`tasks/fix-hang-rebalance-progress-log.md` section H1. The mechanism is not yet
+diagnosed (task H2 in `tasks/fix-hang-rebalance.md`).
 
 ### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
 

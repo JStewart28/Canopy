@@ -66,28 +66,11 @@ echo "=================="
 
 cd ${CANOPY_BUILD}
 
-# WATCHDOG. ctest --timeout alone does NOT bound the np-3 hang on this
-# system: on timeout ctest kills the `flux run` client, but the flux job it
-# launched keeps running and keeps the node --exclusive, so every later rank
-# count sits in state S behind it and times out too without ever starting
-# (measured: flux job f3bn8EK66YaK, np 3 sub-job still R at 19.5 min while
-# np 4/5/6 were S). This loop cancels any sub-job in this allocation that has
-# run longer than WATCHDOG_S seconds, so the hang costs one rank count, not
-# the rest of the pass. WATCHDOG_S matches the ctest --timeout below.
+# Watchdog: cancels (after stack-sampling) any sub-job older than WATCHDOG_S,
+# so an np-3 hang costs one rank count, not the rest of the pass. WATCHDOG_S
+# matches the ctest --timeout below.
 WATCHDOG_S=300
-(
-    while true; do
-        flux jobs --filter=running --no-header -o '{id} {runtime}' |
-            while read -r jid rt; do
-                if [ "${rt%.*}" -gt ${WATCHDOG_S} ]; then
-                    echo "### watchdog: cancelling sub-job ${jid} after ${rt%.*} s ###"
-                    flux cancel "${jid}"
-                fi
-            done
-        sleep 15
-    done
-) &
-watchdog_pid=$!
+source ${CANOPY_SRC}/scripts/tuolumne/flux_watchdog.sh
 
 rc_all=0
 for i in 1 2 3; do
@@ -104,6 +87,6 @@ for i in 1 2 3; do
     if [ ${rc_ms} -ne 0 ]; then rc_all=${rc_ms}; fi
 done
 
-kill ${watchdog_pid} 2>/dev/null
+watchdog_stop
 echo "### overall rc=${rc_all} ###"
 exit ${rc_all}
