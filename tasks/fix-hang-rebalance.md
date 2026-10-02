@@ -217,7 +217,7 @@ follow-on then ran. In the np-3 loop, run 1 completed and run 2 hung in
 non-empty `gstack` captures of all three ranks. The stacks are verbatim in the
 progress log, section H1.
 
-### H2 — Name the hang's mechanism and fix it — **NOT STARTED**
+### H2 — Name the hang's mechanism and fix it — **DONE**
 
 **Depends on:** H1 **DONE**.
 **Fill in:** `src/Canopy_TreePartitioner.hpp`: the Zoltan2 adapter type at
@@ -274,6 +274,15 @@ and E1 measures on the post-H2 partition.
   watchdog cancels. At ~1 in 3 it misses one with probability
   $(2/3)^{20} \approx 3 \times 10^{-4}$. If the reverted build does not hang in
   20 runs, the result is inconclusive: stop and report.
+
+**Met.** Zoltan2 MJ was running on Tpetra's default HIP node. It now runs on the
+partitioner's `ExecutionSpace`, through `Zoltan2::BasicUserTypes`; templating
+`Tpetra::Map` alone does not reach Zoltan2's `node_t` (progress log, section
+H2). **Fixed:** job `f3bnvGYaSqWP`, 15 of 15 np-3 runs completed with no
+watchdog cancellation. **Checked:** job `f3bnyu3peHWw`, on the reverted build,
+hung on run 1 and was cancelled at 302.3 s, with the same stack signature as H1.
+Job `f3bnvGg3MDo5`: two np 1-6 passes print identical `[multisolve-dev]` lines,
+and the np 1-2 lines match `canopy-v1.f3bmo4JYikKh.log`.
 
 ### E1 — Classify the AutoRebalance excess — **NOT STARTED**
 

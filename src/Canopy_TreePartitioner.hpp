@@ -26,13 +26,14 @@
 #include <Teuchos_DefaultMpiComm.hpp>
 #include <Teuchos_DefaultSerialComm.hpp>
 #include <Teuchos_ParameterList.hpp>
-#include <Tpetra_Map.hpp>
+#include <Tpetra_KokkosCompat_ClassicNodeAPI_Wrapper.hpp>
 
 #include <mpi.h>
 
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <type_traits>
 #include <typeinfo>
 #include <unordered_map>
 #include <vector>
@@ -364,7 +365,22 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
     // Create Zoltan2 adapter
     // BasicVectorAdapter needs:
     //   numIds, globalIds, coords, weights
-    using adapter_t = Zoltan2::BasicVectorAdapter<Tpetra::Map<int, int64_t>>;
+    // Zoltan2 runs on the partitioner's execution space. Its node comes from
+    // InputTraits<User>, which defaults to Tpetra's default node (HIP in this
+    // build) for any User without a specialization, Tpetra::Map included; MJ's
+    // device fences there stall intermittently at np >= 3 even for a Serial
+    // solver (tasks/fix-hang-rebalance-progress-log.md, H1). BasicUserTypes
+    // sets the node and keeps Zoltan2's default scalar/lno/gno.
+    using zoltan_node_t =
+        Tpetra::KokkosCompat::KokkosDeviceWrapperNode<ExecutionSpace>;
+    using adapter_t = Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<
+        Zoltan2::default_scalar_t, Zoltan2::default_lno_t,
+        Zoltan2::default_gno_t, zoltan_node_t>>;
+    static_assert(
+        std::is_same_v<typename adapter_t::node_t::execution_space,
+                       ExecutionSpace>,
+        "partition_leaves: Zoltan2 must run on the partitioner's "
+        "ExecutionSpace, not Tpetra's default node" );
     // Must also use Zoltan types
     using glbl_id_t = typename adapter_t::gno_t;
     using scalar_t = typename adapter_t::scalar_t;

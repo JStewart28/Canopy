@@ -471,6 +471,11 @@ test binaries. To be triaged in a separate session: either make the partitioner
 deterministic (a deterministic algorithm, or a seeded / host-serial MJ) or cache
 and reuse a committed assignment.
 
+With MJ on a host node (the Serial solver since `fix-hang-rebalance` H2), two
+`MultiSolve` np 1-6 passes print identical `[multisolve-dev]` lines at every
+rank count (flux job `f3bnvGg3MDo5`). Run-to-run variation on a HIP
+`ExecutionSpace` has not been re-measured.
+
 ### Six `MultiSolve` tests fail the `1e-8` multi-step check at every rank count
 
 `ctest --output-on-failure -L regression -R MPI_SERIAL` does not currently pass.
@@ -511,44 +516,17 @@ and rerunning reproduces the identical error values to every digit
 Whether these failures share a cause with the partitioner non-determinism above
 has not been investigated.
 
-### The `regression` gate hangs intermittently at np=3
+### Zoltan2 runs on HIP when the solver's `ExecutionSpace` is HIP
 
-`Canopy_Test_MultiSolve_MPI_SERIAL_np_3` sometimes hangs until the scheduler
-wall kills it, and sometimes does not, with no change to the command, the
-checkout or the binary. Both behaviours were observed on the same build of
-commit `64d1648`: one run of the gate command above completed all six rank
-counts in 62 s with no hang at all (flux job `f3XUAWAy6WFR`), while a later run
-of the same script over the same binary path hung at np=3 for over ten minutes
-and was cancelled (flux job `f3XUPJqSuqdh`).
-
-Because it is intermittent, a clean run is not evidence the hang is gone, and
-15 minutes of wall is not a safe budget for this gate. The `SingleSolve` entry
-below describes a *reproducible* np=3 hang with the same signature that occurs
-only when `SingleSolve` shares the `ctest` process; this one occurs with
-`MultiSolve` running alone, so the two are not known to be the same defect. The
-run-to-run variation is shared with the partitioner non-determinism above, which
-is the first thing to rule out.
-
-**`ctest --timeout` does not contain the hang under flux.** On timeout ctest
-kills the `flux run` client, but the flux job it launched keeps running and
-holds the node `--exclusive`, so every later rank count sits in state `S` behind
-it and also times out without ever starting. Measured in flux job
-`f3bn8EK66YaK`: the np 3 sub-job was still running at 19.5 min while np 4, 5 and
-6 waited, and cancelling it inside the allocation
-(`flux proxy <jobid> flux cancel <subjob>`) let np 4 finish in 11 s.
-`scripts/tuolumne/flux_watchdog.sh`, sourced by a flux batch script, contains
-it. The watchdog stacks (`gstack`) and then cancels any sub-job older than
-`WATCHDOG_S`, so a hang costs one rank count rather than the rest of the pass.
-`scripts/tuolumne/run_ctest_v1.flux` and `run_ctest_h1.flux` source it.
-
-**Captured stacks.** `scripts/tuolumne/run_ctest_h1.flux` (flux job
-`f3bnfasqQDAo`) hung on its second np=3 run, in
-`MultiSolve.LargeMotion_Rebuild`. One rank sat inside Zoltan2 MJ
-(`TreePartitioner::partition_leaves` → `PartitioningProblem::solve`) in a
-`hipDeviceSynchronize`. The other two waited in `partition_leaves`'s
-`MPI_Bcast`. The stacks, verbatim, are in
-`tasks/fix-hang-rebalance-progress-log.md` section H1. The mechanism is not yet
-diagnosed (task H2 in `tasks/fix-hang-rebalance.md`).
+`TreePartitioner::partition_leaves` builds its Zoltan2 adapter on
+`KokkosDeviceWrapperNode<ExecutionSpace>` (`src/Canopy_TreePartitioner.hpp`), so
+multijagged runs where the solver runs. For the SERIAL test binaries that is the
+host. With Zoltan2 on Tpetra's default HIP node, rank 0 intermittently stalled in
+`hipDeviceSynchronize` inside MJ while the other ranks waited in the assignment
+`MPI_Bcast`. That hung `Canopy_Test_MultiSolve_MPI_SERIAL_np_3` in about one run
+in three (stacks in `tasks/fix-hang-rebalance-progress-log.md`, sections H1 and
+H2). A solver whose `ExecutionSpace` is HIP still runs MJ on HIP and has not
+been checked for the same stall. To be triaged in a separate session.
 
 ### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
 
