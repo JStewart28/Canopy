@@ -89,9 +89,9 @@ mistake are in several places too loose to do it.
 
 The work is three mechanism chains, preceded by two tasks that serve all of
 them. **T1** establishes the fixture the rest measure on. **V1** sharpens what
-the mechanism changes will be verified against — without it a chain-A or chain-B regression of a few percent passes
-every existing check (**R9**, **R10**). Then the three mechanism chains, which
-are independent of each other and may land in any order:
+the mechanism changes will be verified against — without it a chain-A or
+chain-B regression of a few percent passes every existing check (**R9**,
+**R10**). The chains are independent of each other and may land in any order:
 
 | | removes | tasks |
 | --- | --- | --- |
