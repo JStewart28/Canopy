@@ -58,8 +58,8 @@ more steeply than the floor ratio. The per-site figures are in
 - The `SingleSolve`-coupled np-3 deadlock. README "Known Issues" records it as
   occurring only when `SingleSolve` shares the ctest process. Every task here
   runs `MultiSolve` alone.
-- Making Zoltan2's partition deterministic. H2 records whether the host-node
-  partition reproduces, and goes no further.
+- Pursuing partition determinism. H2 records whether the partition
+  reproduces, and goes no further.
 - Moving any `MultiSolve` bound. That is V1's work.
 - The OPENMP test variants, and HIP above np 4. A node has four APUs, so HIP
   np 5-6 cannot run one APU per rank.
@@ -91,8 +91,13 @@ budget after H0b), and **before cancelling it takes
 watchdog. At ~1 in 3 per np-3 run, 20 runs miss it with probability
 $(2/3)^{20} \approx 3 \times 10^{-4}$. H2 reads the stacks, names the mechanism,
 fixes it, and turns the precondition that was violated into a loud check.
-H1 and H2 each carry a SERIAL arm, met, and a HIP arm. H2's SERIAL fix leaves a
-HIP solver running Zoltan2 on HIP, the device H1's SERIAL stacks stalled on.
+H1 carries a SERIAL arm, met, and a HIP arm. H2's SERIAL fix leaves a HIP solver
+running Zoltan2 on HIP, the device H1's SERIAL stacks stalled on. H2's second
+arm replaces the partitioner on both backends. A distributed ParMETIS graph
+partition over every non-shared cell replaces the rank-0 MJ solve on leaves
+and the majority-vote rule for their parents. It balances each band of tree
+levels and minimizes the parent-child and neighbour edges that the sweeps
+communicate across.
 
 **The deviation.** E1 adds a per-step probe that compares the FMM gradient to a
 brute-force gradient **at the FMM's own current positions**. That error is the
@@ -151,6 +156,12 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   force where the FMM particles actually are removes the trajectory from the
   error, and that separation is the purpose of the probe. The shadow comparison
   is kept unchanged beside it.
+- **The partition covers cells, not only leaves, and is a graph partition, not
+  a geometric one.** MJ, RCB, RIB and HSFC see leaves as weighted points, which
+  leaves parent ownership to a rule that ignores communication and per-level
+  load. ParMETIS sees both through edges and per-band constraints. It runs
+  distributed and on the host for every `ExecutionSpace`. Its output is not
+  guaranteed reproducible. H2 measures that and does not pursue it.
 - **The hang is captured by stack sampling, not reproduced in a debugger
   session.** At ~1 in 3 it takes tens of ctest runs to see one. An interactive
   allocation is the wrong tool, and a sampling watchdog also contains the
@@ -202,6 +213,15 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   `Canopy_Test_CartesianTaylorSolve_MPI_HIP` and
   `Canopy_Test_FarFieldContract_MPI_HIP` have never been built, so whether they
   compile is unknown.
+- **The tree topology is replicated to the leaves; ownership is not.**
+  `TreeBuilder` all-reduces candidate counts at every depth and pushes every
+  non-empty cell into `_cells` on every rank
+  (`src/Canopy_TreeBuilder.hpp:659-777`). `replication_depth` sets which
+  internal cells are `OWNER_SHARED`
+  (`src/Canopy_TreePartitioner.hpp:514`), and therefore whose expansions every
+  rank computes. Below it, leaves get an MJ owner, and each internal cell goes
+  to the rank with the most descendant particles, ties to the lowest rank
+  (`:459-552`). That rule does not see sweep communication or per-level load.
 - **A HIP solver still runs Zoltan2 on HIP.** `partition_leaves` builds its
   adapter on `KokkosDeviceWrapperNode<ExecutionSpace>`
   (`src/Canopy_TreePartitioner.hpp:374-383`), so for
@@ -328,8 +348,8 @@ state**; `flux_watchdog.sh`'s cancel test (`"${rt%.*}" -gt "${WATCHDOG_S}"` in
 - **no false positive:** two
   `canopy_ctest '^Canopy_Test_MultiSolve_MPI_SERIAL_np_[1-6]$'` passes finish
   with every entry `completed` or `failed` and none `over-budget`;
-- **refusal:** `canopy_ctest '^Canopy_Test_UpwardSweep_MPI_SERIAL_np_1$'`, a stem
-  with no row, exits non-zero naming `(UpwardSweep, 1, default)` and launches
+- **refusal:** `canopy_ctest '^Canopy_Test_SingleSolve_MPI_SERIAL_np_1$'`, a stem
+  with no row, exits non-zero naming `(SingleSolve, 1, default)` and launches
   no sub-job.
 
 ### H0c — Build every named HIP target and record its baseline — **NOT STARTED**
@@ -343,7 +363,7 @@ and the batch preamble.
 **Do:**
 1. In `build-tuolumne/`, build the HIP target of every stem named by an exit
    criterion in this document or in `tree-opt.md`:
-   `Canopy_Test_{MultiSolve,DownwardSweep,TreeBuilder,TreePartitioner,CommunicationPlan,LaplaceSolve,CartesianTaylorSolve,FarFieldContract}_MPI_HIP`
+   `Canopy_Test_{MultiSolve,DownwardSweep,UpwardSweep,TreeBuilder,TreePartitioner,CommunicationPlan,LaplaceSolve,CartesianTaylorSolve,FarFieldContract}_MPI_HIP`
    and `Canopy_Test_CartesianTaylor_HIP`. A target that does not compile is
    recorded with its first error and skipped. Do not fix it here.
 2. In one allocation: run H0b's watchdog self-test, then each built MPI stem
@@ -437,11 +457,12 @@ progress log, section H1.
 
 ### H2 — Name the hang's mechanism and fix it — **REOPENED**
 
-SERIAL arm **met**; HIP arm **not started**. **Fill in** through the SERIAL
-exit criterion below are the SERIAL arm's; the HIP arm follows them.
+SERIAL arm **met**; partitioner arm **not started**. **Fill in** through the
+SERIAL exit criterion below are the SERIAL arm's; the partitioner arm follows
+them.
 
-**Depends on:** H1's SERIAL arm for the SERIAL arm. HIP arm: H1's HIP arm
-**met**.
+**Depends on:** H1's SERIAL arm for the SERIAL arm. Partitioner arm: H1's HIP
+arm **met**.
 **Fill in:** `src/Canopy_TreePartitioner.hpp`: the Zoltan2 adapter type at
 `:367`. New `scripts/tuolumne/run_ctest_h2.flux`, which sources the
 watchdog and runs against `build-tuolumne/`.
@@ -497,39 +518,132 @@ and E1 measures on the post-H2 partition.
   $(2/3)^{20} \approx 3 \times 10^{-4}$. If the reverted build does not hang in
   20 runs, the result is inconclusive: stop and report.
 
-**HIP arm.**
-**Fill in:** the `src/` path H1's HIP stacks name; `scripts/tuolumne/run_ctest_h2.flux`
-(a backend argument, as for H1); README "Known Issues", the entry "Zoltan2
-runs on HIP when the solver's `ExecutionSpace` is HIP": remove it when fixed,
-or rewrite it to state what the HIP stacks showed.
-**Reference:** H1's HIP stacks (progress log, section H1); the SERIAL mechanism
-and fix in the progress log, section H2; the collectives on the rebuild path
-listed under **Reference** above, at their current lines
-(`src/Canopy_TreePartitioner.hpp:447` for the `MPI_Bcast`).
+**Partitioner arm.** This arm replaces rank-0 MJ with a
+distributed ParMETIS graph partition over all non-shared cells, on both
+backends at once. That removes Zoltan2-on-HIP from every solver, and it removes
+the rank-0 solve. Every rank already holds the full tree topology, so no tree
+data is gathered anywhere.
+
+**Depends on:** H1's HIP arm **met**. Its stacks say whether the HIP stall is
+in the partitioner. If it is anywhere else, that cause is fixed in this arm as
+well, under the SERIAL arm's step-2 rules. The "all ranks inside Kokkos/HIP"
+case needs a decision with the user before any change.
+**Fill in:**
+- `src/Canopy_TreePartitioner.hpp`: replace `partition_leaves` (`:313-456`)
+  with `partition_cells`. Restrict `derive_internal_ownership` (`:459-552`) to
+  cells the partition did not assign. Change the cache and its use in
+  `refresh_ownership_for_current_tree` (`:860-950`) from leaves to cells.
+  Update `partition` (`:796-812`) and `repartition` (`:839-855`), its two
+  callers. The constructor comment calls `imbalance_tolerance` "Zoltan2
+  imbalance tolerance" (`:100-108`).
+- `src/Canopy_Solver.hpp`: the step-5b comment (`:586-602`), which explains
+  not re-running Zoltan2 by MJ's nondeterminism.
+- `docs/design.md`, "Load Balancing": rewrite it for the graph partition. It is
+  the authoritative record of this interface.
+- Tests: see step 6.
+- README "Known Issues": the entries "Zoltan2 runs on HIP when the solver's
+  `ExecutionSpace` is HIP" and "The leaf partition is not reproducible
+  run-to-run above two ranks". Remove the first; rewrite the second from step 7's
+  measurement.
+- `scripts/tuolumne/run_ctest_h2.flux`: a backend argument, as for H1.
+
+**Reference:** `Zoltan2_AlgParMETIS.hpp` and `Zoltan2_TpetraCrsGraphAdapter.hpp`
+in the spack view. ParMETIS gets one balance constraint per vertex weight
+(`pm_nCon = nVwgt`). `partitioning_approach` selects `PARTKWAY`, or
+`ADAPTIVE_REPART` for a repartition. Zoltan2's ParMETIS path needs consecutive
+global IDs. `Zoltan2_config.h` enables `HAVE_ZOLTAN2_PARMETIS`; Scotch, PuLP
+and ParMA are disabled. Also: the current majority-vote rule for internal
+cells (`:459-552`), which is the comparison baseline in step 6.
+
 **Do:**
-1. Read H1's HIP stacks and name the mechanism, as the SERIAL arm did. The
-   design proposes no fix in advance. If the stacks match a fallback in step 2
-   above, that fallback's rule applies. That includes the "all ranks inside
-   Kokkos/HIP" case, which needs a decision with the user before any change.
-2. Fix the cause. The SERIAL fix stays: whatever changes, `nm -C` on
-   `Canopy_Test_MultiSolve_MPI_SERIAL` still shows no `AlgMJ` symbol on a HIP
-   node.
-3. Run the HIP solve twice at np 3-4 and state in the log whether the leaf
-   partition reproduces.
+1. **Vertices.** One vertex per non-shared cell: every leaf, and every internal
+   cell deeper than `replication_depth`. Shared cells stay `OWNER_SHARED`, as
+   now. A vertex's global ID is its index in the Morton-ordered list of those
+   cells. That list is identical on every rank, because `TreeBuilder` builds the
+   full topology everywhere from all-reduced counts
+   (`src/Canopy_TreeBuilder.hpp:659-777`).
+2. **Weights: one constraint per band.** Constraint 0 is the leaf's
+   `global_count` for a leaf and 0 for an internal cell (P2P, P2M and L2P
+   work). Constraints 1..B weigh 1 for each cell, leaf or internal, whose depth
+   falls in band b, and 0 otherwise. That balances M2M, M2L and L2L work per
+   band, so coarse cells spread across ranks. The bands split the non-shared
+   depths `replication_depth + 1 .. deepest` into `B = min(3, number of those
+   depths)` contiguous groups of near-equal depth count. The log records B and
+   the band edges. More constraints cost ParMETIS partition quality, so `B` is
+   capped.
+3. **Edges.** Parent-child edges between non-shared cells (M2M and L2L
+   traffic), plus same-depth face/edge/corner neighbours computed from Morton
+   keys (the near-field and M2L proximity that the interaction list does not
+   yet exist to give: `CommunicationPlan` is built after the partition). Unit
+   edge weights. Edges are symmetric.
+4. **Distribution: no rank-0 solve.** Each rank supplies a disjoint block of
+   vertices. On `partition`, rank r supplies the r-th contiguous block of the
+   Morton list. On `repartition`, it supplies the cells it owned before, with
+   new cells going to the block rule, and uses `ADAPTIVE_REPART` to limit
+   migration. The `TpetraCrsGraphAdapter`'s graph is on
+   `KokkosDeviceWrapperNode<Kokkos::Serial>`. A `static_assert` checks that the
+   adapter's `node_t::execution_space` is host-accessible, so no instantiation
+   can put the partition on a device. Each rank's part list is then
+   all-gathered (`MPI_Allgatherv`), so every rank holds the full key→rank map
+   its consumers read. That is the same size as the current broadcast, with
+   no rank serialized ahead of it. `np == 1` assigns everything to rank 0
+   without calling ParMETIS, as now.
+5. **Loud failures.** These throw `std::runtime_error` naming the condition:
+   ranks disagree on the vertex count (checked with one `MPI_Allreduce` of
+   min and max before the solve); a non-`METIS_OK` return; and a part outside
+   `[0, comm_size)`. A rank left with no leaf is legal and is reported in the
+   log, not thrown. On a small tree that can be the balanced answer.
+6. **Tests.**
+   - `tests/tstTreePartitioner.hpp`: the existing invariants hold unchanged
+     (`:300-405`, `:660-790`): one owner per cell, `OWNER_SHARED` only at
+     depth ≤ `replication_depth`, particle conservation, every particle in an
+     owned leaf. Correct the `:671` comment that says repartition re-solves
+     Zoltan2. Add these cases:
+     (a) `cell_owner_map()` hashes identically on every rank;
+     (b) on a fixture of at least 20 000 global particles, every constraint's
+     max/mean is ≤ `1 + imbalance_tolerance` at np 2-6;
+     (c) on the same fixture, the fraction of non-shared parent-child pairs
+     owned by different ranks is no higher than under the majority-vote rule.
+     That is the "sweeps communicate less" claim. Compute the vote rule's
+     figure in the test from the same leaf assignment;
+     (d) after `refresh_ownership_for_current_tree`, every internal cell present
+     in the partition keeps its partitioned owner, and the test prints the
+     fraction that fell back to the vote rule.
+   - `tests/tstLaplaceSolve.hpp` and `tests/data/laplace_solve_P6.txt`: the np-2
+     cut changes, so the `(2,0)` and `(2,1)` `bitForBitArtifacts` records are
+     regenerated with `CANOPY_LAPLACE_SOLVE_REGENERATE` on the SERIAL binary.
+     The `(1,0)` record and the np-1 `field` record must come out byte-identical,
+     because np 1 never partitions; a change there is a defect, not a
+     regeneration. Update the comments and the `GTEST_SKIP` message that name
+     multijagged (`:17-21`, `:926-927`, `:1190-1201`, and the data file's
+     header). Keep the np 1-2 gating even if step 7 finds np ≥ 3 reproducible.
+     Widening it is not this task's change.
+   - `tstCommunicationPlan`, `tstDownwardSweep`, `tstUpwardSweep` and
+     `tstMultiSolve` call only `partition`, `ownership()` and
+     `cell_owner_map()`, whose signatures do not change. They need no edit and
+     must pass. `MultiSolve.M2L_BinEdge_Fallback` asserts a max over ranks, so
+     it does not depend on the cut.
+7. Run the solve twice at SERIAL np 2-6 and HIP np 2-4. State in the log
+   whether `cell_owner_map()` reproduces, and whether the `[multisolve-dev]`
+   lines do. Record per-constraint imbalance, the parent-child cut fraction
+   against the vote rule, and partition time against MJ (`TIMER_PARTITION`).
 
-If H1's HIP arm reproduced no hang, there is nothing to name. Skip steps 1-2,
-record that in the log, and run only the **Fixed** direction below.
-
-**HIP exit criterion:** both directions.
+**Exit criterion:** both directions, on both backends.
 - **Fixed:** 15 consecutive
   `canopy_ctest '^Canopy_Test_MultiSolve_MPI_HIP_np_3$'` runs, and 15 at each
   other rank count H1's HIP arm hung at, finish with no entry over budget. So do
-  two `canopy_ctest '^Canopy_Test_MultiSolve_MPI_HIP_np_[1-4]$'` passes. In the
-  same job, 15 `canopy_ctest '^Canopy_Test_MultiSolve_MPI_SERIAL_np_3$'` runs
-  stay within budget, so the HIP fix has not reopened the SERIAL hang.
-- **Checked:** with the HIP fix temporarily reverted, the `run_ctest_h1.flux hip`
-  loop reproduces at least one hang that the watchdog cancels. If 20 reverted
-  runs do not hang, the result is inconclusive: stop and report.
+  15 `canopy_ctest '^Canopy_Test_MultiSolve_MPI_SERIAL_np_3$'` runs. Stems
+  `TreePartitioner`, `CommunicationPlan`, `UpwardSweep`, `DownwardSweep`,
+  `LaplaceSolve` and `MultiSolve` pass through `canopy_ctest` at SERIAL np 1-6
+  and HIP np 1-4. `MultiSolve` carries only the failures README "Known Issues"
+  already records. `nm -C` on every `*_MPI_HIP` binary shows no `AlgMJ` and no
+  `KokkosDeviceWrapperNode<Kokkos::HIP` partitioner symbol.
+- **Checked:** with the partitioner change temporarily reverted, the
+  `run_ctest_h1.flux hip` loop reproduces at least one hang that the watchdog
+  cancels. If H1's HIP arm reproduced no hang, there is nothing to revert
+  against: record that, and the Fixed direction is the whole criterion. Test
+  (c) fails when the partition is swapped for a random assignment: run it once
+  that way and record the failure. That shows the comparison can fail.
 
 **Met (SERIAL).** Zoltan2 MJ was running on Tpetra's default HIP node. It now runs on the
 partitioner's `ExecutionSpace`, through `Zoltan2::BasicUserTypes`; templating
@@ -543,7 +657,7 @@ and the np 1-2 lines match `canopy-v1.f3bmo4JYikKh.log`.
 ### E1 — Classify the AutoRebalance excess — **NOT STARTED**
 
 **Depends on:** H1 **DONE**, both arms: its watchdog keeps an np-3 hang from costing
-np 4-6 of a measurement pass. H2 **DONE**, both arms: H2 changes the np >= 3
+np 4-6 of a measurement pass. H2 **DONE**, both arms: H2 changes the np >= 2
 partition that E1 measures, and a HIP pass that hangs cannot be measured. H0c
 **DONE**: its HIP `[multisolve-dev]` lines are E1's HIP baseline.
 **Fill in:** `tests/tstMultiSolve.hpp`: two helpers beside `get_test_mac_theta`
@@ -590,11 +704,13 @@ and the HIP-against-SERIAL comparison. Both directions:
 - **Measuring:** at np 1, `CANOPY_MAC_THETA=0.7` raises the per-step
   field-scale error above its theta-0.5 value. This shows the probe measures
   the far field.
-- **Inert when off:** with the probe unset, the 12 np 1-2 `[multisolve-dev]`
-  lines (six sites, two rank counts) match the corresponding lines of
-  `canopy-v1.f3bmo4JYikKh.log` (repo root, untracked; V1's step-1 job) character
-  for character. np 1-2 are deterministic: all three passes of that job print
-  each of the 12 identically. The V1 table in `tree-opt-progress-log.md` is
+- **Inert when off:** with the probe unset, the six np-1 `[multisolve-dev]`
+  lines match the corresponding lines of `canopy-v1.f3bmo4JYikKh.log` (repo
+  root, untracked; V1's step-1 job) character for character. np 1 never
+  partitions, so H2 cannot move it. The six np-2 lines match H2 step 7's
+  post-change SERIAL run character for character if step 7 found them
+  reproducible. Otherwise they fall within step 7's measured spread. H2
+  changes the np-2 cut, so V1's np-2 lines are no longer a baseline. The V1 table in `tree-opt-progress-log.md` is
   rounded to three figures and cannot decide this. On HIP, with the probe
   unset, the np 1-2 `[multisolve-dev]` lines match H0c's character for
   character if H0c found them identical between its two passes. Otherwise they
@@ -641,9 +757,9 @@ own, so record it as "not reproduced at 20" and never as "fixed".
 Distinguishing measurement: the rate in surviving logs, 4 hangs in 12 runs,
 spans runs with and without `-V`.
 
-**R3 — H2's fix moves every np >= 3 accuracy figure.** Moving Zoltan2 onto the
-host node changes the partition. Every `[multisolve-dev]` figure V1 recorded at
-np >= 3 is then stale. Presentation: V1 resumes and its np >= 3 table no
+**R3 — H2 moves every multi-rank accuracy figure.** The SERIAL arm's node change
+moved the np >= 3 partition. The partitioner arm moves it at every np >= 2.
+Every `[multisolve-dev]` figure V1 recorded above np 1 is then stale. Presentation: V1 resumes and its np >= 3 table no
 longer reproduces. Response: H2's log section states that the partition path
 changed. E1 runs after H2 and measures on the new partition. V1 re-measures
 np >= 3 before pinning anything.
@@ -671,3 +787,33 @@ fails on a case its change does not touch. Distinguishing measurement: H0c's
 table, taken before any change. A failure that H0c recorded is carried and named
 in README "Known Issues", not attributed to the task that ran into it. A failure
 that H0c did not record belongs to the change.
+
+**R7 — The test trees are too small for per-band balance.** `MultiSolve` runs
+36-207 cells at np 6 (AutoRebalance's `[Canopy diag]` lines). With `B` band
+constraints, some band can hold fewer cells than ranks, and no partition
+balances it. Presentation: `MultiSolve` passes, but step 7's imbalance figures
+exceed `1 + imbalance_tolerance` at np 5-6, which reads like a ParMETIS defect.
+Distinguishing measurement: count the cells per band. A band with fewer cells
+than ranks cannot balance, and that is recorded, not fixed. The balance
+assertion lives only in TreePartitioner test (b), on a fixture sized so every
+band has many cells per rank.
+
+**R8 — MPI inside the partitioner on HIP builds.** MJ moved to a `SerialComm`
+after self-sends through Cray MPICH's single-copy path raised
+`process_vm_readv: Bad address` on AMD/HIP builds
+(`src/Canopy_TreePartitioner.hpp:398-404`). ParMETIS communicates over the real
+communicator. Presentation: a crash or MPI error inside ParMETIS, on HIP only.
+Distinguishing measurement: the HIP environment's
+`MPICH_SMP_SINGLE_COPY_MODE=NONE` turns that path off. Rerun the failing
+entry with and without it. If it fails only without, the HIP environment
+convention covers it. If it fails either way, it is a new defect.
+
+**R9 — The partition is diluted after migration.** `_full_setup` rebuilds the
+tree after migration and refreshes ownership against it
+(`src/Canopy_Solver.hpp:586-608`), and that tree can differ from the one that
+was partitioned. Every cell absent from the partition falls back to the vote
+rule. Presentation: test (c) passes on the partitioner directly, but the
+solver's comm plan is no cheaper than before. Distinguishing measurement: test
+(d)'s printed fallback fraction, and the same fraction on `MultiSolve`
+recorded in step 7. If it is large, the partition is being computed on the
+wrong tree, and that is a finding to raise before E1.

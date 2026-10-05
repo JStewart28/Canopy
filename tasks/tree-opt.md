@@ -410,10 +410,14 @@ refusal.
 
 ### Not read
 
-- **The partitioner.** `src/Canopy_TreePartitioner.hpp` was not opened. A2
-  changes the cell set, which the partitioner consumes, so **A2 is the task that
-  first opens it** and A1 must not — A1's cost model is a cell count, which
-  `m2l_cells_at_depth()` and `TreeBuilder`'s own cell list answer without it.
+- **The partitioner.** `fix-hang-rebalance.md` H2 replaces it: a distributed
+  ParMETIS graph partition over every non-shared cell, with one balance
+  constraint per band of depths. A2 changes the cell set that partition
+  consumes, so **A2 is the task here that first opens it**, and A1 must not.
+  A1's cost model is a cell count, which `m2l_cells_at_depth()` and
+  `TreeBuilder`'s own cell list answer without it. A balanced tree also changes
+  the band populations H2's constraints are drawn from, so A2 records the
+  per-band imbalance before and after.
 - **The upward sweep's coefficient formation.**
   `src/Canopy_UpwardSweep.hpp` was read only far enough to confirm where
   `build_aux_tables` is called. No task here changes coefficient scaling, so it
@@ -492,7 +496,10 @@ listed under [Current state](#current-state).
    tasks read their numbers out of this fixture's log rather than re-deriving
    them.
 
-**HIP arm.** Build and run the exit criterion's HIP lines, and the failure
+**HIP arm.** `fix-hang-rebalance.md` H2 changes the partition at every
+np ≥ 2, so the per-`(nprocs, rank)` figures the SERIAL arm recorded above np 1
+are stale. This arm records post-H2 figures for both backends. Build and run
+the exit criterion's HIP lines, and the failure
 direction in `build-tuolumne-noprof/` on HIP as well. Record in the log, per
 `(nprocs, rank)` at np 1-4, the line step 8 prints, from two runs, and whether
 they agree with each other and with SERIAL at the same np. A HIP case that
