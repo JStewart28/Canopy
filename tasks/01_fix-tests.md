@@ -1,6 +1,6 @@
 # Make `UpwardSweep` and `LaplaceSolve` pass on SERIAL and HIP
 
-**Status:** IN PROGRESS — F1, F2, F3 done
+**Status:** IN PROGRESS — F1, F2, F3 done; F4 stopped: cause is a MAC tie defect in `src/`, fix not decided
 
 ## Problem
 
@@ -285,7 +285,7 @@ changed to `6dd7`), SERIAL np 1 failed on `locals_hash` alone. The data file
 was restored with `git checkout`. In the same pass run, HIP np 2
 `crossRankAgreement` failed at `1.6e-7` (log, section F3; F4's business).
 
-### F4 — Classify and resolve `crossRankAgreement` on HIP np 2-4 — **NOT STARTED**
+### F4 — Classify and resolve `crossRankAgreement` on HIP np 2-4 — **STOPPED: MAC tie defect found, fix not decided**
 
 **Depends on:** F3 (its criterion runs the whole `LaplaceSolve` stem).
 

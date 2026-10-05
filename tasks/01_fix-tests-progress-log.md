@@ -201,3 +201,184 @@ added. If np 2 fails reliably, the (b) row of the classification (deviation
 falls to SERIAL's level when the partition is forced onto the host node)
 should also be run at np 2. `fix-hang-rebalance.md` H2: if F4 carries
 `crossRankAgreement` on HIP, the carried set may include np 2.
+
+## F4
+
+**Decisions carried in.** F4 is a classification task. Under (a) and (b) it
+changes no code in `src/` or the tests; only (c) changes `src/`. H2's
+partitioner arm replaces Zoltan2 MJ, so nothing here is made to pass on the
+current partitioner and MJ-on-HIP is not made reproducible. The failing set is
+the HIP rank counts in np 2-4 that fail `crossRankAgreement` in either step-1
+run, and step 3 runs at np 2-4 regardless.
+
+**Departure from Do: more runs than written.** Every entry fails
+intermittently, at roughly 1 in 4, so two passes per np cannot tell
+"unchanged" from "fixed". Step 3 ran six passes, and a control job on the
+committed binaries (`f3cNLgnHcxib`) added four HIP and four SERIAL passes at
+np 2-4. All runs used `FIX_TESTS_CTEST_ARGS=-V`. Values below are
+(`max_pot_dev`, `max_grad_dev`); F = the entry failed.
+
+**Step 1: spread** (job `f3cNHmnYRF1y`, committed code, HIP np 2-4 twice).
+
+| np | run 1 | run 2 |
+| --- | --- | --- |
+| 2 | 9.7e-13, 4.9e-12 | 3.6e-13, 1.9e-12 |
+| 3 | 8.1e-13, 4.1e-12 | **4.2271443817898591e-07, 3.89e-08 F** |
+| 4 | 2.2e-12, 1.1e-11 | 4.0e-13, 2.0e-12 |
+
+Failing set by the task's definition: {np 3}.
+
+**Control** (job `f3cNLgnHcxib`, committed code, four passes). SERIAL
+np 2/3/4 was bit-identical every pass: `4.1994e-13`/`2.1570e-12`,
+`8.0211e-13`/`4.0354e-12`, `1.1143e-12`/`5.5987e-12`, with per-rank
+`n_unique_ops` 368/386 at np 2. HIP:
+
+| np | pass 1 | pass 2 | pass 3 | pass 4 |
+| --- | --- | --- | --- | --- |
+| 2 | 2.8e-13 | 1.2e-13 | **1.5865136617e-07, 2.0292e-08 F** | 7.2e-13 |
+| 3 | 3.3e-13 | **1.5865136542e-07, 2.0292e-08 F** | 4.8e-14 | 4.0e-13 |
+| 4 | **1.9545431357e-07, 2.3481e-08 F** | 1.3e-12 | 1.2e-12 | 6.1e-13 |
+
+So np 2 and np 4 fail too. The failing set as defined ({3}) understates it.
+On committed code, HIP failed 4 of 18 entries across steps 1 and control, and
+np 2 also failed in F3 (`f3cNB48LsWNB`).
+
+**Step 2: one step** (job `f3cNSNzuQpKR`). Instrumentation, reverted with
+`git checkout -- tests/tstLaplaceSolve.hpp`:
+
+```diff
+-static constexpr int LS_NUM_STEPS = 12;
++static constexpr int LS_NUM_STEPS = 1; // F4 SCRATCH
+-    CANOPY_TEST_DATA_DIR "/laplace_solve_P6.txt";
++    "/usr/workspace/stewartj/canopy-f4-scratch/laplace_solve_P6_1step.txt"; // F4 SCRATCH
+```
+
+`scripts/tuolumne/run_f4_step2.flux` regenerates the one-step SERIAL record at
+np 1-2 (`CANOPY_LAPLACE_SOLVE_REGENERATE` pointed at
+`/usr/workspace/stewartj/canopy-f4-scratch/regen`). It then concatenates the
+three parts under the committed header, and runs each regex with
+`GTEST_FILTER=*crossRankAgreement*`. The scratch record's initial hash is
+`0xb6ad437608ad69b7`, the committed one.
+
+| np | SERIAL | HIP (4 passes) |
+| --- | --- | --- |
+| 2 | 2.0e-15, 4.90e-12 | pot 1.9-2.0e-15; grad 4.90-6.93e-12 |
+| 3 | 1.7e-15, 4.90e-12 | pot 1.6-1.7e-15; grad 4.90e-12 |
+| 4 | 1.7e-15, 4.90e-12 | pot 1.7-1.9e-15; grad 4.90e-12 |
+
+All 12 HIP entries passed. At one step HIP is at SERIAL's reassociation level,
+about six orders under `LS_CROSS_RANK_R8_THRESHOLD = 1e-9`.
+
+**Step 3: host partition** (job `f3cNWTvVDx7h`, 12 steps, committed data, six
+passes). Instrumentation, reverted with
+`git checkout -- src/Canopy_TreePartitioner.hpp`:
+
+```diff
+-        Tpetra::KokkosCompat::KokkosDeviceWrapperNode<ExecutionSpace>;
++        Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::Serial>; // F4 SCRATCH
+-    static_assert(
++    static_assert( // F4 SCRATCH: relaxed with zoltan_node_t
+         std::is_same_v<typename adapter_t::node_t::execution_space,
+-                       ExecutionSpace>,
++                       Kokkos::Serial>,
+```
+
+| np | failures | failing values |
+| --- | --- | --- |
+| 2 | 0 of 6 | — (passing 3.3e-13 to 1.5e-12) |
+| 3 | 2 of 6 | 7.7193e-08 / 9.14e-09; 1.5865472965e-07 / 2.0292e-08 |
+| 4 | 3 of 6 | 1.9551736394e-07 / 2.3479e-08 (twice); 1.5865136702e-07 / 2.0292e-08 |
+
+That is 5 of 18 against 4 of 18 on committed code, at the same discrete
+values. The deviation is unchanged with Zoltan2 on the host node.
+
+**Steps 1-3 alone pointed at (a), and that reading was wrong.** Step 2's
+one-step check had little power: a 12-step run fails about 1 time in 4, so a
+per-step trigger would fail only about 2% of one-step runs. Two further
+experiments located the cause.
+
+**Experiment 1: HIP np 1 against the SERIAL np-1 reference** (job
+`f3cNfrMYm1GB`, 20 passes, `GTEST_FILTER=*crossRankAgreement*`).
+Instrumentation, reverted:
+
+```diff
+-    if ( nprocs == 1 )
++    if ( nprocs == 1 && std::is_same_v<ExecutionSpace, Kokkos::Serial> ) // F4 SCRATCH
+```
+
+11 of 20 failed, at the same discrete values as np 2-4: `7.7193e-08`,
+`1.5865136e-07` (four times), `1.5865473e-07`, `4.2271444e-07` (twice) and
+`4.2273204e-07` (three times). Passing passes were `1.7e-13` to `5.3e-13`.
+**The failure does not need more than one rank, so it is not in the
+distributed path.**
+
+**Experiment 2: first divergent step** (jobs `f3cNoqiVDvFZ`, `f3cNt51qKjWw`;
+script `scripts/tuolumne/run_f4_trace.flux`). Temporary instrumentation in
+`with_laplace_solve`, after each `solve()` at np 1, since reverted:
+- **Trace:** gather positions, potential and gradient by `GlobalId`. Hash
+  `solver.builder().cells()` (key, `global_count`, `is_leaf`), and record
+  `root_box()` and `downward().m2l_n_unique_ops()`. With `F4_TRACE_WRITE`
+  (SERIAL) it writes a per-step reference under
+  `/usr/workspace/stewartj/canopy-f4-scratch/`. With `F4_TRACE_READ` (HIP) it
+  prints per-step deviations against that reference.
+- **Tie count:** over every pair of cells, apply `mac_satisfied`'s test as
+  written (`src/Canopy_CommunicationPlan.hpp:337-346`). Count the pairs with
+  $\lvert R^2\theta^2 - r_{sum}^2\rvert \le 10^{-9} r_{sum}^2$ and how many of
+  those the floating-point test accepts.
+- **Skip:** the np-1 skip also stays off for SERIAL while tracing.
+
+Findings:
+- **The root box is recomputed from the particles at every step.** Its last
+  bits differ between HIP and SERIAL from step 2 on. So every cell center and
+  half-width carries that last-bit noise.
+- **Every step's tree has 32 pairs exactly on the MAC threshold** in exact
+  arithmetic. For θ = 0.5 and two same-depth cells offset by (2,2,2) cells,
+  the two sides are equal because $|n|^2 = 12$.
+  Rounding decides how many are accepted. Within one deterministic SERIAL run
+  that count goes 0, 16, 0, 24, 32, 32, 24, 0, 16, 24, 24, 16 over steps
+  0-11.
+- **Both failing HIP runs (of 8) diverge at step 5, and only there.** Steps
+  0-4 match SERIAL to `≤1e-14`, with positions within `4e-15` and identical
+  tree topology (103 cells, 90 leaves, same key/count hash). At step 5 HIP
+  accepted 16 of the 32 ties where SERIAL accepted 32. `m2l_n_unique_ops` went
+  from 686 to 716, and the potential jumped from `~4e-15` to `2.150e-07`
+  (gradient `9.9e-07`). Positions then diverge by `1e-10` and up, and the
+  deviation persists to step 11 (`1.587e-07`).
+- **All six passing runs accepted 32 at step 5, as SERIAL did.** Tie decisions
+  that differ from SERIAL at other steps (steps 2-4, 7-11) left the field at
+  `≤1e-12`. Those pairs are presumably never reached by the dual-tree
+  traversal, because their parents are already accepted or rejected.
+
+**Classification: none of (a), (b), (c) as written. It is a defect in `src/`,
+not in HIP and not in the distributed path.** `mac_satisfied` decides exact
+geometric ties by floating-point rounding. Its inputs, the cell centers, carry
+last-bit noise from a root box rebuilt from particle positions every step.
+Which side of the MAC a tie lands on changes the far field by truncation size
+(~2e-7 here). HIP exposes this only because its positions are not
+bit-reproducible run to run. SERIAL's decisions are just as arbitrary but
+repeatable. The committed reference in `tests/data/laplace_solve_P6.txt` was
+generated with arbitrary tie decisions too.
+
+`is_well_separated`, next to it (`:306-318`), already guards its own tie with
+`eps = 1.0e-10`. `mac_satisfied` has no such guard.
+
+**Not done here:**
+- Any fix. A tie-robust MAC, for example rejecting pairs within a relative
+  band of the threshold, or comparing in integer lattice units derived from
+  Morton keys, changes which pairs are accepted. That moves SERIAL's results
+  and so `tests/data/laplace_solve_P6.txt`, which this document puts out of
+  scope.
+- Any tolerance.
+
+**Stalls (R4):** none. Every HIP entry finished within budget in all jobs, and
+every watchdog cancel record held only the self-test.
+
+**Affects:**
+- F4: stopped. The cause is a `src/` defect whose fix changes the committed
+  `LaplaceSolve` reference data, which needs a decision. The failing set is
+  HIP np 1-4, since np 1 fails too once compared.
+- `fix-hang-rebalance.md` H2: replacing MJ does not remove this failure. The
+  partitioner arm cannot gate on HIP `crossRankAgreement` at the unchanged
+  tolerance until the MAC tie is fixed or the gate changes. The same tie
+  sensitivity can shift any MultiSolve or LaplaceSolve comparison whose
+  inputs differ in the last bit.

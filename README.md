@@ -551,17 +551,29 @@ the zeroing `deep_copy` removed from `UpwardSweep::execute()`, its SERIAL
 entry still passed. Fixed there with `create_mirror` + `deep_copy`; not yet
 applied to `DownwardSweep`. Found by reading, not by a run.
 
-### `LaplaceSolve.crossRankAgreement` fails on HIP at np 3-4
+### `LaplaceSolve.crossRankAgreement` fails intermittently on HIP: MAC ties decided by rounding
 
-On HIP only (SERIAL passes), flux job `f3cM4ghTjtiT`:
-- `LaplaceSolve.crossRankAgreement` at np 3-4: the field deviates from the
-  committed np-1 field by `4.2e-7` (potential) and `3.9e-8` (gradient) at np 3,
-  against `LS_CROSS_RANK_TOL = 5.6e-10`.
+On HIP, about 1 run in 4 at np 2-4, and about half at np 1 when np 1 is
+compared, the 12-step field deviates from the SERIAL-generated np-1 field by
+`7.7e-8` to `4.2e-7`, against `LS_CROSS_RANK_TOL = 5.6e-10`. Passing runs sit
+at `1e-13` to `1e-12`.
 
-It compares a HIP run against the SERIAL-generated np-1 field. Found by
-`fix-hang-rebalance` H0c. HIP np 2, which passed there, failed in
-`01_fix-tests` F3's run (flux job `f3cNB48LsWNB`: `1.6e-7` potential, `2.0e-8`
-gradient). `tasks/01_fix-tests.md` F4 classifies it.
+**The cause is in `mac_satisfied`** (`src/Canopy_CommunicationPlan.hpp:337-346`):
+- Octree cells produce exact ties of $R^2\theta^2 > (\sqrt{3}(h_A+h_B))^2$. At
+  θ = 0.5, same-depth cells offset by (2,2,2) cells are one example. This
+  configuration has 32 such pairs every step.
+- Floating-point rounding of the cell centers decides those ties, and the
+  centers come from a root box rebuilt from particle positions every step.
+- SERIAL decides them repeatably, but arbitrarily: 0-32 accepted, varying by
+  step. HIP's last-bit position differences sometimes flip a reachable tie,
+  which changes the far field by truncation size (~2e-7) from then on.
+
+It is neither HIP-specific nor distributed. Compare `is_well_separated`, which
+guards its tie with an epsilon. Fixing it changes SERIAL's accepted pairs, and
+so the committed `tests/data/laplace_solve_P6.txt`.
+
+Flux jobs `f3cNfrMYm1GB` (HIP np 1) and `f3cNt51qKjWw` (per-step tie trace).
+Figures in `tasks/01_fix-tests-progress-log.md`, section F4.
 
 ### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
 
