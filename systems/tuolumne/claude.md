@@ -161,8 +161,14 @@ rather than the HIP variant above.
 When the build is configured with [run_cmake_tuolumne.sh](../../run_cmake_tuolumne.sh),
 every unit test is registered with CTest at the required rank counts, and
 `ctest` launches each one via `flux run --ntasks N --nodes=1 --exclusive
---cores-per-task=1` (the `MPIEXEC_*` overrides in that script). So a stem's
-whole 1–6 rank sweep is one command inside an allocation:
+--cores-per-task=1` (the `MPIEXEC_*` overrides in that script). HIP MPI tests
+are the exception: the script sets `Canopy_TEST_MPI_RANKS_HIP=1;2;3;4` and
+`Canopy_TEST_MPIEXEC_PREFLAGS_HIP`, so they register at np 1–4 only and launch
+with `--gpus-per-task=1 --cores-per-task=8`, one APU per rank. A node has four
+APUs; flux refuses np 5 with one GPU per task as unsatisfiable. The HIP
+GPU-aware-MPI variables of section 4 are not baked into the tests: set them on
+the HIP `ctest` command only. So a stem's whole SERIAL 1–6 rank sweep is one
+command inside an allocation:
 
 ```bash
 ctest --output-on-failure -R 'Canopy_Test_MultiSolve_MPI_SERIAL'

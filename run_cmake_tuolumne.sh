@@ -9,7 +9,9 @@ cmake -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
       -DCanopy_PROFILING_LEVEL=2 \
       -DMPIEXEC_EXECUTABLE=$(which flux) \
       "-DMPIEXEC_NUMPROC_FLAG=run;--ntasks" \
-      "-DMPIEXEC_PREFLAGS=--nodes=1;--exclusive;--cores-per-task=1" ..
+      "-DMPIEXEC_PREFLAGS=--nodes=1;--exclusive;--cores-per-task=1" \
+      "-DCanopy_TEST_MPI_RANKS_HIP=1;2;3;4" \
+      "-DCanopy_TEST_MPIEXEC_PREFLAGS_HIP=--nodes=1;--exclusive;--gpus-per-task=1;--cores-per-task=8" ..
 
 # MPIEXEC_* overrides make CTest launch each MPI test via `flux run` with the
 # same resource binding the by-hand scripts use:
@@ -20,3 +22,8 @@ cmake -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
 # on the single MI300A APU). With the overrides, `ctest` is the single entry
 # point for the test suite. GPU/backend env (HSA_XNACK, MPICH_GPU_*, the
 # static-TLS workaround) still belongs in the batch script that invokes ctest.
+#
+# HIP MPI tests register at np 1-4 only, one APU per rank
+# (--gpus-per-task=1, the binding of scripts/tuolumne/run_treepartitioner_hip.flux).
+# A node has four MI300A APUs, so np 5-6 would oversubscribe one; flux refuses
+# them as unsatisfiable.

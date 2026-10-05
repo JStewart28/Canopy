@@ -559,3 +559,76 @@ Thread 1 (Thread 0x155555548a80 (LWP 3023430)):
 - tree-opt V1: the np >= 3 `[multisolve-dev]` figures moved. Re-measure np >= 3
   on this build before pinning anything. np 1-2 are unchanged.
 - E2: none.
+
+## H0a
+
+Job `f3cLYyF1XxQX` (`scripts/tuolumne/run_h0a_binding.flux`, node
+`tuolumne1048`, HEAD `53c671b` plus this task's working-tree changes; Cray clang
+20.0.0, flux-core 0.89.0). Log: `canopy-h0a-binding.f3cLYyF1XxQX.log` in the
+repo root (untracked).
+
+**Variables added.** `Canopy_TEST_MPI_RANKS_<DEVICE>` and
+`Canopy_TEST_MPIEXEC_PREFLAGS_<DEVICE>`, both unset by default and documented
+beside `Canopy_TEST_MPI_RANKS` in `CMakeLists.txt`. They are not declared
+as cache variables because the device set is only known after Kokkos is found.
+The `MPIEXEC_MAX_NUMPROCS` filter became `_canopy_filter_mpi_ranks(out what
+ranks…)`, one function called for the shared list and for each device that
+sets an override. The per-device lists are resolved once at file scope
+(`CANOPY_TEST_MPI_RANKS_EFFECTIVE_<DEVICE>`), so a skipped-rank warning prints
+once per configure and not once per `Canopy_add_tests` call. Inside the macro's
+`_device` loop, `_canopy_mpi_ranks` and `_canopy_mpi_preflags` are set on every
+pass, so nothing carries over to the next device.
+`CANOPY_UNIT_TEST_MPIEXEC_NUMPROCS` was removed; nothing else read it.
+`run_cmake_tuolumne.sh` sets `Canopy_TEST_MPI_RANKS_HIP=1;2;3;4` and
+`Canopy_TEST_MPIEXEC_PREFLAGS_HIP=--nodes=1;--exclusive;--gpus-per-task=1;--cores-per-task=8`.
+
+**Decisions.**
+- The SERIAL comparison covers `name`, `command` and `properties` of each
+  `_MPI_SERIAL_` object
+  (`jq -S '[.tests[] | select(.name|test("_MPI_SERIAL_")) | {name,command,properties}]'`).
+  `backtrace` is left out because it indexes `backtraceGraph`, which records
+  `test_harness.cmake` line numbers that this edit shifts.
+- The "before" dump was taken from `build-tuolumne/` before any CMake file was
+  edited.
+- The binding was checked twice: with the criterion's verbatim command, and
+  with `--cores-per-task=8 --setopt=mpibind=verbose:1` added, as the registered
+  HIP preflags launch.
+
+**Registration.** `ctest -N`: 230 entries before, 208 after. `_MPI_HIP_np_`:
+66 before (11 stems × np 1-6), 44 after (11 × np 1-4), and
+`-R '_MPI_HIP_np_[56]$'` lists none. Every HIP command is now
+`flux run --ntasks N --nodes=1 --exclusive --gpus-per-task=1 --cores-per-task=8 <exe>`.
+`diff canopy-h0a.serial-before.json canopy-h0a.serial-after.json` (66 objects
+each) printed nothing, rc 0. The same projection over every non-`_MPI_HIP_`
+entry (SERIAL, OPENMP, non-MPI, valgrind) is also identical.
+
+**Binding (`f3cLYyF1XxQX`).** np 4, verbatim `printenv ROCR_VISIBLE_DEVICES`:
+`0 1 2 3`, rc 0. With all device variables echoed, `ROCR_VISIBLE_DEVICES` is
+the only one set: `HIP_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` are unset.
+
+```
+0: rank=0 ROCR=0 HIP=unset CUDA=unset
+1: rank=1 ROCR=1 HIP=unset CUDA=unset
+2: rank=2 ROCR=2 HIP=unset CUDA=unset
+3: rank=3 ROCR=3 HIP=unset CUDA=unset
+```
+
+With `--cores-per-task=8`, the same four devices. mpibind widens each task to
+its whole APU's cores less one per eight, not to the eight requested:
+
+```
+mpibind: task   0 nths 21 gpus 0 cpus 1-7,9-15,17-23
+mpibind: task   1 nths 21 gpus 1 cpus 25-31,33-39,41-47
+mpibind: task   2 nths 21 gpus 2 cpus 49-55,57-63,65-71
+mpibind: task   3 nths 21 gpus 3 cpus 73-79,81-87,89-95
+```
+
+np 5, all three variants: rc 1,
+`job.exception … type=alloc severity=0 alloc denied due to type="unsatisfiable"`.
+
+**Affects:**
+- H0b: `canopy_ctest` sees HIP entries at np 1-4 only, and also guards against
+  any HIP entry above np 4.
+- H0c: HIP runs launch with one APU per rank through ctest. Under mpibind each
+  rank gets 21 CPUs, so `OMP_NUM_THREADS=1` (the ctest `ENVIRONMENT` property)
+  is still what bounds host threading.

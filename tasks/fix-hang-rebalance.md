@@ -179,14 +179,15 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   as its sub-jobs, so `gstack` there sees every rank. `kernel.yama.ptrace_scope`
   is `0` on the compute nodes, and `gstack` attaches to the test ranks
   (`fix-hang-rebalance-progress-log.md` section H1).
-- **Those flags and the rank list are shared by every backend.**
-  `Canopy_add_tests` registers every device's MPI tests at the one rank list
-  `CANOPY_TEST_MPI_RANKS_EFFECTIVE` (`cmake/test_harness/test_harness.cmake:73-80`,
-  `:89`) with the one `${MPIEXEC_PREFLAGS}` (`:122`). So
-  `Canopy_Test_<Stem>_MPI_HIP_np_[1-6]` are registered today and launch with no
-  GPU binding; at np 5-6 a node's four APUs cannot give one per rank. The only
-  HIP script that has run, `scripts/tuolumne/run_treepartitioner_hip.flux`,
-  bypasses ctest with `--gpus-per-task=1 --cores-per-task=8` at np 1 and 4.
+- **HIP MPI tests register at np 1-4, one APU per rank.** `Canopy_add_tests`
+  takes a per-device rank list and launch flags:
+  `Canopy_TEST_MPI_RANKS_<DEVICE>` and `Canopy_TEST_MPIEXEC_PREFLAGS_<DEVICE>`
+  (`cmake/test_harness/test_harness.cmake`), each falling back to the shared
+  value when unset. `run_cmake_tuolumne.sh` sets them for HIP only:
+  `1;2;3;4` and `--nodes=1;--exclusive;--gpus-per-task=1;--cores-per-task=8`.
+  SERIAL and every other device register as before. The only HIP script
+  outside ctest, `scripts/tuolumne/run_treepartitioner_hip.flux`, uses the same
+  binding.
 - **Every timeout is 300 s, and the watchdog has one threshold.** The scripts
   pass `ctest --timeout 300` (e.g. `run_ctest_h2.flux`) and set
   `WATCHDOG_S=300`. `flux_watchdog.sh` applies that one threshold to every
@@ -259,7 +260,7 @@ signature, or reopening a question this document treats as settled.
 
 ## Task sequence
 
-### H0a — Register HIP MPI tests at np 1-4, one APU per rank — **NOT STARTED**
+### H0a — Register HIP MPI tests at np 1-4, one APU per rank — **DONE**
 
 **Depends on:** none.
 **Fill in:** `cmake/test_harness/test_harness.cmake` (`Canopy_add_tests`, the
@@ -291,11 +292,22 @@ CTest"; README "Run with CTest", the rank-count paragraph.
   `_MPI_HIP_np_` command;
 - **SERIAL unchanged:** the `_MPI_SERIAL_` entries and their full command lines
   in `ctest --show-only=json-v1` are identical to the same dump taken before
-  the change (save both to the log's directory and `diff` them);
+  the change (save both to the repo root, untracked, as
+  `canopy-h0a.serial-before.json` and `canopy-h0a.serial-after.json`, and
+  `diff` them);
 - inside a one-node allocation, `flux run --ntasks=4 --nodes=1 --exclusive
   --gpus-per-task=1 printenv ROCR_VISIBLE_DEVICES` prints four distinct
   devices, and the same command at `--ntasks=5` is refused by flux as
   unsatisfiable. That refusal is why HIP stops at np 4.
+
+**Met.** After reconfiguring, `ctest -N` lists 44 `_MPI_HIP_np_` entries,
+np 1-4 for each of 11 stems (66 at np 1-6 before), and every one's command
+carries `--gpus-per-task=1 --cores-per-task=8`. The 66 `_MPI_SERIAL_` entries'
+`name`, `command` and `properties` diff empty against the pre-change dump, and
+so does every other non-HIP entry. Job `f3cLYyF1XxQX`: at np 4 the verbatim
+`printenv` printed ROCR devices `0 1 2 3`, as did the run with
+`--cores-per-task=8` added. At np 5 flux refused both with
+`alloc denied due to type="unsatisfiable"`.
 
 ### H0b — Per-test time budgets from measured SERIAL runtimes — **NOT STARTED**
 

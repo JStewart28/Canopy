@@ -206,6 +206,10 @@ option(Canopy_INSTALL_TEST_EXECUTABLES "Install Canopy test executables" OFF)
 # that exceed MPIEXEC_MAX_NUMPROCS are skipped at configure time.
 set(Canopy_TEST_MPI_RANKS "1;2;3;4;5;6" CACHE STRING
     "Semicolon-separated MPI rank counts to register each MPI unit test at")
+# Optional per-backend overrides, unset by default. Non-empty
+# Canopy_TEST_MPI_RANKS_<DEVICE> (e.g. _HIP) replaces Canopy_TEST_MPI_RANKS, and
+# non-empty Canopy_TEST_MPIEXEC_PREFLAGS_<DEVICE> replaces MPIEXEC_PREFLAGS, for
+# that backend's MPI tests only.
 
 # Optional filter restricting which Kokkos backends tests are built for. Empty
 # (default) builds a test variant for every enabled backend. Each test header

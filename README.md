@@ -230,7 +230,12 @@ Labels combine with `-R` (backend/name regex) by AND, so
 
 MPI tests are registered at several rank counts. The rank list is controlled by
 the `Canopy_TEST_MPI_RANKS` cache variable (default `1;2;3;4;5;6`); ranks
-exceeding `MPIEXEC_MAX_NUMPROCS` are skipped at configure time. Non-MPI tests
+exceeding `MPIEXEC_MAX_NUMPROCS` are skipped at configure time. Two optional
+per-backend overrides, unset by default, apply to one backend's MPI tests:
+`Canopy_TEST_MPI_RANKS_<DEVICE>` replaces the rank list and
+`Canopy_TEST_MPIEXEC_PREFLAGS_<DEVICE>` replaces `MPIEXEC_PREFLAGS`. On
+Tuolumne, `run_cmake_tuolumne.sh` sets both for `HIP`, so HIP MPI tests register
+at np 1-4 with one APU per rank (`--gpus-per-task=1`); a node has four APUs. Non-MPI tests
 (`Helpers`, `LaplaceKernel`) exercise no MPI functionality and run once,
 serially.
 CTest launches each MPI test through CMake's `MPIEXEC_EXECUTABLE` — on a

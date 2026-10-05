@@ -67,26 +67,42 @@ if(NOT CANOPY_TEST_DEVICES)
     "matched none of the enabled Kokkos backends); no device tests will be built.")
 endif()
 
+# Drop from a rank list any rank that exceeds what the launcher can run, with a
+# single warning. _what names the list in that warning.
+function(_canopy_filter_mpi_ranks _out _what)
+  set(_kept)
+  set(_skipped)
+  foreach(_np ${ARGN})
+    if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL ${_np})
+      list(APPEND _kept ${_np})
+    else()
+      list(APPEND _skipped ${_np})
+    endif()
+  endforeach()
+  if(_skipped)
+    message(WARNING
+      "Canopy: ${_what} ${_skipped} exceed "
+      "MPIEXEC_MAX_NUMPROCS=${MPIEXEC_MAX_NUMPROCS} and will not be registered.")
+  endif()
+  set(${_out} ${_kept} PARENT_SCOPE)
+endfunction()
+
 # Resolve the MPI rank counts to register each MPI unit test at. Driven by the
-# Canopy_TEST_MPI_RANKS cache variable (default 1-6).
-# Drop any rank that exceeds what the launcher can run, with a single warning.
-set(CANOPY_TEST_MPI_RANKS_EFFECTIVE)
-foreach(_np ${Canopy_TEST_MPI_RANKS})
-  if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL ${_np})
-    list(APPEND CANOPY_TEST_MPI_RANKS_EFFECTIVE ${_np})
+# Canopy_TEST_MPI_RANKS cache variable (default 1-6); a non-empty
+# Canopy_TEST_MPI_RANKS_<DEVICE> replaces it for that device.
+_canopy_filter_mpi_ranks(CANOPY_TEST_MPI_RANKS_EFFECTIVE "MPI test ranks"
+  ${Canopy_TEST_MPI_RANKS})
+foreach(_device ${CANOPY_TEST_DEVICES})
+  if(NOT "${Canopy_TEST_MPI_RANKS_${_device}}" STREQUAL "")
+    _canopy_filter_mpi_ranks(CANOPY_TEST_MPI_RANKS_EFFECTIVE_${_device}
+      "${_device} MPI test ranks" ${Canopy_TEST_MPI_RANKS_${_device}})
   else()
-    list(APPEND _canopy_skipped_ranks ${_np})
+    set(CANOPY_TEST_MPI_RANKS_EFFECTIVE_${_device} ${CANOPY_TEST_MPI_RANKS_EFFECTIVE})
   endif()
 endforeach()
-if(_canopy_skipped_ranks)
-  message(WARNING
-    "Canopy: MPI test ranks ${_canopy_skipped_ranks} exceed "
-    "MPIEXEC_MAX_NUMPROCS=${MPIEXEC_MAX_NUMPROCS} and will not be registered.")
-endif()
 
 macro(Canopy_add_tests)
   cmake_parse_arguments(CANOPY_UNIT_TEST "MPI" "PACKAGE" "NAMES;LABELS" ${ARGN})
-  set(CANOPY_UNIT_TEST_MPIEXEC_NUMPROCS ${CANOPY_TEST_MPI_RANKS_EFFECTIVE})
   set(CANOPY_UNIT_TEST_NUMTHREADS 1)
   foreach( _nt 2 4 )
     if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL ${_nt})
@@ -99,6 +115,14 @@ macro(Canopy_add_tests)
     set(CANOPY_UNIT_TEST_MAIN ${TEST_HARNESS_DIR}/unit_test_main.cpp)
   endif()
   foreach(_device ${CANOPY_TEST_DEVICES})
+    # A non-empty Canopy_TEST_MPIEXEC_PREFLAGS_<DEVICE> replaces MPIEXEC_PREFLAGS
+    # for that device's MPI tests.
+    set(_canopy_mpi_ranks ${CANOPY_TEST_MPI_RANKS_EFFECTIVE_${_device}})
+    if(NOT "${Canopy_TEST_MPIEXEC_PREFLAGS_${_device}}" STREQUAL "")
+      set(_canopy_mpi_preflags ${Canopy_TEST_MPIEXEC_PREFLAGS_${_device}})
+    else()
+      set(_canopy_mpi_preflags ${MPIEXEC_PREFLAGS})
+    endif()
     set(_dir ${CMAKE_CURRENT_BINARY_DIR}/${_device})
     file(MAKE_DIRECTORY ${_dir})
     foreach(_test ${CANOPY_UNIT_TEST_NAMES})
@@ -117,9 +141,9 @@ macro(Canopy_add_tests)
         ${TEST_HARNESS_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
       target_link_libraries(${_target} PRIVATE ${CANOPY_UNIT_TEST_PACKAGE} ${gtest_target})
       if(CANOPY_UNIT_TEST_MPI)
-        foreach(_np ${CANOPY_UNIT_TEST_MPIEXEC_NUMPROCS})
+        foreach(_np ${_canopy_mpi_ranks})
           add_test(NAME ${_target}_np_${_np} COMMAND
-            ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${_np} ${MPIEXEC_PREFLAGS}
+            ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${_np} ${_canopy_mpi_preflags}
             $<TARGET_FILE:${_target}> ${MPIEXEC_POSTFLAGS} ${gtest_args})
           set_property(TEST ${_target}_np_${_np} PROPERTY ENVIRONMENT OMP_NUM_THREADS=1)
           if(CANOPY_UNIT_TEST_LABELS)
