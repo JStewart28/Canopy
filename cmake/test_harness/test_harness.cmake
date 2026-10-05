@@ -68,7 +68,7 @@ if(NOT CANOPY_TEST_DEVICES)
 endif()
 
 # Resolve the MPI rank counts to register each MPI unit test at. Driven by the
-# Canopy_TEST_MPI_RANKS cache variable (default: the minimum test set, 1-6).
+# Canopy_TEST_MPI_RANKS cache variable (default 1-6).
 # Drop any rank that exceeds what the launcher can run, with a single warning.
 set(CANOPY_TEST_MPI_RANKS_EFFECTIVE)
 foreach(_np ${Canopy_TEST_MPI_RANKS})

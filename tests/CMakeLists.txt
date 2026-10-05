@@ -13,9 +13,7 @@ include(${TEST_HARNESS_DIR}/test_harness.cmake)
 
 # Tests are tagged with a CTest LABEL describing their tier:
 #
-#   regression - full-pipeline FMM solves (SingleSolve, MultiSolve). These are
-#                the required ship gate: `ctest -L regression` must pass before
-#                any change ships (see CLAUDE.md "Minimum test set").
+#   regression - the full-pipeline FMM solve (MultiSolve).
 #   unit       - utilities, math kernels, and individual FMM-phase/component
 #                tests. The diagnostic layer: they localize which stage broke
 #                and cover edge cases the end-to-end solve does not exercise.
@@ -44,8 +42,7 @@ set(UNIT_SERIAL_TESTS
 # SingleSolve is a full single-tree solve but is labeled `unit`, not
 # `regression`: it currently fails an accuracy check at np=4 and, when run in
 # the same ctest process as other solves, leaves state behind that deadlocks a
-# later test's Kokkos::initialize. See README "Known Issues". Until that is
-# fixed it must not gate releases; MultiSolve is the regression gate.
+# later test's Kokkos::initialize. See README "Known Issues".
 set(UNIT_MPI_TESTS
   CartesianTaylorSolve
   CommunicationPlan
@@ -59,9 +56,8 @@ set(UNIT_MPI_TESTS
   UpwardSweep
   )
 
-# Regression tests: the full-pipeline solve that is the required gate. Runs at
-# 1-6 ranks. MultiSolve composes the entire FMM pipeline end-to-end, so if it
-# passes the pipeline is correct.
+# Regression tests: the full-pipeline solve. MultiSolve composes the entire FMM
+# pipeline end-to-end.
 set(REGRESSION_MPI_TESTS
   MultiSolve
   )

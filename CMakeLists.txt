@@ -202,9 +202,8 @@ add_feature_info(Tests Canopy_ENABLE_TESTING "Build unit tests (requires GTest)"
 # Set installing tests to off by default
 option(Canopy_INSTALL_TEST_EXECUTABLES "Install Canopy test executables" OFF)
 
-# MPI rank counts at which each MPI unit test is registered with CTest. The
-# default matches the project-wide minimum test set (see CLAUDE.md). Ranks that
-# exceed MPIEXEC_MAX_NUMPROCS are skipped at configure time.
+# MPI rank counts at which each MPI unit test is registered with CTest. Ranks
+# that exceed MPIEXEC_MAX_NUMPROCS are skipped at configure time.
 set(Canopy_TEST_MPI_RANKS "1;2;3;4;5;6" CACHE STRING
     "Semicolon-separated MPI rank counts to register each MPI unit test at")
 

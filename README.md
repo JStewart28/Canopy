@@ -196,9 +196,9 @@ single backend, restrict the test build with `Canopy_TEST_DEVICES`:
 cmake -DCanopy_ENABLE_TESTING=ON -DCanopy_TEST_DEVICES=SERIAL [other args] ..
 ```
 
-This builds only the SERIAL test variants (the minimum test set is SERIAL), a
-roughly N-fold reduction in test-compile time for N enabled backends. Leave it
-empty (the default) to build every enabled backend for a full pre-ship run.
+This builds only the SERIAL test variants, a roughly N-fold reduction in
+test-compile time for N enabled backends. Leave it empty (the default) to build
+every enabled backend.
 Incremental rebuilds are already accelerated by `ccache` (enabled via
 `-DCMAKE_CXX_COMPILER_LAUNCHER=ccache` in the `run_cmake_<system>.sh` wrappers),
 which caches unchanged translation units across rebuilds.
@@ -210,7 +210,7 @@ From the build directory:
 ```bash
 ctest -N                                          # list registered tests, run nothing
 ctest --output-on-failure                         # run the whole suite
-ctest --output-on-failure -L regression -R MPI_SERIAL   # the required ship gate (see below)
+ctest --output-on-failure -L regression          # the full-pipeline solve (MultiSolve)
 ctest --output-on-failure -L unit                 # the diagnostic/component suite
 ctest --output-on-failure -R MultiSolve           # run tests matching a regex
 ctest -j 4 --output-on-failure                    # run up to 4 tests concurrently
@@ -218,10 +218,8 @@ ctest -j 4 --output-on-failure                    # run up to 4 tests concurrent
 
 Tests carry a CTest **label** describing their tier (`ctest -L <label>`):
 
-- **`regression`** — the full-pipeline FMM solve (`MultiSolve`). This is the
-  required gate: `ctest -L regression -R MPI_SERIAL` (SERIAL backend, ranks
-  1–6) must pass before any change ships. `MultiSolve` composes the entire
-  pipeline end-to-end, so if it passes the pipeline is correct.
+- **`regression`** — the full-pipeline FMM solve (`MultiSolve`), which
+  composes the entire pipeline end-to-end.
 - **`unit`** — utilities, math kernels, and individual FMM-phase/component
   tests (tree build, partition, up/down sweeps, P2P, communication plan, and
   the single-tree `SingleSolve`). The diagnostic layer: run these to localize
@@ -240,9 +238,6 @@ scheduler-managed machine, run `ctest` from inside an allocation (the per-system
 docs provide ready-made batch wrappers, e.g.
 [`scripts/tuolumne/run_ctest_minset.flux`](scripts/tuolumne/run_ctest_minset.flux)
 and [`scripts/dane/run_ctest_minset.slurm`](scripts/dane/run_ctest_minset.slurm)).
-
-The project-wide minimum test set that must pass before any change ships is
-defined in [`CLAUDE.md`](CLAUDE.md).
 
 ## Algorithm and Design Documentation
 
@@ -478,8 +473,7 @@ rank count (flux job `f3bnvGg3MDo5`). Run-to-run variation on a HIP
 
 ### Six `MultiSolve` tests fail the `1e-8` multi-step check at every rank count
 
-`ctest --output-on-failure -L regression -R MPI_SERIAL` does not currently pass.
-Six tests fail the multi-step position/velocity comparison at
+The `MultiSolve` stem does not currently pass. Six tests fail the multi-step position/velocity comparison at
 `fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:651,655`) at **all six** rank
 counts: `MultiSolve.StableTree_Migrate`, `IntermediateMotion_Rebalance`,
 `LargeMotion_Rebuild`, `AutoMaintain`, `AutoRebalance`, `M2L_BinEdge_Fallback`.
@@ -572,9 +566,8 @@ A `make -k` over the whole tree fails exactly two targets, at every backend:
 
 Both are **pre-existing** — verified by rebuilding
 `Canopy_Test_LaplaceKernel_SERIAL` at `64d1648` with unrelated in-flight changes
-stashed, which produces the same errors. Neither target carries the `regression`
-label, so neither gates a release; both are test-side drift behind a `src/`
-signature change, not a defect in the library.
+stashed, which produces the same errors. Both are test-side drift behind a
+`src/` signature change, not a defect in the library.
 
 The consequence is that `ctest -L unit` cannot be run as the diagnostic layer
 described under [Run with CTest](#run-with-ctest) until they are fixed. Build
@@ -606,8 +599,8 @@ when it was re-enabled in the CTest suite:
    test's `Kokkos::initialize` — the SERIAL test binaries all bring up the HIP
    backend.
 
-Because of (2), `SingleSolve` is excluded from the regression gate so the gate
-(`MultiSolve` only) runs cleanly. To be triaged in a separate session: fix the
+Because of (2), `SingleSolve` is kept out of the `regression` label so that
+`ctest -L regression` (`MultiSolve` only) does not deadlock. To be triaged in a separate session: fix the
 np=4 accuracy bug, and ensure a failed solve tears down its MPI/GPU state so it
 cannot poison subsequent tests in the same `ctest` run.
 

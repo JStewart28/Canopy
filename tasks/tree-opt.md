@@ -1,6 +1,6 @@
 # Tree balance and M2L operator-table economy on non-uniform trees
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS
 
 ## Problem
 
@@ -75,7 +75,7 @@ needs is measured rather than assumed (**chain C**).
   coverage, and each task's exit criterion below names the stems and rank counts
   it must pass — that list is the task's gate, and nothing wider is required of
   it. The `regression` label keeps its single member, `MultiSolve`
-  (`tests/CMakeLists.txt:65-67`). `CartesianTaylorBasis`'s coverage stays in the
+  (`tests/CMakeLists.txt:61-63`). `CartesianTaylorBasis`'s coverage stays in the
   `unit` tier, and B1's and B2's exit criteria are what hold it: both name
   `CartesianTaylorSolve` as the authority on the basis they change, precisely
   because `MultiSolve` would pass with that basis wholly broken.
@@ -168,8 +168,9 @@ drifting level index with a stable one.
 | Balancing knob default | the off value, until A3 | A2 must not move any existing result. A knob whose default is the current behavior is a change with no runtime surface until something sets it, which is what makes A2's exit criterion checkable against the existing stems, unmodified. |
 | Root-width quantization | `std::ldexp`/`std::frexp`, never `pow(2, round(log2(w)))` | Exact in binary floating point. A rounded `pow` reintroduces the drift the quantization exists to remove, and would do it only on some inputs. |
 | Where a refused pair goes | unchanged — `m2l_overflow_policy` | `CartesianTaylorBasis` selects `PerPairTranslate` (`src/Canopy_CartesianTaylorBasis.hpp:516`) and that stays. Nothing here changes what happens to a refused pair, only how many pairs are refused. |
-| New test tier | `unit`, always | Every task here adds a component-level claim, and none of them relabels an existing test. `regression` has one member, `MultiSolve` (`tests/CMakeLists.txt:65-67`); moving a test between labels needs confirmation per `CLAUDE.md`, and no task here asks for it. Each task's exit criterion names the stems it must pass, which is what makes the `unit` tier sufficient. |
-| New test registration | append the stem to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:49-59`) | The macro call below it applies the label and the 1-6 rank sweep, so a stem added to the list is registered everywhere for free. |
+| New test tier | `unit`, always | Every task here adds a component-level claim, and none of them relabels an existing test. `regression` has one member, `MultiSolve` (`tests/CMakeLists.txt:61-63`). Each task's exit criterion names the stems it must pass, so the label does not decide what a task is held to. |
+| Backends | every exit criterion passes on SERIAL at np 1-6 **and** on HIP at np 1-4 | Production runs on HIP. A node has four APUs, and HIP runs one APU per rank (`fix-hang-rebalance.md` H0a). A figure a task *records* is taken from the SERIAL binary unless the task says otherwise; the HIP arm is pass/fail, read against `fix-hang-rebalance.md` H0c's baseline (**R11**). |
+| New test registration | append the stem to `UNIT_MPI_TESTS` (`tests/CMakeLists.txt:46-57`) | The macro call below it applies the label and the 1-6 rank sweep, so a stem added to the list is registered everywhere for free (HIP at np 1-4, per `fix-hang-rebalance.md` H0a). |
 | Fixture determinism | report per `(nprocs, rank)`, never a mean, and state reproducibility across two runs | The tree/partition path is run-to-run nondeterministic at np $\ge$ 3; see **R6**. A single draw is not the number. |
 | Formatting | never run clang-format | `CLAUDE.md`: "Do not clang format." Write in the style of the surrounding code. |
 | Comments | state units, signs and ranges on the declaration | Every bound and offset here is in units of a half-width at some depth, and which depth is exactly what goes wrong silently. |
@@ -182,19 +183,34 @@ any task below.
 
 `Canopy_add_tests` (`cmake/test_harness/test_harness.cmake:87-171`) generates one
 executable per (stem, backend) and, for an MPI stem, one ctest entry per rank
-count:
+count. Every exit criterion below runs two backends:
 
 | | build target | ctest entry |
 | --- | --- | --- |
-| MPI stem | `Canopy_Test_<Stem>_MPI_SERIAL` | `Canopy_Test_<Stem>_MPI_SERIAL_np_<N>`, `N` in 1-6 |
-| non-MPI stem | `Canopy_Test_<Stem>_SERIAL` | `Canopy_Test_<Stem>_SERIAL` |
+| MPI stem, SERIAL | `Canopy_Test_<Stem>_MPI_SERIAL` | `Canopy_Test_<Stem>_MPI_SERIAL_np_<N>`, `N` in 1-6 |
+| MPI stem, HIP | `Canopy_Test_<Stem>_MPI_HIP` | `Canopy_Test_<Stem>_MPI_HIP_np_<N>`, `N` in 1-4 |
+| non-MPI stem | `Canopy_Test_<Stem>_SERIAL`, `Canopy_Test_<Stem>_HIP` | the same names |
 
-So a task that names stems `DownwardSweep` and `MultiSolve` is run by building
-exactly two targets and matching exactly twelve ctest entries:
+HIP registers at np 1-4 with one APU per rank only once
+`fix-hang-rebalance.md` H0a is **DONE**; every task below
+reach H0c through T1, whose HIP arm depends on it. Run each HIP `ctest` line with the HIP environment
+set on that command only (`fix-hang-rebalance.md`, Conventions, "HIP
+environment"). Run every `ctest` line through `canopy_ctest` with the same
+regex. That gives each entry a timeout of 1.75x its measured SERIAL runtime
+instead of 300 s (`fix-hang-rebalance.md` H0b and Conventions, "Time
+budget"). The code blocks below show the bare `ctest`. A task that adds a case
+to a stem, or changes its runtime, re-calibrates that stem's rows in
+`scripts/tuolumne/serial_runtimes.tsv` in the same change. That includes a
+knob turned on in an exit criterion (A2, B2), which runs under its own budget
+config. So a task that names
+stems `DownwardSweep` and `MultiSolve` is run by building exactly four targets
+and matching exactly twenty ctest entries:
 
 ```bash
-make -j Canopy_Test_DownwardSweep_MPI_SERIAL Canopy_Test_MultiSolve_MPI_SERIAL
+make -j Canopy_Test_DownwardSweep_MPI_SERIAL Canopy_Test_MultiSolve_MPI_SERIAL \
+       Canopy_Test_DownwardSweep_MPI_HIP Canopy_Test_MultiSolve_MPI_HIP
 ctest --output-on-failure -R '^Canopy_Test_(DownwardSweep|MultiSolve)_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_(DownwardSweep|MultiSolve)_MPI_HIP_np_[1-4]$'
 ```
 
 The anchored regex matters: unanchored, `-R Canopy_Test_CartesianTaylor` also
@@ -210,7 +226,7 @@ mpirun -n 4 ./tests/Canopy_Test_CartesianTaylorSolve_MPI_SERIAL \
     --gtest_filter=CartesianTaylorSolve.matchesDirectSumThetaRef
 ```
 
-Use this for the edit-compile-check loop and the ctest line for the exit
+Use this for the edit-compile-check loop and the ctest lines for the exit
 criterion; a gtest filter silently matching nothing exits 0, so it is not a
 criterion.
 
@@ -289,7 +305,7 @@ Gaussian blob in one corner, 20 % uniform (`tests/tstMultiSolve.hpp:159-171`,
 (`tests/tstMultiSolve.hpp:734-748`) drives it at `ncrit = 8`, `max_depth = 8`
 and `mac_theta = 0.3`, asserting that the fallback population is non-zero
 (`:751-762`). That test is the `regression` label's only member
-(`tests/CMakeLists.txt:65-67`).
+(`tests/CMakeLists.txt:61-63`).
 
 **Every refusal on that fixture is an offset refusal.** The range guard carries
 all of them — the count-cap and dropped counters read 0 on every reading — and
@@ -332,7 +348,7 @@ Also true now:
 - **There is no `FmmConfig` knob for tree balance.**
 - **The `regression`-labeled stem exercises `LaplaceKernel` only.**
   `REGRESSION_MPI_TESTS` is the single stem `MultiSolve`
-  (`tests/CMakeLists.txt:65-67`), and `tstMultiSolve.hpp` instantiates
+  (`tests/CMakeLists.txt:61-63`), and `tstMultiSolve.hpp` instantiates
   `Canopy::Solver<..., Scalar, P, 1>` (`:744-745`) without a far-field
   argument, so it takes the default `FarField = LaplaceKernel`
   (`src/Canopy_Solver.hpp:146-148`). **No `regression`-labeled test
@@ -418,13 +434,19 @@ that way and what was already tried.
 
 ## Task sequence
 
-### T1 — A fixture whose tree has shallow leaves beside deep subtrees — **DONE**
+### T1 — A fixture whose tree has shallow leaves beside deep subtrees — **REOPENED**
 
-**Depends on:** none.
+SERIAL arm **met**; HIP arm **not started**. The fixture and its assertions are
+in place. What remains is running the exit criterion below on HIP, and fixing
+whatever fails there that H0c did not already record.
+
+**Depends on:** none for the SERIAL arm. HIP arm: `fix-hang-rebalance.md` H0c
+**DONE** (HIP registration and baseline) and H2 **DONE**, both arms, since a
+`MultiSolve` HIP pass that hangs at np 3 cannot be read.
 **Fill in:** `tests/tstMultiSolve.hpp` (the per-reason report on the existing
 clustered fixture); `tests/tstDownwardSweep.hpp` (the reusable fixture and the
 new case). Both stems are already registered
-(`tests/CMakeLists.txt:49-59`, `:65-67`), so no CMake change is needed.
+(`tests/CMakeLists.txt:46-57`, `:61-63`), so no CMake change is needed.
 **Reference:** the existing clustered distribution and the test that drives it
 (`tests/tstMultiSolve.hpp:158-167`, `:205-220`, `:686-708`) — **the starting
 point, not a model to copy**; `with_laplace_solve`
@@ -470,7 +492,15 @@ listed under [Current state](#current-state).
    tasks read their numbers out of this fixture's log rather than re-deriving
    them.
 
-**Met.** Step 1 settled the open question first, on the clustered fixture
+**HIP arm.** Build and run the exit criterion's HIP lines, and the failure
+direction in `build-tuolumne-noprof/` on HIP as well. Record in the log, per
+`(nprocs, rank)` at np 1-4, the line step 8 prints, from two runs, and whether
+they agree with each other and with SERIAL at the same np. A HIP case that
+fails where SERIAL passes, and that H0c did not record, is a defect in T1's
+fixture or in what it exercises: fix it here. A failure H0c did record is
+carried under the same rule as the `MultiSolve` carve-out below.
+
+**Met (SERIAL).** Step 1 settled the open question first, on the clustered fixture
 unchanged at its own `ncrit = 8`, `max_depth = 8`, `mac_theta = 0.3`: **every
 refusal there is a range-guard refusal**, with `count_cap == 0` and
 `depth_dropped == 0` on all 42 `(nprocs, rank, step)` readings and
@@ -515,19 +545,22 @@ passes; it fails only on the shared accuracy check inside
 `testMultiStepGravity`. The `DownwardSweep` arm passes at ranks 1-6 in both
 runs. See `tree-opt-progress-log.md` `## T1`.
 
-**Exit criterion:** stems `MultiSolve`, `DownwardSweep` pass at ranks 1-6 —
+**Exit criterion:** stems `MultiSolve`, `DownwardSweep` pass on SERIAL at ranks
+1-6 and on HIP at ranks 1-4 —
 
 ```bash
-make -j Canopy_Test_MultiSolve_MPI_SERIAL Canopy_Test_DownwardSweep_MPI_SERIAL
+make -j Canopy_Test_MultiSolve_MPI_SERIAL Canopy_Test_DownwardSweep_MPI_SERIAL \
+       Canopy_Test_MultiSolve_MPI_HIP Canopy_Test_DownwardSweep_MPI_HIP
 ctest --output-on-failure -R '^Canopy_Test_(MultiSolve|DownwardSweep)_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_(MultiSolve|DownwardSweep)_MPI_HIP_np_[1-4]$'
 ```
 
 — the log records which guard the existing clustered fixture's refusals come
 from, and the new sweep-level case prints `range_guard > 0` with
 `count_cap == 0` on at least one rank at every rank count.
-Failure direction: a build configured `-DCanopy_ENABLE_PROFILING=OFF` passes the
-same case with all three counters reading $-1$, not $0$, and the sum identity
-reported as skipped.
+Failure direction: a build configured `-DCanopy_ENABLE_PROFILING=OFF`
+(`build-tuolumne-noprof/`) passes the same case on both backends with all three
+counters reading $-1$, not $0$, and the sum identity reported as skipped.
 
 ---
 
@@ -538,16 +571,17 @@ reported as skipped.
 (velocity `1.71e-2` at np 6, 8.8x $\theta^{P+1}$), and a `mac_theta` sweep
 shows the excess enters through the far field. No `fmm_tolerance` bound was
 moved. Steps 2, 4 and 5 and the deviation reports are in place; step 3 is
-measured but not applied. See `tree-opt-progress-log.md` section V1.
+measured but not applied. Every figure V1 recorded is SERIAL. See
+`tree-opt-progress-log.md` section V1.
 
 **Revisit V1 once `fix-hang-rebalance.md` is done.** That design resolves the
-two defects blocking it: the np-3 `MultiSolve` hang (H1, H2), and the
-AutoRebalance excess (E1, E2). E2 either fixes the far field or corrects the
+two defects blocking it, on SERIAL and HIP: the `MultiSolve` hang (H1, H2),
+and the AutoRebalance excess (E1, E2). E2 either fixes the far field or corrects the
 step-1 derivation above with the measurement that justifies it. When both are
 **DONE**, re-run V1 from step 1: re-measure, because a fix to the partition or
 the far field moves the figures recorded in the log, then pin the bounds.
 
-**Depends on:** T1 **DONE**.
+**Depends on:** T1 **DONE**, both arms; `fix-hang-rebalance.md` E2 **DONE**.
 **Fill in:** `tests/tstMultiSolve.hpp` (the six `fmm_tolerance` call sites,
 `SolveFusedM2L.matchesPriorReference`'s bounds, `SolveFusedM2L.FP32_smokeTest`,
 and the clustered test's per-reason assertion);
@@ -570,7 +604,10 @@ explicit absence of any accuracy claim (`:1040-1062`).
    documents a prior value of `2e-2` that no call site passes. Set each site's
    bound at its own measured deviation over **at least three runs** (**R6** — it
    moves at np $\ge$ 3) times a margin stated in the comment, with the measured
-   figures beside it, and correct the `:684` prose in the same change. Per call
+   figures beside it, and correct the `:684` prose in the same change. Measure
+   on SERIAL at np 1-6 **and** on HIP at np 1-4, and set each bound at the worst
+   over both backends. A bound that one backend alone would fail is a bound
+   drawn on the other backend's noise. Per call
    site and not one shared value: the parameter is already per-site, the
    configurations differ materially — `nsteps` 2/5/8, `drift_multiplier`
    1.0/2.0/5.0, uniform against clustered — and the measured errors span roughly
@@ -611,9 +648,9 @@ explicit absence of any accuracy claim (`:1040-1062`).
    `SolveFusedM2L.matchesPriorReference` is the clearest case: its own comment
    says `5.0e-2` exists to catch "a complete-regression bug", which is a
    different job from noticing a tree change that costs a few percent. Measure
-   the actual deviation over **at least three runs** and set the bound at the
-   worst observed times a margin you state in the comment, with the measured
-   figures beside it.
+   the actual deviation over **at least three runs** on each backend and set
+   the bound at the worst observed times a margin you state in the comment,
+   with the measured figures beside it.
 4. **Confirm the `theta_canopy` bound rather than redoing it.**
    `CTS_DEV_TOL_THETA_CANOPY` is already a measured deviation times a stated
    margin, in exactly the form step 3 prescribes, at 2x the worst of the two
@@ -647,16 +684,20 @@ than the margin between runs cannot be tightened and must be left as it is, with
 that recorded. The `theta_canopy` arm needs no such measurement: its six rank
 counts agree to 15 significant figures, recorded on the constant.
 
-**Exit criterion:** stems `CartesianTaylorSolve`, `MultiSolve` pass at ranks 1-6
+**Exit criterion:** stems `CartesianTaylorSolve`, `MultiSolve` pass on SERIAL at
+ranks 1-6 and on HIP at ranks 1-4
 with the re-derived bounds, three times in succession, with
 `SolveFusedM2L.FP32_smokeTest` commented out per step 2 so that carve-out is
 visible in the diff rather than hidden behind a gtest filter —
 
 ```bash
-make -j Canopy_Test_CartesianTaylorSolve_MPI_SERIAL Canopy_Test_MultiSolve_MPI_SERIAL
+make -j Canopy_Test_CartesianTaylorSolve_MPI_SERIAL Canopy_Test_MultiSolve_MPI_SERIAL \
+       Canopy_Test_CartesianTaylorSolve_MPI_HIP Canopy_Test_MultiSolve_MPI_HIP
 for i in 1 2 3; do
   ctest --output-on-failure \
     -R '^Canopy_Test_(CartesianTaylorSolve|MultiSolve)_MPI_SERIAL_np_[1-6]$' || break
+  ctest --output-on-failure \
+    -R '^Canopy_Test_(CartesianTaylorSolve|MultiSolve)_MPI_HIP_np_[1-4]$' || break
 done
 ```
 
@@ -702,9 +743,15 @@ $(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$ — then B1 removes
 nothing on this fixture and its value rests entirely on a different tree shape,
 which must be said in the log before B1 is started.
 
-**Exit criterion:** stem `DownwardSweep` passes at ranks 1-6 —
-`make -j Canopy_Test_DownwardSweep_MPI_SERIAL` then
-`ctest --output-on-failure -R '^Canopy_Test_DownwardSweep_MPI_SERIAL_np_[1-6]$'`
+**Exit criterion:** stem `DownwardSweep` passes on SERIAL at ranks 1-6 and on
+HIP at ranks 1-4 —
+
+```bash
+make -j Canopy_Test_DownwardSweep_MPI_SERIAL Canopy_Test_DownwardSweep_MPI_HIP
+ctest --output-on-failure -R '^Canopy_Test_DownwardSweep_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_DownwardSweep_MPI_HIP_np_[1-4]$'
+```
+
 — and the log records the duplicate factor per `(nprocs, rank)` for both bases,
 with the absolute column counts and byte figures. Failure direction: the `-DCanopy_ENABLE_PROFILING=OFF`
 build passes the same case, since `m2l_realized_keys()` is ungated — a $-1$
@@ -741,9 +788,15 @@ depending on how the surface folds, and **A2 must not be started until this
 number is in the log** — it is the input to A2's decision about whether to
 balance fully or only against the deepest neighbour.
 
-**Exit criterion:** stem `TreeBuilder` passes at ranks 1-6 —
-`make -j Canopy_Test_TreeBuilder_MPI_SERIAL` then
-`ctest --output-on-failure -R '^Canopy_Test_TreeBuilder_MPI_SERIAL_np_[1-6]$'`
+**Exit criterion:** stem `TreeBuilder` passes on SERIAL at ranks 1-6 and on HIP
+at ranks 1-4 —
+
+```bash
+make -j Canopy_Test_TreeBuilder_MPI_SERIAL Canopy_Test_TreeBuilder_MPI_HIP
+ctest --output-on-failure -R '^Canopy_Test_TreeBuilder_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_TreeBuilder_MPI_HIP_np_[1-4]$'
+```
+
 — and the log records, per `(nprocs, rank)`, the neighbour
 level-difference distribution, the count exceeding 1, and the implied cell-count
 multiplier, from two separate runs. Failure direction: the case asserts the
@@ -797,12 +850,14 @@ the tree builder's tests). No `src/` change.
 5. Add a loud report — not an assertion — when a cell is made a leaf by
    `max_depth` rather than by `ncrit`.
 
-**Exit criterion:** stems `TreeBuilder`, `CartesianTaylorSolve` pass at ranks
-1-6 —
+**Exit criterion:** stems `TreeBuilder`, `CartesianTaylorSolve` pass on SERIAL
+at ranks 1-6 and on HIP at ranks 1-4 —
 
 ```bash
-make -j Canopy_Test_TreeBuilder_MPI_SERIAL Canopy_Test_CartesianTaylorSolve_MPI_SERIAL
+make -j Canopy_Test_TreeBuilder_MPI_SERIAL Canopy_Test_CartesianTaylorSolve_MPI_SERIAL \
+       Canopy_Test_TreeBuilder_MPI_HIP Canopy_Test_CartesianTaylorSolve_MPI_HIP
 ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|CartesianTaylorSolve)_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|CartesianTaylorSolve)_MPI_HIP_np_[1-4]$'
 ```
 
 — the new case asserts the cap-0 and default-cap fields agree at the deviation
@@ -862,13 +917,17 @@ prove the other basis did **not** move.
 ```bash
 make -j Canopy_Test_CartesianTaylorSolve_MPI_SERIAL Canopy_Test_FarFieldContract_MPI_SERIAL \
        Canopy_Test_DownwardSweep_MPI_SERIAL Canopy_Test_LaplaceSolve_MPI_SERIAL \
-       Canopy_Test_MultiSolve_MPI_SERIAL Canopy_Test_CartesianTaylor_SERIAL
+       Canopy_Test_MultiSolve_MPI_SERIAL Canopy_Test_CartesianTaylor_SERIAL \
+       Canopy_Test_CartesianTaylorSolve_MPI_HIP Canopy_Test_FarFieldContract_MPI_HIP \
+       Canopy_Test_DownwardSweep_MPI_HIP Canopy_Test_LaplaceSolve_MPI_HIP \
+       Canopy_Test_MultiSolve_MPI_HIP Canopy_Test_CartesianTaylor_HIP
 ctest --output-on-failure -R '^Canopy_Test_(CartesianTaylorSolve|FarFieldContract|DownwardSweep|LaplaceSolve|MultiSolve)_MPI_SERIAL_np_[1-6]$'
-ctest --output-on-failure -R '^Canopy_Test_CartesianTaylor_SERIAL$'
+ctest --output-on-failure -R '^Canopy_Test_(CartesianTaylorSolve|FarFieldContract|DownwardSweep|LaplaceSolve|MultiSolve)_MPI_HIP_np_[1-4]$'
+ctest --output-on-failure -R '^Canopy_Test_CartesianTaylor_(SERIAL|HIP)$'
 ```
 
-All pass at ranks 1-6, and B0's case reports a duplicate factor of exactly
-**1.0** for
+All pass on SERIAL at ranks 1-6 and on HIP at ranks 1-4, and B0's case reports
+a duplicate factor of exactly **1.0** for
 `CartesianTaylorBasis` — every admitted key now has a distinct
 $(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$ — with its absolute
 column count reduced by B0's measured factor and `LaplaceKernel`'s count
@@ -938,8 +997,13 @@ partition path.
 make -j Canopy_Test_TreeBuilder_MPI_SERIAL Canopy_Test_TreePartitioner_MPI_SERIAL \
        Canopy_Test_CommunicationPlan_MPI_SERIAL Canopy_Test_DownwardSweep_MPI_SERIAL \
        Canopy_Test_LaplaceSolve_MPI_SERIAL Canopy_Test_CartesianTaylorSolve_MPI_SERIAL \
-       Canopy_Test_MultiSolve_MPI_SERIAL
+       Canopy_Test_MultiSolve_MPI_SERIAL \
+       Canopy_Test_TreeBuilder_MPI_HIP Canopy_Test_TreePartitioner_MPI_HIP \
+       Canopy_Test_CommunicationPlan_MPI_HIP Canopy_Test_DownwardSweep_MPI_HIP \
+       Canopy_Test_LaplaceSolve_MPI_HIP Canopy_Test_CartesianTaylorSolve_MPI_HIP \
+       Canopy_Test_MultiSolve_MPI_HIP
 ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|TreePartitioner|CommunicationPlan|DownwardSweep|LaplaceSolve|CartesianTaylorSolve|MultiSolve)_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|TreePartitioner|CommunicationPlan|DownwardSweep|LaplaceSolve|CartesianTaylorSolve|MultiSolve)_MPI_HIP_np_[1-4]$'
 ```
 
 *Knob at 1* — the new cases, run by the same seven stems, assert the balance
@@ -976,11 +1040,12 @@ fallback-to-GEMM time ratio, both in the log.
 3. Update `README.md` per `CLAUDE.md`'s keep-in-sync rule, since this changes a
    public configuration default.
 
-**Exit criterion:** A2's seven stems pass at ranks 1-6 at whatever default this
-task sets —
+**Exit criterion:** A2's seven stems pass on SERIAL at ranks 1-6 and on HIP at
+ranks 1-4 at whatever default this task sets —
 
 ```bash
 ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|TreePartitioner|CommunicationPlan|DownwardSweep|LaplaceSolve|CartesianTaylorSolve|MultiSolve)_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|TreePartitioner|CommunicationPlan|DownwardSweep|LaplaceSolve|CartesianTaylorSolve|MultiSolve)_MPI_HIP_np_[1-4]$'
 ```
 
 — the log records the arithmetic with both measured inputs, and `README.md`
@@ -1050,8 +1115,12 @@ per-level `unit_w` array the operator builder indexes by `max_d`
 ```bash
 make -j Canopy_Test_TreeBuilder_MPI_SERIAL Canopy_Test_DownwardSweep_MPI_SERIAL \
        Canopy_Test_CartesianTaylorSolve_MPI_SERIAL Canopy_Test_LaplaceSolve_MPI_SERIAL \
-       Canopy_Test_MultiSolve_MPI_SERIAL
+       Canopy_Test_MultiSolve_MPI_SERIAL \
+       Canopy_Test_TreeBuilder_MPI_HIP Canopy_Test_DownwardSweep_MPI_HIP \
+       Canopy_Test_CartesianTaylorSolve_MPI_HIP Canopy_Test_LaplaceSolve_MPI_HIP \
+       Canopy_Test_MultiSolve_MPI_HIP
 ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|DownwardSweep|CartesianTaylorSolve|LaplaceSolve|MultiSolve)_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|DownwardSweep|CartesianTaylorSolve|LaplaceSolve|MultiSolve)_MPI_HIP_np_[1-4]$'
 ```
 
 *Knob off*: all five pass unchanged, `LaplaceSolve`'s bit-for-bit hashes
@@ -1178,3 +1247,14 @@ every bound still passes. Distinguishing measurement: record the **measured
 deviations**, not the pass/fail, before and after any task that changes the tree
 or the key — A3's failure direction requires exactly that, and it is the only
 reason an unchanged pass there means anything.
+
+**R11 — A HIP failure is attributed to the task that ran into it.** No HIP
+test ran before this design's tasks, so a HIP arm may fail for a reason that
+predates them. Examples: `LaplaceSolve`'s bit-for-bit hashes in `tests/data`
+were generated by the SERIAL binary, and device reductions can sum in a
+different order. Presentation: a task's HIP arm fails on a case the task does
+not touch. Distinguishing measurement: `fix-hang-rebalance.md` H0c's per-stem
+HIP table, taken before any change. A failure recorded there is carried and
+stays in README "Known Issues". A failure not recorded there belongs to the
+task. Never widen a bound to green a HIP arm. The same rule applies as for
+SERIAL (V1 step 1).

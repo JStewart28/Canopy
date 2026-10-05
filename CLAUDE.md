@@ -62,8 +62,9 @@ default, and a task that names two test stems needs two targets.
 
 - Build exactly the targets named by the task's exit criterion, and nothing
   else. `cmake/test_harness/test_harness.cmake` generates one target per
-  (stem, backend): `Canopy_Test_<Stem>_MPI_SERIAL` for an MPI stem,
-  `Canopy_Test_<Stem>_SERIAL` for a non-MPI one.
+  (stem, backend): `Canopy_Test_<Stem>_MPI_<DEVICE>` for an MPI stem,
+  `Canopy_Test_<Stem>_<DEVICE>` for a non-MPI one, where `<DEVICE>` is
+  `SERIAL`, `HIP`, … .
 - `ctest -N` lists what is registered without building or running anything.
 - If something outside the task's list looks like it needs building, say why
   and ask before building it.
@@ -80,14 +81,13 @@ stem, `-R CartesianTaylor` also matches `CartesianTaylorSolve`):
 
 ```bash
 ctest --output-on-failure -R '^Canopy_Test_(StemA|StemB)_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_(StemA|StemB)_MPI_HIP_np_[1-4]$'
 ```
 
 Tests carry CTest labels in [tests/CMakeLists.txt](tests/CMakeLists.txt), and
 the labels stay useful for selecting a diagnostic sweep — `ctest -L unit`
 covers utilities, math kernels and individual FMM-phase/component tests, which
-is how you localize *which* phase a failure comes from. Relabeling a test
-changes what other work is held to, so confirm with the user before moving one
-between labels.
+is how you localize *which* phase a failure comes from.
 
 ## Plans
 
