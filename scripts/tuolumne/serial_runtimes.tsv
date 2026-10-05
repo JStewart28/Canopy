@@ -1,4 +1,4 @@
-stem	np	config	t_ref_s	jobid
+stem	np	config	t_ref_s	jobid	extra_s	extra_reason
 CartesianTaylor	1	default	5.49	f3cLieUe4u2F
 CartesianTaylorSolve	1	default	18.86	f3cLieUe4u2F
 CartesianTaylorSolve	2	default	12.4	f3cLieUe4u2F
@@ -48,9 +48,9 @@ TreePartitioner	3	default	5.2	f3cLieUe4u2F
 TreePartitioner	4	default	6.06	f3cLieUe4u2F
 TreePartitioner	5	default	6.89	f3cLieUe4u2F
 TreePartitioner	6	default	7.86	f3cLieUe4u2F
-UpwardSweep	1	default	3.54	f3cLieUe4u2F
-UpwardSweep	2	default	4.19	f3cLieUe4u2F
-UpwardSweep	3	default	5.25	f3cLieUe4u2F
-UpwardSweep	4	default	6.17	f3cLieUe4u2F
+UpwardSweep	1	default	3.54	f3cLieUe4u2F	2	HIP testIdempotentExecution failure output (3k-17k lines): ctest digests it ~10 s after the ranks exit; worst ctest time x1.25 (H0c, f3cM4ghTjtiT/f3cMCHLDMNu5)
+UpwardSweep	2	default	4.19	f3cLieUe4u2F	7	HIP testIdempotentExecution failure output (3k-17k lines): ctest digests it ~10 s after the ranks exit; worst ctest time x1.25 (H0c, f3cM4ghTjtiT/f3cMCHLDMNu5)
+UpwardSweep	3	default	5.25	f3cLieUe4u2F	18	HIP testIdempotentExecution failure output (3k-17k lines): ctest digests it ~10 s after the ranks exit; worst ctest time x1.25 (H0c, f3cM4ghTjtiT/f3cMCHLDMNu5)
+UpwardSweep	4	default	6.17	f3cLieUe4u2F	23	HIP testIdempotentExecution failure output (3k-17k lines): ctest digests it ~10 s after the ranks exit; worst ctest time x1.25 (H0c, f3cM4ghTjtiT/f3cMCHLDMNu5)
 UpwardSweep	5	default	6.94	f3cLieUe4u2F
 UpwardSweep	6	default	7.91	f3cLieUe4u2F

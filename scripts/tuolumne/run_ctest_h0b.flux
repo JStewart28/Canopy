@@ -124,8 +124,11 @@ if [ "${PHASE}" = calibrate ] || [ "${PHASE}" = all ]; then
     done
     watchdog_stop
 
+    # Carry each row's extra_s / extra_reason allowance over a recalibration.
+    old_tsv=${WATCHDOG_DIR}/old.tsv
+    cp ${TSV} ${old_tsv} 2>/dev/null || : > ${old_tsv}
     {
-        echo -e "stem\tnp\tconfig\tt_ref_s\tjobid"
+        echo -e "stem\tnp\tconfig\tt_ref_s\tjobid\textra_s\textra_reason"
         awk -F'\t' '
             { if (!($1 in m) || $2 + 0 > m[$1]) m[$1] = $2 + 0; n[$1]++ }
             END { for (e in m) print e "\t" m[e] "\t" n[e] }' ${samples} |
@@ -136,7 +139,9 @@ if [ "${PHASE}" = calibrate ] || [ "${PHASE}" = all ]; then
             elif [[ ${entry} =~ ^Canopy_Test_([A-Za-z0-9]+)_SERIAL$ ]]; then
                 echo -e "${BASH_REMATCH[1]}\t1\tdefault\t${tmax}\t${JOBID}"
             fi
-        done | sort -t$'\t' -k1,1 -k2,2n
+        done | sort -t$'\t' -k1,1 -k2,2n |
+        awk -F'\t' -v OFS='\t' 'NR == FNR { if ($6 != "") x[$1 FS $2 FS $3] = $6 OFS $7; next }
+            { k = $1 FS $2 FS $3; print (k in x) ? $0 OFS x[k] : $0 }' ${old_tsv} -
     } > ${TSV}
     echo "### serial_runtimes.tsv ($(($(wc -l < ${TSV}) - 1)) rows) ###"
     cat ${TSV}

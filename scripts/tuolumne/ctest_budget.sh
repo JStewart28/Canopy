@@ -6,9 +6,14 @@
 # Lists the entries the regex matches (ctest -N), checks every one before
 # launching any, then runs each alone as
 #   ctest --timeout <budget> -R '^<entry>$' [ctest args...]
-# followed by watchdog_wait_idle. The budget is ceil(1.75 * t_ref_s) seconds,
-# t_ref_s being the (stem, np, ${CANOPY_BUDGET_CONFIG:-default}) row of
-# CANOPY_BUDGET_TSV, for every backend. One line per entry:
+# followed by watchdog_wait_idle. The budget is ceil(1.75 * t_ref_s) + extra_s
+# seconds, t_ref_s and extra_s (optional, default 0) being columns of the
+# (stem, np, ${CANOPY_BUDGET_CONFIG:-default}) row of CANOPY_BUDGET_TSV, for
+# every backend. extra_s is a measured allowance for work outside the solve
+# (e.g. ctest digesting a large failure output); the row's extra_reason column
+# says what. The first entry run after flux_watchdog.sh is sourced also gets
+# CANOPY_COLD_START_S (6): the first Canopy binary launched in a job runs ~4 s
+# slow. One line per entry:
 #   [canopy_ctest] <entry> runtime=<s> budget=<s> outcome=<completed|failed|over-budget>
 #
 # Refused before anything launches (exit 2, naming the entry):
@@ -26,6 +31,7 @@
 # Returns 0 if every entry completed, 1 if any failed or went over budget.
 
 CANOPY_BUDGET_TSV=${CANOPY_BUDGET_TSV:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/serial_runtimes.tsv}
+: "${CANOPY_COLD_START_S:=6}"
 _CANOPY_DEVICES='SERIAL|OPENMP|THREADS|HIP|CUDA|CUDA_UVM|SYCL'
 
 # Sets _cc_stem, _cc_dev, _cc_np, _cc_mpi from an entry name; 1 if unparseable.
@@ -43,7 +49,7 @@ _canopy_ctest_parse() {
 # Prints the budget in seconds for an entry; on refusal prints the reason to
 # stderr and returns 1.
 _canopy_ctest_budget() {
-    local name=$1 config=${CANOPY_BUDGET_CONFIG:-default} t_ref
+    local name=$1 config=${CANOPY_BUDGET_CONFIG:-default} row t_ref extra
     if ! _canopy_ctest_parse "${name}"; then
         echo "canopy_ctest: REFUSED ${name}: not Canopy_Test_<Stem>_MPI_<DEV>_np_<N> or Canopy_Test_<Stem>_<DEV>" >&2
         return 1
@@ -52,13 +58,15 @@ _canopy_ctest_budget() {
         echo "canopy_ctest: REFUSED ${name}: HIP above np 4 oversubscribes a node's four APUs" >&2
         return 1
     fi
-    t_ref=$(awk -F'\t' -v s="${_cc_stem}" -v n="${_cc_np}" -v c="${config}" \
-        '$1 == s && $2 == n && $3 == c { print $4; exit }' "${CANOPY_BUDGET_TSV}" 2>/dev/null)
+    row=$(awk -F'\t' -v s="${_cc_stem}" -v n="${_cc_np}" -v c="${config}" \
+        '$1 == s && $2 == n && $3 == c { print $4, ($6 == "" ? 0 : $6); exit }' \
+        "${CANOPY_BUDGET_TSV}" 2>/dev/null)
+    read -r t_ref extra <<< "${row}"
     if [ -z "${t_ref}" ]; then
         echo "canopy_ctest: REFUSED ${name}: no budget row (${_cc_stem}, ${_cc_np}, ${config}) in ${CANOPY_BUDGET_TSV}" >&2
         return 1
     fi
-    awk -v t="${t_ref}" 'BEGIN { x = 1.75 * t; c = int(x); if (c < x) c++; print c }'
+    awk -v t="${t_ref}" -v e="${extra}" 'BEGIN { x = 1.75 * t; c = int(x); if (c < x) c++; print c + e }'
 }
 
 # Stacks, then kills, the descendants of $1 whose comm matches
@@ -110,6 +118,10 @@ canopy_ctest() {
 
     for entry in ${entries}; do
         budget=$(_canopy_ctest_budget "${entry}")
+        if [ ! -f "${WATCHDOG_DIR}/warm" ]; then
+            budget=$((budget + CANOPY_COLD_START_S))
+            : > "${WATCHDOG_DIR}/warm"
+        fi
         _canopy_ctest_parse "${entry}"
         out=$(mktemp "${WATCHDOG_DIR}/ctest.XXXXXX")
         before=$(watchdog_cancel_count)

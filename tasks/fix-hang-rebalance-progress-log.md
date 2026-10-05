@@ -1299,3 +1299,50 @@ waits budget + 5 s.
 - tree-opt T1: its HIP arm runs `MultiSolve` HIP and is blocked by the same
   stall until H2's partitioner arm. Its `DownwardSweep` HIP arm passes at
   np 1-4.
+
+## Budget allowances (H0b follow-up)
+
+Jobs `f3cMZeA862N3` (`run_ctest_h0.flux UpwardSweep`) and `f3cMZeHziDAF`
+(`run_ctest_h0b.flux check`), HEAD `d22b6a0` plus this change. Logs in the repo
+root (untracked).
+
+**Why.** Two kinds of entry ran at or over budget without being hung (H0b,
+H0c):
+- **Cold start.** The first Canopy binary in a job runs ~4 s slow:
+  `MultiSolve` SERIAL np 1 took 8.4-8.6 s as a job's first entry against a
+  budget of 9, and HIP np 1 9.99 s. Any np-1 row with `t_ref_s` ≈ 3.5 s (budget
+  7) would fail as a first entry.
+- **`UpwardSweep` HIP np 1-4.** The `testIdempotentExecution` failure output
+  makes ctest take 6.7-26.8 s against budgets of 7-11. In one run of
+  `f3cMCHLDMNu5` the np-3 sub-job itself took 12.9 s against 10.
+
+The `MultiSolve` HIP np 3-4 over-budget entries are real stalls (H0c) and get
+no allowance.
+
+**Change.**
+- `serial_runtimes.tsv` gains two optional columns, `extra_s` and
+  `extra_reason`. The budget is `ceil(1.75 * t_ref_s) + extra_s`.
+- `UpwardSweep` np 1-4 carry 2/7/18/23 s. Each makes the budget 1.25x the
+  worst observed ctest time (6.66, 11.64, 21.92, 26.80 s), giving budgets of
+  9/15/28/34. The allowance applies on SERIAL too, because rows have no
+  backend.
+- `canopy_ctest` adds `CANOPY_COLD_START_S` (default 6) to the first entry it
+  runs after `flux_watchdog.sh` is sourced, marked by
+  `${WATCHDOG_DIR}/warm`. A file marker survives the HIP subshell. A script
+  that re-sources the watchdog gets the allowance again, which is
+  conservative.
+- `run_ctest_h0b.flux` carries the `extra_s`/`extra_reason` columns of
+  existing rows over a recalibration.
+
+**Verified.**
+- `f3cMZeHziDAF`: `MultiSolve` SERIAL np 1 as the first entry took 8.97 s
+  against a budget of 15. The following pass's np 1 took 4.75 s against 9.
+- `f3cMZeA862N3`: `UpwardSweep` HIP np 1-4 took 10.20/12.30/18.30/22.89 s
+  against 15/15/28/34, all `failed` (their recorded cases) and none
+  over-budget. SERIAL np 1-6 had none over-budget either.
+- The self-test (21.87 s) and the forced over-budget checks behaved as in H0b.
+
+**Affects:**
+- `01_fix-tests.md`: removes the `UpwardSweep` `extra_s` allowance once its
+  failure output is bounded.
+- H1 HIP arm, H2, E1: a job's first entry gets 6 s more.
