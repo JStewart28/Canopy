@@ -762,3 +762,540 @@ them beside its HIP run.
 - H1 HIP arm, H2 partitioner arm, E1, tree-opt T1: `canopy_ctest` is ready, and
   a switch configuration needs its own rows (`CANOPY_BUDGET_CONFIG`). A job
   whose first entry is an np-1 run is near its budget.
+
+## H0c
+
+Job `f3cM4ghTjtiT` (`scripts/tuolumne/run_ctest_h0.flux`, all ten stems in one
+allocation, about 12 min). Diagnostic job `f3cMCHLDMNu5`
+(`scripts/tuolumne/run_h0c_upward_diag.flux`). Both ran on HEAD `0440f84` plus
+this task's scripts; Cray clang 20.0.0, flux-core 0.89.0, ROCm 6.4.2,
+`build-tuolumne/` with `Canopy_ENABLE_PROFILING=ON`. Logs:
+`canopy-h0.f3cM4ghTjtiT.log` and `canopy-h0c-upward-diag.f3cMCHLDMNu5.log` in
+the repo root (untracked).
+
+**Build.** `make -j 16` on each target in turn: all ten
+(`Canopy_Test_{MultiSolve,DownwardSweep,UpwardSweep,TreeBuilder,TreePartitioner,CommunicationPlan,LaplaceSolve,CartesianTaylorSolve,FarFieldContract}_MPI_HIP`,
+`Canopy_Test_CartesianTaylor_HIP`) compiled with no errors. They were built
+while H0b ran, with this session's sources.
+
+**Decisions.**
+- The HIP environment is applied in a subshell. `canopy_ctest` is a shell
+  function, so `env VAR=… canopy_ctest` cannot work. Each HIP call runs as
+  `( export MPICH_GPU_SUPPORT_ENABLED=1 GTL_HSA_VSMSG_CUTOFF_SIZE=4096
+  FI_CXI_ATS=0 HSA_XNACK=1 MPICH_SMP_SINGLE_COPY_MODE=NONE; canopy_ctest … )`,
+  which keeps the variables off every SERIAL command.
+- Over budget is recorded, not re-budgeted. HIP entries use the SERIAL
+  budget, and no HIP rows were added.
+- The job reruns the SERIAL twin of every failed HIP entry with
+  `--output-on-failure`. `MultiSolve`'s twin is excluded: H2 already recorded
+  its six SERIAL `1e-8` failures. The job also reruns `UpwardSweep` SERIAL
+  np 1-6 with `--output-on-failure`, because H0b found it failing.
+- The job aborts if any `_MPI_HIP_np_[56]` entry is registered. None was.
+
+**Self-test.** Cancelled at 21.62 s, `matched=3 children=3 nonempty=3`.
+
+**Outcomes.** One pass per stem, np 1-4 (`MultiSolve` twice, `-V`). Budget in
+seconds; "known" means the SERIAL twin fails the same case and README records
+it.
+
+| stem | np 1 | np 2 | np 3 | np 4 |
+| --- | --- | --- | --- | --- |
+| `MultiSolve` pass 1 | failed: six `1e-8` (known) | failed: six (known) | **over budget** (17), stalled in `LargeMotion_Rebuild` | failed: six (known) |
+| `MultiSolve` pass 2 | failed: six (known) | failed: six (known) | failed: six (known) | **over budget** (21), stalled in `LargeMotion_Rebuild` |
+| `DownwardSweep` | passed | passed | passed | passed |
+| `UpwardSweep` | failed: `RootMultipole…{Basic,Small}` (SERIAL same), `IdempotentExecution{Basic,Small}` (HIP only) | failed: `…MultiRank{Basic,Small}` (SERIAL same), `Idempotent…` (HIP only) | **over budget** (10): same failures, ranks exited, ctest digesting output | **over budget** (11): `…MultiRank…` failures; output cut by ctest's timeout |
+| `TreeBuilder` | passed | passed | passed | passed |
+| `TreePartitioner` | passed | passed | passed | passed |
+| `CommunicationPlan` | passed | passed | passed | passed |
+| `LaplaceSolve` | failed: `bitForBitArtifacts` (HIP only) | failed: `bitForBitArtifacts` (HIP only) | failed: `crossRankAgreement` (HIP only) | failed: `crossRankAgreement` (HIP only) |
+| `CartesianTaylorSolve` | passed | passed | passed | passed |
+| `FarFieldContract` | passed | passed | passed | passed |
+| `CartesianTaylor` (non-MPI) | passed | | | |
+
+SERIAL twins in the same job:
+- `LaplaceSolve` SERIAL np 1-4 passed.
+- `UpwardSweep` SERIAL failed `testRootMultipoleMatchesDirectP2M{Basic,Small}`
+  at np 1 and `…MultiRank{Basic,Small}` at np 2-6 (max relative error
+  34.8-35.8 against `1e-10`). Its idempotence cases passed.
+
+README "Known Issues" now has an entry for each of these, and the existing
+Zoltan2-on-HIP entry records the stall.
+
+**HIP failure details.**
+- `UpwardSweep.testIdempotentExecution*`: two `execute()` calls differ in the
+  last bits, e.g. cell 91 coeff 27 imag `3.1318581590950871` vs
+  `3.1318581590950876`. The test uses exact equality
+  (`tests/tstUpwardSweep.hpp:385-395`). Each mismatch prints a message:
+  3 214 / 9 160 / 16 976 / 8 330 lines at np 1-4.
+- `LaplaceSolve.bitForBitArtifacts` np 1: `locals()` hash `0xbf7c808746669af7`
+  against the reference `0xfb2cddef75e26dd6`, as R6 predicted (SERIAL-generated
+  references).
+- `LaplaceSolve.crossRankAgreement` np 3: field deviates from the committed
+  np-1 field by `4.23e-7` (potential) and `3.89e-8` (gradient), against
+  `LS_CROSS_RANK_TOL = 5.6e-10`.
+
+**The `UpwardSweep` np 3-4 over-budget entries are ctest-side, not hangs.** In
+`f3cM4ghTjtiT`, np 3 printed gtest's final summary ("10 tests from 1 test
+suite ran", 2 failed), then ctest timed out at budget + 5 = 15 s. The
+watchdog never listed the sub-job as running past 10 s. `f3cMCHLDMNu5` reran
+np 3 and np 4 three times each, without the budget, and snapshotted the node
+once each entry passed its budget:
+- In 5 of 6 runs the sub-job was already `INACTIVE` (runtime 8.2-12.9 s), and
+  no `Canopy_Test_` process or `flux run` client was left.
+- In run 1 at np 3 the ranks were still running (state `Rl`) at 9.8 s. They
+  exited before gstack attached, so it printed nothing.
+
+ctest then ran a further 10-14 s with no child, for 19.6-26.8 s per entry. The
+captured output is 25 864 / 73 469 / 136 034 / 66 801 lines at np 1-4, so
+ctest's output processing is where the time goes. With no process left, there
+is nothing to stack. Correcting the test's output volume is the README entry's
+work, not H0c's.
+
+**`MultiSolve` stalls: the H1 signature, on HIP.** Both captures stopped in
+`MultiSolve.LargeMotion_Rebuild`.
+- Rank 0 is in `hipDeviceSynchronize` from a `Kokkos::deep_copy` in
+  `Zoltan2::AlgMJ<…KokkosDeviceWrapperNode<Kokkos::HIP>…>::mj_get_new_cut_coordinates`,
+  under `TreePartitioner<HIPSpace, HIP>::partition_leaves`.
+- The other ranks are in `partition_leaves`'s `MPI_Bcast`.
+
+H2's SERIAL fix put MJ on the partitioner's execution space, which is HIP here.
+That is the README entry "Zoltan2 runs on HIP when the solver's
+`ExecutionSpace` is HIP", now observed. Hang count: **2 stalls in 8**
+`MultiSolve` HIP entries, both at np >= 3 (np 3: 1 in 2, np 4: 1 in 2).
+
+Last `[multisolve-dev]` line before each stall:
+
+```
+[multisolve-dev] case IntermediateMotion_Rebalance nprocs 3 nsteps 5 drift 5 max_pos_rel 1.9045913955560584e-05 max_vel_rel 4.2352651310527094e-05 tol 1e-08
+[multisolve-dev] case IntermediateMotion_Rebalance nprocs 4 nsteps 5 drift 5 max_pos_rel 0.00017969857882758528 max_vel_rel 0.00027710166692275571 tol 1e-08
+```
+
+The captures below keep each rank's main thread (Thread 1) verbatim. The two
+other threads per rank are the HSA `AsyncEventsLoop` threads seen in H1, and
+the job log has them in full. The capture does not record MPI rank. The PID in
+Zoltan2 is inferred to be rank 0, as in H1.
+
+np 3, pass 1:
+
+```
+### watchdog stacks fXed7s1h ###
+time: 2026-10-05 11:14:54 runtime: 19.176634550094604 s jobid(dec): 1166754709504
+shell: 2587973 /usr/libexec/flux/flux-shell 1166754709504
+--- pid 2587974 ppid 2587973 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2587974)):
+#0  0x000015552f64f9a8 in rocr::core::InterruptSignal::WaitRelaxed(hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#1  0x000015552f64f7fa in rocr::core::InterruptSignal::WaitAcquire(hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#2  0x000015552f644231 in rocr::HSA::hsa_signal_wait_scacquire(hsa_signal_s, hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#3  0x000015553c59027b in amd::roc::Device::IsHwEventReady(amd::Event const&, bool, unsigned int) const () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#4  0x000015553c57f1d7 in amd::HostQueue::finish(bool) () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#5  0x000015553c31b21e in hip::Device::SyncAllStreams(bool, bool) () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#6  0x000015553c308e51 in hip::hipDeviceSynchronize() () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#7  0x0000155541a07cb3 in Kokkos::HIP::impl_static_fence(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libkokkoscore.so.4.7
+#8  0x00001555419f671d in Kokkos::fence(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libkokkoscore.so.4.7
+#9  0x0000000000ce8e70 in Kokkos::deep_copy<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace>, int*, Kokkos::LayoutLeft, Kokkos::Device<Kokkos::OpenMP, Kokkos::HIPSpace>, Kokkos::Experimental::EmptyViewHooks> ()
+#10 0x0000000000d0ac19 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::mj_get_new_cut_coordinates(int, int, int const&, double const&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<bool*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#11 0x0000000000cdf672 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::mj_1D_part(Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, double, int, int, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, int, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<unsigned long*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#12 0x0000000000ca17c8 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::multi_jagged_part(Teuchos::RCP<Zoltan2::Environment const> const&, Teuchos::RCP<Teuchos::Comm<int> const>&, double, int, unsigned long, Kokkos::View<int*, Kokkos::HostSpace>&, int, int, int, long long, Kokkos::View<long long const*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double**, Kokkos::LayoutLeft, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, int, Kokkos::View<bool*, Kokkos::HostSpace>&, Kokkos::View<double**, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<bool*, Kokkos::HostSpace>&, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<long long*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#13 0x0000000000c924c6 in Zoltan2::Zoltan2_AlgMJ<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > >::partition(Teuchos::RCP<Zoltan2::PartitioningSolution<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > > > const&) ()
+#14 0x0000000000c5f458 in Zoltan2::PartitioningProblem<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > >::solve(bool) ()
+#15 0x0000000000c559d3 in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#16 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#17 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#18 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#19 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#21 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#22 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#23 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#24 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#25 0x0000000000f271b2 in main ()
+--- pid 2587975 ppid 2587973 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2587975)):
+#0  0x0000155553832a09 in MPIR_Progress_hook_exec_all () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#1  0x00001555537b277a in MPIDI_progress_test () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#2  0x00001555537b4006 in MPID_Progress_wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#3  0x00001555537b6f56 in MPIR_Wait_state () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#4  0x00001555536cdcc7 in MPID_Wait.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#5  0x00001555536e453f in MPIC_Wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#6  0x00001555536e4980 in MPIC_Recv () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#7  0x000015555372b55c in MPIR_CRAY_Bcast_Tree () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#8  0x000015555372bf5a in MPIR_CRAY_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#9  0x00001555532e01cf in PMPI_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#10 0x0000000000c55cfe in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#11 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#12 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#13 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#14 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#15 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#16 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#17 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#18 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#19 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000000000f271b2 in main ()
+--- pid 2587976 ppid 2587973 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2587976)):
+#0  0x00001555537ac19b in MPIDI_POSIX_progress.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#1  0x00001555537b2b68 in MPIDI_progress_test () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#2  0x00001555537b4006 in MPID_Progress_wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#3  0x00001555537b6f56 in MPIR_Wait_state () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#4  0x00001555536cdcc7 in MPID_Wait.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#5  0x00001555536e453f in MPIC_Wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#6  0x00001555536e4980 in MPIC_Recv () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#7  0x000015555372b55c in MPIR_CRAY_Bcast_Tree () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#8  0x000015555372bf5a in MPIR_CRAY_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#9  0x00001555532e01cf in PMPI_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#10 0x0000000000c55cfe in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#11 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#12 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#13 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#14 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#15 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#16 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#17 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#18 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#19 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000000000f271b2 in main ()
+### end watchdog stacks fXed7s1h: matched=3 children=3 nonempty=3 ###
+### watchdog: cancelling sub-job fXed7s1h after 19.176634550094604 s ###
+### MultiSolve pass 1: canopy_ctest rc=1 ###
+### MultiSolve HIP pass 2 (-V) ###
+### watchdog stacks f2DJTdkMD ###
+time: 2026-10-05 11:16:27 runtime: 22.454469203948975 s jobid(dec): 2676267941888
+shell: 2588649 /usr/libexec/flux/flux-shell 2676267941888
+--- pid 2588650 ppid 2588649 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2588650)):
+#0  0x000015552f64f98d in rocr::core::InterruptSignal::WaitRelaxed(hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#1  0x000015552f64f7fa in rocr::core::InterruptSignal::WaitAcquire(hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#2  0x000015552f644231 in rocr::HSA::hsa_signal_wait_scacquire(hsa_signal_s, hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#3  0x000015553c59027b in amd::roc::Device::IsHwEventReady(amd::Event const&, bool, unsigned int) const () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#4  0x000015553c57f1d7 in amd::HostQueue::finish(bool) () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#5  0x000015553c31b21e in hip::Device::SyncAllStreams(bool, bool) () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#6  0x000015553c308e51 in hip::hipDeviceSynchronize() () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#7  0x0000155541a07cb3 in Kokkos::HIP::impl_static_fence(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libkokkoscore.so.4.7
+#8  0x00001555419f671d in Kokkos::fence(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libkokkoscore.so.4.7
+#9  0x0000000000ce8e70 in Kokkos::deep_copy<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace>, int*, Kokkos::LayoutLeft, Kokkos::Device<Kokkos::OpenMP, Kokkos::HIPSpace>, Kokkos::Experimental::EmptyViewHooks> ()
+#10 0x0000000000d0ac19 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::mj_get_new_cut_coordinates(int, int, int const&, double const&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<bool*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#11 0x0000000000cdf672 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::mj_1D_part(Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, double, int, int, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, int, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<unsigned long*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#12 0x0000000000ca17c8 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::multi_jagged_part(Teuchos::RCP<Zoltan2::Environment const> const&, Teuchos::RCP<Teuchos::Comm<int> const>&, double, int, unsigned long, Kokkos::View<int*, Kokkos::HostSpace>&, int, int, int, long long, Kokkos::View<long long const*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double**, Kokkos::LayoutLeft, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, int, Kokkos::View<bool*, Kokkos::HostSpace>&, Kokkos::View<double**, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<bool*, Kokkos::HostSpace>&, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<long long*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#13 0x0000000000c924c6 in Zoltan2::Zoltan2_AlgMJ<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > >::partition(Teuchos::RCP<Zoltan2::PartitioningSolution<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > > > const&) ()
+#14 0x0000000000c5f458 in Zoltan2::PartitioningProblem<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > >::solve(bool) ()
+#15 0x0000000000c559d3 in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#16 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#17 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#18 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#19 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#21 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#22 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#23 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#24 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#25 0x0000000000f271b2 in main ()
+--- pid 2588651 ppid 2588649 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2588651)):
+#0  0x00001555537ac19b in MPIDI_POSIX_progress.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#1  0x00001555537b2b68 in MPIDI_progress_test () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#2  0x00001555537b4006 in MPID_Progress_wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#3  0x00001555537b6f56 in MPIR_Wait_state () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#4  0x00001555536cdcc7 in MPID_Wait.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#5  0x00001555536e453f in MPIC_Wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#6  0x00001555536e4980 in MPIC_Recv () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#7  0x000015555372b55c in MPIR_CRAY_Bcast_Tree () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#8  0x000015555372bf5a in MPIR_CRAY_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#9  0x00001555532e01cf in PMPI_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#10 0x0000000000c55cfe in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#11 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#12 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#13 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#14 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#15 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#16 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#17 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#18 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#19 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000000000f271b2 in main ()
+--- pid 2588652 ppid 2588649 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2588652)):
+#0  0x00001555537ac1ad in MPIDI_POSIX_progress.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#1  0x00001555537b2b68 in MPIDI_progress_test () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#2  0x00001555537b4006 in MPID_Progress_wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#3  0x00001555537b6f56 in MPIR_Wait_state () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#4  0x00001555536cdcc7 in MPID_Wait.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#5  0x00001555536e453f in MPIC_Wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#6  0x00001555536e4980 in MPIC_Recv () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#7  0x000015555372b55c in MPIR_CRAY_Bcast_Tree () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#8  0x000015555372bf5a in MPIR_CRAY_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#9  0x00001555532e01cf in PMPI_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#10 0x0000000000c55cfe in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#11 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#12 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#13 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#14 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#15 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#16 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#17 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#18 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#19 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000000000f271b2 in main ()
+--- pid 2588653 ppid 2588649 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2588653)):
+#0  0x000015555392a25e in MPIDI_POSIX_eager_recv_begin () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#1  0x00001555537a654c in MPIDI_POSIX_progress_recv.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#2  0x00001555537ac1a8 in MPIDI_POSIX_progress.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#3  0x00001555537b2b68 in MPIDI_progress_test () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#4  0x00001555537b4006 in MPID_Progress_wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#5  0x00001555537b6f56 in MPIR_Wait_state () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#6  0x00001555536cdcc7 in MPID_Wait.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#7  0x00001555536e453f in MPIC_Wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#8  0x00001555536e4980 in MPIC_Recv () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#9  0x000015555372b55c in MPIR_CRAY_Bcast_Tree () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#10 0x000015555372bf5a in MPIR_CRAY_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#11 0x00001555532e01cf in PMPI_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#12 0x0000000000c55cfe in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#13 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#14 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#15 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#16 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#17 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#18 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#19 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#21 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#22 0x0000000000f271b2 in main ()
+### end watchdog stacks f2DJTdkMD: matched=4 children=4 nonempty=4 ###
+### watchdog: cancelling sub-job f2DJTdkMD after 22.454469203948975 s ###
+### MultiSolve pass 2: canopy_ctest rc=1 ###
+### DownwardSweep binary: 2026-10-05 10:26:09.408226273 -0700 ###
+### DownwardSweep HIP ###
+### DownwardSweep: canopy_ctest rc=0 ###
+### UpwardSweep binary: 2026-10-05 10:28:26.168287766 -0700 ###
+### UpwardSweep HIP ###
+### UpwardSweep: canopy_ctest rc=1 ###
+### SERIAL twin of failed Canopy_Test_UpwardSweep_MPI_HIP_np_1: Canopy_Test_UpwardSweep_MPI_SERIAL_np_1 ###
+### Canopy_Test_UpwardSweep_MPI_SERIAL_np_1: canopy_ctest rc=1 ###
+### SERIAL twin of failed Canopy_Test_UpwardSweep_MPI_HIP_np_2: Canopy_Test_UpwardSweep_MPI_SERIAL_np_2 ###
+### Canopy_Test_UpwardSweep_MPI_SERIAL_np_2: canopy_ctest rc=1 ###
+### TreeBuilder binary: 2026-10-05 10:29:07.452193567 -0700 ###
+### TreeBuilder HIP ###
+### TreeBuilder: canopy_ctest rc=0 ###
+### TreePartitioner binary: 2026-10-05 10:31:18.110566890 -0700 ###
+### TreePartitioner HIP ###
+### TreePartitioner: canopy_ctest rc=0 ###
+### CommunicationPlan binary: 2026-10-05 10:33:32.886230160 -0700 ###
+### CommunicationPlan HIP ###
+### CommunicationPlan: canopy_ctest rc=0 ###
+### LaplaceSolve binary: 2026-10-05 10:36:46.001435713 -0700 ###
+### LaplaceSolve HIP ###
+### LaplaceSolve: canopy_ctest rc=1 ###
+### SERIAL twin of failed Canopy_Test_LaplaceSolve_MPI_HIP_np_1: Canopy_Test_LaplaceSolve_MPI_SERIAL_np_1 ###
+### Canopy_Test_LaplaceSolve_MPI_SERIAL_np_1: canopy_ctest rc=0 ###
+### SERIAL twin of failed Canopy_Test_LaplaceSolve_MPI_HIP_np_2: Canopy_Test_LaplaceSolve_MPI_SERIAL_np_2 ###
+### Canopy_Test_LaplaceSolve_MPI_SERIAL_np_2: canopy_ctest rc=0 ###
+### SERIAL twin of failed Canopy_Test_LaplaceSolve_MPI_HIP_np_3: Canopy_Test_LaplaceSolve_MPI_SERIAL_np_3 ###
+### Canopy_Test_LaplaceSolve_MPI_SERIAL_np_3: canopy_ctest rc=0 ###
+### SERIAL twin of failed Canopy_Test_LaplaceSolve_MPI_HIP_np_4: Canopy_Test_LaplaceSolve_MPI_SERIAL_np_4 ###
+### Canopy_Test_LaplaceSolve_MPI_SERIAL_np_4: canopy_ctest rc=0 ###
+### CartesianTaylorSolve binary: 2026-10-05 10:39:45.813316585 -0700 ###
+### CartesianTaylorSolve HIP ###
+### CartesianTaylorSolve: canopy_ctest rc=0 ###
+### FarFieldContract binary: 2026-10-05 10:42:26.306176615 -0700 ###
+### FarFieldContract HIP ###
+### FarFieldContract: canopy_ctest rc=0 ###
+### CartesianTaylor binary: 2026-10-05 10:43:11.718372622 -0700 ###
+### CartesianTaylor HIP ###
+### CartesianTaylor: canopy_ctest rc=0 ###
+### SERIAL UpwardSweep np 1-6 (--output-on-failure) ###
+### SERIAL UpwardSweep: canopy_ctest rc=1 ###
+### cancelled sub-jobs ###
+```
+
+np 4, pass 2:
+
+```
+### watchdog stacks f2DJTdkMD ###
+time: 2026-10-05 11:16:27 runtime: 22.454469203948975 s jobid(dec): 2676267941888
+shell: 2588649 /usr/libexec/flux/flux-shell 2676267941888
+--- pid 2588650 ppid 2588649 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2588650)):
+#0  0x000015552f64f98d in rocr::core::InterruptSignal::WaitRelaxed(hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#1  0x000015552f64f7fa in rocr::core::InterruptSignal::WaitAcquire(hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#2  0x000015552f644231 in rocr::HSA::hsa_signal_wait_scacquire(hsa_signal_s, hsa_signal_condition_t, long, unsigned long, hsa_wait_state_t) () from /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1
+#3  0x000015553c59027b in amd::roc::Device::IsHwEventReady(amd::Event const&, bool, unsigned int) const () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#4  0x000015553c57f1d7 in amd::HostQueue::finish(bool) () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#5  0x000015553c31b21e in hip::Device::SyncAllStreams(bool, bool) () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#6  0x000015553c308e51 in hip::hipDeviceSynchronize() () from /opt/rocm-6.4.2/lib/libamdhip64.so.6
+#7  0x0000155541a07cb3 in Kokkos::HIP::impl_static_fence(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libkokkoscore.so.4.7
+#8  0x00001555419f671d in Kokkos::fence(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libkokkoscore.so.4.7
+#9  0x0000000000ce8e70 in Kokkos::deep_copy<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace>, int*, Kokkos::LayoutLeft, Kokkos::Device<Kokkos::OpenMP, Kokkos::HIPSpace>, Kokkos::Experimental::EmptyViewHooks> ()
+#10 0x0000000000d0ac19 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::mj_get_new_cut_coordinates(int, int, int const&, double const&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<bool*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#11 0x0000000000cdf672 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::mj_1D_part(Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, double, int, int, Kokkos::View<double*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, int, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<unsigned long*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#12 0x0000000000ca17c8 in Zoltan2::AlgMJ<double, int, long long, int, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> >::multi_jagged_part(Teuchos::RCP<Zoltan2::Environment const> const&, Teuchos::RCP<Teuchos::Comm<int> const>&, double, int, unsigned long, Kokkos::View<int*, Kokkos::HostSpace>&, int, int, int, long long, Kokkos::View<long long const*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<double**, Kokkos::LayoutLeft, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, int, Kokkos::View<bool*, Kokkos::HostSpace>&, Kokkos::View<double**, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<bool*, Kokkos::HostSpace>&, Kokkos::View<int*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&, Kokkos::View<long long*, Kokkos::Device<Kokkos::HIP, Kokkos::HIPSpace> >&) ()
+#13 0x0000000000c924c6 in Zoltan2::Zoltan2_AlgMJ<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > >::partition(Teuchos::RCP<Zoltan2::PartitioningSolution<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > > > const&) ()
+#14 0x0000000000c5f458 in Zoltan2::PartitioningProblem<Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::HIP, Kokkos::HIPSpace> > > >::solve(bool) ()
+#15 0x0000000000c559d3 in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#16 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#17 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#18 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#19 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#21 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#22 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#23 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#24 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#25 0x0000000000f271b2 in main ()
+--- pid 2588651 ppid 2588649 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2588651)):
+#0  0x00001555537ac19b in MPIDI_POSIX_progress.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#1  0x00001555537b2b68 in MPIDI_progress_test () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#2  0x00001555537b4006 in MPID_Progress_wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#3  0x00001555537b6f56 in MPIR_Wait_state () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#4  0x00001555536cdcc7 in MPID_Wait.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#5  0x00001555536e453f in MPIC_Wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#6  0x00001555536e4980 in MPIC_Recv () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#7  0x000015555372b55c in MPIR_CRAY_Bcast_Tree () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#8  0x000015555372bf5a in MPIR_CRAY_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#9  0x00001555532e01cf in PMPI_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#10 0x0000000000c55cfe in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#11 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#12 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#13 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#14 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#15 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#16 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#17 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#18 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#19 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000000000f271b2 in main ()
+--- pid 2588652 ppid 2588649 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2588652)):
+#0  0x00001555537ac1ad in MPIDI_POSIX_progress.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#1  0x00001555537b2b68 in MPIDI_progress_test () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#2  0x00001555537b4006 in MPID_Progress_wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#3  0x00001555537b6f56 in MPIR_Wait_state () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#4  0x00001555536cdcc7 in MPID_Wait.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#5  0x00001555536e453f in MPIC_Wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#6  0x00001555536e4980 in MPIC_Recv () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#7  0x000015555372b55c in MPIR_CRAY_Bcast_Tree () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#8  0x000015555372bf5a in MPIR_CRAY_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#9  0x00001555532e01cf in PMPI_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#10 0x0000000000c55cfe in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#11 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#12 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#13 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#14 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#15 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#16 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#17 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#18 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#19 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000000000f271b2 in main ()
+--- pid 2588653 ppid 2588649 comm Canopy_Test_Mul ---
+Thread 1 (Thread 0x155555548a80 (LWP 2588653)):
+#0  0x000015555392a25e in MPIDI_POSIX_eager_recv_begin () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#1  0x00001555537a654c in MPIDI_POSIX_progress_recv.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#2  0x00001555537ac1a8 in MPIDI_POSIX_progress.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#3  0x00001555537b2b68 in MPIDI_progress_test () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#4  0x00001555537b4006 in MPID_Progress_wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#5  0x00001555537b6f56 in MPIR_Wait_state () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#6  0x00001555536cdcc7 in MPID_Wait.constprop.0 () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#7  0x00001555536e453f in MPIC_Wait () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#8  0x00001555536e4980 in MPIC_Recv () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#9  0x000015555372b55c in MPIR_CRAY_Bcast_Tree () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#10 0x000015555372bf5a in MPIR_CRAY_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#11 0x00001555532e01cf in PMPI_Bcast () from /opt/cray/pe/lib64/libmpi_cray.so.12
+#12 0x0000000000c55cfe in Canopy::TreePartitioner<Kokkos::HIPSpace, Kokkos::HIP>::partition_leaves(std::vector<Canopy::CellInfo, std::allocator<Canopy::CellInfo> > const&) ()
+#13 0x0000000000c18e82 in void Canopy::Solver<Kokkos::HIPSpace, Kokkos::HIP, double, 8, 1, Canopy::LaplaceKernel>::_full_setup<0, 1, Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> > >(Cabana::AoSoA<Cabana::MemberTypes<double [3], double [1], double [3], int>, Kokkos::HIPSpace, 64, Kokkos::MemoryTraits<0u> >&, int) ()
+#14 0x0000000000bfee6f in Test::testMultiStepGravity(Test::MultiSolveTest::Mode, char const*, int, int, double, double, int, int, double, int, double, int*, bool, double, long long*) ()
+#15 0x0000000000be3c52 in Test::MultiSolve_LargeMotion_Rebuild_Test::TestBody() ()
+#16 0x0000155554e008ed in void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#17 0x0000155554de2ea6 in testing::Test::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#18 0x0000155554de3045 in testing::TestInfo::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#19 0x0000155554de32bd in testing::TestSuite::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#20 0x0000155554df7169 in testing::internal::UnitTestImpl::RunAllTests() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#21 0x0000155554de3384 in testing::UnitTest::Run() () from /g/g20/stewartj/spack_envs/tuolumne_trilinos/.spack-env/view/lib64/libgtest.so.1.15.2
+#22 0x0000000000f271b2 in main ()
+### end watchdog stacks f2DJTdkMD: matched=4 children=4 nonempty=4 ###
+### watchdog: cancelling sub-job f2DJTdkMD after 22.454469203948975 s ###
+### MultiSolve pass 2: canopy_ctest rc=1 ###
+### DownwardSweep binary: 2026-10-05 10:26:09.408226273 -0700 ###
+### DownwardSweep HIP ###
+### DownwardSweep: canopy_ctest rc=0 ###
+### UpwardSweep binary: 2026-10-05 10:28:26.168287766 -0700 ###
+### UpwardSweep HIP ###
+### UpwardSweep: canopy_ctest rc=1 ###
+### SERIAL twin of failed Canopy_Test_UpwardSweep_MPI_HIP_np_1: Canopy_Test_UpwardSweep_MPI_SERIAL_np_1 ###
+### Canopy_Test_UpwardSweep_MPI_SERIAL_np_1: canopy_ctest rc=1 ###
+### SERIAL twin of failed Canopy_Test_UpwardSweep_MPI_HIP_np_2: Canopy_Test_UpwardSweep_MPI_SERIAL_np_2 ###
+### Canopy_Test_UpwardSweep_MPI_SERIAL_np_2: canopy_ctest rc=1 ###
+### TreeBuilder binary: 2026-10-05 10:29:07.452193567 -0700 ###
+### TreeBuilder HIP ###
+### TreeBuilder: canopy_ctest rc=0 ###
+### TreePartitioner binary: 2026-10-05 10:31:18.110566890 -0700 ###
+### TreePartitioner HIP ###
+### TreePartitioner: canopy_ctest rc=0 ###
+### CommunicationPlan binary: 2026-10-05 10:33:32.886230160 -0700 ###
+### CommunicationPlan HIP ###
+### CommunicationPlan: canopy_ctest rc=0 ###
+### LaplaceSolve binary: 2026-10-05 10:36:46.001435713 -0700 ###
+### LaplaceSolve HIP ###
+### LaplaceSolve: canopy_ctest rc=1 ###
+### SERIAL twin of failed Canopy_Test_LaplaceSolve_MPI_HIP_np_1: Canopy_Test_LaplaceSolve_MPI_SERIAL_np_1 ###
+### Canopy_Test_LaplaceSolve_MPI_SERIAL_np_1: canopy_ctest rc=0 ###
+### SERIAL twin of failed Canopy_Test_LaplaceSolve_MPI_HIP_np_2: Canopy_Test_LaplaceSolve_MPI_SERIAL_np_2 ###
+### Canopy_Test_LaplaceSolve_MPI_SERIAL_np_2: canopy_ctest rc=0 ###
+### SERIAL twin of failed Canopy_Test_LaplaceSolve_MPI_HIP_np_3: Canopy_Test_LaplaceSolve_MPI_SERIAL_np_3 ###
+### Canopy_Test_LaplaceSolve_MPI_SERIAL_np_3: canopy_ctest rc=0 ###
+### SERIAL twin of failed Canopy_Test_LaplaceSolve_MPI_HIP_np_4: Canopy_Test_LaplaceSolve_MPI_SERIAL_np_4 ###
+### Canopy_Test_LaplaceSolve_MPI_SERIAL_np_4: canopy_ctest rc=0 ###
+### CartesianTaylorSolve binary: 2026-10-05 10:39:45.813316585 -0700 ###
+### CartesianTaylorSolve HIP ###
+### CartesianTaylorSolve: canopy_ctest rc=0 ###
+### FarFieldContract binary: 2026-10-05 10:42:26.306176615 -0700 ###
+### FarFieldContract HIP ###
+### FarFieldContract: canopy_ctest rc=0 ###
+### CartesianTaylor binary: 2026-10-05 10:43:11.718372622 -0700 ###
+### CartesianTaylor HIP ###
+### CartesianTaylor: canopy_ctest rc=0 ###
+### SERIAL UpwardSweep np 1-6 (--output-on-failure) ###
+### SERIAL UpwardSweep: canopy_ctest rc=1 ###
+### cancelled sub-jobs ###
+```
+
+**`MultiSolve` HIP two-pass comparison.** Not one np reproduces between the
+passes:
+
+| np | cases in both passes | identical | relative spread of differing figures |
+| --- | --- | --- | --- |
+| 1 | 6 | 1 (`AutoRebalance`) | 6.8e-12 to 1.2e-2 |
+| 2 | 6 | 1 (`StableTree_Migrate`) | 2.9e-8 to 3.4e-2 |
+| 3 | 2 (pass 1 stalled) | 0 | 5.9e-7 to 3.2e-5 |
+| 4 | 2 (pass 2 stalled) | 0 | 8.5e-7 to 1.0e-5 |
+
+np 1 never partitions, so the spread comes from device-side reductions alone.
+The largest relative spreads are in `max_vel_rel` of `AutoMaintain` and
+`IntermediateMotion_Rebalance` at np 1 (1.2e-2) and `LargeMotion_Rebuild` at
+np 2 (3.4e-2). AutoRebalance's HIP `max_vel_rel` is 8.55e-6
+(np 1), 1.36e-4 (np 2), 3.00e-4 (np 3) and 5.06e-4 (np 4), all below the
+`1.95e-3` floor.
+
+**Budgets on HIP.** Except where noted above, every HIP entry ran within its
+SERIAL budget. The cold first entry, `MultiSolve` HIP np 1 (pass 1), took
+9.99 s of ctest time against a budget of 9 and was not cancelled. The watchdog
+compares the sub-job's runtime, which excludes `flux run` launch, and ctest
+waits budget + 5 s.
+
+**Affects:**
+- H1 HIP arm: the HIP stall already reproduced with stacks, at np 3 and np 4.
+  Its loop covers `MultiSolve_MPI_HIP_np_3` and `_np_4`, the rank counts H0c
+  recorded over budget. Expect the Zoltan2-on-HIP signature above.
+- H2 partitioner arm: the stall is in the path it replaces. Its exit criterion
+  runs `UpwardSweep` and `LaplaceSolve` through `canopy_ctest` at SERIAL np 1-6
+  and HIP np 1-4. `UpwardSweep` fails on SERIAL and HIP, and `LaplaceSolve` on
+  HIP, before any partitioner change. Those failures are carried (README),
+  and the `UpwardSweep` HIP np 3-4 entries go over budget on output volume
+  alone. The criterion needs to say they are carried, or wait on their fixes.
+- E1: its HIP arm is blocked until H2's partitioner arm removes the stall. Its
+  HIP "inert when off" comparison must use H0c's spread, because the HIP lines
+  are not identical between passes even at np 1.
+- tree-opt T1: its HIP arm runs `MultiSolve` HIP and is blocked by the same
+  stall until H2's partitioner arm. Its `DownwardSweep` HIP arm passes at
+  np 1-4.

@@ -473,8 +473,11 @@ and reuse a committed assignment.
 
 With MJ on a host node (the Serial solver since `fix-hang-rebalance` H2), two
 `MultiSolve` np 1-6 passes print identical `[multisolve-dev]` lines at every
-rank count (flux job `f3bnvGg3MDo5`). Run-to-run variation on a HIP
-`ExecutionSpace` has not been re-measured.
+rank count (flux job `f3bnvGg3MDo5`). On a HIP `ExecutionSpace` the lines do
+not reproduce even at np 1, where nothing is partitioned: two passes differ
+in 5 of 6 cases at np 1 and at np 2, and in every case both passes completed at
+np 3-4, by relative 7e-12 to 3.4e-2 (flux job
+`f3cM4ghTjtiT`, `fix-hang-rebalance` H0c), so device reductions alone move them.
 
 ### Six `MultiSolve` tests fail the `1e-8` multi-step check at every rank count
 
@@ -524,8 +527,59 @@ host. With Zoltan2 on Tpetra's default HIP node, rank 0 intermittently stalled i
 `hipDeviceSynchronize` inside MJ while the other ranks waited in the assignment
 `MPI_Bcast`. That hung `Canopy_Test_MultiSolve_MPI_SERIAL_np_3` in about one run
 in three (stacks in `tasks/fix-hang-rebalance-progress-log.md`, sections H1 and
-H2). A solver whose `ExecutionSpace` is HIP still runs MJ on HIP and has not
-been checked for the same stall. To be triaged in a separate session.
+H2). A solver whose `ExecutionSpace` is HIP still runs MJ on HIP, and stalls the
+same way: `Canopy_Test_MultiSolve_MPI_HIP` went over its time budget in
+`MultiSolve.LargeMotion_Rebuild` at np 3 in one of two passes and at np 4 in the
+other, with rank 0 in `hipDeviceSynchronize` inside
+`Zoltan2::AlgMJ<…HIP…>::mj_get_new_cut_coordinates` under
+`TreePartitioner<HIPSpace, HIP>::partition_leaves` and the other ranks in its
+`MPI_Bcast` (flux job `f3cM4ghTjtiT`; stacks in
+`tasks/fix-hang-rebalance-progress-log.md`, section H0c). Reproduce with
+`canopy_ctest '^Canopy_Test_MultiSolve_MPI_HIP_np_[3-4]$'` under the HIP
+environment, a few passes. `fix-hang-rebalance` H2's partitioner arm replaces
+this path.
+
+### `UpwardSweep`'s root-multipole checks fail at every rank count
+
+`UpwardSweep.testRootMultipoleMatchesDirectP2M{Basic,Small}` (np 1) and
+`…MultiRank{Basic,Small}` (np 2-6) fail on both SERIAL and HIP: the FMM root
+multipole deviates from the direct P2M reference by a max relative error of
+~35 (34.8-35.8) against a `1e-10` tolerance (`tests/tstUpwardSweep.hpp:223`,
+`:684`). An O(1) error, not round-off. Found by `fix-hang-rebalance` H0b and
+H0c (flux jobs `f3cLieUe4u2F`, `f3cM4ghTjtiT`, HEAD `0440f84`); when it began
+is not bisected. Reproduce with
+`canopy_ctest '^Canopy_Test_UpwardSweep_MPI_SERIAL_np_[1-6]$' --output-on-failure`.
+To be triaged in a separate session.
+
+### `UpwardSweep`'s idempotence checks fail on HIP, and their output overruns the budget
+
+`UpwardSweep.testIdempotentExecution{Basic,Small}` fail on HIP at np 1-3 and
+pass on SERIAL: two `execute()` calls on the same tree give multipoles that
+differ in the last bits (e.g. `3.1318581590950871` vs `3.1318581590950876`),
+and the test compares with exact equality (`tests/tstUpwardSweep.hpp:385-395`),
+consistent with an order-dependent device reduction. Each mismatching
+coefficient prints a message, 3 000-17 000 of them per run, and ctest needs
+~10 s after the ranks exit to process that output. So
+`Canopy_Test_UpwardSweep_MPI_HIP_np_3` and `_np_4` exceed their time budget
+with no process left to stack (flux jobs `f3cM4ghTjtiT`, `f3cMCHLDMNu5`). HIP
+only; found by `fix-hang-rebalance` H0c. To be triaged in a separate session:
+decide whether HIP `execute()` must be bit-reproducible, or the test compares
+to a tolerance.
+
+### `LaplaceSolve` fails two bit-level checks on HIP
+
+On HIP only (SERIAL passes both), flux job `f3cM4ghTjtiT`:
+- `LaplaceSolve.bitForBitArtifacts` at np 1-2: the `locals()` hash differs
+  from the SERIAL-generated reference in `tests/data/laplace_solve_P6.txt`
+  (np 1: `0xbf7c808746669af7` against `0xfb2cddef75e26dd6`).
+- `LaplaceSolve.crossRankAgreement` at np 3-4: the field deviates from the
+  committed np-1 field by `4.2e-7` (potential) and `3.9e-8` (gradient) at np 3,
+  against `LS_CROSS_RANK_TOL = 5.6e-10`.
+
+Both compare a HIP run against SERIAL-generated references, which device
+reductions need not reproduce (`fix-hang-rebalance` risk R6). Found by H0c.
+To be triaged in a separate session: per-backend references, or a HIP
+tolerance justified by measurement.
 
 ### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
 

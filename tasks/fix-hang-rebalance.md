@@ -199,11 +199,14 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   (`MultiSolve` np 1: 8.4-8.6 s as a job's first entry against 4.8-5.1 s
   after, budget 9), which the calibration maximum does not include (progress
   log, H0b).
-- **No HIP test has run for this work.** No log in the repo root contains an
-  `MPI_HIP` test. The HIP binaries in `build-tuolumne/tests` predate H2, and
-  `Canopy_Test_CartesianTaylorSolve_MPI_HIP` and
-  `Canopy_Test_FarFieldContract_MPI_HIP` have never been built, so whether they
-  compile is unknown.
+- **The HIP baseline is H0c's table** (progress log, section H0c). All ten
+  HIP targets compile. `DownwardSweep`, `TreeBuilder`, `TreePartitioner`,
+  `CommunicationPlan`, `CartesianTaylorSolve`, `FarFieldContract` and
+  `CartesianTaylor` pass at HIP np 1-4. `MultiSolve` fails the six known `1e-8`
+  cases and stalls intermittently at np 3-4 in Zoltan2 MJ on HIP.
+  `UpwardSweep` and `LaplaceSolve` carry HIP failures recorded in README
+  "Known Issues". HIP `[multisolve-dev]` lines are not bit-stable between
+  runs, even at np 1.
 - **The tree topology is replicated to the leaves; ownership is not.**
   `TreeBuilder` all-reduces candidate counts at every depth and pushes every
   non-empty cell into `_cells` on every rank
@@ -366,7 +369,7 @@ one `default` row per `(stem, np)` from the three completed passes. Job
 - with a throwaway 4 s budget, the watchdog stacked all six ranks of
   `MultiSolve` np 6 and cancelled it at 5.13 s.
 
-### H0c — Build every named HIP target and record its baseline — **NOT STARTED**
+### H0c — Build every named HIP target and record its baseline — **DONE**
 
 **Depends on:** H0a **DONE**, H0b **DONE**.
 **Fill in:** new `scripts/tuolumne/run_ctest_h0.flux`, which sources the
@@ -399,6 +402,22 @@ over-budget entry stacked on all its ranks. The log has the table and the `Multi
 over-budget entry.
 The log's **Affects** line names every task whose HIP arm a recorded failure
 blocks.
+
+**Met.** All ten targets compiled. Job `f3cM4ghTjtiT` passed H0b's self-test
+(cancelled at 21.62 s, three stacks) and recorded an outcome for every
+`(stem, np)` at HIP np 1-4 through `canopy_ctest`, with the HIP environment set
+only on the HIP calls. Four entries went over budget:
+- `MultiSolve` np 3 (pass 1) and np 4 (pass 2) were stacked on all ranks: rank 0
+  in Zoltan2 MJ's `hipDeviceSynchronize`, the rest in `partition_leaves`'s
+  `MPI_Bcast`.
+- `UpwardSweep` np 3 and np 4 hit ctest's timeout after every rank had exited,
+  while ctest digested ~10⁵ lines of failure output. Job `f3cMCHLDMNu5` showed
+  the sub-job inactive and no process left to stack.
+
+The log has the table and the `MultiSolve` two-pass comparison, which differs
+at every np. README "Known Issues" records the Zoltan2-on-HIP stall, the
+`UpwardSweep` HIP idempotence failures, the `LaplaceSolve` HIP bit-level
+failures, and a SERIAL `UpwardSweep` failure found on the way.
 
 ### H1 — Contain the np-3 hang and capture its stacks — **REOPENED**
 
