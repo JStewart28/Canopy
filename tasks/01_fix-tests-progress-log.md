@@ -151,3 +151,53 @@ HIP binary can still exceed that. It happened once in seven submissions.
 
 **Affects:** none in this document. The DownwardSweep finding is a README
 Known Issue, not a task here.
+
+## F3
+
+**Change.** `testBitForBitArtifacts` (`tests/tstLaplaceSolve.hpp`) now opens
+with a `GTEST_SKIP` when `!std::is_same_v<ExecutionSpace, Kokkos::Serial>`,
+ahead of the existing np ≥ 3 skip. The message, as printed at HIP np 1:
+
+> bit-for-bit artifacts are gated on Kokkos::Serial only, and this backend is
+> HIP: the reference data in <LS_DATA_FILE> was generated on SERIAL, and device
+> backends accumulate with atomics, so their bit patterns vary run to run.
+> crossRankAgreement and matchesDirectSum cover this backend. See
+> tasks/01_fix-tests.md F3.
+
+The file-header gate table and the comment above the function say the same.
+README: the `bitForBitArtifacts` bullet is gone, and the entry is retitled to
+`crossRankAgreement` alone. The np ≥ 3 skip citation at `README.md:466` now
+reads `tests/tstLaplaceSolve.hpp:1211-1219`; it used to read `:1065`.
+
+**Measured** (job `f3cNB48LsWNB`, `-V`, SERIAL and HIP np 1-2):
+`bitForBitArtifacts` was `OK` at SERIAL np 1 (532 ms) and np 2 (both ranks),
+and `SKIPPED` at HIP np 1 and np 2 (both ranks).
+
+**Fails for the intended reason.** Perturbation: line 92 of
+`tests/data/laplace_solve_P6.txt`, the `set 1 0` `locals` hash, changed from
+`0xfb2cddef75e26dd6` to `…6dd7`. Job `f3cNANZK5J1V`, SERIAL np 1:
+`bitForBitArtifacts` failed with "locals() hash differs (nprocs=1 rank=0):
+measured 0xfb2cddef75e26dd6, reference 0xfb2cddef75e26dd7", and it was the
+entry's only failure. The file was restored with
+`git checkout -- tests/data/laplace_solve_P6.txt` after that job finished and
+before the pass run was submitted. `git status` showed it clean.
+
+**Found, not investigated: HIP np 2 `crossRankAgreement` fails.** In
+`f3cNB48LsWNB`, `Canopy_Test_LaplaceSolve_MPI_HIP_np_2` reported `failed`.
+The only failure was `crossRankAgreement`, with `max_pot_dev = 1.59e-7` and
+`max_grad_dev = 2.03e-8` against `LS_CROSS_RANK_TOL = 5.6e-10`, and the R8
+message fired (above `1e-9`). Both ranks recorded 397/386 unique operators.
+`fix-hang-rebalance` H0c saw HIP np 2 pass; one run here cannot say whether it
+is intermittent. `01_fix-tests.md`'s Approach says HIP np 2 passes and that
+only np 3-4 fail. It also attributes HIP np ≥ 3 to the MJ-on-device partition,
+whose cut is trivial at two parts. A ~2.8e2x-tolerance deviation at np 2 is
+evidence against mechanism (b) being the whole story. The README bullet notes
+the np 2 failure.
+
+**Affects:** F4. Its step 1 (spread, HIP np 2-4 twice) should establish
+whether HIP np 2 fails reproducibly. Its Approach premise "HIP np 2 passes"
+and the End state's "except `crossRankAgreement` at HIP np 3-4" may need np 2
+added. If np 2 fails reliably, the (b) row of the classification (deviation
+falls to SERIAL's level when the partition is forced onto the host node)
+should also be run at np 2. `fix-hang-rebalance.md` H2: if F4 carries
+`crossRankAgreement` on HIP, the carried set may include np 2.

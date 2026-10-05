@@ -19,7 +19,9 @@
 // src/Canopy_TreePartitioner.hpp:417-419 and README "Known Issues"):
 //
 //   bitForBitArtifacts  np 1-2  four internal artifacts, on their *bit
-//                               patterns*, against committed reference data
+//                               patterns*, against committed SERIAL-generated
+//                               reference data; Kokkos::Serial only, skipped
+//                               on every other backend
 //   crossRankAgreement  np 2-6  the np=k field reproduces the committed np=1
 //                               field to floating-point reassociation
 //   matchesDirectSum    np 1-6  the field matches a brute-force O(N^2) sum at
@@ -1187,11 +1189,23 @@ inline void field_scales( const std::vector<double>& pot,
 // Test bodies.
 // ---------------------------------------------------------------------------
 
-// np 1-2 only. The partition is not reproducible run-to-run above two ranks,
-// so there is no stable baseline to compare bit patterns against there.
+// Kokkos::Serial at np 1-2 only. The reference data is SERIAL-generated, and
+// Serial is the only execution space with a fixed accumulation order. The
+// partition is not reproducible run-to-run above two ranks, so there is no
+// stable baseline to compare bit patterns against there.
 template <class MemorySpace, class ExecutionSpace>
 void testBitForBitArtifacts()
 {
+    if ( !std::is_same_v<ExecutionSpace, Kokkos::Serial> )
+        GTEST_SKIP() << "bit-for-bit artifacts are gated on Kokkos::Serial "
+                        "only, and this backend is "
+                     << ExecutionSpace::name()
+                     << ": the reference data in " << LS_DATA_FILE
+                     << " was generated on SERIAL, and device backends "
+                        "accumulate with atomics, so their bit patterns vary "
+                        "run to run. crossRankAgreement and matchesDirectSum "
+                        "cover this backend. See tasks/01_fix-tests.md F3.";
+
     int nprocs = 0;
     MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
     if ( nprocs >= 3 )

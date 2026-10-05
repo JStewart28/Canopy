@@ -1,6 +1,6 @@
 # Make `UpwardSweep` and `LaplaceSolve` pass on SERIAL and HIP
 
-**Status:** IN PROGRESS — F1, F2 done
+**Status:** IN PROGRESS — F1, F2, F3 done
 
 ## Problem
 
@@ -251,7 +251,7 @@ removed), SERIAL np 1 and HIP np 1 each failed once per case, with scalars
 `1.54` and `1.50`. That required a test fix first: on SERIAL, both snapshots
 had aliased `sweep.multipoles()` (log, section F2).
 
-### F3 — Run `bitForBitArtifacts` on `Kokkos::Serial` only — **NOT STARTED**
+### F3 — Run `bitForBitArtifacts` on `Kokkos::Serial` only — **DONE**
 
 **Depends on:** none.
 
@@ -274,6 +274,13 @@ had aliased `sweep.multipoles()` (log, section F2).
   hash in `tests/data/laplace_solve_P6.txt` temporarily altered, SERIAL np 1
   fails on `locals_hash`. Restore it (`git checkout -- tests/data/laplace_solve_P6.txt`)
   before committing.
+
+**Met.** In flux job `f3cNB48LsWNB` (`-V`), `LaplaceSolve.bitForBitArtifacts`
+was `OK` at SERIAL np 1-2 and `SKIPPED` with the new message at HIP np 1-2.
+In perturbed job `f3cNANZK5J1V` (the `(1,0)` `locals` hash ending `6dd6`
+changed to `6dd7`), SERIAL np 1 failed on `locals_hash` alone. The data file
+was restored with `git checkout`. In the same pass run, HIP np 2
+`crossRankAgreement` failed at `1.6e-7` (log, section F3; F4's business).
 
 ### F4 — Classify and resolve `crossRankAgreement` on HIP np 3-4 — **NOT STARTED**
 

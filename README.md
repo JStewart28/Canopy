@@ -463,7 +463,7 @@ global set), but the run-to-run drift above two parts does not.
 This is **pre-existing** — a property of the partitioner, untouched by the
 harness work that found it. It blocks any bit-for-bit comparison above two
 ranks, and `LaplaceSolve.bitForBitArtifacts` is gated at np 1-2 for exactly that
-reason, with a `GTEST_SKIP` message naming it (`tests/tstLaplaceSolve.hpp:1065`);
+reason, with a `GTEST_SKIP` message naming it (`tests/tstLaplaceSolve.hpp:1211-1219`);
 `crossRankAgreement` and `matchesDirectSum` carry ranks 3-6 instead. A plausible
 but unverified mechanism is Zoltan2 MJ running on
 `Kokkos::DefaultExecutionSpace`, which is HIP in this build even for the SERIAL
@@ -551,20 +551,17 @@ the zeroing `deep_copy` removed from `UpwardSweep::execute()`, its SERIAL
 entry still passed. Fixed there with `create_mirror` + `deep_copy`; not yet
 applied to `DownwardSweep`. Found by reading, not by a run.
 
-### `LaplaceSolve` fails two bit-level checks on HIP
+### `LaplaceSolve.crossRankAgreement` fails on HIP at np 3-4
 
-On HIP only (SERIAL passes both), flux job `f3cM4ghTjtiT`:
-- `LaplaceSolve.bitForBitArtifacts` at np 1-2: the `locals()` hash differs
-  from the SERIAL-generated reference in `tests/data/laplace_solve_P6.txt`
-  (np 1: `0xbf7c808746669af7` against `0xfb2cddef75e26dd6`).
+On HIP only (SERIAL passes), flux job `f3cM4ghTjtiT`:
 - `LaplaceSolve.crossRankAgreement` at np 3-4: the field deviates from the
   committed np-1 field by `4.2e-7` (potential) and `3.9e-8` (gradient) at np 3,
   against `LS_CROSS_RANK_TOL = 5.6e-10`.
 
-Both compare a HIP run against SERIAL-generated references, which device
-reductions need not reproduce (`fix-hang-rebalance` risk R6). Found by H0c.
-To be triaged in a separate session: per-backend references, or a HIP
-tolerance justified by measurement.
+It compares a HIP run against the SERIAL-generated np-1 field. Found by
+`fix-hang-rebalance` H0c. HIP np 2, which passed there, failed in
+`01_fix-tests` F3's run (flux job `f3cNB48LsWNB`: `1.6e-7` potential, `2.0e-8`
+gradient). `tasks/01_fix-tests.md` F4 classifies it.
 
 ### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
 
