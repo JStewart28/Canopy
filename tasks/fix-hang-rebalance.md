@@ -495,7 +495,7 @@ SERIAL exit criterion below are the SERIAL arm's; the partitioner arm follows
 them.
 
 **Depends on:** H1's SERIAL arm for the SERIAL arm. Partitioner arm: H1's HIP
-arm **met**.
+arm **met**, and `01_fix-tests.md` F1-F4 **DONE**.
 **Fill in:** `src/Canopy_TreePartitioner.hpp`: the Zoltan2 adapter type at
 `:367`. New `scripts/tuolumne/run_ctest_h2.flux`, which sources the
 watchdog and runs against `build-tuolumne/`.
@@ -557,7 +557,9 @@ backends at once. That removes Zoltan2-on-HIP from every solver, and it removes
 the rank-0 solve. Every rank already holds the full tree topology, so no tree
 data is gathered anywhere.
 
-**Depends on:** H1's HIP arm **met**. Its stacks say whether the HIP stall is
+**Depends on:** H1's HIP arm **met**; `01_fix-tests.md` F1-F4 **DONE**, so
+`UpwardSweep` and `LaplaceSolve` start this arm passing, or with F4's carried
+HIP np 3-4 `crossRankAgreement` cases named. Its stacks say whether the HIP stall is
 in the partitioner. If it is anywhere else, that cause is fixed in this arm as
 well, under the SERIAL arm's step-2 rules. The "all ranks inside Kokkos/HIP"
 case needs a decision with the user before any change.
