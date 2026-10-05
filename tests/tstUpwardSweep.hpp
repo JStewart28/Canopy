@@ -23,9 +23,11 @@
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 namespace Test
@@ -45,6 +47,13 @@ enum FieldIdx
 
 static constexpr int P_ORDER = 6;
 using Kernel = LaplaceKernel<double, P_ORDER>;
+
+// testIdempotentExecution on a backend without a fixed accumulation order.
+// Field-scale relative: max |M1 - M2| over all cells and coefficients, divided
+// by max |M1| over the same set. Worst measured on HIP np 1-4, two runs:
+// 3.7e-16 (tasks/01_fix-tests-progress-log.md, F2), a margin of ~2700x. A
+// leaked partial sum is O(1).
+static constexpr double LS_IDEMPOTENT_TOL = 1.0e-12;
 
 // Charges are stored as double[NComps] so the AoSoA layout matches what
 // UpwardSweep expects: particle_charges(p, comp_idx).
@@ -340,16 +349,20 @@ void testMultipolesNonzeroAfterSweep( int num_particles_per_rank, int ncrit,
 
 //---------------------------------------------------------------------------//
 /**
- * Verify that calling execute() a second time on the same sweep object
- * and inputs produces bit-identical multipole coefficients.
+ * Verify that calling execute() a second time on the same sweep object and
+ * inputs reproduces the first call's multipole coefficients.
  *
- * execute() must zero the coefficient storage at the start of each call, so
- * the result must not accumulate across invocations or depend on leftover
- * state from a prior run.
+ * execute() must zero the coefficient storage at the start of each call and
+ * keep no state across calls. A leaked partial sum is O(1) relative to the
+ * coefficients; reassociation of the device's atomic P2M accumulation is
+ * O(N eps). So the check is exact on Kokkos::Serial, the only execution space
+ * with a fixed accumulation order, and elsewhere a tolerance between the two.
  *
  * Checks:
- *   1. Real and imaginary parts of every coefficient in every cell match
- *      exactly between the first and second execute() calls.
+ *   1. d = max |M1 - M2| / max |M1| over every coefficient of every cell on
+ *      every rank (field-scale relative) is 0 on Kokkos::Serial and below
+ *      LS_IDEMPOTENT_TOL elsewhere. One EXPECT, reporting d and the
+ *      (rank, cell, coeff, comp) of the largest difference.
  */
 void testIdempotentExecution( int num_particles_per_rank, int ncrit,
                               int max_depth, double tolerance,
@@ -357,8 +370,9 @@ void testIdempotentExecution( int num_particles_per_rank, int ncrit,
 {
     using namespace UpwardSweepTest;
 
-    int rank;
+    int rank, nprocs;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
 
     AoSoA_t particles( "particles", num_particles_per_rank );
     generate_test_particles( particles, num_particles_per_rank, rank );
@@ -388,31 +402,62 @@ void testIdempotentExecution( int num_particles_per_rank, int ncrit,
     sweep.setup( builder.cells(), partitioner.cell_owner_map(),
                  builder.particle_keys(), num_local );
 
-    // First execute — snapshot the multipoles
+    // First execute — snapshot the multipoles. create_mirror always
+    // allocates; create_mirror_view would alias sweep.multipoles() on a host
+    // memory space, and the comparison would be against itself.
     sweep.execute( charges, positions, comm_plan );
-    auto h_M_first = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
-                                                          sweep.multipoles() );
+    auto h_M_first =
+        Kokkos::create_mirror( Kokkos::HostSpace(), sweep.multipoles() );
+    Kokkos::deep_copy( h_M_first, sweep.multipoles() );
 
-    // Second execute — must give the same result
+    // Second execute — must reproduce the first
     sweep.execute( charges, positions, comm_plan );
     auto h_M_second = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
                                                            sweep.multipoles() );
 
-    const int num_cells = static_cast<int>( h_M_first.extent( 0 ) );
-    for ( int c = 0; c < num_cells; c++ )
+    double max_diff = 0.0, max_mag = 0.0;
+    int loc[3] = { -1, -1, -1 }; // cell, coeff, comp of max_diff
+    for ( std::size_t c = 0; c < h_M_first.extent( 0 ); c++ )
+        for ( std::size_t i = 0; i < h_M_first.extent( 1 ); i++ )
+            for ( std::size_t k = 0; k < h_M_first.extent( 2 ); k++ )
+            {
+                const auto m1 = h_M_first( c, i, k );
+                const double diff = Kokkos::abs( m1 - h_M_second( c, i, k ) );
+                max_mag = std::max( max_mag, Kokkos::abs( m1 ) );
+                if ( diff > max_diff )
+                {
+                    max_diff = diff;
+                    loc[0] = static_cast<int>( c );
+                    loc[1] = static_cast<int>( i );
+                    loc[2] = static_cast<int>( k );
+                }
+            }
+
+    struct
     {
-        for ( int idx = 0; idx < Kernel::num_coeffs_per_cell; idx++ )
-        {
-            EXPECT_EQ( h_M_first( c, idx, 0 ).real(),
-                       h_M_second( c, idx, 0 ).real() )
-                << "Real part mismatch at cell " << c << ", coeff " << idx
-                << " between first and second execute()";
-            EXPECT_EQ( h_M_first( c, idx, 0 ).imag(),
-                       h_M_second( c, idx, 0 ).imag() )
-                << "Imaginary part mismatch at cell " << c << ", coeff " << idx
-                << " between first and second execute()";
-        }
-    }
+        double value;
+        int rank;
+    } local_diff{ max_diff, rank }, global_diff;
+    MPI_Allreduce( &local_diff, &global_diff, 1, MPI_DOUBLE_INT, MPI_MAXLOC,
+                   MPI_COMM_WORLD );
+    double global_mag = 0.0;
+    MPI_Allreduce( &max_mag, &global_mag, 1, MPI_DOUBLE, MPI_MAX,
+                   MPI_COMM_WORLD );
+    MPI_Bcast( loc, 3, MPI_INT, global_diff.rank, MPI_COMM_WORLD );
+
+    const double rel = global_diff.value / global_mag;
+    if ( rank == 0 )
+        std::cout << "[idempotent] np=" << nprocs << " rel_diff=" << rel
+                  << " max_abs_diff=" << global_diff.value
+                  << " max_mag=" << global_mag << std::endl;
+
+    const bool exact = std::is_same_v<TEST_EXECSPACE, Kokkos::Serial>;
+    EXPECT_TRUE( exact ? rel == 0.0 : rel < LS_IDEMPOTENT_TOL )
+        << "execute() is not idempotent on " << TEST_EXECSPACE::name()
+        << ": max |M1 - M2| / max |M1| = " << rel << " (limit "
+        << ( exact ? 0.0 : LS_IDEMPOTENT_TOL ) << ") at rank "
+        << global_diff.rank << ", cell " << loc[0] << ", coeff " << loc[1]
+        << ", comp " << loc[2];
 }
 
 //---------------------------------------------------------------------------//

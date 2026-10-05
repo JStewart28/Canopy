@@ -539,20 +539,17 @@ other, with rank 0 in `hipDeviceSynchronize` inside
 environment, a few passes. `fix-hang-rebalance` H2's partitioner arm replaces
 this path.
 
-### `UpwardSweep`'s idempotence checks fail on HIP, and their output overruns the budget
+### `DownwardSweep.testIdempotentExecution` compares `locals()` with itself on SERIAL
 
-`UpwardSweep.testIdempotentExecution{Basic,Small}` fail on HIP at np 1-3 and
-pass on SERIAL: two `execute()` calls on the same tree give multipoles that
-differ in the last bits (e.g. `3.1318581590950871` vs `3.1318581590950876`),
-and the test compares with exact equality (`tests/tstUpwardSweep.hpp:385-395`),
-consistent with an order-dependent device reduction. Each mismatching
-coefficient prints a message, 3 000-17 000 of them per run, and ctest needs
-~10 s after the ranks exit to process that output. So
-`Canopy_Test_UpwardSweep_MPI_HIP_np_3` and `_np_4` exceed their time budget
-with no process left to stack (flux jobs `f3cM4ghTjtiT`, `f3cMCHLDMNu5`). HIP
-only; found by `fix-hang-rebalance` H0c. To be triaged in a separate session:
-decide whether HIP `execute()` must be bit-reproducible, or the test compares
-to a tolerance.
+`tests/tstDownwardSweep.hpp:365-379` snapshots `downward.locals()` after each
+of two `execute()` calls with `Kokkos::create_mirror_view_and_copy`. On a host
+memory space that returns the view itself, so `h_L1` and `h_L2` alias one
+buffer and the locals half of the check cannot fail on SERIAL (or OPENMP). The
+potential half is sound: it compares two distinct views. Found by
+`01_fix-tests` F2, where `UpwardSweep`'s twin test had the same defect: with
+the zeroing `deep_copy` removed from `UpwardSweep::execute()`, its SERIAL
+entry still passed. Fixed there with `create_mirror` + `deep_copy`; not yet
+applied to `DownwardSweep`. Found by reading, not by a run.
 
 ### `LaplaceSolve` fails two bit-level checks on HIP
 

@@ -1,6 +1,6 @@
 # Make `UpwardSweep` and `LaplaceSolve` pass on SERIAL and HIP
 
-**Status:** IN PROGRESS — F1 done
+**Status:** IN PROGRESS — F1, F2 done
 
 ## Problem
 
@@ -200,7 +200,7 @@ perturbed job `f3cMiZgKVDDy` ($w^{-n}$), SERIAL np 1 failed at `0.668` and
 `0.674`, which is $1/w - 1$ for $w_{root} \approx 0.60$. Per-case figures are
 in the log, section F1.
 
-### F2 — Make `testIdempotentExecution` backend-aware and bounded — **NOT STARTED**
+### F2 — Make `testIdempotentExecution` backend-aware and bounded — **DONE**
 
 **Depends on:** F1 (both edit `tests/tstUpwardSweep.hpp`, and F2's criterion
 runs the whole stem).
@@ -240,6 +240,16 @@ the error.
   `_multipoles` (`src/Canopy_UpwardSweep.hpp:701`) temporarily removed in a
   scratch build, `testIdempotentExecution*` fails on SERIAL np 1 and HIP np 1.
   Each failure is one message with an O(1) scalar. Revert before committing.
+
+**Met.** With the `UpwardSweep` np 1-4 allowance cleared, flux jobs
+`f3cN2kx53B2o` and `f3cN3nXho9rP` (`-V`) and `f3cN5VTtsPWP` (default
+`--output-on-failure`) each reported every SERIAL np 1-6 and HIP np 1-4 entry
+`completed`. SERIAL's scalar was exactly `0`. HIP's worst scalar was `3.7e-16`,
+about 2700x under `LS_IDEMPOTENT_TOL = 1.0e-12`. The HIP entries printed 10-40
+lines in `f3cN5VTtsPWP`. In perturbed job `f3cMxBbPLv9d` (zeroing `deep_copy`
+removed), SERIAL np 1 and HIP np 1 each failed once per case, with scalars
+`1.54` and `1.50`. That required a test fix first: on SERIAL, both snapshots
+had aliased `sweep.multipoles()` (log, section F2).
 
 ### F3 — Run `bitForBitArtifacts` on `Kokkos::Serial` only — **NOT STARTED**
 

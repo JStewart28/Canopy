@@ -83,3 +83,71 @@ rebuilt before both pass runs (`f3cMm2wURzM5` without the print,
 `f3cMpQqPjuiw` with it).
 
 **Affects:** none.
+
+## F2
+
+**Change.** `testIdempotentExecution` (`tests/tstUpwardSweep.hpp`) now reduces
+the comparison to one scalar,
+$d = \max_{c,i,k} \lvert M^{(1)} - M^{(2)}\rvert / \max_{c,i,k} \lvert M^{(1)}\rvert$
+(complex modulus, every cell, coefficient and component). Both maxima are
+global: `MPI_MAXLOC` finds the owning rank of the largest difference, and that
+rank broadcasts its (cell, coeff, comp). One `EXPECT_TRUE` checks `d == 0` when
+`TEST_EXECSPACE` is `Kokkos::Serial` and `d < LS_IDEMPOTENT_TOL` otherwise. Its
+message names the backend, `d`, the limit and the location. Every rank asserts,
+so a failing np-k entry prints k copies of one line. Rank 0 also prints
+`[idempotent] np=<k> rel_diff=<d> max_abs_diff=<num> max_mag=<den>`.
+`LS_IDEMPOTENT_TOL = 1.0e-12` sits in `UpwardSweepTest`. The `LS_` prefix
+follows the task text, although the constant is not `LaplaceSolve`'s.
+`serial_runtimes.tsv`: `extra_s`/`extra_reason` cleared on `UpwardSweep` np 1-4.
+
+**Bug only running revealed: the SERIAL check was vacuous.** The first
+perturbed run (`f3cMuUxoun7q`) failed HIP np 1 as intended but passed SERIAL
+np 1. `create_mirror_view_and_copy(HostSpace(), v)` returns `v` itself when
+`v` is already host-resident. So on SERIAL, `h_M_first` and `h_M_second` were
+the same buffer, and the old exact `EXPECT_EQ`s compared each value with
+itself. The first snapshot now uses `Kokkos::create_mirror` (which always
+allocates) plus `deep_copy`. `DownwardSweep.testIdempotentExecution` has the
+same pattern for `locals()` (`tests/tstDownwardSweep.hpp:365-378`); that is
+out of scope here and recorded in README "Known Issues". Its potential
+comparison uses two distinct views and is sound.
+
+**Measured** (HIP; SERIAL was exactly `0` at np 1-6 in both runs). Values are
+$d$ for (`Basic`, `Small`):
+
+| np | run 1 `f3cN2kx53B2o` | run 2 `f3cN3nXho9rP` |
+| --- | --- | --- |
+| 1 | 1.8e-16, 9.1e-17 | 2.0e-16, 1.2e-16 |
+| 2 | 1.5e-16, 3.7e-16 | 2.7e-16, 1.9e-16 |
+| 3 | 1.8e-16, 3.1e-16 | 2.5e-16, 1.8e-16 |
+| 4 | 2.4e-16, 8.7e-17 | 2.1e-16, 1.1e-16 |
+
+The worst is `3.75e-16`, which is about 1.7 ulp of the largest coefficient
+(`max_mag` 21.8-153.9). That is reassociation, so R2 did not fire, and
+`1.0e-12` leaves ~2700x margin. Both runs used `-V`, which is how passing
+entries' scalars get printed. Under `-V`, the HIP entries' full output was
+154/340/558/808 lines at np 1-4, nearly all of it the gtest listing of every
+rank. Under the default `--output-on-failure` (`f3cN5VTtsPWP`, every entry
+`completed`), they printed 10/20/30/40 lines. The constant's comment was
+written after these runs and is the only difference between the committed file
+and the measured binaries.
+
+**Fails for the intended reason.** Perturbation: the
+`Kokkos::deep_copy( _multipoles, coeff_type() )` at
+`src/Canopy_UpwardSweep.hpp:701` commented out. Job `f3cMxBbPLv9d`, with the
+snapshot fix: SERIAL np 1 and HIP np 1 each failed once per case, `d = 1.541`
+(`Basic`, cell 6) and `1.504` (`Small`, cell 0), identical on both backends.
+Reverted with `git checkout -- src/Canopy_UpwardSweep.hpp` and rebuilt before
+the pass runs.
+
+**Budget observation.** The first perturbed submission (`f3cMtaAWZFkT`, on
+binaries just relinked) went over budget on both entries before any test ran.
+SERIAL np 1 took 18.0 s against 13. HIP np 1 took 12.0 s against 7, and its
+rank 0 stack at 7.7 s was still in `Kokkos::HIP::impl_initialize` →
+`hipMemcpyToSymbol` → code-object load. An unchanged resubmit
+(`f3cMuUxoun7q`) ran in 6.9 s and 4.1 s. A HIP np 1 entry that runs after a
+SERIAL entry gets no cold-start allowance, and with `extra_s` gone its budget
+is 7 s against a ~3.8 s warm runtime. A slow first launch of a freshly linked
+HIP binary can still exceed that. It happened once in seven submissions.
+
+**Affects:** none in this document. The DownwardSweep finding is a README
+Known Issue, not a task here.
