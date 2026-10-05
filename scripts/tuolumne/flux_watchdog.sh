@@ -5,8 +5,10 @@
 # `flux run` client, but the sub-job keeps running and holds the node
 # --exclusive, so every later sub-job waits in state S behind it (flux job
 # f3bn8EK66YaK). Every WATCHDOG_POLL_S seconds this loop lists the running
-# sub-jobs of the enclosing instance; any one older than WATCHDOG_S is first
-# stack-sampled, then `flux cancel`ed.
+# sub-jobs of the enclosing instance; any one older than its threshold is first
+# stack-sampled, then `flux cancel`ed. The threshold is the integer in
+# ${WATCHDOG_DIR}/budget while that file exists (written by canopy_ctest in
+# ctest_budget.sh for the entry it is running), and WATCHDOG_S otherwise.
 #
 # Only the sub-job's own processes are stacked: descendants of the flux-shell
 # whose last argument is that sub-job's id (`flux-shell [OPTIONS] JOBID`),
@@ -16,8 +18,9 @@
 # `flux run` client.
 #
 # Inputs (read when the loop starts):
-#   WATCHDOG_S            cancel threshold, seconds of sub-job runtime (300)
-#   WATCHDOG_POLL_S       poll period, seconds (15)
+#   WATCHDOG_S            cancel threshold, seconds of sub-job runtime, for
+#                         sub-jobs canopy_ctest did not launch (300)
+#   WATCHDOG_POLL_S       poll period, seconds (2)
 #   CANOPY_WATCHDOG_PGREP process-name regex of the processes to stack
 #                         (Canopy_Test_)
 #
@@ -34,7 +37,7 @@
 # those whose capture holds at least one "#0" frame.
 
 : "${WATCHDOG_S:=300}"
-: "${WATCHDOG_POLL_S:=15}"
+: "${WATCHDOG_POLL_S:=2}"
 WATCHDOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/canopy-watchdog.XXXXXX")
 : > "${WATCHDOG_DIR}/cancelled"
 
@@ -112,11 +115,13 @@ watchdog_start() {
             begin=$(date +%s%N)
             listing=$(flux jobs --filter=running --no-header -o '{id} {runtime}')
             running=0
+            threshold=${WATCHDOG_S}
+            [ -f "${WATCHDOG_DIR}/budget" ] && read -r threshold < "${WATCHDOG_DIR}/budget"
             while read -r jid rt; do
                 [ -z "${jid}" ] && continue
                 running=$((running + 1))
                 grep -q "^${jid} " "${WATCHDOG_DIR}/cancelled" && continue
-                if [ "${rt%.*}" -gt "${WATCHDOG_S}" ]; then
+                if awk -v r="${rt}" -v t="${threshold}" 'BEGIN { exit !(r > t) }'; then
                     _watchdog_capture_and_cancel "${jid}" "${rt}"
                 fi
             done <<< "${listing}"

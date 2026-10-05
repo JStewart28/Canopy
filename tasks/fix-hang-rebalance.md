@@ -77,7 +77,7 @@ records what each one does at np 1-4 before anything is changed. Every later
 task reads its HIP figures against H0c.
 
 **Time budgets.** Waiting on test runs is the bottleneck. A default-configuration
-SERIAL entry completes in 4.5-24 s (Current state), yet a hang was waited out
+SERIAL entry completes in 3.5-18.9 s (`serial_runtimes.tsv`), yet a hang was waited out
 for 300 s. H0b sets each ctest entry's timeout and watchdog threshold at
 1.75x the maximum completed SERIAL runtime of the same `(stem, np)`. That
 applies to every backend. An entry that runs past its budget is hung or
@@ -188,27 +188,17 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   SERIAL and every other device register as before. The only HIP script
   outside ctest, `scripts/tuolumne/run_treepartitioner_hip.flux`, uses the same
   binding.
-- **Every timeout is 300 s, and the watchdog has one threshold.** The scripts
-  pass `ctest --timeout 300` (e.g. `run_ctest_h2.flux`) and set
-  `WATCHDOG_S=300`. `flux_watchdog.sh` applies that one threshold to every
-  sub-job and polls every `WATCHDOG_POLL_S=15` s. Completed SERIAL runtimes in
-  the default configuration are far shorter. The table below gives the maximum
-  per `(stem, np)` over the repo-root job logs, excluding the T4-diagnostic,
-  LaplaceSolve-trace and θ-gain jobs, which ran non-default work. Sample counts
-  are in parentheses:
-
-  | stem | np 1 | np 2 | np 3 | np 4 | np 5 | np 6 |
-  | --- | --- | --- | --- | --- | --- | --- |
-  | `MultiSolve` | 8.84 (12) | 7.01 (12) | 12.96 (25) | 12.21 (9) | 15.65 (9) | 16.26 (9) |
-  | `CartesianTaylorSolve` | 24.38 (10) | 13.84 (10) | 11.31 (9) | 11.15 (9) | 11.31 (9) | 11.69 (9) |
-  | `LaplaceSolve` | 11.94 (44) | 9.04 (34) | 7.67 (32) | 8.01 (31) | 8.72 (31) | 8.65 (30) |
-  | `DownwardSweep` | 7.83 (10) | 5.41 (10) | 6.61 (10) | 8.08 (10) | 8.57 (9) | 9.65 (9) |
-  | `FarFieldContract` | 7.36 (13) | 4.48 (12) | 5.63 (12) | 6.75 (12) | 7.82 (12) | 8.66 (12) |
-
-  These are seconds per ctest entry, launch and `Kokkos::initialize` included.
-  `TreeBuilder`, `TreePartitioner`, `CommunicationPlan` and `CartesianTaylor`
-  have no SERIAL ctest timing in any log. The figures span builds and commits,
-  so they size the budgets; H0b's calibration sets them.
+- **Every ctest entry has a time budget.** `canopy_ctest`
+  (`scripts/tuolumne/ctest_budget.sh`) runs each matched entry alone at
+  `ceil(1.75 * t_ref_s)` s, from `scripts/tuolumne/serial_runtimes.tsv`
+  (55 `default` rows, H0b). The same budget is the watchdog's threshold for
+  that entry's sub-job, through `${WATCHDOG_DIR}/budget`. `WATCHDOG_S` applies
+  only to sub-jobs `canopy_ctest` did not launch. The watchdog polls every 2 s.
+  Non-MPI entries are not flux sub-jobs, so `canopy_ctest` stacks and kills
+  them itself. The first Canopy binary launched in a job runs ~3.5 s slow
+  (`MultiSolve` np 1: 8.4-8.6 s as a job's first entry against 4.8-5.1 s
+  after, budget 9), which the calibration maximum does not include (progress
+  log, H0b).
 - **No HIP test has run for this work.** No log in the repo root contains an
   `MPI_HIP` test. The HIP binaries in `build-tuolumne/tests` predate H2, and
   `Canopy_Test_CartesianTaylorSolve_MPI_HIP` and
@@ -309,7 +299,7 @@ so does every other non-HIP entry. Job `f3cLYyF1XxQX`: at np 4 the verbatim
 `--cores-per-task=8` added. At np 5 flux refused both with
 `alloc denied due to type="unsatisfiable"`.
 
-### H0b — Per-test time budgets from measured SERIAL runtimes — **NOT STARTED**
+### H0b — Per-test time budgets from measured SERIAL runtimes — **DONE**
 
 **Depends on:** none.
 **Fill in:** new `scripts/tuolumne/serial_runtimes.tsv`; new
@@ -363,6 +353,18 @@ state**; `flux_watchdog.sh`'s cancel test (`"${rt%.*}" -gt "${WATCHDOG_S}"` in
 - **refusal:** `canopy_ctest '^Canopy_Test_SingleSolve_MPI_SERIAL_np_1$'`, a stem
   with no row, exits non-zero naming `(SingleSolve, 1, default)` and launches
   no sub-job.
+
+**Met.** Job `f3cLieUe4u2F` calibrated the 55 SERIAL entries (np 1-6 for nine
+MPI stems, np 1 for `CartesianTaylor`) three times each with no hang, and wrote
+one `default` row per `(stem, np)` from the three completed passes. Job
+`f3cM1y4WB335`, on the committed watchdog and `canopy_ctest`:
+- the self-test was cancelled at 21.80 s with three `sleep` stacks;
+- two `canopy_ctest` `MultiSolve` SERIAL np 1-6 passes ended with every entry
+  `failed` (the known `1e-8` cases) and none `over-budget`;
+- the `SingleSolve` np-1 call exited 2 naming `(SingleSolve, 1, default)`,
+  with the flux job count unchanged (13 before and after);
+- with a throwaway 4 s budget, the watchdog stacked all six ranks of
+  `MultiSolve` np 6 and cancelled it at 5.13 s.
 
 ### H0c — Build every named HIP target and record its baseline — **NOT STARTED**
 

@@ -632,3 +632,133 @@ np 5, all three variants: rc 1,
 - H0c: HIP runs launch with one APU per rank through ctest. Under mpibind each
   rank gets 21 CPUs, so `OMP_NUM_THREADS=1` (the ctest `ENVIRONMENT` property)
   is still what bounds host threading.
+
+## H0b
+
+Jobs, all `scripts/tuolumne/run_ctest_h0b.flux`, HEAD `875628e` plus this
+task's working-tree changes, Cray clang 20.0.0, flux-core 0.89.0,
+`build-tuolumne/` with `Canopy_ENABLE_PROFILING=ON`. Logs:
+`canopy-h0b.<jobid>.log` in the repo root (untracked).
+- `f3cLieUe4u2F` (`all`): self-test, calibration, check.
+- `f3cLx8h8NwVR` and `f3cLyvp55Utf` (`check`): reruns after the fixes below.
+- `f3cM1y4WB335` (`verify`): self-test and check on the final scripts. This is
+  the job the **Met.** paragraph cites for everything except the calibration.
+
+The ten SERIAL targets were rebuilt at HEAD (`make -j` naming exactly them)
+before calibrating, because the binaries in `build-tuolumne/tests` predated H2.
+
+**Interface.** `scripts/tuolumne/ctest_budget.sh`, sourced after
+`flux_watchdog.sh`, defines `canopy_ctest <anchored-regex> [ctest args…]`.
+Inputs are `CANOPY_BUDGET_CONFIG` (default `default`) and `CANOPY_BUDGET_TSV`
+(default `serial_runtimes.tsv` beside the script). It prints one line per entry:
+`[canopy_ctest] <entry> runtime=<s> budget=<s> outcome=<completed|failed|over-budget>`.
+It returns 0 if every entry completed, 1 if any failed or went over budget, and
+2 on refusal.
+
+**Decisions.**
+- A HIP entry above np 4 is refused. `canopy_ctest` exits 2 naming any
+  `_MPI_HIP_np_<N>` entry with N > 4, before launching anything, the same as
+  for a missing row. This is a second guard behind H0a's registration.
+- Only two name shapes are accepted: `Canopy_Test_<Stem>_MPI_<DEV>_np_<N>` and
+  `Canopy_Test_<Stem>_<DEV>` (a non-MPI stem, looked up as np 1). Anything
+  else, `_valgrind` and `_nt_<k>` included, is refused before any launch.
+- `canopy_ctest` stacks non-MPI entries itself. They run as `<exe>` with no
+  `flux run` (`NONMPI_PRECOMMAND` is empty), so the watchdog cannot see them.
+  At the budget it `gstack`s every descendant of the `ctest` process whose
+  name matches `CANOPY_WATCHDOG_PGREP`, between the watchdog's
+  `### watchdog stacks … ###` markers, then sends `SIGKILL`.
+- The ten SERIAL targets were rebuilt at HEAD before calibrating.
+- H0b step 4 rewrites no existing script. `run_ctest_v1/h1/h2.flux` stay as
+  the record of what those jobs ran; the rule binds new runs. `tree-opt.md`
+  already routes its runs through `canopy_ctest`.
+
+**Departures from Do.**
+- ctest's `--timeout` is the budget plus 5 s, for MPI entries as well as
+  non-MPI. In `f3cLieUe4u2F`, `--timeout` equalled the budget. A forced
+  over-budget `MultiSolve` np 2 then hit ctest's timeout at 4.01 s, and its
+  sub-job ended with the killed `flux run` client before the watchdog polled,
+  so there were no stacks. A sub-job that is merely slow, not hung, dies with
+  its client. With the 5 s margin, the watchdog stacks and cancels at the
+  budget first. Outcome `over-budget` means the watchdog or the non-MPI timer
+  cancelled the entry, or ctest reported a timeout.
+- The watchdog's cancel test compares the fractional runtime
+  (`awk 'BEGIN { exit !(r > t) }'`). Before, it compared the integer part
+  (`"${rt%.*}" -gt`), which fires only once the runtime reaches the next whole
+  second, up to 1 s late on top of the 2 s poll. `f3cLyvp55Utf` cancelled a
+  4 s budget at 7.08 s; `f3cM1y4WB335`, on the fractional test, at 5.13 s.
+- The script takes a phase argument: `calibrate`, `check`, `verify`
+  (self-test then check) or `all`. Everything ran in one allocation
+  (`f3cLieUe4u2F`, `all`); the phases exist for the reruns.
+- The check phase adds two diagnostics the exit criterion does not name. One
+  calls `_canopy_ctest_budget` on refused names without launching anything.
+  The other forces an over-budget entry for each cancel path with a throwaway
+  TSV (`MultiSolve` np 6 at `t_ref_s = 2`, budget 4; `CartesianTaylor` at 0.5,
+  budget 1).
+- The TSV's `jobid` column was written empty by `f3cLieUe4u2F`: `FLUX_JOB_ID`
+  is not set in the batch shell. The column was filled with `f3cLieUe4u2F`, the
+  job whose log holds every sample. The scripts now take the id from
+  `flux getattr jobid`.
+
+**Self-test.** `f3cLieUe4u2F`: sub-job `f75CzP2P` cancelled at 21.46 s with
+`matched=3 children=3 nonempty=3`. `f3cM1y4WB335`: cancelled at 21.80 s with
+3/3/3. Both are inside 20-25 s.
+
+**Calibration (`f3cLieUe4u2F`).** 55 entries × 3 passes, all completed, no
+watchdog cancellation, about 28 min. `t_ref_s`, the maximum of three, in s:
+
+| stem | np 1 | np 2 | np 3 | np 4 | np 5 | np 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `MultiSolve` | 4.76 | 6.81 | 9.21 | 11.94 | 13.94 | 15.80 |
+| `CartesianTaylorSolve` | 18.86 | 12.40 | 11.65 | 11.20 | 11.53 | 11.88 |
+| `LaplaceSolve` | 9.96 | 8.29 | 8.26 | 8.66 | 9.19 | 10.00 |
+| `DownwardSweep` | 3.84 | 5.41 | 7.24 | 7.97 | 8.19 | 9.16 |
+| `UpwardSweep` | 3.54 | 4.19 | 5.25 | 6.17 | 6.94 | 7.91 |
+| `FarFieldContract` | 4.48 | 4.35 | 5.34 | 6.09 | 6.78 | 7.91 |
+| `TreeBuilder` | 3.53 | 4.17 | 5.20 | 6.12 | 6.90 | 7.86 |
+| `TreePartitioner` | 3.52 | 4.20 | 5.20 | 6.06 | 6.89 | 7.86 |
+| `CommunicationPlan` | 3.45 | 4.25 | 5.38 | 6.12 | 6.96 | 7.94 |
+| `CartesianTaylor` (non-MPI) | 5.49 | | | | | |
+
+**Bug found by running: the first Canopy binary in a job is ~3.5 s slow, and
+the budgets do not cover it.** Calibration's first entry,
+`CartesianTaylor_SERIAL`, took 5.49 s in pass 1 and 1.52 s in pass 2. In every
+check job, `MultiSolve` np 1 was the job's first Canopy entry and took 8.61,
+8.40 and 8.54 s, against 4.83-5.05 s for the same entry in pass 2 and a budget
+of 9. It completed in all three, but with 0.4-0.6 s of margin. Calibration ran
+`MultiSolve` np 1 well after the job's first entry, so its row (4.76) does not
+include the cold start. Not fixed here: the budgets are as H0b specifies.
+
+**No false positive.** In all three check jobs, both `MultiSolve` SERIAL
+np 1-6 passes ended with every entry `failed` (the six `1e-8` cases, README) and
+none `over-budget`.
+
+**Refusal.** `canopy_ctest '^Canopy_Test_SingleSolve_MPI_SERIAL_np_1$'` printed
+`REFUSED … no budget row (SingleSolve, 1, default)` and returned 2. The flux job
+count was 13 before and after (`f3cM1y4WB335`). The name guard refused
+`…_MPI_HIP_np_5` (HIP above np 4), `…_SERIAL_valgrind` and `…_OPENMP_nt_2`.
+
+**Forced over-budget.**
+- MPI (`f3cM1y4WB335`): `MultiSolve` np 6 at budget 4 was stacked with
+  `matched=6 children=6 nonempty=6` and cancelled at 5.13 s, mid-run (rank 0 in
+  `DownwardSweep::run_m2l_fused`, the others in MPI progress).
+- Non-MPI: the timer fired at 1.1 s both times, matching the one
+  `Canopy_Test_Car…` process. `f3cLyvp55Utf` got a stack (`ioctl` from HIP
+  device bring-up). In `f3cM1y4WB335`, gstack, eu-stack and gdb all failed on
+  it. `SIGKILL` did not land until the kernel call returned, so ctest's
+  budget + 5 s timeout fired too (runtime 8-9 s). At 1 s the process is still
+  inside HIP initialization in the kernel. A real budget (≥ 7 s here) is past
+  it.
+
+**New failure, not in README "Known Issues": `UpwardSweep` SERIAL exits 8 at
+every np, in all three passes.** Calibration ran without
+`--output-on-failure`, so the failing cases are not recorded here. H0c records
+them beside its HIP run.
+
+**Affects:**
+- H0c: run every HIP entry through `canopy_ctest`. HIP np 1 for the job's
+  first stem pays the cold start against its SERIAL budget (see above). An
+  over-budget entry there whose stacks show progress is that effect, not a
+  hang. `UpwardSweep`'s SERIAL failure is pre-existing to H0c.
+- H1 HIP arm, H2 partitioner arm, E1, tree-opt T1: `canopy_ctest` is ready, and
+  a switch configuration needs its own rows (`CANOPY_BUDGET_CONFIG`). A job
+  whose first entry is an np-1 run is near its budget.
