@@ -539,18 +539,6 @@ other, with rank 0 in `hipDeviceSynchronize` inside
 environment, a few passes. `fix-hang-rebalance` H2's partitioner arm replaces
 this path.
 
-### `UpwardSweep`'s root-multipole checks fail at every rank count
-
-`UpwardSweep.testRootMultipoleMatchesDirectP2M{Basic,Small}` (np 1) and
-`…MultiRank{Basic,Small}` (np 2-6) fail on both SERIAL and HIP: the FMM root
-multipole deviates from the direct P2M reference by a max relative error of
-~35 (34.8-35.8) against a `1e-10` tolerance (`tests/tstUpwardSweep.hpp:223`,
-`:684`). An O(1) error, not round-off. Found by `fix-hang-rebalance` H0b and
-H0c (flux jobs `f3cLieUe4u2F`, `f3cM4ghTjtiT`, HEAD `0440f84`); when it began
-is not bisected. Reproduce with
-`canopy_ctest '^Canopy_Test_UpwardSweep_MPI_SERIAL_np_[1-6]$' --output-on-failure`.
-To be triaged in a separate session.
-
 ### `UpwardSweep`'s idempotence checks fail on HIP, and their output overruns the budget
 
 `UpwardSweep.testIdempotentExecution{Basic,Small}` fail on HIP at np 1-3 and

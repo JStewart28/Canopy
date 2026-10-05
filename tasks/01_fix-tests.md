@@ -1,6 +1,6 @@
 # Make `UpwardSweep` and `LaplaceSolve` pass on SERIAL and HIP
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — F1 done
 
 ## Problem
 
@@ -160,7 +160,7 @@ signature, or reopening a question this document treats as settled.
 
 ## Task sequence
 
-### F1 — Normalize the root-multipole reference — **NOT STARTED**
+### F1 — Normalize the root-multipole reference — **DONE**
 
 **Depends on:** none.
 
@@ -191,6 +191,14 @@ cell's construction (`src/Canopy_TreeBuilder.hpp:606-656`).
 - **Fails for the intended reason:** with the exponent temporarily changed to
   $w^{-n}$ in a scratch build, the SERIAL np-1 case fails with an error of
   order $1/w - 1$ (≈ 0.7-0.8). Revert before committing.
+
+**Met.** In flux job `f3cMpQqPjuiw`, every `testRootMultipoleMatchesDirectP2M*`
+case passed at SERIAL np 1-6 and HIP np 1-4, with a worst max relative error
+of `7.7e-14` (HIP np 3). Every SERIAL entry reported `completed`. The HIP
+entries still report `failed`, from `testIdempotentExecution` alone (F2). In
+perturbed job `f3cMiZgKVDDy` ($w^{-n}$), SERIAL np 1 failed at `0.668` and
+`0.674`, which is $1/w - 1$ for $w_{root} \approx 0.60$. Per-case figures are
+in the log, section F1.
 
 ### F2 — Make `testIdempotentExecution` backend-aware and bounded — **NOT STARTED**
 

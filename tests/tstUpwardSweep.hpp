@@ -24,6 +24,7 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <iostream>
 #include <random>
 #include <vector>
 
@@ -76,12 +77,23 @@ void generate_test_particles( AoSoA_t& particles, int num_particles, int rank )
     Cabana::deep_copy( particles, particles_h );
 }
 
+// Half-width of the ROOT_KEY cell in cells, or -1 if it is absent.
+double root_half_width( const std::vector<CellInfo>& cells )
+{
+    for ( const auto& c : cells )
+        if ( c.key == ROOT_KEY )
+            return c.half_width;
+    return -1.0;
+}
+
 // Direct P2M: accumulate multipole coefficients from all particles in
 // particles_h to the expansion center (cx, cy, cz).  Returns the result
-// in M_ref, sized to Kernel::num_coeffs_per_cell.
+// in M_ref, sized to Kernel::num_coeffs_per_cell, in the kernel's
+// scale-normalized convention M_{n,m} / w^{n+1} (w the root half-width; see
+// LaplaceKernel::p2m_contribution).
 // Only component 0 is used (single Laplace solve).
 void direct_p2m_to_center( const AoSoA_ht& particles_h, int num_particles,
-                           double cx, double cy, double cz,
+                           double cx, double cy, double cz, double w,
                            std::vector<Kokkos::complex<double>>& M_ref )
 {
     using complex = Kokkos::complex<double>;
@@ -102,16 +114,17 @@ void direct_p2m_to_center( const AoSoA_ht& particles_h, int num_particles,
         // Component 0 only for a single Laplace solve.
         const double q = h_q( p, 0 );
 
-        double rho_pow_n = 1.0;
+        // term = rho^n / w^{n+1}
+        double term = 1.0 / w;
         for ( int n = 0; n <= P_ORDER; n++ )
         {
             for ( int m = 0; m <= n; m++ )
             {
                 const complex Y = Ynm<double>( n, -m, theta, phi );
                 const int idx = coeff_index( n, m );
-                M_ref[idx] += q * rho_pow_n * Y;
+                M_ref[idx] += q * term * Y;
             }
-            rho_pow_n *= rho;
+            term *= rho / w;
         }
     }
 }
@@ -122,7 +135,8 @@ void direct_p2m_to_center( const AoSoA_ht& particles_h, int num_particles,
 /**
  * Verify that the FMM root multipole produced by the full upward sweep
  * matches the reference multipole computed by direct P2M from all particles
- * directly to the root center.
+ * directly to the root center. Both are scale-normalized,
+ * M_{n,m} / w_root^{n+1}, with w_root the root cell's half-width.
  *
  * This equality is exact (up to floating-point round-off) for any tree
  * depth, any ncrit, and any particle distribution, because M2M is an exact
@@ -191,8 +205,11 @@ void testRootMultipoleMatchesDirectP2M( int num_particles_per_rank, int ncrit,
     AoSoA_ht particles_h( "particles_h", num_local );
     Cabana::deep_copy( particles_h, particles );
 
+    const double w_root = root_half_width( builder.cells() );
+    ASSERT_GT( w_root, 0.0 ) << "Root cell not found in builder.cells()";
+
     std::vector<Kokkos::complex<double>> M_ref;
-    direct_p2m_to_center( particles_h, num_local, cx, cy, cz, M_ref );
+    direct_p2m_to_center( particles_h, num_local, cx, cy, cz, w_root, M_ref );
 
     // Phase 6: Compare coefficient by coefficient.
     // Multipoles are stored as (cell_idx, coeff_idx, comp_idx); use comp 0.
@@ -220,6 +237,8 @@ void testRootMultipoleMatchesDirectP2M( int num_particles_per_rank, int ncrit,
             max_rel_err = rel_err;
     }
 
+    std::cout << "[root-multipole] np=1 max_rel_err=" << max_rel_err
+              << " w_root=" << w_root << std::endl;
     EXPECT_LT( max_rel_err, 1.0e-10 )
         << "FMM root multipole deviates from direct P2M; "
            "max relative error = "
@@ -653,9 +672,12 @@ void testRootMultipoleMatchesDirectP2MMultiRank( int num_particles_per_rank,
         const double cy = 0.5 * ( box.min[1] + box.max[1] );
         const double cz = 0.5 * ( box.min[2] + box.max[2] );
 
+        const double w_root = root_half_width( builder.cells() );
+        ASSERT_GT( w_root, 0.0 ) << "Root cell not found in builder.cells()";
+
         std::vector<Kokkos::complex<double>> M_ref;
         direct_p2m_to_center( all_particles_h, total_particles, cx, cy, cz,
-                              M_ref );
+                              w_root, M_ref );
 
         int root_idx = sweep.cell_index( ROOT_KEY );
         ASSERT_GE( root_idx, 0 ) << "Root cell not found in sweep index";
@@ -681,6 +703,9 @@ void testRootMultipoleMatchesDirectP2MMultiRank( int num_particles_per_rank,
                 max_rel_err = rel_err;
         }
 
+        std::cout << "[root-multipole] np=" << nprocs
+                  << " max_rel_err=" << max_rel_err << " w_root=" << w_root
+                  << std::endl;
         EXPECT_LT( max_rel_err, 1.0e-10 )
             << "FMM root multipole deviates from globally-gathered direct "
                "P2M reference; max relative error = "
