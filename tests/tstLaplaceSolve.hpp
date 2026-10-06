@@ -13,10 +13,9 @@
 // tstLaplaceSolve — the solve-level gate for the solid-harmonic far field.
 //
 // One frozen FMM configuration is driven for 12 timesteps and the state
-// after the 12th solve is gated three ways, split by rank count because the
-// leaf partition is not reproducible run-to-run above two ranks
-// (TreePartitioner::partition_leaves uses Zoltan2 multijagged; see
-// src/Canopy_TreePartitioner.hpp:417-419 and README "Known Issues"):
+// after the 12th solve is gated three ways, split by rank count; the bitwise
+// gate stays at np 1-2 (README "Known Issues", the cell partition's
+// reproducibility):
 //
 //   bitForBitArtifacts  np 1-2  four internal artifacts, on their *bit
 //                               patterns*, against committed SERIAL-generated
@@ -931,10 +930,8 @@ void with_laplace_solve( Fn&& after, std::size_t m2l_op_table_byte_budget = 0,
     // migrate(), and never rebalance(), rebuild() or auto_maintain():
     // migrate moves particles to the ranks that already own their cells and
     // never repartitions, so the np 1-2 bitwise gate faces one partition
-    // rather than twelve. The partitioner is not reproducible run-to-run
-    // above two ranks (src/Canopy_TreePartitioner.hpp:417-419) and every
-    // further invocation is another opportunity for the np=2 cut to stop
-    // coming out the same way.
+    // rather than twelve. Every further partitioner invocation is another
+    // opportunity for the np=2 cut to stop coming out the same way.
     // -----------------------------------------------------------------------
     for ( int step = 0; step < LS_NUM_STEPS; step++ )
     {
@@ -1196,8 +1193,8 @@ inline void field_scales( const std::vector<double>& pot,
 
 // Kokkos::Serial at np 1-2 only. The reference data is SERIAL-generated, and
 // Serial is the only execution space with a fixed accumulation order. The
-// partition is not reproducible run-to-run above two ranks, so there is no
-// stable baseline to compare bit patterns against there.
+// gate holds three records, (1,0), (2,0) and (2,1); np >= 3 is covered by
+// crossRankAgreement and matchesDirectSum.
 template <class MemorySpace, class ExecutionSpace>
 void testBitForBitArtifacts()
 {
@@ -1215,13 +1212,13 @@ void testBitForBitArtifacts()
     MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
     if ( nprocs >= 3 )
         GTEST_SKIP() << "bit-for-bit artifacts are gated at np 1-2 only: "
-                        "TreePartitioner::partition_leaves uses the Zoltan2 "
-                        "multijagged algorithm, which is not reproducible "
-                        "run-to-run above two parts, so cell ownership — and "
-                        "with it locals(), the M2L operator table and the "
-                        "realized key set — moves between runs at np >= 3. "
-                        "See README.md \"Known Issues\" and "
-                        "tasks/abstract-solver-backend.md T1.";
+                        "the reference data holds the (1,0), (2,0) and (2,1) "
+                        "records, and cell ownership — and with it locals(), "
+                        "the M2L operator table and the realized key set — "
+                        "is the ParMETIS cell partition's, whose "
+                        "reproducibility above two ranks README.md "
+                        "\"Known Issues\" records. crossRankAgreement and "
+                        "matchesDirectSum cover np >= 3.";
 
     with_laplace_solve<MemorySpace, ExecutionSpace>(
         []( const auto& outcome, const auto& ds )

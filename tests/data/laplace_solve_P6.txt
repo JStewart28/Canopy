@@ -20,25 +20,26 @@
 # this configuration first trips a degeneracy test at step 18 (max |grad phi|
 # 3.81e+06 against 8.60e+03 at step 0), and 12 is two thirds of that rounded
 # down. At the 12th solve the tree is 103 cells with 724 realized M2L
-# operators at np=1 and 390/400 at np=2, so the far field really is evaluated
+# operators at np=1 and 393/462 at np=2, so the far field really is evaluated
 # at the step every record below is taken from.
 #
 # Only three bit-for-bit records are held — (nprocs, rank) of (1,0), (2,0)
-# and (2,1) — because the leaf partition is not reproducible run-to-run above
-# two parts (TreePartitioner::partition_leaves uses Zoltan2 multijagged; see
-# src/Canopy_TreePartitioner.hpp:417-419 and README "Known Issues"). At np 3-6
-# the gate is cross-rank agreement against the np=1 `field` record, plus the
-# direct sum. The `field` record is np=1 only: that run is bit-reproducible,
+# and (2,1). The np 3-6 gate is cross-rank agreement against the np=1 `field`
+# record, plus the direct sum; the bitwise gate stays at np 1-2 (README
+# "Known Issues", the cell partition's reproducibility). The `field` record is np=1 only: that run is bit-reproducible,
 # which is what makes committing its output meaningful. The last-step
 # positions are NOT bit-identical across rank counts, which is why the drift
 # check hashes the INITIAL set instead.
 #
 # Provenance
 # ----------
-# Generated with mac_satisfied's tie guard (commit after 34c2cbe, the commit
-#   that adds this file's current records; tasks/01_fix-tests-progress-log.md,
-#   F4) on tuolumne, Cray clang 20.0.0, spack env tuolumne_trilinos,
-#   RelWithDebInfo, Kokkos SERIAL backend, flux job f3cP3HeeQ4oZ.
+# (1,0), `initial` and `field`: generated with mac_satisfied's tie guard
+#   (tasks/01_fix-tests-progress-log.md, F4), flux job f3cP3HeeQ4oZ.
+# (2,0) and (2,1): regenerated on the ParMETIS cell partition
+#   (tasks/fix-hang-rebalance-progress-log.md, H2 partitioner arm), flux job
+#   f3cY5dZ6SgwH, whose (1,0)/initial/field output was byte-identical to the
+#   records above. Both on tuolumne, Cray clang 20.0.0, spack env
+#   tuolumne_trilinos, RelWithDebInfo, Kokkos SERIAL backend.
 # Regenerate with scripts/tuolumne/run_laplace_solve_regenerate.flux, merge
 # the three .part files in the order (1,0), (2,0), (2,1) under this header,
 # and record the new commit and the reason in the progress log of the task
@@ -744,10 +745,10 @@ f 0x408de04c54a0a291 0xc091316841a37290 0x40727efa8a3b8aea 0x409011286b3473f9
 f 0x40914c16e42bcf4f 0xc085bb64da5b1b49 0xc09a391246c2bd50 0x40814b45049a3f2d
 endfield
 set 2 0
-locals 103 28 1 0x6f5753938a0a4b66
-optab 28 49 390 0x91f07099d12d9b86
-nops 390
-keys 0x8b37cec4dd89647e
+locals 103 28 1 0xf89c93ad39136410
+optab 28 49 393 0x752aead9cca1680b
+nops 393
+keys 0x2b295d4ccd707062
 fallback 0
 atable 169
 a 0x3ff0000000000000 0xbfe6a09e667f3bcc 0xbff0000000000000 0xbfe6a09e667f3bcc
@@ -795,10 +796,10 @@ a 0x3de1fc7e5de81d2c 0x3dcf66435865daea 0x3db730a695463bf3 0x3d9b5a7dbc617fc5
 a 0x3d765582950959c3
 end
 set 2 1
-locals 103 28 1 0x2eb065b9fb330364
-optab 28 49 400 0x3351ab0eb312c2ad
-nops 400
-keys 0x5738151e6548fc07
+locals 103 28 1 0x4d63ddf1ad3b611e
+optab 28 49 462 0x63b6a1d3dc0a59cb
+nops 462
+keys 0x83443394dc7ae7e5
 fallback 0
 atable 169
 a 0x3ff0000000000000 0xbfe6a09e667f3bcc 0xbff0000000000000 0xbfe6a09e667f3bcc
