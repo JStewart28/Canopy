@@ -611,7 +611,8 @@ when it was re-enabled in the CTest suite:
 
 1. **Accuracy failure at np=4.** `SingleSolve.PotentialNComps3` and
    `SingleSolve.PotentialAndGradientNComps3` fail at exactly 4 ranks with
-   `max_pot_rel_err = 0.00207 vs tol 0.001` (~2× over budget,
+   `max_pot_rel_err = 0.00196 vs tol 0.001` (~2× over budget; `0.00207`
+   before `mac_satisfied` rejected exact ties,
    `tstSingleSolve.hpp:365`). Ranks 1, 2, 3, 5, 6 pass. This is *not* the FP32
    issue above. The np=4-only signature suggests a partition/decomposition edge
    case specific to that rank count.

@@ -461,3 +461,53 @@ limits this task to its two stems, so none were built or run.
   carried.
 - V1's and E1's recorded M2L operator counts and accuracy figures predate the
   tie guard, so a comparison against them must account for it.
+
+## F4 — solver-stem sweep
+
+This sweep runs what "F4 — fix" left unrun. It builds and runs every stem
+that reaches `mac_satisfied` at HEAD `8e6e0c5`, in `run_f4_sweep.flux`. That
+script is `run_ctest_fix_tests.flux` plus a `RAW:` prefix, which runs a stem
+with no budget row through plain `ctest --timeout` under the watchdog.
+- **Built:** `CommunicationPlan`, `DownwardSweep`, `CartesianTaylorSolve`,
+  `FarFieldContract`, `MultiSolve` and `SingleSolve`, `_MPI_SERIAL` and
+  `_MPI_HIP`.
+- **Not run:** `P2P` does not compile (README "Two `unit` test targets do not
+  compile"), and `CartesianTaylor` is a non-MPI kernel test off the MAC path.
+
+**HEAD** (jobs `f3cWVibHs6gf`, five stems; `f3cWViiojTY3`, `SingleSolve` in a
+job of its own, because of its README deadlock with `MultiSolve`):
+- `CommunicationPlan`, `DownwardSweep`, `CartesianTaylorSolve`,
+  `FarFieldContract`: every entry `completed`, SERIAL np 1-6 and HIP np 1-4.
+- `MultiSolve`: every entry failed, on exactly the six README cases
+  (`StableTree_Migrate`, `IntermediateMotion_Rebalance`, `LargeMotion_Rebuild`,
+  `AutoMaintain`, `AutoRebalance`, `M2L_BinEdge_Fallback`). HIP np 3 went over
+  budget, and the watchdog cancelled it at 19 s. Its stacks show one rank in
+  Zoltan under `TreePartitioner<HIPSpace>` and the others in `PMPI_Bcast`,
+  the known MJ-on-HIP stall (R4; `fix-hang-rebalance` H1/H2).
+- `SingleSolve`: np 4 fails on both backends, in `PotentialNComps3` and
+  `PotentialAndGradientNComps3`, with `max_pot_rel_err = 1.963e-3` against
+  `1e-3`. Every other np passes, as in README.
+
+**Before the fix, for attribution** (job `f3cWett4qLC7`, `MAC_TIE_REL = 0.0`
+in a scratch build of the two failing SERIAL targets, since reverted and
+rebuilt):
+- **`SingleSolve`:** np 4 failed the same two cases at `2.0696e-3`, the
+  README figure. The fix lowers it by 5% and does not resolve it.
+- **`MultiSolve` SERIAL:** the same six cases fail at every np.
+  - With the fix, every `[multisolve-dev]` max deviation is within about
+    1.5x of its pre-fix value, and none rises past that.
+  - At np ≥ 3 the rebalance cases also vary run to run (README "The leaf
+    partition is not reproducible"), so those differences are not
+    attributable.
+  - `AutoRebalance` np 1 improved from `9.19e-6` / `8.55e-6` to `2.06e-6` /
+    `2.22e-6` (position / velocity).
+  - The README's `AutoRebalance` np 6 figures, `3.15e-3` / `1.71e-2`, are
+    unchanged.
+
+**Conclusion.** The tie guard introduces no new failure in any solver stem,
+and makes no known failure worse. It does not change which `MultiSolve` and
+`SingleSolve` cases fail.
+
+**Affects:** none. `fix-hang-rebalance.md` H2's partitioner arm starts from
+the `MultiSolve` and `SingleSolve` baselines above, which the README already
+records.
