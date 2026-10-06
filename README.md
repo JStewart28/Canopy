@@ -426,6 +426,34 @@ are the whole of what is measured. Whoever prices it should read
 build lies outside `run_m2l_all`'s scope, so the `M2L kernel (all depths)` row
 is the wrong number for this.
 
+### Partition cost on small trees
+
+`TreePartitioner::partition_cells` sorts the full vertex list on every rank
+and builds its ParMETIS graph with `unordered_map` lookups (27 per local
+vertex), then runs a distributed ParMETIS solve. On `MultiSolve`'s trees of a
+few hundred cells the mean `TIMER_PARTITION` is 3-20 ms at SERIAL np 2-6,
+against 0.5-1.0 ms for the multijagged partitioner it replaced; on HIP it is
+within 2x of multijagged-on-HIP (flux jobs `f3cZDMUWgsYj`, `f3cZDMd8JhWw`;
+`tasks/fix-hang-rebalance-progress-log.md`, H2 partitioner arm). Candidates: a
+size threshold below which one rank partitions serially with METIS (the vertex
+list is already replicated, so no data moves), and a sorted-key lookup in
+place of the per-edge hash map. Not measured at production scale, where the
+solve rather than the setup is expected to dominate.
+
+### Particle balance on near-degenerate trees
+
+About 40% of `MultiSolve`'s partitions miss the particle-balance tolerance,
+with max/mean up to 5.8 at np 6 and up to four ranks owning no leaf
+(`[Canopy diag] partition` lines, flux job `f3cZDMUWgsYj`). Every such
+partition is an 11-29-vertex graph with no band constraint; max/mean of exactly
+2.0 at np 2 and 4.0 at np 4 puts every particle on one rank, which fits one
+leaf holding nearly all of them (the ejected-particle boxes of
+`LargeMotion_Rebuild` and `AutoRebalance`). No partition of cells can split
+such a leaf, so the remedy is in the tree (e.g. bounding the box against an
+outlier, or a deeper `max_depth` where one leaf is crowded), not in the
+partitioner. Measure the largest leaf's share of the particles first: that
+has not been done, so the single-leaf cause is unverified.
+
 ---
 
 ## Known Issues
