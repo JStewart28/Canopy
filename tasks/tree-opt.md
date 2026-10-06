@@ -571,22 +571,18 @@ counters reading $-1$, not $0$, and the sum identity reported as skipped.
 
 ---
 
-### V1 — Sharpen the checks these chains will be verified against — **BLOCKED**
+### V1 — Sharpen the checks these chains will be verified against — **NOT STARTED**
 
-**Blocked.** Step 1's stop-and-report branch fired:
-`MultiSolve.AutoRebalance` exceeds the undamped truncation floor at np 5-6
-(velocity `1.71e-2` at np 6, 8.8x $\theta^{P+1}$), and a `mac_theta` sweep
-shows the excess enters through the far field. No `fmm_tolerance` bound was
-moved. Steps 2, 4 and 5 and the deviation reports are in place; step 3 is
-measured but not applied. Every figure V1 recorded is SERIAL. See
-`tree-opt-progress-log.md` section V1.
-
-**Revisit V1 once `fix-hang-rebalance.md` is done.** That design resolves the
-two defects blocking it, on SERIAL and HIP: the `MultiSolve` hang (H1, H2),
-and the AutoRebalance excess (E1, E2). E2 either fixes the far field or corrects the
-step-1 derivation above with the measurement that justifies it. When both are
-**DONE**, re-run V1 from step 1: re-measure, because a fix to the partition or
-the far field moves the figures recorded in the log, then pin the bounds.
+**Resume from step 1.** A first pass stopped at step 1 because
+`MultiSolve.AutoRebalance`'s trajectory deviation exceeds $\theta^{P+1}$ at
+np 5-6 (`tree-opt-progress-log.md` section V1). `fix-hang-rebalance.md` E1
+attributed that excess to trajectory amplification at unsoftened close
+encounters: the per-step far-field error is at most `9.5e-7` there
+(`fix-hang-rebalance-progress-log.md` section E1). Step 1's derivation and stop
+clause below now say so. The partition changed since the first pass
+(`fix-hang-rebalance.md` H2), so re-measure every figure before pinning a bound.
+Steps 2, 4 and 5 are in place from the first pass; step 3 was measured but not
+applied.
 
 **Depends on:** T1 **DONE**, both arms; `fix-hang-rebalance.md` E2 **DONE**.
 **Fill in:** `tests/tstMultiSolve.hpp` (the six `fmm_tolerance` call sites,
@@ -595,9 +591,9 @@ and the clustered test's per-reason assertion);
 `tests/tstCartesianTaylorSolve.hpp` (the two direct-sum arms' bounds, and the
 two drift cases); `README.md` (the disabled FP32 case).
 **Reference:** the measured deviations and bounds recorded in place — the six
-`fmm_tolerance` call sites at `1.0e-8` (`tests/tstMultiSolve.hpp:610`, `:626`,
-`:643`, `:660`, `:696`, `:742`), applied to `max_pos_rel` and `max_vel_rel` at
-`:585-589`; `SolveFusedM2L.matchesPriorReference` at `5.0e-2` / `1.0e-1`
+`fmm_tolerance` call sites at `1.0e-8` (`tests/tstMultiSolve.hpp:955`, `:972`,
+`:990`, `:1008`, `:1045`, `:1094`), applied to `max_pos_rel` and `max_vel_rel` at
+`:929-933`; `SolveFusedM2L.matchesPriorReference` at `5.0e-2` / `1.0e-1`
 (`:962-983`); `CTS_DEV_TOL_THETA_CANOPY = 3.74e-02`
 (`tests/tstCartesianTaylorSolve.hpp:365`), which the rationale block above it
 (`:334-363`) records as **2x the worst measured figure** — gradient
@@ -607,11 +603,11 @@ to 15 significant figures; `CTS_DEV_TOL_THETA_REF`, the `1e-3` bar itself
 explicit absence of any accuracy claim (`:1040-1062`).
 **Do:**
 1. **Re-derive the six `fmm_tolerance` bounds, one per call site.** `1.0e-8` has
-   no derivation behind it, and the prose at `tests/tstMultiSolve.hpp:684` still
+   no derivation behind it, and the prose at `tests/tstMultiSolve.hpp:1032` still
    documents a prior value of `2e-2` that no call site passes. Set each site's
    bound at its own measured deviation over **at least three runs** (**R6** — it
    moves at np $\ge$ 3) times a margin stated in the comment, with the measured
-   figures beside it, and correct the `:684` prose in the same change. Measure
+   figures beside it, and correct the `:1032` prose in the same change. Measure
    on SERIAL at np 1-6 **and** on HIP at np 1-4, and set each bound at the worst
    over both backends. A bound that one backend alone would fail is a bound
    drawn on the other backend's noise. Per call
@@ -622,22 +618,52 @@ explicit absence of any accuracy claim (`:1040-1062`).
    best-behaved site.
 
    **The derivation each bound is read against.** The far-field truncation floor
-   at `MultiSolveTest::P_ORDER = 8` (`:54`) and `get_test_mac_theta() = 0.5`
-   (`:38-43`) is near $\theta^{P+1}$, and the trajectory check damps a gradient
-   error further still: the driver integrates `v += dt * g` and then
-   `r += dt * drift_multiplier * v` at `dt = 1.0e-4` over a handful of steps, so
-   a relative error in `g` reaches `max_pos_rel` reduced by the step size twice
-   over. `1.0e-8` is below what a finite-order FMM can deliver at that order and
-   admissibility, which is why these sites fail — not because the method is
-   wrong.
+   at `MultiSolveTest::P_ORDER = 8` (`:88`) and `get_test_mac_theta() = 0.5`
+   (`:42-47`) is $\theta^{P+1} = 1.95 \times 10^{-3}$, a bound on the
+   **per-solve** relative gradient error. `1.0e-8` is below what a
+   finite-order FMM can deliver at that order and admissibility, which is why
+   these sites fail — not because the method is wrong. The trajectory check
+   compares the end state of two integrations (`v += dt * g`, then
+   `r += dt * drift_multiplier * v`) against a brute-force shadow. While the
+   trajectories stay close, a gradient error reaches `max_vel_rel` no larger
+   than it entered. It is **not** damped when particles approach unsoftened
+   (`cfg.softening = 0.0`, `:402`): a close encounter amplifies a small force
+   difference into a large velocity difference. E1 of `fix-hang-rebalance.md`
+   measured this on `AutoRebalance`
+   (`fix-hang-rebalance-progress-log.md` section E1):
+   - the per-step field-scale error, FMM against brute force at the FMM's own
+     positions, is at most `9.5e-7` for AutoRebalance and `1.52e-6` for any
+     case, at SERIAL np 1-6 and HIP np 1-4;
+   - SERIAL np 1 at N = 1200 (`CANOPY_MULTISOLVE_NPP=1200`, no partition)
+     reaches `max_vel_rel = 2.67e-3`, about 7000x the `3.8e-7` and `1.1e-9`
+     solve errors of steps 0-1, the only far-field error that run's trajectory
+     sees;
+   - at np 6, 10 of the 11 particles above the floor had a close encounter
+     (separation below 0.1 of the mean spacing), against a 48% base rate;
+   - θ = 0.7 raises the per-step error about 140x at np 1, which is why the
+     first pass's `CANOPY_MAC_THETA` sweep moved the trajectory deviation: the
+     dynamics amplify whatever far-field error goes in.
 
-   **Stop and report if a measurement exceeds that derivation.** If a measured
-   deviation is *larger* than the truncation floor and the integrator's damping
-   together account for, the far field is wrong and the bound is not the defect.
-   Record the finding in the log, report it, and stop — fixing it is its own
-   sequence of tasks and must not be folded in here. A bound widened to cover a
-   real defect is indistinguishable in the diff from one derived correctly,
-   which is the failure mode this whole task exists to close.
+   So the excess is N-driven, not rank-driven. A trajectory bound at a site with
+   unsoftened close encounters measures the dynamics, not the far field.
+   `AutoRebalance` at np 5-6 is such a site, as is np 1 once N reaches 1200.
+   Whether that site's test gates on the trajectory or on the per-step probe is
+   this task's decision.
+
+   **Stop and report if the per-step probe exceeds the floor.** With
+   `CANOPY_MULTISOLVE_PROBE=1`, `testMultiStepGravity` prints the per-step
+   field-scale error on each `[multisolve-probe]` line. If it exceeds
+   $\theta^{P+1}$ on any step, at any site, np or backend, the far field is
+   wrong and the bound is not the defect. Record the finding in the log, report
+   it, and stop — fixing it is its own sequence of tasks and must not be folded
+   in here. A trajectory deviation above the floor does **not** stop this task
+   when the site's probe stays under the floor on every step and its excess sits
+   on close encounters (the probe's `end` line: `n_excess` against
+   `n_excess_close`). Record it as dynamics, with those figures. The clause
+   exists because a bound widened to cover a real far-field defect is
+   indistinguishable in the diff from one derived correctly, which is the
+   failure mode this whole task exists to close; the probe is what tells the
+   two apart.
 2. **Disable `SolveFusedM2L.FP32_smokeTest`, and leave it disabled.** It is the
    stem's only FP32 case (`tests/tstMultiSolve.hpp:1121-1161`) and fails at
    np 2-6 with a max relative gradient error of $\approx 0.277$ against its own

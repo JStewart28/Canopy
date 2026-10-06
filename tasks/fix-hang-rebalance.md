@@ -1,6 +1,6 @@
 # The np-3 `MultiSolve` hang, and `AutoRebalance`'s excess deviation
 
-**Status:** IN PROGRESS
+**Status:** DONE
 
 ## Problem
 
@@ -30,7 +30,7 @@ therefore costs the rest of the pass, which is how three measurement rank counts
 were lost.
 
 **2. `MultiSolve.AutoRebalance` exceeds the far-field truncation floor.** The
-floor at `MultiSolveTest::P_ORDER = 8` (`tests/tstMultiSolve.hpp:54`) and
+floor at `MultiSolveTest::P_ORDER = 8` (`tests/tstMultiSolve.hpp:88`) and
 `theta = 0.5` is $\theta^{P+1} = 1.95 \times 10^{-3}$, a bound on the relative
 gradient error. The integrator can only shrink it in velocity. Its max relative
 velocity deviation from the brute-force trajectory is `6.41e-3` to `6.57e-3` at
@@ -132,9 +132,9 @@ ejected particle (mechanisms a and c) and says nothing about (b).
 | Backends | every exit criterion runs SERIAL at np 1-6 **and** HIP at np 1-4: `Canopy_Test_<Stem>_MPI_SERIAL_np_[1-6]` and `Canopy_Test_<Stem>_MPI_HIP_np_[1-4]`; a non-MPI stem runs `Canopy_Test_<Stem>_SERIAL` and `Canopy_Test_<Stem>_HIP` | Production runs on HIP. A node has four APUs, so HIP at one APU per rank stops at np 4. |
 | HIP launch | through ctest only, after H0a: the HIP entries carry `--gpus-per-task=1 --cores-per-task=8` | The same binding as `scripts/tuolumne/run_treepartitioner_hip.flux`. A HIP test launched by hand bypasses what H0a registers. |
 | HIP environment | the GPU variables of `systems/tuolumne/claude.md` section 4 (`MPICH_GPU_SUPPORT_ENABLED=1`, `GTL_HSA_VSMSG_CUTOFF_SIZE=4096`, `FI_CXI_ATS=0`, `HSA_XNACK=1`, `MPICH_SMP_SINGLE_COPY_MODE=NONE`) set with `env` on the HIP `ctest` command only, never exported for the whole script | Device buffers reach MPI only with GPU-aware MPICH. Keeping them off the SERIAL commands keeps SERIAL runs in the environment their baselines (`canopy-v1.f3bmo4JYikKh.log`, H2's jobs) were measured in. |
-| Diagnostic switches | environment variables read in `tests/tstMultiSolve.hpp`, **default off**, one helper each beside `get_test_mac_theta()` (`:38-43`) | `CANOPY_MAC_THETA` is the existing precedent. The suite has no `DISABLED_` tests. An env switch adds no ctest entry and no gtest case, so the `regression` label's registration (`tests/CMakeLists.txt:61-63`) stays unchanged. |
+| Diagnostic switches | environment variables read in `tests/tstMultiSolve.hpp`, **default off**, one helper each beside `get_test_mac_theta()` (`:42-47`) | `CANOPY_MAC_THETA` is the existing precedent. The suite has no `DISABLED_` tests. An env switch adds no ctest entry and no gtest case, so the `regression` label's registration (`tests/CMakeLists.txt:61-63`) stays unchanged. |
 | Switch names | `CANOPY_MULTISOLVE_PROBE` (`1` enables the per-step probe), `CANOPY_MULTISOLVE_NPP` (positive integer; overrides `num_particles_per_rank` at every site) | One name per quantity, prefixed by the stem it affects. |
-| Probe output | one line per step on rank 0, tag `[multisolve-probe]`, printed with `%.17g` | Matches `[multisolve-dev]` (`:644`). A line must be diffable across runs. |
+| Probe output | one line per step on rank 0, tag `[multisolve-probe]`, printed with `%.17g` | Matches `[multisolve-dev]` (`:922`). A line must be diffable across runs. |
 | Normalization | report **both** the per-particle max relative error and the field-scale error $\max_i \lvert\Delta g_i\rvert / \max_i \lvert g_i\rvert$ | Per-particle relative error is inflated wherever $\lvert g_i\rvert$ cancels, the way `matchesPriorReference`'s potential figure is (V1 log). The field-scale rule is the suite's own: `field_scales` (`tests/tstLaplaceSolve.hpp:1166-1188`), whose comment makes the same cancellation argument. Reading one figure without the other is how a normalization artifact gets reported as a defect. |
 | Floor | $\theta^{P+1}$, `1.95e-3` at `theta = 0.5`, `P_ORDER = 8` | The figure every task here reads against, stated once. |
 | Watchdog | `scripts/tuolumne/flux_watchdog.sh`, **sourced** by a batch script after setting `WATCHDOG_S`; starts a background loop; `watchdog_stop` ends it, and `watchdog_wait_idle` blocks until no sub-job is running | A copy per script drifts. Call `watchdog_wait_idle` after any ctest that may have timed out: ctest returns before the watchdog has stacked and cancelled the hung sub-job. |
@@ -151,7 +151,7 @@ ejected particle (mechanisms a and c) and says nothing about (b).
 ### Deliberate deviations
 
 - **The probe compares gradients at the FMM's positions, not at the brute-force
-  shadow's.** The existing check (`:484-498` integrates the shadow, `:591-660`
+  shadow's.** The existing check (`:692-706` integrates the shadow, `:735-936`
   compares) diverges from the FMM trajectory by construction. Evaluating brute
   force where the FMM particles actually are removes the trajectory from the
   error, and that separation is the purpose of the probe. The shadow comparison
@@ -232,8 +232,8 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   Rebuild, Rebuild, then Rebalance for the remaining five steps; at np 3-4 it
   is Migrate, Rebuild, Rebuild, then five Rebalances (`[Canopy diag]
   auto_maintain` lines on stderr, profiling builds only, job `f3cZoFBJNNc7`).
-- `testMultiStepGravity` (`tests/tstMultiSolve.hpp:154`) draws particles per
-  rank with seed `42 + rank * 7919` (`:208`), so global N is
+- `testMultiStepGravity` (`tests/tstMultiSolve.hpp:208`) draws particles per
+  rank with seed `42 + rank * 7919` (`:266`), so global N is
   `200 * nprocs`. N and the rank count move together at every site.
 - The `[multisolve-dev]` report prints each site's end-of-run `max_pos_rel`
   and `max_vel_rel` on every run. With `CANOPY_MULTISOLVE_PROBE=1`,
@@ -241,7 +241,7 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   (the FMM gradient against brute force at the FMM's own positions, both
   normalizations) and one `end` line (the `max_vel_rel` particle, close
   encounters, and how many particles exceed the floor). E1 defines the fields.
-- `MultiSolve` sets `cfg.softening = 0.0` (`:344`), matching the unsoftened
+- `MultiSolve` sets `cfg.softening = 0.0` (`:402`), matching the unsoftened
   brute-force reference, so a close pair is unsoftened in both.
 
 ## Progress log
@@ -702,7 +702,7 @@ np 4-6 of a measurement pass. H2 **DONE**, both arms: H2 changes the np >= 2
 partition that E1 measures, and a HIP pass that hangs cannot be measured. H0c
 **DONE**: its HIP `[multisolve-dev]` lines are E1's HIP baseline.
 **Fill in:** `tests/tstMultiSolve.hpp`: two helpers beside `get_test_mac_theta`
-(`:38-43`); a per-step probe in the time loop of `testMultiStepGravity`
+(`:42-47`); a per-step probe in the time loop of `testMultiStepGravity`
 (`:354` onward, after `solve()` and before the integrate kernel); the
 `CANOPY_MULTISOLVE_NPP` override where `num_particles_per_rank` is consumed.
 New `scripts/tuolumne/run_ctest_e1.flux`.
@@ -796,7 +796,7 @@ error from at most `4.73e-8` to at most `6.78e-6`.
   against `2.20e-4` at np 2. Measured figure by figure against that figure's
   own 3-4-sample band, 5 of 24 fall outside (progress log, E1).
 
-### E2 — Resolve the excess per E1's classification — **NOT STARTED**
+### E2 — Resolve the excess per E1's classification — **DONE**
 
 **Depends on:** E1 **DONE**.
 **Fill in:** under (a), `tasks/tree-opt.md` V1 step 1, the derivation
@@ -827,6 +827,17 @@ cannot be designed before it.
   `max_vel_rel` is below `1.95e-3` at SERIAL np 5-6 and at every HIP np. The failure direction is the specific condition E1
   identified: reintroduced in a temporary revert, it makes the probe exceed the
   floor again.
+
+**Met (a).** No `src/`, test or bound change; no job submitted. `tree-opt.md`
+V1 step 1's derivation now states trajectory amplification at unsoftened close
+encounters with E1's figures, and its stop clause reads the per-step probe
+instead of the trajectory deviation. V1 is unblocked (**NOT STARTED**, resumes
+from step 1). README's `1e-8` entry carries the attribution. The probe half is
+E1's jobs on the code committed as `eebc473`: `f3cZoFBJNNc7` (SERIAL np 1-6)
+and `f3cZoFK9Wa7y` (HIP np 1-4), two passes each, every step of every case,
+field-scale error at most `1.52e-6` on SERIAL and `1.13e-6` on HIP against
+`1.95e-3`. No HIP-specific classification was recorded, so no HIP branch
+applies.
 
 ## Known risks
 

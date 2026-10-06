@@ -485,33 +485,37 @@ two passes' `[multisolve-dev]` lines.
 ### Six `MultiSolve` tests fail the `1e-8` multi-step check at every rank count
 
 The `MultiSolve` stem does not currently pass. Six tests fail the multi-step position/velocity comparison at
-`fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:651,655`) at **all six** rank
+`fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:929,933`) at **all six** rank
 counts: `MultiSolve.StableTree_Migrate`, `IntermediateMotion_Rebalance`,
 `LargeMotion_Rebuild`, `AutoMaintain`, `AutoRebalance`, `M2L_BinEdge_Fallback`.
 The measured deviations are printed unconditionally on a `[multisolve-dev]`
-line (`tests/tstMultiSolve.hpp:644`) and span 3e-11 to 1.7e-2 across sites and
+line (`tests/tstMultiSolve.hpp:922`) and span 3e-11 to 1.7e-2 across sites and
 rank counts; at np 1 they are the 3e-7 to 9e-6 first recorded here.
 
-**The `1e-8` bound is not the only defect, so it has not been re-derived.**
-Task V1 in `tasks/tree-opt.md` was to replace `1e-8` with per-site measured
-bounds, read against the far-field truncation floor
-$\theta^{P+1} \approx 1.95 \times 10^{-3}$ at `P_ORDER = 8`, `theta = 0.5`,
-which the integrator can only damp. `MultiSolve.AutoRebalance` exceeds the
-*undamped* floor: max relative velocity deviation `6.41e-3`-`6.57e-3` at np 5
-and `1.709e-2` at np 6 (3.3x and 8.8x the floor), and position `3.15e-3` at np 6,
-reproducing across three passes. The excess grows with rank count — ~2000x from
-np 1 to np 6 at that site — while the per-solve far-field gradient error
-(`SolveFusedM2L.matchesPriorReference`, 7e-5 to 3e-4) is flat across rank
-counts. Sweeping `CANOPY_MAC_THETA` shows the deviation *is* far-field-driven
-(it falls at 0.4 and rises 24-3000x at 0.7, against a floor ratio of 20.7x;
-`M2L_BinEdge_Fallback`, which pins its own theta, does not move), so the excess
-enters through the far field on the multi-step, multi-rank path. Not yet
-attributed; unmeasured candidates are per-particle normalization where $|g|$
-cancels, and trajectory amplification across the tree changes of the
-`dt = 1e-3` cases. Full figures are in `tasks/tree-opt-progress-log.md` section
-V1. Reproduce with `scripts/tuolumne/run_ctest_v1.flux` (three `ctest -V`
-passes) and `scripts/tuolumne/run_ctest_v1_theta_gain.flux` (the theta sweep).
-Do not widen a bound over it.
+**The `1e-8` bound has not been re-derived yet.** Task V1 in
+`tasks/tree-opt.md` replaces it with per-site measured bounds, read against the
+far-field truncation floor $\theta^{P+1} \approx 1.95 \times 10^{-3}$ at
+`P_ORDER = 8`, `theta = 0.5`. `MultiSolve.AutoRebalance`'s trajectory
+deviation exceeds that floor: max relative velocity deviation `6.52e-3` at np 5
+and `1.71e-2` at np 6, position `3.15e-3` at np 6.
+
+**That excess is trajectory amplification, not a far-field defect**
+(`tasks/fix-hang-rebalance.md` E1). The far field is healthy on every step:
+the per-step field-scale error of the FMM gradient against brute force at the
+FMM's own positions is at most `9.5e-7` for AutoRebalance and `1.52e-6` for any
+case, at SERIAL np 1-6 and HIP np 1-4. The test runs unsoftened
+(`cfg.softening = 0.0`), and close encounters amplify that small force error
+into a large velocity difference. The excess is N-driven, not rank-driven:
+SERIAL np 1 at N = 1200, with no partition, reaches `max_vel_rel = 2.67e-3`,
+about 7000x the solve error its trajectory saw. At np 6, 10 of the 11 particles
+above the floor had a close encounter, against a 48% base rate. A trajectory
+bound at such a site measures the dynamics; how V1 gates it is V1's decision.
+Do not widen a bound over it without the per-step probe showing the far field
+under the floor. Full figures are in `tasks/fix-hang-rebalance-progress-log.md`
+section E1 and `tasks/tree-opt-progress-log.md` section V1. Reproduce the
+per-step figures with `CANOPY_MULTISOLVE_PROBE=1`
+(`flux batch scripts/tuolumne/run_ctest_e1.flux measure serial|hip`), and the
+trajectory figures with `scripts/tuolumne/run_ctest_v1.flux`.
 
 This is **pre-existing**: checking out `src/Canopy_DownwardSweep.hpp` at
 `a6c90de`, the commit before the Laplace-solve harness work began, rebuilding

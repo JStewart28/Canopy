@@ -1765,3 +1765,67 @@ the mean spacing (0.8³/N)^(1/3): 0.0137, 0.0109, 0.0095, 0.0086, 0.0080 and
   (and at np 1 once N reaches 1200) is such a site. The per-step probe
   (`CANOPY_MULTISOLVE_PROBE=1`) gauges the far field directly, at
   ≤ `1.5e-6` for every case at θ = 0.5.
+
+## E2
+
+Branch (a). No `src/`, `tests/` or bound change, and no job submitted. HEAD
+`eebc473` plus this task's doc edits.
+
+**Decisions.**
+- **No rerun.** The (a) exit criterion's probe half is met by E1's jobs on the
+  code committed as `eebc473`: `f3cZoFBJNNc7` (SERIAL np 1-6) and
+  `f3cZoFK9Wa7y` (HIP np 1-4), logs `canopy-e1.<jobid>.log` in the repo root.
+  Per-step field-scale error at most `1.52e-6` (SERIAL) and `1.13e-6` (HIP)
+  against `1.95e-3`. E2 changes no code, so a rerun would measure the same
+  binary.
+- **No HIP-specific classification.** E1 recorded none; its "HIP against
+  SERIAL" paragraph shows the literal Do-step-3 rule's 89 flags are
+  differences of at most `2.97e-12` absolute. No HIP branch is taken.
+- **V1's stop clause is retargeted to the per-step probe.** Whether an
+  amplification site's test gates on the probe instead of the trajectory is
+  left to V1; no assertion was added.
+- **V1 is unblocked**: `**NOT STARTED**`, resume from step 1.
+
+**`tasks/tree-opt.md` V1 edits.**
+- Heading status `**BLOCKED**` → `**NOT STARTED**`. The "Blocked." and "Revisit
+  V1 once…" paragraphs, which said the excess "enters through the far field",
+  are replaced by one "Resume from step 1" paragraph: E1's attribution, a
+  pointer to this log's section E1, and a re-measure instruction.
+- Step 1 derivation: the floor bounds the per-solve relative gradient error;
+  the trajectory check does not damp it at unsoftened close encounters
+  (`cfg.softening = 0.0`, `tests/tstMultiSolve.hpp:402`). It cites `9.5e-7` /
+  `1.52e-6` per step, the N = 1200 run's ~7000x amplification into `2.67e-3`,
+  10 of 11 excess particles on close encounters at np 6 (48% base), and θ = 0.7
+  raising the per-step error ~140x. A trajectory bound at such a site measures
+  dynamics.
+- Step 1 stop clause: triggers on `[multisolve-probe]` field-scale error above
+  $\theta^{P+1}$ on any step. A trajectory excess with the probe under the
+  floor and the excess on close encounters (`n_excess` against
+  `n_excess_close`) is recorded as dynamics and does not stop V1.
+- Line citations: call sites `:955, :972, :990, :1008, :1045, :1094`, `EXPECT`s
+  `:929-933`, the `2e-2` prose `:1032` (prose itself left to V1), `P_ORDER`
+  `:88`, `get_test_mac_theta()` `:42-47`.
+- `tasks/tree-opt-progress-log.md` gains a section `E2 (fix-hang-rebalance)`;
+  its V1 section is untouched.
+
+**README "Known Issues", the `1e-8` entry.** "Not yet attributed; unmeasured
+candidates…" and the theta-sweep "enters through the far field" text are
+replaced by the attribution: per-step far field healthy (`9.5e-7` / `1.52e-6`),
+unsoftened close encounters amplify it, N-driven (N = 1200 at np 1:
+`2.67e-3`), 10 of 11 on close encounters. Its np 5 figure is now H2's
+`6.52e-3` rather than V1's pre-H2 range. Citations `:651,655` → `:929,933` and
+`:644` → `:922`. Reproducers: `run_ctest_e1.flux measure` for the probe,
+`run_ctest_v1.flux` for the trajectory figures. "Do not widen a bound over it"
+became: not without the per-step probe showing the far field under the floor.
+
+**`tasks/fix-hang-rebalance.md` citation fixes** (numbers only): `P_ORDER`
+`:54` → `:88`; `get_test_mac_theta()` `:38-43` → `:42-47` (Conventions, E1
+**Fill in**); `[multisolve-dev]` `:644` → `:922`; shadow integration
+`:484-498` → `:692-706` and comparison `:591-660` → `:735-936` (Deliberate
+deviations, checked against the file); `testMultiStepGravity` `:154` → `:208`;
+seed `:208` → `:266`; `cfg.softening` `:344` → `:402`. Status `DONE`.
+
+**Affects:**
+- tree-opt V1: resumes from step 1 and re-measures on the post-H2 partition. Its
+  stop clause now reads the per-step probe. The gate decision for amplification
+  sites (AutoRebalance np 5-6, np 1 at N = 1200) is V1's own.

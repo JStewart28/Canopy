@@ -534,3 +534,42 @@ stems take 424 s with no hang.
 - **Every task whose script runs `MultiSolve` at np >= 3** — copy the watchdog
   from `run_ctest_v1.flux`. `--timeout` alone loses every later rank count to
   one hang.
+
+## E2 (fix-hang-rebalance)
+
+Doc-only; no code, bound or job. Recorded here because it changes V1.
+
+**Attribution.** `fix-hang-rebalance.md` E1 attributed `MultiSolve.AutoRebalance`'s
+np 5-6 excess (section V1 above) to **trajectory amplification at unsoftened
+close encounters**, V1's candidate (b). V1's candidate (a), per-particle
+normalization, is excluded: the `max_vel_rel` particle's $\lvert v\rvert$ is at or
+above the median at np 6 and at N = 1200. The far field is healthy per solve:
+per-step field-scale error at most `9.5e-7` for AutoRebalance and `1.52e-6` for
+any case, at SERIAL np 1-6 (`f3cZoFBJNNc7`) and HIP np 1-4 (`f3cZoFK9Wa7y`).
+SERIAL np 1 at N = 1200 reaches `max_vel_rel = 2.67e-3` with no partition,
+about 7000x the solve error its trajectory saw. The theta sweep above moved the
+trajectory deviation because θ = 0.7 raises the per-step error about 140x, and the
+dynamics amplify whatever goes in. Figures: `fix-hang-rebalance-progress-log.md`
+section E1.
+
+**Changed in `tree-opt.md` V1.**
+- Status `**BLOCKED**` → `**NOT STARTED**`; the blocked paragraph is replaced
+  by a "Resume from step 1" paragraph with the attribution.
+- Step 1's derivation: the floor bounds the per-solve error; the trajectory
+  check does not damp it at unsoftened close encounters, with E1's figures. The
+  old text said a gradient error reaches `max_pos_rel` reduced by the step size
+  twice over, which holds only while trajectories stay close.
+- Step 1's stop clause now triggers on the per-step probe
+  (`CANOPY_MULTISOLVE_PROBE=1`) exceeding $\theta^{P+1}$, not on the trajectory
+  deviation. A trajectory excess whose probe stays under the floor and sits on
+  close encounters is recorded as dynamics.
+- Line citations updated after E1's edit to `tests/tstMultiSolve.hpp`: call
+  sites `:955, :972, :990, :1008, :1045, :1094`, `EXPECT`s `:929-933`, the
+  stale `2e-2` prose `:1032`, `P_ORDER` `:88`, `get_test_mac_theta()` `:42-47`.
+
+**Affects:**
+- **V1** — resumes from step 1 and re-measures (the partition changed in
+  `fix-hang-rebalance.md` H2). Its stop clause reads the per-step probe. Whether
+  an amplification site (AutoRebalance np 5-6) gates on the trajectory or on the
+  probe is V1's decision; E2 made none. The other resume items in section V1's
+  **Affects** still stand.
