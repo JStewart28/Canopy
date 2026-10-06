@@ -19,8 +19,12 @@
 
 #include <mpi.h>
 
+#include <cstdint>
+#include <cstdio>
+#include <map>
 #include <random>
 #include <set>
+#include <unordered_map>
 
 namespace Test
 {
@@ -171,6 +175,77 @@ void generate_payload_particles( AoSoAP_t& particles, int num_particles,
 
     particles.resize( num_particles );
     Cabana::deep_copy( particles, particles_h );
+}
+
+void generate_uniform_particles( AoSoA_t& particles, int num_particles,
+                                 int rank )
+{
+    AoSoA_ht particles_h( "particles_h", num_particles );
+    auto h_positions = Cabana::slice<Position>( particles_h );
+    std::mt19937 gen( 7 + 31 * rank );
+    std::uniform_real_distribution<double> uniform( 0.0, 1.0 );
+    for ( int i = 0; i < num_particles; ++i )
+        for ( int d = 0; d < 3; ++d )
+            h_positions( i, d ) = uniform( gen );
+    particles.resize( num_particles );
+    Cabana::deep_copy( particles, particles_h );
+}
+
+// FNV-1a over the (key, owner) pairs of a cell owner map in key order.
+uint64_t owner_map_hash( const std::unordered_map<MortonKey, int>& owners )
+{
+    std::map<MortonKey, int> sorted( owners.begin(), owners.end() );
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h]( uint64_t v )
+    {
+        for ( int b = 0; b < 8; ++b )
+        {
+            h ^= ( v >> ( 8 * b ) ) & 0xff;
+            h *= 1099511628211ull;
+        }
+    };
+    for ( const auto& [k, r] : sorted )
+    {
+        mix( k );
+        mix( static_cast<uint64_t>( static_cast<int64_t>( r ) ) );
+    }
+    return h;
+}
+
+bool owner_map_agrees_across_ranks(
+    const std::unordered_map<MortonKey, int>& owners )
+{
+    const uint64_t h = owner_map_hash( owners );
+    uint64_t hmin = h, hmax = h;
+    MPI_Allreduce( MPI_IN_PLACE, &hmin, 1, MPI_UINT64_T, MPI_MIN,
+                   MPI_COMM_WORLD );
+    MPI_Allreduce( MPI_IN_PLACE, &hmax, 1, MPI_UINT64_T, MPI_MAX,
+                   MPI_COMM_WORLD );
+    return hmin == hmax;
+}
+
+// Fraction of parent-child pairs, both deeper than replication_depth or a
+// leaf (the partition's vertices), whose owners differ.
+double parent_child_cut_fraction(
+    const std::vector<CellInfo>& cells,
+    const std::unordered_map<MortonKey, int>& owners, int replication_depth )
+{
+    std::unordered_map<MortonKey, const CellInfo*> by_key;
+    for ( const auto& c : cells )
+        by_key[c.key] = &c;
+    long long pairs = 0, cut = 0;
+    for ( const auto& c : cells )
+    {
+        if ( c.depth == 0 || !( c.is_leaf || c.depth > replication_depth ) )
+            continue;
+        const CellInfo* p = by_key.at( parent_key( c.key ) );
+        if ( p->depth <= replication_depth )
+            continue;
+        pairs++;
+        if ( owners.at( c.key ) != owners.at( p->key ) )
+            cut++;
+    }
+    return pairs ? static_cast<double>( cut ) / pairs : 0.0;
 }
 
 } // namespace TreePartitionerTest
@@ -668,8 +743,8 @@ void testRedistributeWithMotion( int num_particles_per_rank, int ncrit,
  * topology changes. Builds an initial tree and partition, then regenerates
  * particles with a completely different spatial distribution and rebuilds the
  * tree from scratch so the new topology differs from the original. The old
- * ownership map is now stale, and repartition() must re-solve Zoltan2 and
- * rebuild ownership for the new tree.
+ * ownership map is now stale, and repartition() must re-partition from the
+ * stale owners and rebuild ownership for the new tree.
  *
  * Using build() (instead of update()) for the topology change keeps the tree
  * globally consistent across ranks, avoiding spurious divergence.
@@ -788,6 +863,251 @@ void testRepartition( int num_particles_per_rank, int ncrit, int max_depth,
     (void)num_after_partition;
 }
 
+
+//---------------------------------------------------------------------------//
+/**
+ * H2 (a): cell_owner_map() is identical on every rank, after partition() and
+ * after repartition() of a changed tree.
+ */
+void testOwnerMapAgreement( int num_particles_per_rank, int ncrit,
+                            int max_depth, double tolerance,
+                            int replication_depth )
+{
+    using namespace TreePartitionerTest;
+
+    int rank;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+
+    AoSoA_t particles( "particles", num_particles_per_rank );
+    generate_test_particles( particles, num_particles_per_rank, rank );
+    auto positions = Cabana::slice<Position>( particles );
+
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth,
+        std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance,
+                               tolerance, tolerance },
+        tolerance );
+    builder.build( positions, num_particles_per_rank );
+
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+    partitioner.partition( builder, particles, num_particles_per_rank );
+    EXPECT_TRUE( owner_map_agrees_across_ranks( partitioner.cell_owner_map() ) )
+        << "cell_owner_map() differs across ranks after partition()";
+
+    regenerate_shifted_particles( particles, num_particles_per_rank,
+                                  500 + rank );
+    positions = Cabana::slice<Position>( particles );
+    builder.build( positions, num_particles_per_rank );
+    partitioner.repartition( builder, particles, num_particles_per_rank );
+    EXPECT_TRUE( owner_map_agrees_across_ranks( partitioner.cell_owner_map() ) )
+        << "cell_owner_map() differs across ranks after repartition()";
+}
+
+//---------------------------------------------------------------------------//
+/**
+ * H2 (b): on a fixture of 24 000 uniform global particles with the tree
+ * capped at max_depth so every depth band holds many cells per rank (R7: a
+ * band with fewer cells than ranks cannot balance), every balance
+ * constraint's max/mean over ranks is <= 1 + imbalance_tolerance: constraint
+ * 0 the leaf particle count, constraint 1 + b the number of cells in band b.
+ */
+void testPartitionBalance( int num_global_particles, int ncrit, int max_depth,
+                           double tolerance, int replication_depth,
+                           double imbalance_tolerance )
+{
+    using namespace TreePartitionerTest;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+    ASSERT_EQ( num_global_particles % nprocs, 0 );
+    const int num_local = num_global_particles / nprocs;
+
+    AoSoA_t particles( "particles", num_local );
+    generate_uniform_particles( particles, num_local, rank );
+    auto positions = Cabana::slice<Position>( particles );
+
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth,
+        std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance,
+                               tolerance, tolerance },
+        tolerance );
+    builder.build( positions, num_local );
+
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth, imbalance_tolerance );
+    partitioner.partition( builder, particles, num_local );
+
+    const auto& cells = builder.cells();
+    const auto& owners = partitioner.cell_owner_map();
+    const auto& bands = partitioner.bands();
+    const int ncon = 1 + static_cast<int>( bands.size() );
+    ASSERT_EQ( bands.size(), 3u ) << "fixture must span three bands";
+
+    std::vector<double> load( static_cast<size_t>( ncon ) * nprocs, 0.0 );
+    std::vector<int> band_cells( bands.size(), 0 );
+    for ( const auto& c : cells )
+    {
+        const int r = owners.at( c.key );
+        if ( r == OWNER_SHARED )
+            continue;
+        if ( c.is_leaf )
+            load[r] += c.global_count;
+        for ( std::size_t b = 0; b < bands.size(); ++b )
+            if ( c.depth >= bands[b].depth_lo && c.depth <= bands[b].depth_hi )
+            {
+                load[( 1 + b ) * nprocs + r] += 1.0;
+                band_cells[b]++;
+            }
+    }
+    for ( std::size_t b = 0; b < bands.size(); ++b )
+        ASSERT_GE( band_cells[b], 50 * nprocs )
+            << "fixture band " << b << " holds too few cells per rank (R7)";
+
+    for ( int k = 0; k < ncon; ++k )
+    {
+        double mx = 0.0, sum = 0.0;
+        for ( int r = 0; r < nprocs; ++r )
+        {
+            mx = std::max( mx, load[k * nprocs + r] );
+            sum += load[k * nprocs + r];
+        }
+        const double imbalance = mx * nprocs / sum;
+        if ( rank == 0 )
+            std::printf( "[tree-partitioner] np %d constraint %d max/mean %.4f\n",
+                         nprocs, k, imbalance );
+        EXPECT_LE( imbalance, 1.0 + imbalance_tolerance )
+            << "constraint " << k << " is imbalanced";
+    }
+}
+
+//---------------------------------------------------------------------------//
+/**
+ * H2 (c): the fraction of non-shared parent-child pairs owned by different
+ * ranks is no higher than under the vote rule applied to the same leaf
+ * assignment. Runs on the clustered fixture, where the cut is several
+ * percent; on (b)'s depth-capped uniform fixture both cuts are under 1% and
+ * the vote rule breaks band balance at np 5-6
+ * (fix-hang-rebalance-progress-log.md, H2 partitioner arm).
+ */
+void testParentChildCut( int num_particles_per_rank, int ncrit, int max_depth,
+                         double tolerance, int replication_depth )
+{
+    using namespace TreePartitionerTest;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    AoSoA_t particles( "particles", num_particles_per_rank );
+    generate_test_particles( particles, num_particles_per_rank, rank );
+    auto positions = Cabana::slice<Position>( particles );
+
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth,
+        std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance,
+                               tolerance, tolerance },
+        tolerance );
+    builder.build( positions, num_particles_per_rank );
+
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+    partitioner.partition( builder, particles, num_particles_per_rank );
+
+    const auto& cells = builder.cells();
+    const auto& owners = partitioner.cell_owner_map();
+    const auto vote_internal = partitioner.vote_internal_owners( cells, owners );
+    std::unordered_map<MortonKey, int> vote_owners;
+    for ( const auto& c : cells )
+    {
+        if ( c.is_leaf )
+            vote_owners[c.key] = owners.at( c.key );
+        else if ( c.depth > replication_depth )
+            vote_owners[c.key] = vote_internal.at( c.key );
+    }
+    const double cut =
+        parent_child_cut_fraction( cells, owners, replication_depth );
+    const double cut_vote =
+        parent_child_cut_fraction( cells, vote_owners, replication_depth );
+    if ( rank == 0 )
+        std::printf( "[tree-partitioner] np %d parent-child cut %.4f vote "
+                     "rule %.4f\n",
+                     nprocs, cut, cut_vote );
+    EXPECT_LE( cut, cut_vote )
+        << "the partition cuts more parent-child pairs than the vote rule";
+}
+
+//---------------------------------------------------------------------------//
+/**
+ * H2 (d): after refresh_ownership_for_current_tree(), every internal cell of
+ * the current tree that the partition assigned keeps its partitioned owner.
+ * Run on the post-migration tree (the same topology) and on a tree built from
+ * a subset of the particles (a coarser topology with new leaves). Prints the
+ * fraction of non-shared cells that fell back to a vote.
+ */
+void testRefreshKeepsPartition( int num_particles_per_rank, int ncrit,
+                                int max_depth, double tolerance,
+                                int replication_depth )
+{
+    using namespace TreePartitionerTest;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    AoSoA_t particles( "particles", num_particles_per_rank );
+    generate_test_particles( particles, num_particles_per_rank, rank );
+    auto positions = Cabana::slice<Position>( particles );
+
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth,
+        std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance,
+                               tolerance, tolerance },
+        tolerance );
+    builder.build( positions, num_particles_per_rank );
+
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+    partitioner.partition( builder, particles, num_particles_per_rank );
+    const auto partitioned = partitioner.cell_owner_map();
+    const int num_local = partitioner.num_local_particles();
+
+    for ( const char* phase : { "post-migration", "subset" } )
+    {
+        const int n = ( phase[0] == 'p' ) ? num_local : num_local * 3 / 5;
+        positions = Cabana::slice<Position>( particles );
+        builder.build( positions, n );
+        partitioner.refresh_ownership_for_current_tree( builder, particles );
+
+        const auto& owners = partitioner.cell_owner_map();
+        int non_shared = 0, fallback = 0, changed = 0;
+        for ( const auto& c : builder.cells() )
+        {
+            if ( !c.is_leaf && c.depth <= replication_depth )
+                continue;
+            non_shared++;
+            auto it = partitioned.find( c.key );
+            if ( it == partitioned.end() || it->second == OWNER_SHARED )
+            {
+                fallback++;
+                continue;
+            }
+            if ( !c.is_leaf && owners.at( c.key ) != it->second )
+                changed++;
+        }
+        EXPECT_EQ( changed, 0 )
+            << phase << ": " << changed
+            << " internal cells lost their partitioned owner";
+        EXPECT_TRUE( owner_map_agrees_across_ranks( owners ) ) << phase;
+        if ( rank == 0 )
+            std::printf( "[tree-partitioner] np %d refresh %s fallback "
+                         "%d/%d = %.4f\n",
+                         nprocs, phase, fallback, non_shared,
+                         non_shared ? double( fallback ) / non_shared : 0.0 );
+    }
+}
+
 //---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
@@ -840,6 +1160,26 @@ TEST( TreePartitioner, testCoalescedMigrateIntegrityBasic )
 TEST( TreePartitioner, testCoalescedMigrateIntegritySmall )
 {
     testCoalescedMigrateIntegrity( 500, 32, 10, 0.1, 2 );
+}
+
+TEST( TreePartitioner, testOwnerMapAgreement )
+{
+    testOwnerMapAgreement( 10000, 128, 15, 0.1, 3 );
+}
+
+TEST( TreePartitioner, testPartitionBalance )
+{
+    testPartitionBalance( 24000, 4, 5, 0.1, 2, 0.05 );
+}
+
+TEST( TreePartitioner, testParentChildCut )
+{
+    testParentChildCut( 10000, 128, 15, 0.1, 3 );
+}
+
+TEST( TreePartitioner, testRefreshKeepsPartition )
+{
+    testRefreshKeepsPartition( 10000, 128, 15, 0.1, 3 );
 }
 
 //---------------------------------------------------------------------------//

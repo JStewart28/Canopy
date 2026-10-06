@@ -22,6 +22,11 @@
 #   jobid=$(flux batch scripts/tuolumne/run_ctest_h0b.flux [phase])
 #   flux job status "$jobid"; echo "status rc=$?"
 #
+# CANOPY_CAL_REGEX (anchored) restricts calibration to the entries it
+# matches; rows for every other entry are kept unchanged, e.g.
+#   CANOPY_CAL_REGEX='^Canopy_Test_TreePartitioner_MPI_SERIAL_np_[1-6]$' \
+#       flux batch scripts/tuolumne/run_ctest_h0b.flux calibrate
+#
 # Budget: a calibration pass of 55 entries is ~8-10 min, so three are ~30 min;
 # check is ~5 min. No set -e: MultiSolve exits 8 on its pre-existing 1e-8
 # failures, and the refusal is meant to fail.
@@ -98,7 +103,8 @@ if [ "${PHASE}" = calibrate ] || [ "${PHASE}" = all ]; then
     CANOPY_WATCHDOG_PGREP=Canopy_Test_
     source ${CANOPY_SRC}/scripts/tuolumne/flux_watchdog.sh
     watchdog_wait_idle || exit 3
-    CAL_REGEX='^Canopy_Test_(MultiSolve|DownwardSweep|UpwardSweep|TreeBuilder|TreePartitioner|CommunicationPlan|LaplaceSolve|CartesianTaylorSolve|FarFieldContract)_MPI_SERIAL_np_[1-6]$|^Canopy_Test_CartesianTaylor_SERIAL$'
+    CAL_REGEX=${CANOPY_CAL_REGEX:-'^Canopy_Test_(MultiSolve|DownwardSweep|UpwardSweep|TreeBuilder|TreePartitioner|CommunicationPlan|LaplaceSolve|CartesianTaylorSolve|FarFieldContract)_MPI_SERIAL_np_[1-6]$|^Canopy_Test_CartesianTaylor_SERIAL$'}
+    echo "calibration regex: ${CAL_REGEX}"
     entries=$(ctest -N -R "${CAL_REGEX}" 2>/dev/null | sed -n 's/^ *Test *#[0-9]*: //p')
     echo "calibration entries: $(echo ${entries} | wc -w)"
     samples=${WATCHDOG_DIR}/samples
@@ -124,11 +130,12 @@ if [ "${PHASE}" = calibrate ] || [ "${PHASE}" = all ]; then
     done
     watchdog_stop
 
-    # Carry each row's extra_s / extra_reason allowance over a recalibration.
+    # Carry each row's extra_s / extra_reason allowance over a recalibration,
+    # and keep the rows of entries this run did not calibrate.
     old_tsv=${WATCHDOG_DIR}/old.tsv
+    new_rows=${WATCHDOG_DIR}/new_rows.tsv
     cp ${TSV} ${old_tsv} 2>/dev/null || : > ${old_tsv}
     {
-        echo -e "stem\tnp\tconfig\tt_ref_s\tjobid\textra_s\textra_reason"
         awk -F'\t' '
             { if (!($1 in m) || $2 + 0 > m[$1]) m[$1] = $2 + 0; n[$1]++ }
             END { for (e in m) print e "\t" m[e] "\t" n[e] }' ${samples} |
@@ -142,6 +149,14 @@ if [ "${PHASE}" = calibrate ] || [ "${PHASE}" = all ]; then
         done | sort -t$'\t' -k1,1 -k2,2n |
         awk -F'\t' -v OFS='\t' 'NR == FNR { if ($6 != "") x[$1 FS $2 FS $3] = $6 OFS $7; next }
             { k = $1 FS $2 FS $3; print (k in x) ? $0 OFS x[k] : $0 }' ${old_tsv} -
+    } > ${new_rows}
+    {
+        echo -e "stem\tnp\tconfig\tt_ref_s\tjobid\textra_s\textra_reason"
+        {
+            awk -F'\t' 'NR == FNR { n[$1 FS $2 FS $3] = 1; next }
+                FNR > 1 && !(($1 FS $2 FS $3) in n)' ${new_rows} ${old_tsv}
+            cat ${new_rows}
+        } | sort -t$'\t' -k1,1 -k2,2n
     } > ${TSV}
     echo "### serial_runtimes.tsv ($(($(wc -l < ${TSV}) - 1)) rows) ###"
     cat ${TSV}
