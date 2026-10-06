@@ -206,8 +206,8 @@ class TreePartitioner
     int replication_depth() const { return _replication_depth; }
 
     // Depth bands of the most recent partition: constraint 1 + b weighs the
-    // cells of bands()[b]. Empty when no cell is deeper than
-    // replication_depth.
+    // cells of bands()[b]. Holds only bands with at least 4 cells per rank;
+    // empty when none qualifies or no cell is deeper than replication_depth.
     const std::vector<PartitionBand>& bands() const { return _bands; }
 
     int num_local_particles() const { return _num_local_after; }
@@ -438,17 +438,33 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_cells(
     const int n = static_cast<int>( vtx.size() );
 
     // Bands: the non-shared depths replication_depth+1 .. deepest, split into
-    // B = min(3, count) contiguous groups of near-equal depth count.
+    // min(3, count) contiguous groups of near-equal depth count. A band with
+    // fewer than 4 cells per rank is dropped: ParMETIS cannot balance it, and
+    // trying costs every other constraint, the particle one included
+    // (fix-hang-rebalance-progress-log.md, H2 partitioner arm).
     _bands.clear();
-    const int n_depths = std::max( 0, deepest - _replication_depth );
-    const int num_bands = std::min( 3, n_depths );
-    for ( int b = 0, lo = _replication_depth + 1; b < num_bands; ++b )
+    std::vector<int> band_cells;
     {
-        const int width =
-            n_depths / num_bands + ( b < n_depths % num_bands ? 1 : 0 );
-        _bands.push_back( { lo, lo + width - 1 } );
-        lo += width;
+        const int n_depths = std::max( 0, deepest - _replication_depth );
+        const int n_groups = std::min( 3, n_depths );
+        for ( int g = 0, lo = _replication_depth + 1; g < n_groups; ++g )
+        {
+            const int width =
+                n_depths / n_groups + ( g < n_depths % n_groups ? 1 : 0 );
+            const PartitionBand band{ lo, lo + width - 1 };
+            lo += width;
+            int count = 0;
+            for ( int i : vtx )
+                count += ( cells[i].depth >= band.depth_lo &&
+                           cells[i].depth <= band.depth_hi );
+            if ( count >= 4 * _comm_size )
+            {
+                _bands.push_back( band );
+                band_cells.push_back( count );
+            }
+        }
     }
+    const int num_bands = static_cast<int>( _bands.size() );
     const int ncon = 1 + num_bands;
 
     std::unordered_map<MortonKey, int> result;
@@ -669,7 +685,7 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_cells(
                      c.depth <= _bands[b].depth_hi )
                     load[static_cast<size_t>( 1 + b ) * _comm_size + r] += 1.0;
         }
-        std::string imb, band_str;
+        std::string imb, band_str, band_count_str;
         for ( int k = 0; k < ncon; ++k )
         {
             double mx = 0.0, sum = 0.0;
@@ -685,8 +701,11 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_cells(
             imb += buf;
         }
         for ( int b = 0; b < num_bands; ++b )
+        {
             band_str += ( b ? "," : "" ) + std::to_string( _bands[b].depth_lo ) +
                         "-" + std::to_string( _bands[b].depth_hi );
+            band_count_str += ( b ? "," : "" ) + std::to_string( band_cells[b] );
+        }
         const auto vote = vote_internal_owners( cells, result );
         long long pairs = 0, cut = 0, cut_vote = 0;
         for ( int m = 0; m < n; ++m )
@@ -708,13 +727,24 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_cells(
         int no_leaf = 0;
         for ( int r = 0; r < _comm_size; ++r )
             no_leaf += ( leaves_per_rank[r] == 0 );
+        { // H2 SCRATCH: granularity lower bound and greedy (LPT) bound
+            std::vector<double> lw; double tot = 0; // H2 SCRATCH
+            for ( int m = 0; m < n; ++m ) if ( cells[vtx[m]].is_leaf ) { lw.push_back( cells[vtx[m]].global_count ); tot += lw.back(); } // H2 SCRATCH
+            std::sort( lw.rbegin(), lw.rend() ); // H2 SCRATCH
+            std::vector<double> bins( _comm_size, 0.0 ); // H2 SCRATCH
+            for ( double w : lw ) *std::min_element( bins.begin(), bins.end() ) += w; // H2 SCRATCH
+            std::fprintf( stderr, "[H2SCR] np=%d nleaves=%zu lb=%.4f lpt=%.4f\n", _comm_size, lw.size(), // H2 SCRATCH
+                std::max( 1.0, lw.empty() ? 0.0 : lw[0] * _comm_size / tot ), // H2 SCRATCH
+                *std::max_element( bins.begin(), bins.end() ) * _comm_size / tot ); // H2 SCRATCH
+        } // H2 SCRATCH
         std::fprintf(
             stderr,
             "[Canopy diag] partition method=%s np=%d nverts=%d B=%d bands=%s "
-            "imbalance=%s pc_pairs=%lld pc_cut=%.4f pc_cut_vote=%.4f "
+            "band_cells=%s imbalance=%s pc_pairs=%lld pc_cut=%.4f pc_cut_vote=%.4f "
             "ranks_without_leaf=%d hash=0x%016llx\n",
             adaptive && n_keep >= 2 ? "AdaptiveRepart" : "PartKway",
             _comm_size, n, num_bands, band_str.empty() ? "none" : band_str.c_str(),
+            band_count_str.empty() ? "none" : band_count_str.c_str(),
             imb.c_str(), pairs, pairs ? double( cut ) / pairs : 0.0,
             pairs ? double( cut_vote ) / pairs : 0.0, no_leaf,
             static_cast<unsigned long long>( owner_map_hash( result ) ) );
