@@ -21,7 +21,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <map>
 #include <random>
 #include <set>
 #include <unordered_map>
@@ -189,27 +188,6 @@ void generate_uniform_particles( AoSoA_t& particles, int num_particles,
             h_positions( i, d ) = uniform( gen );
     particles.resize( num_particles );
     Cabana::deep_copy( particles, particles_h );
-}
-
-// FNV-1a over the (key, owner) pairs of a cell owner map in key order.
-uint64_t owner_map_hash( const std::unordered_map<MortonKey, int>& owners )
-{
-    std::map<MortonKey, int> sorted( owners.begin(), owners.end() );
-    uint64_t h = 1469598103934665603ull;
-    auto mix = [&h]( uint64_t v )
-    {
-        for ( int b = 0; b < 8; ++b )
-        {
-            h ^= ( v >> ( 8 * b ) ) & 0xff;
-            h *= 1099511628211ull;
-        }
-    };
-    for ( const auto& [k, r] : sorted )
-    {
-        mix( k );
-        mix( static_cast<uint64_t>( static_cast<int64_t>( r ) ) );
-    }
-    return h;
 }
 
 bool owner_map_agrees_across_ranks(

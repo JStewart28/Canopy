@@ -96,6 +96,29 @@ inline MortonKey lattice_to_key( const uint64_t ijk[3], int depth )
     return k;
 }
 
+// FNV-1a-64 over (key, owner) pairs in key order: one number that names an
+// ownership map, for comparing runs ([Canopy diag] lines).
+inline uint64_t owner_map_hash( const std::unordered_map<MortonKey, int>& owners )
+{
+    std::vector<std::pair<MortonKey, int>> sorted( owners.begin(), owners.end() );
+    std::sort( sorted.begin(), sorted.end() );
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h]( uint64_t v )
+    {
+        for ( int b = 0; b < 8; ++b )
+        {
+            h ^= ( v >> ( 8 * b ) ) & 0xff;
+            h *= 1099511628211ull;
+        }
+    };
+    for ( const auto& [k, r] : sorted )
+    {
+        mix( k );
+        mix( static_cast<uint64_t>( static_cast<int64_t>( r ) ) );
+    }
+    return h;
+}
+
 // ============================================================================
 // RedistributeResult
 // ============================================================================
@@ -689,11 +712,12 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_cells(
             stderr,
             "[Canopy diag] partition method=%s np=%d nverts=%d B=%d bands=%s "
             "imbalance=%s pc_pairs=%lld pc_cut=%.4f pc_cut_vote=%.4f "
-            "ranks_without_leaf=%d\n",
+            "ranks_without_leaf=%d hash=0x%016llx\n",
             adaptive && n_keep >= 2 ? "AdaptiveRepart" : "PartKway",
             _comm_size, n, num_bands, band_str.empty() ? "none" : band_str.c_str(),
             imb.c_str(), pairs, pairs ? double( cut ) / pairs : 0.0,
-            pairs ? double( cut_vote ) / pairs : 0.0, no_leaf );
+            pairs ? double( cut_vote ) / pairs : 0.0, no_leaf,
+            static_cast<unsigned long long>( owner_map_hash( result ) ) );
     }
 #endif
 
@@ -1187,9 +1211,12 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::
                  _cached_cell_owners.find( c.key ) == _cached_cell_owners.end() )
                 fallback++;
         }
-        std::fprintf( stderr,
-                      "[Canopy diag] refresh_ownership fallback=%d/%d\n",
-                      fallback, non_shared );
+        std::fprintf(
+            stderr,
+            "[Canopy diag] refresh_ownership fallback=%d/%d hash=0x%016llx\n",
+            fallback, non_shared,
+            static_cast<unsigned long long>(
+                owner_map_hash( _cell_owner_map ) ) );
     }
 #endif
 }
