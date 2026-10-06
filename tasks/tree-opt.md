@@ -589,12 +589,18 @@ applied.
 `SolveFusedM2L.matchesPriorReference`'s bounds, `SolveFusedM2L.FP32_smokeTest`,
 and the clustered test's per-reason assertion);
 `tests/tstCartesianTaylorSolve.hpp` (the two direct-sum arms' bounds, and the
-two drift cases); `README.md` (the disabled FP32 case).
+two drift cases); `README.md` (the disabled FP32 case, and the Known Issues
+entry "Six `MultiSolve` tests fail the `1e-8` multi-step check", removed or
+rewritten to what still fails); `scripts/tuolumne/serial_runtimes.tsv`
+(`MultiSolve`'s `default` rows, re-calibrated because AutoRebalance's
+unconditional probe changes the stem's runtime — `fix-hang-rebalance.md`
+Conventions, "Budget rows"; `run_ctest_h0b.flux calibrate` with
+`CANOPY_CAL_REGEX`).
 **Reference:** the measured deviations and bounds recorded in place — the six
 `fmm_tolerance` call sites at `1.0e-8` (`tests/tstMultiSolve.hpp:955`, `:972`,
 `:990`, `:1008`, `:1045`, `:1094`), applied to `max_pos_rel` and `max_vel_rel` at
-`:929-933`; `SolveFusedM2L.matchesPriorReference` at `5.0e-2` / `1.0e-1`
-(`:962-983`); `CTS_DEV_TOL_THETA_CANOPY = 3.74e-02`
+`:929-933`; `SolveFusedM2L.matchesPriorReference` (`:1320-1350`) at `5.0e-2` /
+`1.0e-1` (`:1349-1350`); `CTS_DEV_TOL_THETA_CANOPY = 3.74e-02`
 (`tests/tstCartesianTaylorSolve.hpp:365`), which the rationale block above it
 (`:334-363`) records as **2x the worst measured figure** — gradient
 `1.8651556395e-02`, potential `9.9666798509e-04`, the six rank counts agreeing
@@ -604,18 +610,23 @@ explicit absence of any accuracy claim (`:1040-1062`).
 **Do:**
 1. **Re-derive the six `fmm_tolerance` bounds, one per call site.** `1.0e-8` has
    no derivation behind it, and the prose at `tests/tstMultiSolve.hpp:1032` still
-   documents a prior value of `2e-2` that no call site passes. Set each site's
-   bound at its own measured deviation over **at least three runs** (**R6** — it
-   moves at np $\ge$ 3) times a margin stated in the comment, with the measured
-   figures beside it, and correct the `:1032` prose in the same change. Measure
-   on SERIAL at np 1-6 **and** on HIP at np 1-4, and set each bound at the worst
-   over both backends. A bound that one backend alone would fail is a bound
-   drawn on the other backend's noise. Per call
-   site and not one shared value: the parameter is already per-site, the
-   configurations differ materially — `nsteps` 2/5/8, `drift_multiplier`
-   1.0/2.0/5.0, uniform against clustered — and the measured errors span roughly
-   30x, so a single bound at the worst observed would pass a regression at the
-   best-behaved site.
+   documents a prior value of `2e-2` that no call site passes; correct it in the
+   same change. Each bound is the **tighter of two figures**, both written in
+   the site's comment:
+   - **derived:** the per-solve floor $\theta^{P+1}$ carried through that
+     site's integration (`dt`, `nsteps`, `drift_multiplier`) per the
+     derivation below. This sets the bound's form and order of magnitude;
+   - **measured:** the worst deviation over **at least three runs** on each
+     backend — SERIAL np 1-6 **and** HIP np 1-4 — times a margin no smaller
+     than the observed run-to-run spread. HIP `[multisolve-dev]` figures are
+     not bit-stable even at np 1, and **R6** moves the partition at
+     np $\ge$ 3, so a margin below the spread is a bound drawn on noise.
+
+   Per call site and not one shared value: the parameter is already per-site,
+   the configurations differ materially — `nsteps` 2/4/5/8,
+   `drift_multiplier` 1/2/5/50, uniform against clustered — and the measured
+   errors span orders of magnitude, so a single bound at the worst observed
+   would pass a regression at the best-behaved site.
 
    **The derivation each bound is read against.** The far-field truncation floor
    at `MultiSolveTest::P_ORDER = 8` (`:88`) and `get_test_mac_theta() = 0.5`
@@ -647,8 +658,17 @@ explicit absence of any accuracy claim (`:1040-1062`).
    So the excess is N-driven, not rank-driven. A trajectory bound at a site with
    unsoftened close encounters measures the dynamics, not the far field.
    `AutoRebalance` at np 5-6 is such a site, as is np 1 once N reaches 1200.
-   Whether that site's test gates on the trajectory or on the per-step probe is
-   this task's decision.
+
+   **`AutoRebalance` gates on both the per-step probe and the trajectory.** The
+   probe runs unconditionally at that site, not behind
+   `CANOPY_MULTISOLVE_PROBE`, and an `EXPECT` holds every step's field-scale
+   error under the tighter of $\theta^{P+1}$ and its measured worst times a
+   margin, as above — that is the far-field gate. The trajectory `EXPECT`s keep a
+   bound at the worst measured deviation times a margin, commented as a
+   dynamics and complete-regression catch rather than a far-field claim. Any
+   other site whose measured trajectory deviation exceeds its derived bound
+   while its probe stays under the floor takes the same treatment, recorded in
+   the log as dynamics with the probe's `n_excess` / `n_excess_close` figures.
 
    **Stop and report if the per-step probe exceeds the floor.** With
    `CANOPY_MULTISOLVE_PROBE=1`, `testMultiStepGravity` prints the per-step
@@ -665,7 +685,8 @@ explicit absence of any accuracy claim (`:1040-1062`).
    failure mode this whole task exists to close; the probe is what tells the
    two apart.
 2. **Disable `SolveFusedM2L.FP32_smokeTest`, and leave it disabled.** It is the
-   stem's only FP32 case (`tests/tstMultiSolve.hpp:1121-1161`) and fails at
+   stem's only FP32 case, commented out at `tests/tstMultiSolve.hpp:1488-1540`,
+   and fails at
    np 2-6 with a max relative gradient error of $\approx 0.277$ against its own
    `5.0e-2` budget — 5.5x over, not marginal, and reproducing on two platforms.
    Nothing in this task can move it: it is not an `fmm_tolerance` test, and its
@@ -709,13 +730,15 @@ explicit absence of any accuracy claim (`:1040-1062`).
    it was, say so in the log and leave it; a bound tightened onto noise fails
    on an unrelated change and gets widened again by someone with less context.
 
-**Additional information needed:** whether the deviations this task still has to
-measure — `matchesPriorReference`'s and the six `fmm_tolerance` sites' — are
-stable enough at np $\ge$ 3 to carry a tightened bound at all. Step 1's and
-step 3's three runs answer it per test. A test whose deviation moves by more
-than the margin between runs cannot be tightened and must be left as it is, with
-that recorded. The `theta_canopy` arm needs no such measurement: its six rank
-counts agree to 15 significant figures, recorded on the constant.
+**Additional information needed:** whether `matchesPriorReference`'s gradient
+deviation is stable enough at np $\ge$ 3 to carry a tightened bound. Step 3's
+three runs per backend answer it. If it moves between runs by more than the
+margin, the bound is not tightened and stays as it is, with that recorded. This
+rule governs only the tightening of a bound that already passes. It does not
+apply to the six `fmm_tolerance` sites: they fail at `1.0e-8`, so their bounds
+only move up, and step 1's margin absorbs the spread. The `theta_canopy` arm
+needs no such measurement: its six rank counts agree to 15 significant figures,
+recorded on the constant.
 
 **Exit criterion:** stems `CartesianTaylorSolve`, `MultiSolve` pass on SERIAL at
 ranks 1-6 and on HIP at ranks 1-4
@@ -734,10 +757,14 @@ for i in 1 2 3; do
 done
 ```
 
-— every case in both stems passes with no failure carried: the six
-`fmm_tolerance` sites green against their re-derived bounds, and the FP32 case
-absent from the binary. The log records each moved bound with its measured
-deviations, and `README.md` records the disabled FP32 case. Failure
+— each `ctest` line run through `canopy_ctest` with the same regex
+([Test naming](#test-naming-and-how-to-run-only-what-a-task-needs)). Every case
+in both stems passes with no failure carried. That covers the six
+`fmm_tolerance` sites against their re-derived bounds, `AutoRebalance`'s
+per-step probe gate on every step, and the FP32 case absent from the binary.
+The log records each moved bound with its derived and measured figures.
+`README.md` records the disabled FP32 case and no longer lists the six sites as
+failing. Failure
 direction: inflate one measured deviation artificially (widen `mac_theta` on one
 arm, say) and confirm the tightened bound **fails**, where the old bound would
 have passed; revert, and record which bound was demonstrated this way. A
