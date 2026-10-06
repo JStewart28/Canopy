@@ -5,7 +5,8 @@
 Canopy provides a parallel Fast Multipole Method (FMM) solver built on top of Kokkos and Cabana. The primary entry point is `Canopy::Solver`, defined in `src/Canopy_Solver.hpp`.
 
 For detailed descriptions of the algorithms used in Canopy — including the
-load-balancing approach and its interface with Zoltan 2 — see the [Algorithm
+load-balancing approach, a ParMETIS graph partition of the octree's cells — see
+the [Algorithm
 and Design Documentation](#algorithm-and-design-documentation) section below.
 
 ### Template Parameters
@@ -246,8 +247,8 @@ and [`scripts/dane/run_ctest_minset.slurm`](scripts/dane/run_ctest_minset.slurm)
 
 ## Algorithm and Design Documentation
 
-The algorithms used in Canopy — for example the load-balancing approach and how
-it interfaces with the Zoltan 2 partitioner — are described in detail in
+The algorithms used in Canopy — for example the load-balancing approach, a
+ParMETIS graph partition of the octree's cells — are described in detail in
 [`docs/design.md`](docs/design.md). That document is the authoritative record of
 the library's algorithmic design decisions; consult it when you need to
 understand *why* a component works the way it does rather than just its API.
@@ -432,52 +433,26 @@ is the wrong number for this.
 Tracked defects to be addressed in a later session. These are not introduced by
 current feature work — they reproduce on the pre-existing baseline.
 
-### The leaf partition is not reproducible run-to-run above two ranks
+### HIP solves are not bit-reproducible run to run; the cell partition is
 
-`TreePartitioner::partition_leaves` uses the Zoltan2 `multijagged` algorithm,
-which `src/Canopy_TreePartitioner.hpp:417-419` already documents as
-non-deterministic. Computing the partition on rank 0 and broadcasting it makes
-the assignment consistent across ranks *within* a run, but it is not reproducible
-*across* runs: two runs of the same binary at the same commit produce different
-leaf-to-rank assignments at every rank count from 3 to 6.
+`TreePartitioner` partitions cells with ParMETIS on the host
+(`docs/design.md`, "Load Balancing"), and that partition reproduces: two
+passes of `MultiSolve` at SERIAL np 2-6 and HIP np 2-4 give the identical
+ownership-map hash on every partition and every refresh (the profiling-build
+`[Canopy diag] partition` and `refresh_ownership` lines; flux jobs
+`f3cZDMUWgsYj` and `f3cZDMd8JhWw`, `fix-hang-rebalance` H2). On SERIAL the
+`[multisolve-dev]` lines are identical between the passes at every np. On a HIP
+`ExecutionSpace` they are not, even at np 1 where nothing is partitioned: at
+np 2-4 no case is identical between two passes, differing by relative 6e-12 to
+2e-4, because device reductions accumulate in a run-dependent order (H0c
+measured the same at np 1-4 under the previous partitioner).
+`LaplaceSolve.bitForBitArtifacts` therefore stays on `Kokkos::Serial`, and at
+np 1-2 because the committed reference holds only the (1,0), (2,0) and (2,1)
+records (`tests/tstLaplaceSolve.hpp:1214-1222`); `crossRankAgreement` and
+`matchesDirectSum` carry ranks 3-6.
 
-Reproduce with the Laplace-solve harness, which measures it directly — the
-`[laplace-solve]` line is printed unconditionally at every rank count
-(`tests/tstLaplaceSolve.hpp:976-986`):
-
-```bash
-ctest -V -R Canopy_Test_LaplaceSolve_MPI_SERIAL   # run twice, diff "[laplace-solve]"
-```
-
-`n_unique_ops` for one `(nprocs, rank)` moves by tens between runs — e.g.
-`(3,0)` gave 1630 / 1605 / 1605 and `(6,3)` gave 974 / 947 / 973 over three
-consecutive runs, while `num_cells` was identical across all runs at every rank
-count (80, 170, 316, 431, 500, 524). The tree build is therefore deterministic
-and it is cell *ownership* that moves; the interaction lists, the M2L operator
-table and `locals()` all follow it. np=1 and np=2 are stable, the multijagged
-cut being trivial for one or two parts. Those figures were measured on the
-harness's earlier per-rank 400-particle generator — the absolute numbers a run
-prints today differ (724 realized operators at np=1 on the current 600-particle
-global set), but the run-to-run drift above two parts does not.
-
-This is **pre-existing** — a property of the partitioner, untouched by the
-harness work that found it. It blocks any bit-for-bit comparison above two
-ranks, and `LaplaceSolve.bitForBitArtifacts` is gated at np 1-2 for exactly that
-reason, with a `GTEST_SKIP` message naming it (`tests/tstLaplaceSolve.hpp:1211-1219`);
-`crossRankAgreement` and `matchesDirectSum` carry ranks 3-6 instead. A plausible
-but unverified mechanism is Zoltan2 MJ running on
-`Kokkos::DefaultExecutionSpace`, which is HIP in this build even for the SERIAL
-test binaries. To be triaged in a separate session: either make the partitioner
-deterministic (a deterministic algorithm, or a seeded / host-serial MJ) or cache
-and reuse a committed assignment.
-
-With MJ on a host node (the Serial solver since `fix-hang-rebalance` H2), two
-`MultiSolve` np 1-6 passes print identical `[multisolve-dev]` lines at every
-rank count (flux job `f3bnvGg3MDo5`). On a HIP `ExecutionSpace` the lines do
-not reproduce even at np 1, where nothing is partitioned: two passes differ
-in 5 of 6 cases at np 1 and at np 2, and in every case both passes completed at
-np 3-4, by relative 7e-12 to 3.4e-2 (flux job
-`f3cM4ghTjtiT`, `fix-hang-rebalance` H0c), so device reductions alone move them.
+Reproduce with `scripts/tuolumne/run_ctest_h2.flux prepro hip` and compare the
+two passes' `[multisolve-dev]` lines.
 
 ### Six `MultiSolve` tests fail the `1e-8` multi-step check at every rank count
 
@@ -515,29 +490,10 @@ This is **pre-existing**: checking out `src/Canopy_DownwardSweep.hpp` at
 and rerunning reproduces the identical error values to every digit
 (`3.485035469067542e-07`, `6.8419528791564039e-07`, `9.1947965989306709e-06`).
 
-Whether these failures share a cause with the partitioner non-determinism above
-has not been investigated.
-
-### Zoltan2 runs on HIP when the solver's `ExecutionSpace` is HIP
-
-`TreePartitioner::partition_leaves` builds its Zoltan2 adapter on
-`KokkosDeviceWrapperNode<ExecutionSpace>` (`src/Canopy_TreePartitioner.hpp`), so
-multijagged runs where the solver runs. For the SERIAL test binaries that is the
-host. With Zoltan2 on Tpetra's default HIP node, rank 0 intermittently stalled in
-`hipDeviceSynchronize` inside MJ while the other ranks waited in the assignment
-`MPI_Bcast`. That hung `Canopy_Test_MultiSolve_MPI_SERIAL_np_3` in about one run
-in three (stacks in `tasks/fix-hang-rebalance-progress-log.md`, sections H1 and
-H2). A solver whose `ExecutionSpace` is HIP still runs MJ on HIP, and stalls the
-same way: `Canopy_Test_MultiSolve_MPI_HIP` went over its time budget in
-`MultiSolve.LargeMotion_Rebuild` at np 3 in one of two passes and at np 4 in the
-other, with rank 0 in `hipDeviceSynchronize` inside
-`Zoltan2::AlgMJ<…HIP…>::mj_get_new_cut_coordinates` under
-`TreePartitioner<HIPSpace, HIP>::partition_leaves` and the other ranks in its
-`MPI_Bcast` (flux job `f3cM4ghTjtiT`; stacks in
-`tasks/fix-hang-rebalance-progress-log.md`, section H0c). Reproduce with
-`canopy_ctest '^Canopy_Test_MultiSolve_MPI_HIP_np_[3-4]$'` under the HIP
-environment, a few passes. `fix-hang-rebalance` H2's partitioner arm replaces
-this path.
+The partition is not their cause: on the reproducible ParMETIS cell partition
+the same six cases fail, and `AutoRebalance` still reaches `max_vel_rel`
+`6.52e-3` at np 5 and `1.71e-2` at np 6 (flux job `f3cZDMUWgsYj`,
+`fix-hang-rebalance` H2).
 
 ### `DownwardSweep.testIdempotentExecution` compares `locals()` with itself on SERIAL
 

@@ -1346,3 +1346,198 @@ no allowance.
 - `01_fix-tests.md`: removes the `UpwardSweep` `extra_s` allowance once its
   failure output is bounded.
 - H1 HIP arm, H2, E1: a job's first entry gets 6 s more.
+
+## H2 (partitioner arm)
+
+Commits `60f933f`..`49dce0b` on `investigate-m2l-cap`. All jobs on tuolumne,
+Cray clang 20.0.0, flux-core 0.89.0, ROCm 6.4.2, `build-tuolumne/` with
+`Canopy_ENABLE_PROFILING=ON`. Logs `canopy-h2.<jobid>.log`,
+`canopy-fix-tests.<jobid>.log`, `canopy-f4-sweep.<jobid>.log`,
+`canopy-h2scr*.<jobid>.log`, `canopy-h0b.<jobid>.log` and
+`canopy-laplace-solve-regen.<jobid>.log` in the repo root (untracked). Gating
+jobs: `run_ctest_h2.flux` `pstems serial` `f3cZDLkZqC6s`, `pstems hip`
+`f3cZDLuHNyCT`, `pfixed hip 3` `f3cZDM3r2pby`, `pfixed hip 4` `f3cZDMCLEiAT`,
+`pfixed serial 3` `f3cZDMLzpWhM`, `prepro serial` `f3cZDMUWgsYj`, `prepro hip`
+`f3cZDMd8JhWw`, all on commit `49dce0b` plus doc edits.
+
+**Decisions.**
+- H1's HIP arm is not run, and no reverted build is rerun to reproduce the HIP
+  hang. The stall is already stacked on every rank in Zoltan2 MJ under
+  `partition_leaves`: H0c job `f3cM4ghTjtiT` at np 3 and np 4, and
+  01_fix-tests F4 sweep job `f3cWVibHs6gf` at np 3. This arm deletes that path,
+  and the `nm -C` check is the evidence that it is gone. The failure direction
+  that remains is test (c) under a random assignment.
+- The `nm -C` check covers the `*_MPI_HIP` binaries of the six exit-criterion
+  stems, rebuilt in this task. Other HIP binaries in `build-tuolumne/tests`
+  predate the change and were not rebuilt.
+- **Parent-child edges weigh 27, neighbour edges 1** (Do step 3 said unit
+  weights). With unit weights ParMETIS cut more parent-child pairs than the
+  vote rule at every np 2-6 on the `Basic` fixture: np 4 0.192 vs 0.114, np 6
+  0.349 vs 0.221 (scratch job `f3cXJPNQnaDD`). Variants measured there:
+  weight 8 still lost at np 4 (0.134 vs 0.092); weight 27 and
+  no-neighbour-edges both passed. 27 was chosen to keep both traffic proxies:
+  one parent-child edge outweighs a cell's 26 neighbours.
+- **Test (c) runs on the clustered `Basic` fixture**, not on (b)'s fixture. On
+  (b)'s depth-capped uniform fixture (24 000 particles, ncrit 4, max_depth 5)
+  both cuts are under 1% and the partition lost by 4-5 pairs of ~16 000 at
+  np 5-6 (0.0047 vs 0.0045, 0.0062 vs 0.0061). There the vote rule itself
+  breaks band 1's tolerance (max/mean 1.0645 at np 5, 1.0547 at np 6) while
+  ParMETIS meets it (1.0449, 1.0430): the extra cuts buy the band balance
+  (job `f3cXRQbNenaT`).
+- **A band constraint is kept only if it holds at least `4 * comm_size`
+  cells** (Do step 2 kept every band). On `DownwardSweep`'s 1200-particle
+  two-scale tree the coarsest band (depths 3-4) holds 2-19 cells, and as a
+  constraint it made ParMETIS miss the particle constraint too: max/mean 1.26
+  at np 4, 2.00 at np 5 with two ranks owning nothing, 1.33 at np 6.
+  `DownwardSweepTwoScale.treeHasShallowAndDeepLeaves` failed at SERIAL np 5
+  (job `f3cYxa8kKdUs`; ranks 2 and 3 had `num_local 0`) after passing under
+  MJ. Dropping bands under `np` cells fixed np 5 only; under `4 * np` cells,
+  particle max/mean is 1.01-1.03 at np 2-6 (1.09 at np 3) (scratch job
+  `f3cZ4TQWntxf`).
+
+**Departure from Do step 4: ParMETIS is called directly, not through
+Zoltan2.** Zoltan2's `PartitioningProblem::createAlgorithm`
+(`Zoltan2_PartitioningProblem.hpp:494-530` in the spack view) instantiates
+`Zoltan2_AlgMJ<Adapter>` for every adapter type, so the `TpetraCrsGraphAdapter`
+route would keep `AlgMJ` symbols in every binary and fail the `nm` criterion.
+`ParMETIS_V3_PartKway` / `ParMETIS_V3_AdaptiveRepart` (ParMETIS 4.0.3, 32-bit
+`idx_t`) are already on every Canopy binary's link line through Trilinos, so no
+CMake change was needed. The partitioner no longer includes any Zoltan2,
+Teuchos or Tpetra header. The `static_assert` of Do step 4 has nothing to
+check: the solve is host-only C.
+
+**Implementation notes.**
+- Vertex order is Morton pre-order: each key shifted to the deepest vertex
+  depth, ancestor first on ties.
+- ParMETIS needs contiguous global IDs per rank, so vertices are numbered by
+  (supplier rank, Morton position); with the block rule that is the Morton
+  index itself. On repartition the supplier is `_cell_owner_map`'s previous
+  owner; AdaptiveRepart gets `PARMETIS_PSR_UNCOUPLED` with `part[]` = the
+  supplier on input, unit `vsize`, `itr = 100`; it falls back to PartKway when
+  fewer than two ranks have vertices. Ranks with no vertices are split off with
+  `MPI_Comm_split`. Seed 15, `ubvec = 1 + imbalance_tolerance` per constraint.
+- A ParMETIS failure on any rank is all-reduced before the throw, so no rank
+  is left in `MPI_Allgatherv`.
+- `derive_internal_ownership` now throws when a leaf has no owner (it assigned
+  rank 0 silently before).
+- `refresh_ownership_for_current_tree` keeps the partitioned owner of every
+  cached cell, leaf or internal; new leaves vote by local particles as before,
+  new internal cells by the vote rule.
+
+**Signatures changed** (all `TreePartitioner`, `src/Canopy_TreePartitioner.hpp`).
+`partition`, `repartition`, `ownership()`, `cell_owner_map()` and
+`refresh_ownership_for_current_tree` are unchanged; no caller outside the file
+needed an edit.
+- `partition_leaves(cells)` deleted (no caller outside the file; comments in
+  `Canopy_Solver.hpp`, `tstLaplaceSolve.hpp` and the data header updated).
+- New `partition_cells(cells, bool adaptive)`, `vote_internal_owners(cells,
+  owners) const` and `bands()`. New free functions `key_to_lattice`,
+  `lattice_to_key`, `owner_map_hash`, and struct `PartitionBand`.
+- `derive_internal_ownership(cells, owners)`: same types; `owners` may now hold
+  internal cells, which keep their entry.
+- `_cached_leaf_owners` became `_cached_cell_owners`.
+- Profiling builds print `[Canopy diag] partition` (method, np, nverts, B,
+  bands, band_cells, per-constraint imbalance, parent-child cut and the vote
+  rule's on the same leaves, ranks without a leaf, ownership hash) and
+  `[Canopy diag] refresh_ownership fallback=<n>/<non-shared> hash=...` on
+  rank 0.
+
+**Scripts.** `run_ctest_h2.flux` gained `pfixed <backend> <np>`,
+`pstems <backend>` and `prepro <backend>`, every run through `canopy_ctest`
+after H0b's self-test; its SERIAL-arm `fixed`/`repro` modes are unchanged.
+`run_ctest_h0b.flux` takes `CANOPY_CAL_REGEX` to recalibrate a subset and keep
+the other rows.
+
+**Tests and budgets.** `tstTreePartitioner.hpp` gained (a)
+`testOwnerMapAgreement`, (b) `testPartitionBalance`, (c) `testParentChildCut`,
+(d) `testRefreshKeepsPartition`. TreePartitioner's six `default` rows were
+recalibrated (job `f3cY3QHjeejZ`): 6.74 / 4.16 / 5.50 / 6.25 / 7.22 / 8.36 s at
+np 1-6. The np-1 row includes the job's cold start, because the entry ran
+first and H0b's rule takes the max of three passes. No other stem went over
+budget.
+
+TreePartitioner figures, SERIAL (job `f3cXzm8FQ6gX`):
+
+| np | (b) max/mean c0, c1, c2, c3 | (c) cut / vote | (d) fallback, subset tree |
+| --- | --- | --- | --- |
+| 2 | 1.0092, 1.0039, 1.0018, 1.0073 | 0.0425 / 0.0425 | 25/410 |
+| 3 | 1.0046, 1.0195, 1.0124, 1.0017 | 0.0473 / 0.0473 | 7/649 |
+| 4 | 1.0175, 1.0156, 1.0110, 1.0085 | 0.0995 / 0.1044 | 5/742 |
+| 5 | 1.0500, 1.0449, 1.0422, 1.0455 | 0.0628 / 0.0673 | 29/855 |
+| 6 | 1.0393, 1.0430, 1.0495, 1.0498 | 0.0562 / 0.0620 | 193/906 |
+
+(d)'s post-migration tree has fallback 0 at every np: migration does not move
+the global particle set, so the rebuilt tree is the partitioned one. Under the
+random assignment (c) reads 0.50-0.82 against the vote rule's 0.40-0.68.
+
+**LaplaceSolve regeneration** (job `f3cY5dZ6SgwH`). `(2,0)` and `(2,1)`
+changed: `n_unique_ops` 390/400 became 393/462, with new `locals`, `optab` and
+`keys` hashes. The `(1,0)` record, the `initial` hash and the np-1 `field`
+record came out byte-identical. After the band rule the regeneration
+(job `f3cZC8dY5PjM`) reproduced the committed file byte for byte.
+
+**Step 7 — reproducibility.** Two passes, `MultiSolve` and `TreePartitioner`,
+SERIAL np 2-6 (`f3cZDMUWgsYj`) and HIP np 2-4 (`f3cZDMd8JhWw`). Every
+`[Canopy diag] partition` and `refresh_ownership` hash matches between passes:
+30-36 partitions per `MultiSolve` entry and 17 per `TreePartitioner` entry, at
+every np on both backends. So `cell_owner_map()` reproduces. SERIAL
+`[multisolve-dev]` lines are identical between passes at every np 2-6. HIP
+lines are not: no case is identical at np 2-4, relative spread 6.2e-12..2.0e-4
+(np 2), 5.8e-8..7.9e-5 (np 3), 4.5e-7..7.9e-5 (np 4). The partition is the
+same, so this is device reductions, as H0c found at np 1.
+
+**Step 7 — `MultiSolve` partitions** (SERIAL pass 1, `f3cZDMUWgsYj`; HIP's
+partition lines are identical):
+
+| np | partitions | particle max/mean > 1.05 | worst particle max/mean | worst band max/mean | cut ≤ vote | mean cut / vote | max ranks without leaf |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | 30 | 12 | 2.000 | 1.111 | 15/18 | 0.070 / 0.122 | 1 |
+| 3 | 34 | 14 | 2.980 | 1.154 | 15/21 | 0.073 / 0.180 | 1 |
+| 4 | 34 | 13 | 4.000 | 1.081 | 21/22 | 0.094 / 0.286 | 3 |
+| 5 | 36 | 17 | 4.270 | 1.364 | 20/22 | 0.161 / 0.344 | 3 |
+| 6 | 35 | 20 | 5.775 | 1.200 | 24/24 | 0.173 / 0.431 | 4 |
+
+The badly imbalanced partitions are all tiny graphs: 11-29 vertices, B = 0, so
+only the particle constraint is in play. Imbalance exactly 2.0 at np 2 or 4.0
+at np 4 means every particle on one rank. That fits one leaf holding nearly
+all the particles: the ejected-particle boxes of `LargeMotion_Rebuild` and
+`AutoRebalance` (Approach, "A lead E1 must read"), which no partition can
+split. The largest leaf's share was not measured, so this is not verified.
+**R9:** `refresh_ownership` fell back to a vote for 0 cells in every one of the
+30-36 refreshes per np, at every np on both backends.
+
+**Step 7 — partition time** (`TIMER_PARTITION` Max column, mean over every
+setup in the two passes; it includes migration). MJ figures are from job
+`f3bnvGg3MDo5` (SERIAL arm, MJ on the Serial node) and H0c's `f3cM4ghTjtiT`
+(MJ on HIP; its np-3 and np-4 means omit the stalled entries).
+
+| np | SERIAL MJ | SERIAL ParMETIS | HIP MJ | HIP ParMETIS |
+| --- | --- | --- | --- | --- |
+| 2 | 0.5 ms | 2.9 ms | 3.8 ms | 3.3 ms |
+| 3 | 0.7 ms | 7.8 ms | 10.8 ms | 15.2 ms |
+| 4 | 0.9 ms | 12.0 ms | 7.1 ms | 12.9 ms |
+| 5 | 1.0 ms | 17.3 ms | | |
+| 6 | 1.0 ms | 20.4 ms | | |
+
+On these trees of a few hundred cells, ParMETIS's distributed setup costs
+3-20x MJ-on-host; on HIP it is within 2x of MJ-on-HIP.
+
+**`AutoRebalance` after this arm** (SERIAL, `f3cZDMUWgsYj`): `max_vel_rel`
+1.74e-4 / 3.00e-4 / 5.06e-4 / 6.52e-3 / 1.71e-2 at np 2-6, `max_pos_rel`
+3.16e-3 at np 6. The np 5-6 excess is unchanged by the partitioner.
+
+**Out of scope, left stale:** `tests/tstFarFieldContract.hpp:862-868` still
+says the tree above one rank is partitioned by Zoltan2 multijagged
+(`FarFieldContract` was not built).
+
+**Affects:**
+- E1: its post-H2 SERIAL np 2-6 baseline is `f3cZDMUWgsYj`'s
+  `[multisolve-dev]` lines, which reproduce exactly, so its inert-when-off
+  np-2 comparison is character for character. Its HIP comparison must use a
+  spread: HIP lines differ between passes even on an identical partition
+  (6e-12..2e-4 at np 2-4). The HIP stall that blocked E1's HIP arm is gone.
+  The AutoRebalance np 5-6 excess survives the new partition.
+- tree-opt V1: every `[multisolve-dev]` figure above np 1 moved again (new
+  partition at np >= 2). Re-measure np >= 2 on this build before pinning
+  anything.
+- tree-opt T1: its `MultiSolve` HIP arm is no longer blocked by the stall.
