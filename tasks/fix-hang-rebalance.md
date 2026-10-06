@@ -227,16 +227,20 @@ ejected particle (mechanisms a and c) and says nothing about (b).
   `partition_cells` throws if ranks disagree on the vertex count.
 - `auto_maintain` (`src/Canopy_Solver.hpp:422-520`) takes `rebuild` when a
   particle escaped the box, `rebalance` when the cell-key set changed, and
-  `migrate` otherwise. AutoRebalance takes all three over its 8 steps at every
-  rank count. At np 5-6 the sequence is Rebalance, Rebuild, Rebuild, then
-  Rebalance for the remaining five steps (`[Canopy diag] auto_maintain`
-  lines on stderr, profiling builds only, job `f3bmo4JYikKh`).
+  `migrate` otherwise. Over AutoRebalance's 8 steps, np 1-4 take all three
+  and np 5-6 never take `migrate`. At np 5-6 the sequence is Rebalance,
+  Rebuild, Rebuild, then Rebalance for the remaining five steps; at np 3-4 it
+  is Migrate, Rebuild, Rebuild, then five Rebalances (`[Canopy diag]
+  auto_maintain` lines on stderr, profiling builds only, job `f3cZoFBJNNc7`).
 - `testMultiStepGravity` (`tests/tstMultiSolve.hpp:154`) draws particles per
   rank with seed `42 + rank * 7919` (`:208`), so global N is
   `200 * nprocs`. N and the rank count move together at every site.
-- The `[multisolve-dev]` report (`:644`) prints each site's end-of-run
-  `max_pos_rel` and `max_vel_rel` on every run. No per-step or per-solve
-  gradient error is printed anywhere in the stem.
+- The `[multisolve-dev]` report prints each site's end-of-run `max_pos_rel`
+  and `max_vel_rel` on every run. With `CANOPY_MULTISOLVE_PROBE=1`,
+  `testMultiStepGravity` also prints one `[multisolve-probe]` line per step
+  (the FMM gradient against brute force at the FMM's own positions, both
+  normalizations) and one `end` line (the `max_vel_rel` particle, close
+  encounters, and how many particles exceed the floor). E1 defines the fields.
 - `MultiSolve` sets `cfg.softening = 0.0` (`:344`), matching the unsoftened
   brute-force reference, so a close pair is unsoftened in both.
 
@@ -691,7 +695,7 @@ and the np 1-2 lines match `canopy-v1.f3bmo4JYikKh.log`.
   np 2-4; SERIAL `[multisolve-dev]` lines reproduce exactly, HIP lines do not.
   Imbalance, cut, fallback and timing figures are in the progress log.
 
-### E1 — Classify the AutoRebalance excess — **NOT STARTED**
+### E1 — Classify the AutoRebalance excess — **DONE**
 
 **Depends on:** H1 **DONE**: its watchdog keeps an np-3 hang from costing
 np 4-6 of a measurement pass. H2 **DONE**, both arms: H2 changes the np >= 2
@@ -759,6 +763,38 @@ and the HIP-against-SERIAL comparison. Both directions:
   (`01_fix-tests.md`) moved np 1, and the partitioner arm moved np >= 2. On
   HIP, with the probe unset, every np 1-2 `[multisolve-dev]` figure falls
   within step 0's pre-E1 spread.
+
+**Met.** Classification: **(a) trajectory amplification**, with no
+HIP-specific defect. Jobs `f3cZoFBJNNc7` (SERIAL np 1-6), `f3cZoFK9Wa7y` (HIP
+np 1-4) and `f3cZoFTWJXGj` (the two np-1 variants) ran two passes each on the
+final binary, with every self-test passing and no entry over budget. Every
+step of every case has a `[multisolve-probe]` line in both passes.
+- The per-step field-scale error is at most `1.52e-6` on SERIAL and `1.13e-6`
+  on HIP, on every step of every case at every np. For AutoRebalance it is at
+  most `9.5e-7` (np 3), about 2000x below the floor, so R4's every-step
+  condition holds. That excludes (b) and (c).
+- SERIAL np 1 at N = 1200 (`CANOPY_MULTISOLVE_NPP=1200`) has
+  `max_vel_rel = 2.67e-3`, above the floor with no partition. From step 2 on,
+  an ejected particle grows the root half-width from 0.64 to 332, and the
+  solve error is at round-off (`< 2e-15`).
+- The excess sits on close encounters. At np 6, 10 of the 11 particles above
+  the floor had one, against a 48% base rate; at N = 1200, 4 of 4. The
+  `max_vel_rel` particle's $\lvert v\rvert$ is ordinary (74.7 against a
+  median of 62.7 at np 6), so the excess is not a normalization artifact.
+- HIP field errors differ from SERIAL's by at most `2.97e-12` absolute. On
+  the steps above round-off, that is at most `9.1e-5` relative, except
+  `3.8e-4` at np 2, on a step whose error is `3.7e-12`.
+
+**Measuring:** at np 1, θ = 0.7 raises the AutoRebalance per-step field-scale
+error from at most `4.73e-8` to at most `6.78e-6`.
+
+**Inert when off** (`f3cZoEsnprZu`, `f3cZoF2MUhyR`, two passes each):
+- SERIAL np 1 and np 2 lines are identical to `f3cZDLkZqC6s` and
+  `f3cZDMUWgsYj`.
+- On HIP, each figure's relative deviation from the pre-E1 mean is within
+  that np's pre-E1 spread: `6.18e-5` against `6.78e-5` at np 1, `2.05e-4`
+  against `2.20e-4` at np 2. Measured figure by figure against that figure's
+  own 3-4-sample band, 5 of 24 fall outside (progress log, E1).
 
 ### E2 — Resolve the excess per E1's classification — **NOT STARTED**
 

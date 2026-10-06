@@ -310,8 +310,9 @@ HIP-`ExecutionSpace` README entry.
 - Leading candidate only. The Do step 2 fallbacks were not needed.
 - Reproducibility is measured with `[multisolve-dev]` from two `-V` np 1-6
   passes. No other target was built.
-- The np 1-2 lines are compared against `canopy-v1.f3bmo4JYikKh.log`, the
-  baseline for E1's "Inert when off" criterion.
+- The np 1-2 lines are compared against `canopy-v1.f3bmo4JYikKh.log`. That
+  log stopped being E1's "Inert when off" baseline once 01_fix-tests F4
+  (`8e6e0c5`) moved np 1 and the partitioner arm moved np >= 2 (section E1).
 
 **Departure from Do step 1: the node is set through `BasicUserTypes`, not
 `Tpetra::Map`.** Templating `Tpetra::Map<int, int64_t, Node>` compiles but
@@ -553,8 +554,9 @@ Thread 1 (Thread 0x155555548a80 (LWP 3023430)):
 **Affects:**
 - E1: measures on the post-H2 partition, which is now reproducible run to run
   at np 3-6 for the SERIAL binaries, so E1's two-run comparison at np >= 3
-  should agree exactly. Its np 1-2 baseline, `canopy-v1.f3bmo4JYikKh.log`,
-  still holds. AutoRebalance's np 5-6 excess survives H2 (table above), so the
+  should agree exactly. Its np 1-2 baseline is not `canopy-v1.f3bmo4JYikKh.log`:
+  F4's MAC-tie guard moved np 1 after this section, and the partitioner arm
+  moved np 2. E1 compares against `f3cZDLkZqC6s` and `f3cZDMUWgsYj`. AutoRebalance's np 5-6 excess survives H2 (table above), so the
   deviation is not caused by the HIP-node partition.
 - tree-opt V1: the np >= 3 `[multisolve-dev]` figures moved. Re-measure np >= 3
   on this build before pinning anything. np 1-2 are unchanged.
@@ -1541,3 +1543,225 @@ says the tree above one rank is partitioned by Zoltan2 multijagged
   partition at np >= 2). Re-measure np >= 2 on this build before pinning
   anything.
 - tree-opt T1: its `MultiSolve` HIP arm is no longer blocked by the stall.
+
+## E1
+
+All jobs ran `scripts/tuolumne/run_ctest_e1.flux` or `run_ctest_h0b.flux`
+on tuolumne, HEAD `f572ca1` plus this task's working-tree changes (each log's
+`git status --porcelain` shows ` M tests/tstMultiSolve.hpp`, except step 0's),
+Cray clang 20.0.0, flux-core 0.89.0, ROCm 6.4.2, `build-tuolumne/` with
+`Canopy_ENABLE_PROFILING=ON`, level 2. Logs are `canopy-e1.<jobid>.log` and
+`canopy-h0b.<jobid>.log` in the repo root (untracked). Every job passed the
+watchdog self-test (21.5-21.7 s, 3/3/3), and no entry went over budget or
+was cancelled. The tightest margin was HIP np 4 at 13.47 s against 20.
+
+| job | mode | binary |
+| --- | --- | --- |
+| `f3cZYwER1RzP` | `base` (Do step 0), HIP np 1-2 ×2 | HEAD, unmodified |
+| `f3cZcmUTK5f5`, `f3cZcmgeVB5Z`, `f3cZcmt3hemM` | calibrate `probe`, `probe-npp1200`, `probe-theta0.7` | first probe build |
+| `f3cZcn4dUXS7`, `f3cZcnFVZGCf`, `f3cZg84gofbu`, `f3cZg8ExngtX`, `f3cZg8RLhfJX` | inert serial/hip, measure serial/hip, variants | first probe build (superseded) |
+| `f3cZoEsnprZu`, `f3cZoF2MUhyR` | inert serial, inert hip | final |
+| `f3cZoFBJNNc7`, `f3cZoFK9Wa7y` | measure serial (np 1-6), measure hip (np 1-4) | final |
+| `f3cZoFTWJXGj` | variants (np 1: N = 1200; θ = 0.7) | final |
+
+The final build differs from the first only in the `end` line (below). Its
+348 SERIAL per-step lines are identical to the first build's.
+
+**Probe interface** (`tests/tstMultiSolve.hpp`).
+- `get_test_probe_enabled()` reads `CANOPY_MULTISOLVE_PROBE`: unset or `0` is
+  off, `1` is on, and anything else throws. `get_test_npp_override()` reads
+  `CANOPY_MULTISOLVE_NPP`: unset is 0, and anything but a positive integer
+  throws. The override replaces `num_particles_per_rank` at the top of
+  `testMultiStepGravity`, so it applies at all six sites.
+- New free function `nearest_separation(pos)`, O(N²), beside
+  `brute_force_gradient`.
+- Per step, after `solve()` and before the integrate kernel, every rank sends
+  its positions, charges, GlobalIds and FMM gradient to rank 0.
+  Rank 0 prints:
+  `[multisolve-probe] case nprocs step prev_action cells root_hw max_rel field_err rel_gid rel_g rel_sep abs_gid abs_dg abs_g abs_sep min_sep n_close close_thr`.
+  `prev_action` is `Setup` at step 0. `root_hw` is the depth-0 cell's
+  half-width.
+- At end of run, rank 0 prints:
+  `[multisolve-probe] case nprocs end max_vel_rel max_vel_gid max_vel_min_sep max_vel_v median_v run_min_sep n_close_run close_thr floor n_excess n_excess_close`.
+  The run minimum separation folds in every probed step plus the final FMM
+  state. `floor` is θ^(P+1) at the case's own θ.
+
+**Departures from Do.**
+- **Fields beyond the listed ones.** Step 1 names the argmax of the
+  per-particle error. The line also gives the argmax of the field-error
+  numerator (`abs_*`), and per-step `min_sep`/`n_close`. The `end` line adds
+  `max_vel_v`, `median_v`, `n_excess` and `n_excess_close`. I added them after
+  the first build: at np 5, the `max_vel_rel` particle had no close encounter
+  (0.00867 against 0.0080), so (a) needed a figure that does not rest on one
+  particle, and a check against a small-|v| normalization artifact.
+- **All six cases run with the probe**, not only AutoRebalance. That keeps one
+  ctest entry per (np, config) and gives every case's per-step error. The
+  `measure` and `variants` budget rows are calibrated on the whole stem.
+- **The np-1 variants ran twice each**, not once.
+- **The budget rows were calibrated on the first probe build.** The `end`-line
+  extension adds O(N) work once per case. The final runs stayed at or below
+  67% of their budgets.
+- **HIP inert-when-off uses the per-np spread.** Do step 0 gives 3 HIP samples
+  at np 1 and 4 at np 2 per figure. Five of the 24 figures (np 1:
+  AutoRebalance pos and vel; np 2: AutoRebalance vel, StableTree_Migrate pos
+  and vel) have a post-E1 sample outside a per-figure band of
+  [lo − (hi − lo), hi + (hi − lo)]. They deviate by 6e-10 to 6.2e-5 relative.
+  The per-np reading follows H0c's table and H2 step 7, which both state the
+  HIP spread as one range per np, and every figure passes it. Under the
+  per-figure reading, 3-4 samples are too few to bound HIP's run-to-run
+  tails. The first probe build's HIP inert run (`f3cZcnFVZGCf`) behaved the
+  same way: 4 samples outside per figure, max deviation 2.35e-5 at np 1 and
+  8.77e-5 at np 2.
+- `run_ctest_h0b.flux` takes the row config from `CANOPY_BUDGET_CONFIG`
+  (default `default`) and prints the `CANOPY_*` environment in its provenance.
+
+**Step 0: pre-E1 HIP spread.** The relative spread of each `[multisolve-dev]`
+figure, (max − min)/|mean|, over `f3cZYwER1RzP`'s two passes plus
+`f3cZDLuHNyCT` (np 1), or plus `f3cZDMd8JhWw`'s two passes (np 2):
+- np 1: 0 (LargeMotion_Rebuild pos, M2L_BinEdge_Fallback pos) to `6.78e-5`
+  (IntermediateMotion_Rebalance pos);
+- np 2: 0 (StableTree_Migrate pos) to `2.20e-4` (AutoMaintain pos).
+
+**Budget rows added** to `serial_runtimes.tsv`. All 55 `default` rows are
+unchanged (diffed before and after).
+
+| stem | np | config | t_ref_s | job |
+| --- | --- | --- | --- | --- |
+| MultiSolve | 1-6 | `probe` | 8.33 / 6.33 / 8.76 / 11.18 / 13.26 / 14.80 | `f3cZcmUTK5f5` |
+| MultiSolve | 1 | `probe-npp1200` | 18.36 | `f3cZcmgeVB5Z` |
+| MultiSolve | 1 | `probe-theta0.7` | 8.67 | `f3cZcmt3hemM` |
+
+Each np-1 row includes its job's cold start, because the entry ran first.
+The probe adds no measurable runtime at np 2-6.
+
+**Inert when off.**
+- SERIAL (`f3cZoEsnprZu`): the six np-1 lines of both passes are identical to
+  `f3cZDLkZqC6s`, and the six np-2 lines to `f3cZDMUWgsYj`.
+- HIP (`f3cZoF2MUhyR`): the largest relative deviation from the pre-E1 mean is
+  `6.18e-5` at np 1 (spread `6.78e-5`) and `2.05e-4` at np 2 (spread
+  `2.20e-4`).
+
+**Per-step field-scale error, max over steps and both passes:**
+
+| case | SERIAL np 1-6 | HIP np 1-4 |
+| --- | --- | --- |
+| AutoRebalance | 4.7e-8 / 7.3e-7 / 9.5e-7 / 7.3e-7 / 7.5e-7 / 7.0e-7 | 4.7e-8 / 7.3e-7 / 9.5e-7 / 7.3e-7 |
+| AutoMaintain, IntermediateMotion_Rebalance | 1.7e-8 / 5.1e-8 / 2.1e-7 / 2.4e-7 / 7.2e-7 / 9.2e-7 | same to 2 figures |
+| LargeMotion_Rebuild | 7.2e-7 / 7.8e-7 / 1.1e-6 / 4.5e-7 / 1.5e-6 / 9.2e-7 | same to 2 figures |
+| StableTree_Migrate | 1.6e-8 / 5.1e-8 / 2.1e-7 / 2.4e-7 / 7.2e-7 / 9.2e-7 | same to 2 figures |
+| M2L_BinEdge_Fallback | 1.2e-8 / 1.4e-8 / 2.3e-8 / 4.6e-9 / 4.3e-9 / 5.6e-9 | same to 2 figures |
+
+The worst figure anywhere is `1.52e-6` (LargeMotion_Rebuild, SERIAL np 5).
+The per-particle `max_rel` peaks at `4.9e-4` (LargeMotion_Rebuild np 3). The
+two SERIAL passes are identical line for line (174 of 174 step lines). On HIP,
+no step line is identical between passes.
+
+**AutoRebalance per step, SERIAL np 6** (np 5 has the same shape):
+
+| step | after | cells | root_hw | field_err | min_sep | n_close |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | Setup | 207 | 0.639 | 7.0e-7 | 8.6e-3 | 0 |
+| 1 | Rebalance | 198 | 0.628 | 5.0e-9 | 6.5e-4 | 33 |
+| 2 | Rebuild | 130 | 5.83 | 5.7e-9 | 9.3e-4 | 78 |
+| 3 | Rebuild | 60 | 11.4 | 1.8e-9 | 1.8e-3 | 65 |
+| 4 | Rebalance | 45 | 17.1 | 7.9e-10 | 3.0e-3 | 60 |
+| 5-7 | Rebalance | 29-33 | 22.9-34.3 | 7e-16 to 2.3e-15 | 1.6e-3 to 2.1e-3 | 50-103 |
+
+This confirms the Approach's lead. The cell count falls because the root
+half-width grows more than 50x: an ejected particle stretches the box. The
+cells left are then mostly P2P, and the solve becomes exact to round-off.
+Step 0, before any maintenance, has the run's largest error.
+
+**AutoRebalance end lines** (identical between passes on SERIAL; close-encounter
+threshold `close_thr` = 0.1 (0.8³/N)^(1/3)):
+
+| run | N | max_vel_rel | gid | its min sep / close_thr | its \|v\| / median \|v\| | n_close_run / N | n_excess (close) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SERIAL np 1 | 200 | 2.22e-6 | 75 | 0.0046 / 0.0137 | 23.4 / 6.4 | 63 / 200 | 0 |
+| SERIAL np 2 | 400 | 1.74e-4 | 287 | 0.0085 / 0.0109 | 7.1 / 12.9 | 152 / 400 | 0 |
+| SERIAL np 3 | 600 | 3.00e-4 | 467 | 0.0097 / 0.0095 | 11.8 / 20.2 | 214 / 600 | 0 |
+| SERIAL np 4 | 800 | 5.06e-4 | 794 | 0.0068 / 0.0086 | 38.0 / 30.0 | 290 / 800 | 0 |
+| SERIAL np 5 | 1000 | 6.52e-3 | 123 | 0.0087 / 0.0080 | 15.7 / 44.6 | 433 / 1000 | 2 (1) |
+| SERIAL np 6 | 1200 | 1.71e-2 | 821 | 0.0056 / 0.0075 | 74.7 / 62.7 | 577 / 1200 | 11 (10) |
+| SERIAL np 1, NPP 1200 | 1200 | 2.67e-3 | 328 | 0.0068 / 0.0075 | 59.3 / 50.5 | 531 / 1200 | 4 (4) |
+| SERIAL np 1, θ 0.7 | 200 | 1.95e-4 | 50 | 0.0039 / 0.0137 | 80.5 / 6.4 | 63 / 200 | 0 (floor 4.0e-2) |
+
+HIP np 1-4 match SERIAL's `max_vel_gid`, separations and counts, with
+`max_vel_rel` agreeing to 1.1e-4 relative (np 2) and 3e-6 or better at
+np 1, 3 and 4.
+
+**Classification: (a) trajectory amplification.** Deciding figures:
+- **Not (b) or (c).** The per-solve error is far below the floor on every step,
+  at every np, on both backends: AutoRebalance at most `9.5e-7`, any case at
+  most `1.52e-6`, against `1.95e-3`. At np 2-6 no AutoRebalance step after
+  a Rebuild or Rebalance exceeds the Setup step's error. At np 1, steps 1
+  (Migrate) and 4 (Rebuild) reach `4.7e-8` and `3.2e-8`, against Setup's
+  `1.9e-8`. Both are at np 1, where (b) does not apply. R4's every-step
+  condition holds.
+- **N-driven, not rank-driven.** SERIAL np 1 at N = 1200, with no partition,
+  has `max_vel_rel = 2.67e-3`, 1.4x the floor. It uses different particles
+  from np 6 (one seed rather than six), so the magnitude differs from np 6's
+  `1.71e-2`.
+- **Amplified from a tiny solve error.** In the N = 1200 run, a particle is
+  ejected at step 2: the root half-width goes from 0.64 to 55, then to 332 by
+  step 7. The tree drops to 17-18 cells, and the field error is below `2e-15`
+  from step 2 on. The only far-field error the trajectory ever sees is the
+  `3.8e-7` and `1.1e-9` of steps 0-1, so dynamics amplify it about 7000x into
+  `2.67e-3`. The system collapses unsoftened (`cfg.softening = 0`):
+  gradients reach 1.2e6 (5.6e5 at np 6), and the smallest separation
+  reaches 2.4e-4, 1/30 of the close threshold.
+- **The excess sits on close encounters.** At np 6, 10 of the 11 particles
+  above the floor came within `close_thr` of another particle, against a base
+  rate of 577/1200 = 48%. At N = 1200, 4 of 4 did, against 44%. At np 5, 1 of 2
+  did, against 43%.
+- **Not a normalization artifact.** The `max_vel_rel` particle's |v| is near
+  or above the median at np 6 (1.2x) and N = 1200 (1.2x). The exception is
+  np 5: there the particle (gid 123) is at 0.35x the median and missed the
+  threshold by 8% (0.0087 against 0.0080). Its relative figure is partly
+  inflated by a smaller |v|. Neither np 5 particle above the floor shows a
+  far-field error: every step's field error is at most `7.5e-7` there.
+
+**HIP against SERIAL.**
+- No HIP-specific far-field defect. Same partition (H2 step 7), same
+  maintenance actions and tree sizes. Across the 116 `(case, np, step)` triples
+  at np 1-4, HIP's per-step field error differs from SERIAL's by at most
+  `2.97e-12` absolute.
+- On steps whose error is above `1e-12`, the relative difference is at most
+  `4.4e-5`, `3.3e-5` and `9.1e-5` at np 1, 3 and 4, against HIP two-run spreads
+  of `4.0e-5`, `1.3e-5` and `3.7e-5`.
+- The outlier is np 2, AutoRebalance step 2: `3.8e-4` relative, on an error of
+  `3.67e-12` (SERIAL `3.6731e-12`, HIP `3.6717e-12` both passes), i.e.
+  `1.4e-15` absolute.
+- Read literally, Do step 3's rule ("differs by more than the two-run spread
+  on either backend") flags 89 of the 116 triples. SERIAL's spread is 0, and
+  with two HIP samples a fixed SERIAL value falls outside their range about
+  two thirds of the time with no defect at all. The flagged differences are
+  at the 1e-12 absolute level, nine orders of magnitude below the floor. I do
+  not count them as a second classification.
+- Separately, HIP's own two-run spread is large in relative terms only on
+  round-off steps (field error ≤ 3.2e-13), where it reaches 0.8.
+
+**Measuring.** At np 1, θ = 0.7 raises AutoRebalance's per-step field error
+from at most `4.73e-8` to at most `6.78e-6`, about 140x. Its worst step goes
+from `4.7e-8` to `6.8e-6` (step 1), and its `max_vel_rel` from `2.22e-6` to
+`1.95e-4`. The probe measures the far field.
+
+**Close-encounter definition.** The threshold is a separation below 0.1 of
+the mean spacing (0.8³/N)^(1/3): 0.0137, 0.0109, 0.0095, 0.0086, 0.0080 and
+0.0075 at N = 200-1200. Particles start on [0.1, 0.9]³; the collapse pulls
+31-48% of them inside it at least once by the end of the run.
+
+**Affects:**
+- E2: takes the (a) branch. Rewrite V1's derivation with the figures above:
+  the per-step field error at most `9.5e-7` on AutoRebalance, the ~7000x
+  amplification in the N = 1200 run, and the close-encounter concentration.
+  Change no `src/`. E2's exit criterion, field-scale error ≤ `1.95e-3` on
+  every probe step at SERIAL np 1-6 and HIP np 1-4, is already met by
+  `f3cZoFBJNNc7` and `f3cZoFK9Wa7y`. No second (HIP-specific) classification
+  was recorded. If E2 reads Do step 3's rule literally, see "HIP against
+  SERIAL" above first.
+- tree-opt V1: at any site where particles approach unsoftened, a trajectory
+  bound measures the dynamics, not the far field. AutoRebalance at np 5-6
+  (and at np 1 once N reaches 1200) is such a site. The per-step probe
+  (`CANOPY_MULTISOLVE_PROBE=1`) gauges the far field directly, at
+  ≤ `1.5e-6` for every case at θ = 0.5.

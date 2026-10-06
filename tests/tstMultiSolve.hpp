@@ -19,10 +19,14 @@
 
 #include <mpi.h>
 
+#include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -40,6 +44,36 @@ inline double get_test_mac_theta()
     if ( const char* s = std::getenv( "CANOPY_MAC_THETA" ) )
         return std::atof( s );
     return 0.5;
+}
+
+// CANOPY_MULTISOLVE_PROBE=1 enables the per-step far-field probe; unset or 0
+// leaves it off. Any other value throws.
+inline bool get_test_probe_enabled()
+{
+    const char* s = std::getenv( "CANOPY_MULTISOLVE_PROBE" );
+    if ( s == nullptr || std::string( s ) == "0" )
+        return false;
+    if ( std::string( s ) == "1" )
+        return true;
+    throw std::runtime_error( "CANOPY_MULTISOLVE_PROBE must be 0 or 1, got '" +
+                              std::string( s ) + "'" );
+}
+
+// CANOPY_MULTISOLVE_NPP: particles per rank at every call site, overriding
+// the site's own count. Returns 0 when unset; anything other than a positive
+// integer throws.
+inline int get_test_npp_override()
+{
+    const char* s = std::getenv( "CANOPY_MULTISOLVE_NPP" );
+    if ( s == nullptr )
+        return 0;
+    char* end = nullptr;
+    const long v = std::strtol( s, &end, 10 );
+    if ( end == s || *end != '\0' || v <= 0 || v > INT_MAX )
+        throw std::runtime_error(
+            "CANOPY_MULTISOLVE_NPP must be a positive integer, got '" +
+            std::string( s ) + "'" );
+    return static_cast<int>( v );
 }
 
 enum FieldIdx
@@ -104,6 +138,26 @@ brute_force_gradient( const std::vector<double>& pos, // 3 * N
         grad[3 * i + 1] = gy;
         grad[3 * i + 2] = gz;
     }
+}
+
+// Distance from each particle to its nearest other particle, O(N^2), in
+// position units. Used by the probe to flag close encounters.
+inline std::vector<double>
+nearest_separation( const std::vector<double>& pos ) // 3 * N
+{
+    const int N = static_cast<int>( pos.size() / 3 );
+    std::vector<double> nn( N, std::numeric_limits<double>::infinity() );
+    for ( int i = 0; i < N; i++ )
+        for ( int j = i + 1; j < N; j++ )
+        {
+            const double dx = pos[3 * i + 0] - pos[3 * j + 0];
+            const double dy = pos[3 * i + 1] - pos[3 * j + 1];
+            const double dz = pos[3 * i + 2] - pos[3 * j + 2];
+            const double r = std::sqrt( dx * dx + dy * dy + dz * dz );
+            nn[i] = std::min( nn[i], r );
+            nn[j] = std::min( nn[j], r );
+        }
+    return nn;
 }
 
 //---------------------------------------------------------------------------//
@@ -193,6 +247,10 @@ inline void testMultiStepGravity(
     int rank, nprocs;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
     MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    if ( const int npp = get_test_npp_override(); npp > 0 )
+        num_particles_per_rank = npp;
+    const bool probe = get_test_probe_enabled();
 
     // -----------------------------------------------------------------------
     // Generate random initial particles on host.
@@ -349,6 +407,22 @@ inline void testMultiStepGravity(
     int action_counts[3] = { 0, 0, 0 }; // [Migrate, Rebalance, Rebuild]
     long long max_fallback_total = 0;   // max across solves of (sum across ranks)
 
+    // Probe state (CANOPY_MULTISOLVE_PROBE=1 only).
+    //   prev_action: the maintenance call that produced this step's tree;
+    //     "Setup" before the first step.
+    //   close_thr: close-encounter separation, one tenth of the mean spacing
+    //     (0.8^3 / N)^(1/3) of N particles drawn on [0.1, 0.9]^3, position
+    //     units.
+    //   run_min_sep: rank 0, indexed by GlobalId; each particle's smallest
+    //     nearest-neighbour distance over every probed state, position units.
+    const char* prev_action = "Setup";
+    const double close_thr =
+        0.1 * std::cbrt( 0.8 * 0.8 * 0.8 / static_cast<double>( total_particles ) );
+    std::vector<double> run_min_sep;
+    if ( probe && rank == 0 )
+        run_min_sep.assign( total_particles,
+                            std::numeric_limits<double>::infinity() );
+
     // -----------------------------------------------------------------------
     // Time loop
     // -----------------------------------------------------------------------
@@ -453,6 +527,140 @@ inline void testMultiStepGravity(
                 max_fallback_total = global_fb;
         }
 
+        // Far-field probe: the FMM gradient against brute force evaluated at
+        // the FMM's own current positions, so no trajectory difference enters
+        // the error. One line per step on rank 0:
+        //   cells: global cell count of the replicated tree;
+        //   root_hw: root cell half-width, position units;
+        //   max_rel: max over particles of |g_fmm - g_bf| / |g_bf|,
+        //     dimensionless, inflated wherever |g_bf| cancels toward zero;
+        //   field_err: max_i |g_fmm - g_bf| / max_i |g_bf|, dimensionless,
+        //     the field_scales rule of tstLaplaceSolve.hpp;
+        //   rel_* / abs_*: the argmax particle of max_rel and of the field
+        //     error numerator: GlobalId, |g_bf| (charge / length^2) and its
+        //     nearest-neighbour distance (position units);
+        //   min_sep, n_close: the smallest nearest-neighbour distance and the
+        //     number of particles closer than close_thr to another.
+        if ( probe )
+        {
+            const int n_loc = solver.num_local_particles();
+            auto p_pos = Canopy::create_mirror_view_and_copy(
+                Kokkos::HostSpace(), Cabana::slice<Position>( particles ),
+                "probe_pos" );
+            auto p_chg = Canopy::create_mirror_view_and_copy(
+                Kokkos::HostSpace(), Cabana::slice<Charge>( particles ),
+                "probe_chg" );
+            auto p_gid = Canopy::create_mirror_view_and_copy(
+                Kokkos::HostSpace(), Cabana::slice<GlobalId>( particles ),
+                "probe_gid" );
+            auto p_grad = Kokkos::create_mirror_view_and_copy(
+                Kokkos::HostSpace(), solver.gradient() );
+
+            std::vector<double> loc_pos( 3 * n_loc ), loc_grad( 3 * n_loc ),
+                loc_chg( n_loc );
+            std::vector<int> loc_gid( n_loc );
+            for ( int i = 0; i < n_loc; i++ )
+            {
+                for ( int d = 0; d < 3; d++ )
+                {
+                    loc_pos[3 * i + d] = p_pos( i, d );
+                    loc_grad[3 * i + d] = p_grad( i, 0, d );
+                }
+                loc_chg[i] = p_chg( i, 0 );
+                loc_gid[i] = p_gid( i );
+            }
+
+            std::vector<int> cnt( nprocs, 0 ), dsp( nprocs, 0 ),
+                cnt3( nprocs, 0 ), dsp3( nprocs, 0 );
+            MPI_Gather( &n_loc, 1, MPI_INT, cnt.data(), 1, MPI_INT, 0,
+                        MPI_COMM_WORLD );
+            for ( int r = 0; r < nprocs; r++ )
+            {
+                cnt3[r] = 3 * cnt[r];
+                if ( r > 0 )
+                {
+                    dsp[r] = dsp[r - 1] + cnt[r - 1];
+                    dsp3[r] = dsp3[r - 1] + cnt3[r - 1];
+                }
+            }
+            const int n_root = ( rank == 0 ) ? total_particles : 0;
+            std::vector<double> all_pos( 3 * n_root ), all_grad( 3 * n_root ),
+                all_chg( n_root );
+            std::vector<int> all_gid( n_root );
+            MPI_Gatherv( loc_pos.data(), 3 * n_loc, MPI_DOUBLE, all_pos.data(),
+                         cnt3.data(), dsp3.data(), MPI_DOUBLE, 0,
+                         MPI_COMM_WORLD );
+            MPI_Gatherv( loc_grad.data(), 3 * n_loc, MPI_DOUBLE,
+                         all_grad.data(), cnt3.data(), dsp3.data(), MPI_DOUBLE,
+                         0, MPI_COMM_WORLD );
+            MPI_Gatherv( loc_chg.data(), n_loc, MPI_DOUBLE, all_chg.data(),
+                         cnt.data(), dsp.data(), MPI_DOUBLE, 0,
+                         MPI_COMM_WORLD );
+            MPI_Gatherv( loc_gid.data(), n_loc, MPI_INT, all_gid.data(),
+                         cnt.data(), dsp.data(), MPI_INT, 0, MPI_COMM_WORLD );
+
+            if ( rank == 0 )
+            {
+                std::vector<double> bf;
+                brute_force_gradient( all_pos, all_chg, bf );
+                const std::vector<double> nn = nearest_separation( all_pos );
+
+                double max_rel = 0.0, max_dg = 0.0, g_scale = 0.0;
+                double min_sep = std::numeric_limits<double>::infinity();
+                int i_rel = 0, i_abs = 0, n_close = 0;
+                for ( int i = 0; i < total_particles; i++ )
+                {
+                    const double dx = all_grad[3 * i + 0] - bf[3 * i + 0];
+                    const double dy = all_grad[3 * i + 1] - bf[3 * i + 1];
+                    const double dz = all_grad[3 * i + 2] - bf[3 * i + 2];
+                    const double dg = std::sqrt( dx * dx + dy * dy + dz * dz );
+                    const double gm =
+                        std::sqrt( bf[3 * i + 0] * bf[3 * i + 0] +
+                                   bf[3 * i + 1] * bf[3 * i + 1] +
+                                   bf[3 * i + 2] * bf[3 * i + 2] );
+                    const double rel = ( gm > 0.0 ) ? dg / gm : dg;
+                    if ( rel > max_rel )
+                    {
+                        max_rel = rel;
+                        i_rel = i;
+                    }
+                    if ( dg > max_dg )
+                    {
+                        max_dg = dg;
+                        i_abs = i;
+                    }
+                    g_scale = std::max( g_scale, gm );
+                    min_sep = std::min( min_sep, nn[i] );
+                    if ( nn[i] < close_thr )
+                        n_close++;
+                    double& m = run_min_sep[all_gid[i]];
+                    m = std::min( m, nn[i] );
+                }
+                auto gmag = [&]( int i ) {
+                    return std::sqrt( bf[3 * i + 0] * bf[3 * i + 0] +
+                                      bf[3 * i + 1] * bf[3 * i + 1] +
+                                      bf[3 * i + 2] * bf[3 * i + 2] );
+                };
+                double root_hw = 0.0;
+                for ( const auto& c : solver.builder().cells() )
+                    if ( c.depth == 0 )
+                        root_hw = c.half_width;
+                std::printf(
+                    "[multisolve-probe] case %s nprocs %d step %d "
+                    "prev_action %s cells %zu root_hw %.17g max_rel %.17g "
+                    "field_err %.17g rel_gid %d rel_g %.17g rel_sep %.17g "
+                    "abs_gid %d abs_dg %.17g abs_g %.17g abs_sep %.17g "
+                    "min_sep %.17g n_close %d close_thr %.17g\n",
+                    case_label, nprocs, step, prev_action,
+                    solver.builder().cells().size(), root_hw, max_rel,
+                    ( g_scale > 0.0 ) ? max_dg / g_scale : max_dg,
+                    all_gid[i_rel], gmag( i_rel ), nn[i_rel], all_gid[i_abs],
+                    max_dg, gmag( i_abs ), nn[i_abs], min_sep, n_close,
+                    close_thr );
+                std::fflush( stdout );
+            }
+        }
+
         // Update local positions and velocities from gradient.
         // Symplectic Euler: v += dt*g;  r += dt * drift * v.
         // Run on device so we write directly into the AoSoA slices.
@@ -503,12 +711,15 @@ inline void testMultiStepGravity(
         {
         case Solver_t::MaintenanceAction::Migrate:
             action_counts[0]++;
+            prev_action = "Migrate";
             break;
         case Solver_t::MaintenanceAction::Rebalance:
             action_counts[1]++;
+            prev_action = "Rebalance";
             break;
         case Solver_t::MaintenanceAction::Rebuild:
             action_counts[2]++;
+            prev_action = "Rebuild";
             break;
         }
     }
@@ -595,6 +806,15 @@ inline void testMultiStepGravity(
 
         double max_pos_rel = 0.0;
         double max_vel_rel = 0.0;
+        int max_vel_gid = -1;
+        // Probe only, indexed by GlobalId: |v_bf| and the relative velocity
+        // deviation of each particle.
+        std::vector<double> vmag_of_gid, vrel_of_gid;
+        if ( probe )
+        {
+            vmag_of_gid.assign( total_particles, 0.0 );
+            vrel_of_gid.assign( total_particles, 0.0 );
+        }
         for ( int i = 0; i < total_particles; i++ )
         {
             const int gid = fmm_gid_f[i];
@@ -627,7 +847,65 @@ inline void testMultiStepGravity(
             const double verr = std::sqrt( vdx * vdx + vdy * vdy + vdz * vdz );
             const double vrel = ( vmag > 1.0e-10 ) ? verr / vmag : verr;
             if ( vrel > max_vel_rel )
+            {
                 max_vel_rel = vrel;
+                max_vel_gid = gid;
+            }
+            if ( probe )
+            {
+                vmag_of_gid[gid] = vmag;
+                vrel_of_gid[gid] = vrel;
+            }
+        }
+
+        // Probe end-of-run line. Velocities in position units per time,
+        // separations in position units, the rest dimensionless.
+        //   max_vel_*: the max_vel_rel particle's GlobalId, its smallest
+        //     nearest-neighbour distance over the probed steps and the final
+        //     FMM state, and its |v_bf| against the median |v_bf|, which
+        //     shows whether its relative deviation is inflated by a small
+        //     |v_bf|;
+        //   run_min_sep, n_close_run: smallest distance over the run, and the
+        //     number of particles whose run minimum fell below close_thr;
+        //   n_excess, n_excess_close: particles whose relative velocity
+        //     deviation exceeds the floor theta^(P+1), and how many of those
+        //     had a close encounter.
+        if ( probe )
+        {
+            const std::vector<double> nn_f = nearest_separation( fmm_pos_f );
+            for ( int i = 0; i < total_particles; i++ )
+            {
+                double& m = run_min_sep[fmm_gid_f[i]];
+                m = std::min( m, nn_f[i] );
+            }
+            const double floor_rel = std::pow( mac_theta_used, P_ORDER + 1 );
+            int n_close_run = 0, n_excess = 0, n_excess_close = 0;
+            for ( int g = 0; g < total_particles; g++ )
+            {
+                const bool close = run_min_sep[g] < close_thr;
+                n_close_run += close;
+                if ( vrel_of_gid[g] > floor_rel )
+                {
+                    n_excess++;
+                    n_excess_close += close;
+                }
+            }
+            std::vector<double> vsorted = vmag_of_gid;
+            std::nth_element( vsorted.begin(),
+                              vsorted.begin() + total_particles / 2,
+                              vsorted.end() );
+            std::printf(
+                "[multisolve-probe] case %s nprocs %d end max_vel_rel %.17g "
+                "max_vel_gid %d max_vel_min_sep %.17g max_vel_v %.17g "
+                "median_v %.17g run_min_sep %.17g n_close_run %d "
+                "close_thr %.17g floor %.17g n_excess %d n_excess_close %d\n",
+                case_label, nprocs, max_vel_rel, max_vel_gid,
+                ( max_vel_gid >= 0 ) ? run_min_sep[max_vel_gid] : -1.0,
+                ( max_vel_gid >= 0 ) ? vmag_of_gid[max_vel_gid] : -1.0,
+                vsorted[total_particles / 2],
+                *std::min_element( run_min_sep.begin(), run_min_sep.end() ),
+                n_close_run, close_thr, floor_rel, n_excess, n_excess_close );
+            std::fflush( stdout );
         }
 
         // UNCONDITIONAL. The bounds below are measured bounds, so the

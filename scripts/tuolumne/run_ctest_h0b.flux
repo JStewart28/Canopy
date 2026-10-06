@@ -26,6 +26,11 @@
 # matches; rows for every other entry are kept unchanged, e.g.
 #   CANOPY_CAL_REGEX='^Canopy_Test_TreePartitioner_MPI_SERIAL_np_[1-6]$' \
 #       flux batch scripts/tuolumne/run_ctest_h0b.flux calibrate
+# CANOPY_BUDGET_CONFIG (default `default`) names the rows' config. A switch
+# configuration exports its switches at submit, e.g.
+#   CANOPY_MULTISOLVE_PROBE=1 CANOPY_BUDGET_CONFIG=probe \
+#   CANOPY_CAL_REGEX='^Canopy_Test_MultiSolve_MPI_SERIAL_np_[1-6]$' \
+#       flux batch scripts/tuolumne/run_ctest_h0b.flux calibrate
 #
 # Budget: a calibration pass of 55 entries is ~8-10 min, so three are ~30 min;
 # check is ~5 min. No set -e: MultiSolve exits 8 on its pre-existing 1e-8
@@ -52,6 +57,7 @@ JOBID=$(flux job id --to=f58 "$(flux getattr jobid 2>/dev/null)" 2>/dev/null || 
 
 echo "=== provenance ==="
 echo "submit: flux batch scripts/tuolumne/run_ctest_h0b.flux ${PHASE}"
+echo "CANOPY_* environment:"; env | grep "^CANOPY_" | sort
 echo "jobid: ${JOBID}"
 echo "host: $(hostname)"
 spack env status
@@ -105,6 +111,8 @@ if [ "${PHASE}" = calibrate ] || [ "${PHASE}" = all ]; then
     watchdog_wait_idle || exit 3
     CAL_REGEX=${CANOPY_CAL_REGEX:-'^Canopy_Test_(MultiSolve|DownwardSweep|UpwardSweep|TreeBuilder|TreePartitioner|CommunicationPlan|LaplaceSolve|CartesianTaylorSolve|FarFieldContract)_MPI_SERIAL_np_[1-6]$|^Canopy_Test_CartesianTaylor_SERIAL$'}
     echo "calibration regex: ${CAL_REGEX}"
+    CAL_CONFIG=${CANOPY_BUDGET_CONFIG:-default}
+    echo "calibration config: ${CAL_CONFIG}"
     entries=$(ctest -N -R "${CAL_REGEX}" 2>/dev/null | sed -n 's/^ *Test *#[0-9]*: //p')
     echo "calibration entries: $(echo ${entries} | wc -w)"
     samples=${WATCHDOG_DIR}/samples
@@ -142,9 +150,9 @@ if [ "${PHASE}" = calibrate ] || [ "${PHASE}" = all ]; then
         while IFS=$'\t' read -r entry tmax count; do
             [ "${count}" = 3 ] || { echo "BAD sample count ${count} for ${entry}" >&2; continue; }
             if [[ ${entry} =~ ^Canopy_Test_([A-Za-z0-9]+)_MPI_SERIAL_np_([0-9]+)$ ]]; then
-                echo -e "${BASH_REMATCH[1]}\t${BASH_REMATCH[2]}\tdefault\t${tmax}\t${JOBID}"
+                echo -e "${BASH_REMATCH[1]}\t${BASH_REMATCH[2]}\t${CAL_CONFIG}\t${tmax}\t${JOBID}"
             elif [[ ${entry} =~ ^Canopy_Test_([A-Za-z0-9]+)_SERIAL$ ]]; then
-                echo -e "${BASH_REMATCH[1]}\t1\tdefault\t${tmax}\t${JOBID}"
+                echo -e "${BASH_REMATCH[1]}\t1\t${CAL_CONFIG}\t${tmax}\t${JOBID}"
             fi
         done | sort -t$'\t' -k1,1 -k2,2n |
         awk -F'\t' -v OFS='\t' 'NR == FNR { if ($6 != "") x[$1 FS $2 FS $3] = $6 OFS $7; next }
