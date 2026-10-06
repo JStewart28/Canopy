@@ -19,22 +19,17 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_Sort.hpp>
 
-#include <Zoltan2_BasicVectorAdapter.hpp>
-#include <Zoltan2_PartitioningProblem.hpp>
-
-#include <Teuchos_Comm.hpp>
-#include <Teuchos_DefaultMpiComm.hpp>
-#include <Teuchos_DefaultSerialComm.hpp>
-#include <Teuchos_ParameterList.hpp>
-#include <Tpetra_KokkosCompat_ClassicNodeAPI_Wrapper.hpp>
+#include <parmetis.h>
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <limits>
-#include <type_traits>
-#include <typeinfo>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -60,6 +55,48 @@ struct CellOwnership
 };
 
 // ============================================================================
+// PartitionBand
+//
+// A contiguous range of tree depths [depth_lo, depth_hi] (inclusive) whose
+// cells share one ParMETIS balance constraint.
+// ============================================================================
+
+struct PartitionBand
+{
+    int depth_lo;
+    int depth_hi;
+};
+
+// ============================================================================
+// Lattice coordinates of a cell at its own depth, in [0, 2^depth) per axis.
+// Octant bit 0 is x, bit 1 is y, bit 2 is z (TreeBuilder::which_octant).
+// ============================================================================
+
+inline void key_to_lattice( MortonKey k, int depth, uint64_t ijk[3] )
+{
+    ijk[0] = ijk[1] = ijk[2] = 0;
+    for ( int l = depth - 1; l >= 0; --l )
+    {
+        const int oct = static_cast<int>( ( k >> ( 3 * l ) ) & 7 );
+        for ( int a = 0; a < 3; ++a )
+            ijk[a] = ( ijk[a] << 1 ) | static_cast<uint64_t>( ( oct >> a ) & 1 );
+    }
+}
+
+inline MortonKey lattice_to_key( const uint64_t ijk[3], int depth )
+{
+    MortonKey k = ROOT_KEY;
+    for ( int l = depth - 1; l >= 0; --l )
+    {
+        int oct = 0;
+        for ( int a = 0; a < 3; ++a )
+            oct |= static_cast<int>( ( ijk[a] >> l ) & 1 ) << a;
+        k = child_key( k, oct );
+    }
+    return k;
+}
+
+// ============================================================================
 // RedistributeResult
 // ============================================================================
 
@@ -74,9 +111,11 @@ struct RedistributeResult
 // TreePartitioner
 //
 // Given a globally-agreed adaptive octree (from TreeBuilder), partitions
-// leaf cells across MPI ranks using Zoltan2 RCB, derives internal cell
-// ownership using the replicated-coarse-layers strategy, migrates
+// every non-shared cell (each leaf, and each internal cell deeper than
+// replication_depth) across MPI ranks with a distributed ParMETIS graph
+// partition, keeps cells at depth <= replication_depth replicated, migrates
 // particles to their owning ranks, and sorts particles by leaf cell index.
+// docs/design.md, "Load Balancing", describes the graph.
 //
 // Sort-by-leaf invariant (after partition/repartition + sort_by_leaf):
 //   For each cell index i, particles in that cell live in the AoSoA at
@@ -103,8 +142,9 @@ class TreePartitioner
     //     64 + 512), so the allreduce cost at coarse layers
     //     is relatively small.
     //
-    // imbalance_tolerance: Zoltan2 imbalance tolerance (e.g., 0.05 means
-    //     allow 5% imbalance)
+    // imbalance_tolerance: allowed relative excess of each balance
+    //     constraint's per-rank load over its mean (e.g., 0.05 means max/mean
+    //     <= 1.05); passed to ParMETIS as ubvec
     // -----------------------------------------------------------------------
     TreePartitioner( MPI_Comm comm, int replication_depth = 3,
                      double imbalance_tolerance = 0.05 )
@@ -141,6 +181,11 @@ class TreePartitioner
 
     // Replication depth (for CommunicationPlan)
     int replication_depth() const { return _replication_depth; }
+
+    // Depth bands of the most recent partition: constraint 1 + b weighs the
+    // cells of bands()[b]. Empty when no cell is deeper than
+    // replication_depth.
+    const std::vector<PartitionBand>& bands() const { return _bands; }
 
     int num_local_particles() const { return _num_local_after; }
 
@@ -188,12 +233,14 @@ class TreePartitioner
     // Fast lookup: MortonKey -> owner rank
     std::unordered_map<MortonKey, int> _cell_owner_map;
 
-    // Cached leaf assignment from the most recent partition_leaves() call.
-    // Used by refresh_ownership_for_current_tree() to avoid re-running the
-    // non-deterministic Zoltan2 multijagged partitioner (which would emit a
-    // different assignment and trigger a multi-GB second migrate that
-    // overflows MPI's signed int count at scale).
-    std::unordered_map<MortonKey, int> _cached_leaf_owners;
+    // Cell assignment from the most recent partition_cells() call, plus the
+    // leaves refresh_ownership_for_current_tree() has voted on since. Read by
+    // that refresh so it keeps the partitioned owners instead of
+    // re-partitioning and re-migrating particles.
+    std::unordered_map<MortonKey, int> _cached_cell_owners;
+
+    // Depth bands of the most recent partition_cells() call.
+    std::vector<PartitionBand> _bands;
 
     // Post-migration local particle count
     int _num_local_after;
@@ -217,17 +264,43 @@ class TreePartitioner
     detail::RegisteredBufferPool<int, memory_space> _migrate_send_idx_pool;
 
   public:
-    // Internal: partition leaf cells using Zoltan2 RCB
-    // Returns a map: leaf MortonKey -> owning rank
+    // -----------------------------------------------------------------------
+    // partition_cells
+    //
+    // ParMETIS graph partition of every non-shared cell. adaptive selects
+    // ParMETIS_V3_AdaptiveRepart starting from the current _cell_owner_map;
+    // otherwise ParMETIS_V3_PartKway from a block distribution. Collective.
+    // Returns non-shared cell MortonKey -> owning rank, identical on every
+    // rank. Throws std::runtime_error if ranks disagree on the vertex count,
+    // ParMETIS fails on any rank, or a part falls outside [0, comm_size).
+    // -----------------------------------------------------------------------
     std::unordered_map<MortonKey, int>
-    partition_leaves( const std::vector<CellInfo>& cells );
+    partition_cells( const std::vector<CellInfo>& cells, bool adaptive );
+
+    // -----------------------------------------------------------------------
+    // vote_internal_owners
+    //
+    // The majority-vote rule: each internal cell deeper than
+    // replication_depth goes to the rank owning the most descendant particles
+    // (leaf global_count), ties to the lowest rank. Reads only the leaf
+    // entries of owners. Returns internal cell MortonKey -> rank for every
+    // such cell with a voting descendant.
+    // -----------------------------------------------------------------------
+    std::unordered_map<MortonKey, int>
+    vote_internal_owners( const std::vector<CellInfo>& cells,
+                          const std::unordered_map<MortonKey, int>& owners ) const;
 
     // -----------------------------------------------------------------------
     // derive_internal_ownership
+    //
+    // Fills _ownership and _cell_owner_map for cells. Every leaf must have an
+    // entry in owners (throws otherwise). Internal cells at depth <=
+    // replication_depth are OWNER_SHARED; deeper ones take their owners entry
+    // if present, else the vote rule.
     // -----------------------------------------------------------------------
     void derive_internal_ownership(
         const std::vector<CellInfo>& cells,
-        const std::unordered_map<MortonKey, int>& leaf_owners );
+        const std::unordered_map<MortonKey, int>& owners );
 
     // -----------------------------------------------------------------------
     // migrate_particles — coalesced, registration-bounded particle migration
@@ -266,15 +339,15 @@ class TreePartitioner
     // refresh_ownership_for_current_tree()
     //
     // Re-populate _cell_owner_map against tree_builder.cells() WITHOUT
-    // re-running Zoltan2 and WITHOUT migrating particles. Uses the leaf
-    // assignment cached from the most recent partition_leaves() call. For
-    // any leaf in the current tree that wasn't a leaf in the cached
-    // assignment, votes on owner based on which rank holds the most
-    // local particles in that leaf (single Allreduce on a per-leaf vote
-    // table). This keeps cell_owner_map consistent with the final cells
-    // passed to comm_plan.build, fixing the phantom-send M2M plan that
-    // arises when the post-migration build produces a different tree than
-    // the pre-partition build.
+    // re-partitioning and WITHOUT migrating particles. Every non-shared cell
+    // present in the cached assignment of the most recent partition_cells()
+    // call keeps its partitioned owner. A leaf absent from it goes to the
+    // rank holding the most local particles in that leaf (one Allgather of
+    // per-leaf counts), and an absent internal cell to the vote rule. This
+    // keeps cell_owner_map consistent with the final cells passed to
+    // comm_plan.build, fixing the phantom-send M2M plan that arises when the
+    // post-migration build produces a different tree than the pre-partition
+    // build.
     // -----------------------------------------------------------------------
     template <class AoSoAType>
     void refresh_ownership_for_current_tree(
@@ -312,189 +385,377 @@ class TreePartitioner
 
 template <class MemorySpace, class ExecutionSpace>
 std::unordered_map<MortonKey, int>
-TreePartitioner<MemorySpace, ExecutionSpace>::partition_leaves(
-    const std::vector<CellInfo>& cells )
+TreePartitioner<MemorySpace, ExecutionSpace>::partition_cells(
+    const std::vector<CellInfo>& cells, bool adaptive )
 {
-    // Collect leaf cells
-    std::vector<MortonKey> leaf_keys;
-    std::vector<double> leaf_x, leaf_y, leaf_z;
-    std::vector<double> leaf_weights;
-
-    for ( const auto& c : cells )
+    // Vertices: every non-shared cell, in Morton pre-order (each key shifted
+    // to the deepest depth, ancestors first on ties). cells is identical on
+    // every rank (TreeBuilder builds the full topology from all-reduced
+    // counts), so this list is too.
+    std::vector<int> vtx; // index into cells, per Morton position m
+    int deepest = 0;
+    for ( int i = 0; i < static_cast<int>( cells.size() ); ++i )
     {
-        if ( c.is_leaf )
+        const auto& c = cells[i];
+        if ( c.is_leaf || c.depth > _replication_depth )
         {
-            leaf_keys.push_back( c.key );
-            leaf_x.push_back( c.center[0] );
-            leaf_y.push_back( c.center[1] );
-            leaf_z.push_back( c.center[2] );
-            leaf_weights.push_back( static_cast<double>( c.global_count ) );
+            vtx.push_back( i );
+            deepest = std::max( deepest, c.depth );
         }
     }
+    std::sort( vtx.begin(), vtx.end(),
+               [&]( int a, int b )
+               {
+                   const MortonKey ka = cells[a].key
+                                        << ( 3 * ( deepest - cells[a].depth ) );
+                   const MortonKey kb = cells[b].key
+                                        << ( 3 * ( deepest - cells[b].depth ) );
+                   return ka != kb ? ka < kb : cells[a].depth < cells[b].depth;
+               } );
+    const int n = static_cast<int>( vtx.size() );
 
-    int num_leaves = static_cast<int>( leaf_keys.size() );
+    // Bands: the non-shared depths replication_depth+1 .. deepest, split into
+    // B = min(3, count) contiguous groups of near-equal depth count.
+    _bands.clear();
+    const int n_depths = std::max( 0, deepest - _replication_depth );
+    const int num_bands = std::min( 3, n_depths );
+    for ( int b = 0, lo = _replication_depth + 1; b < num_bands; ++b )
+    {
+        const int width =
+            n_depths / num_bands + ( b < n_depths % num_bands ? 1 : 0 );
+        _bands.push_back( { lo, lo + width - 1 } );
+        lo += width;
+    }
+    const int ncon = 1 + num_bands;
 
-    // If only one rank, all leaves are owned by rank 0
-    // and can skip partitioning.
+    std::unordered_map<MortonKey, int> result;
+    result.reserve( n );
     if ( _comm_size == 1 )
     {
-        std::unordered_map<MortonKey, int> result;
-        for ( int i = 0; i < num_leaves; i++ )
-            result[leaf_keys[i]] = 0;
+        for ( int m = 0; m < n; ++m )
+            result[cells[vtx[m]].key] = 0;
         return result;
     }
 
-    // ---------------------------------------------------------------
-    // Build Zoltan2 adapter
-    //
-    // Every rank has the identical set of leaves (the tree structure is
-    // replicated globally), so each rank can build the full-leaf-set adapter
-    // locally. The partition itself is NOT recomputed redundantly per rank:
-    // the "multijagged" algorithm used below is non-deterministic, so only
-    // rank 0 solves and then broadcasts the assignment (see the solve step
-    // further down). The adapter is still constructed everywhere because it
-    // is cheap and keeps the leaf ordering / global-ID indexing identical
-    // across ranks, which is what makes the broadcast assignment meaningful
-    // on every rank.
-    //
-    // Use global IDs = leaf index (0..num_leaves-1), which are the
-    // same on every rank since _cells from TreeBuilder is identical on all
-    // ranks.
-    // ---------------------------------------------------------------
+    long long n_minmax[2] = { n, -static_cast<long long>( n ) };
+    MPI_Allreduce( MPI_IN_PLACE, n_minmax, 2, MPI_LONG_LONG, MPI_MAX, _comm );
+    if ( n_minmax[0] != -n_minmax[1] )
+        throw std::runtime_error(
+            "TreePartitioner::partition_cells: ranks disagree on the vertex "
+            "count (max " +
+            std::to_string( n_minmax[0] ) + ", min " +
+            std::to_string( -n_minmax[1] ) + ")" );
 
-    // Create Zoltan2 adapter
-    // BasicVectorAdapter needs:
-    //   numIds, globalIds, coords, weights
-    // Zoltan2 runs on the partitioner's execution space. Its node comes from
-    // InputTraits<User>, which defaults to Tpetra's default node (HIP in this
-    // build) for any User without a specialization, Tpetra::Map included; MJ's
-    // device fences there stall intermittently at np >= 3 even for a Serial
-    // solver (tasks/fix-hang-rebalance-progress-log.md, H1). BasicUserTypes
-    // sets the node and keeps Zoltan2's default scalar/lno/gno.
-    using zoltan_node_t =
-        Tpetra::KokkosCompat::KokkosDeviceWrapperNode<ExecutionSpace>;
-    using adapter_t = Zoltan2::BasicVectorAdapter<Zoltan2::BasicUserTypes<
-        Zoltan2::default_scalar_t, Zoltan2::default_lno_t,
-        Zoltan2::default_gno_t, zoltan_node_t>>;
-    static_assert(
-        std::is_same_v<typename adapter_t::node_t::execution_space,
-                       ExecutionSpace>,
-        "partition_leaves: Zoltan2 must run on the partitioner's "
-        "ExecutionSpace, not Tpetra's default node" );
-    // Must also use Zoltan types
-    using glbl_id_t = typename adapter_t::gno_t;
-    using scalar_t = typename adapter_t::scalar_t;
-    using longint_t = typename adapter_t::lno_t;
+    // Supplier rank of each vertex. partition: rank r supplies the r-th
+    // contiguous block of the Morton list. repartition: a cell's previous
+    // owner supplies it; cells new to the tree follow the block rule.
+    std::vector<long long> block_start( _comm_size + 1 );
+    for ( int r = 0; r <= _comm_size; ++r )
+        block_start[r] = static_cast<long long>( r ) * n / _comm_size;
+    std::vector<int> supplier( n );
+    for ( int m = 0; m < n; ++m )
+    {
+        supplier[m] = static_cast<int>(
+            std::upper_bound( block_start.begin(), block_start.end() - 1, m ) -
+            block_start.begin() - 1 );
+        if ( adaptive )
+        {
+            auto it = _cell_owner_map.find( cells[vtx[m]].key );
+            if ( it != _cell_owner_map.end() && it->second >= 0 &&
+                 it->second < _comm_size )
+                supplier[m] = it->second;
+        }
+    }
 
-    // Zoltan2 needs coordinates as an array of pointers, one per dim
-    const scalar_t* coords[3] = { leaf_x.data(), leaf_y.data(), leaf_z.data() };
-    // const int strides[3] = { 1, 1, 1 };
+    // ParMETIS global IDs must be contiguous per rank: number vertices by
+    // (supplier, Morton position).
+    std::vector<idx_t> vtxdist( _comm_size + 1, 0 );
+    for ( int m = 0; m < n; ++m )
+        vtxdist[supplier[m] + 1]++;
+    for ( int r = 0; r < _comm_size; ++r )
+        vtxdist[r + 1] += vtxdist[r];
+    std::vector<int> gid_of_m( n ), m_of_gid( n );
+    {
+        std::vector<idx_t> cursor( vtxdist.begin(), vtxdist.end() - 1 );
+        for ( int m = 0; m < n; ++m )
+        {
+            const int g = static_cast<int>( cursor[supplier[m]]++ );
+            gid_of_m[m] = g;
+            m_of_gid[g] = m;
+        }
+    }
+    std::unordered_map<MortonKey, int> m_of_key;
+    m_of_key.reserve( n );
+    for ( int m = 0; m < n; ++m )
+        m_of_key[cells[vtx[m]].key] = m;
 
-    // Global IDs for the leaves
-    std::vector<glbl_id_t> global_ids( num_leaves );
-    for ( int i = 0; i < num_leaves; i++ )
-        global_ids[i] = static_cast<glbl_id_t>( i );
+    // Local rows: parent-child edges between non-shared cells (M2M and L2L
+    // traffic), and same-depth face/edge/corner neighbours (near-field and
+    // M2L proximity). A parent-child edge weighs 27 and a neighbour edge 1, so
+    // one parent-child edge outweighs all 26 neighbours of a cell; with unit
+    // weights ParMETIS cuts more parent-child pairs than the vote rule
+    // (fix-hang-rebalance-progress-log.md, H2 partitioner arm). Symmetric by
+    // construction.
+    constexpr idx_t parent_child_weight = 27;
+    const idx_t g_lo = vtxdist[_rank];
+    const idx_t n_local = vtxdist[_rank + 1] - g_lo;
+    std::vector<idx_t> xadj( 1, 0 ), adjncy, adjwgt, vwgt( n_local * ncon, 0 );
+    auto add_edge = [&]( MortonKey k, idx_t w )
+    {
+        auto it = m_of_key.find( k );
+        if ( it != m_of_key.end() )
+        {
+            adjncy.push_back( gid_of_m[it->second] );
+            adjwgt.push_back( w );
+        }
+    };
+    for ( idx_t l = 0; l < n_local; ++l )
+    {
+        const CellInfo& c = cells[vtx[m_of_gid[g_lo + l]]];
+        if ( c.depth > 0 )
+            add_edge( parent_key( c.key ), parent_child_weight );
+        if ( !c.is_leaf )
+            for ( int oct = 0; oct < MAX_CHILDREN; ++oct )
+                add_edge( child_key( c.key, oct ), parent_child_weight );
+        uint64_t ijk[3];
+        key_to_lattice( c.key, c.depth, ijk );
+        const int64_t side = int64_t( 1 ) << c.depth;
+        for ( int dx = -1; dx <= 1; ++dx )
+            for ( int dy = -1; dy <= 1; ++dy )
+                for ( int dz = -1; dz <= 1; ++dz )
+                {
+                    const int64_t nb[3] = { static_cast<int64_t>( ijk[0] ) + dx,
+                                            static_cast<int64_t>( ijk[1] ) + dy,
+                                            static_cast<int64_t>( ijk[2] ) + dz };
+                    if ( ( dx == 0 && dy == 0 && dz == 0 ) || nb[0] < 0 ||
+                         nb[1] < 0 || nb[2] < 0 || nb[0] >= side ||
+                         nb[1] >= side || nb[2] >= side )
+                        continue;
+                    const uint64_t nbu[3] = { static_cast<uint64_t>( nb[0] ),
+                                              static_cast<uint64_t>( nb[1] ),
+                                              static_cast<uint64_t>( nb[2] ) };
+                    add_edge( lattice_to_key( nbu, c.depth ), 1 );
+                }
+        xadj.push_back( static_cast<idx_t>( adjncy.size() ) );
 
-    // Build a Teuchos communicator for Zoltan2.
-    // Use SerialComm (not MpiComm(MPI_COMM_SELF)) so Zoltan2's internal
-    // sends/receives never enter MPICH. Only rank 0 actually solves the
-    // partitioning problem (below), and it does so serially over this
-    // SerialComm, so no real MPI is needed inside Zoltan2; routing
-    // self-sends through Cray MPICH's CMA single-copy path was triggering
-    // process_vm_readv: Bad address on AMD/HIP builds.
-    auto teuchos_comm =
-        Teuchos::rcp( new Teuchos::SerialComm<int>() );
+        // Constraint 0: particles (P2P, P2M, L2P work). Constraint 1 + b: one
+        // per cell in band b (M2M, M2L, L2L work).
+        vwgt[l * ncon] = c.is_leaf ? c.global_count : 0;
+        for ( int b = 0; b < num_bands; ++b )
+            if ( c.depth >= _bands[b].depth_lo && c.depth <= _bands[b].depth_hi )
+                vwgt[l * ncon + 1 + b] = 1;
+    }
 
-    const glbl_id_t* ids_ptr = global_ids.data();
-    const scalar_t* x_ptr = leaf_x.data();
-    const scalar_t* y_ptr = leaf_y.data();
-    const scalar_t* z_ptr = leaf_z.data();
-    const scalar_t* w_ptr = leaf_weights.data();
+    // ParMETIS rejects a rank with no vertices: solve on the ranks that have
+    // some, ordered as in vtxdist.
+    MPI_Comm pm_comm;
+    MPI_Comm_split( _comm, n_local > 0 ? 0 : MPI_UNDEFINED, _rank, &pm_comm );
+    std::vector<idx_t> pm_vtxdist( 1, 0 );
+    for ( int r = 0; r < _comm_size; ++r )
+        if ( vtxdist[r + 1] > vtxdist[r] )
+            pm_vtxdist.push_back( vtxdist[r + 1] );
+    const int n_keep = static_cast<int>( pm_vtxdist.size() ) - 1;
 
-    adapter_t adapter( static_cast<longint_t>( num_leaves ), ids_ptr, x_ptr,
-                       y_ptr, z_ptr, 1, 1, 1, // strides for x, y, z
-                       true,                  // use weights
-                       w_ptr,
-                       1 ); // weight stride
+    std::vector<idx_t> part( n_local, _rank );
+    int pm_status = METIS_OK;
+    if ( pm_comm != MPI_COMM_NULL )
+    {
+        idx_t wgtflag = 3; // vertex and edge weights
+        idx_t numflag = 0;
+        idx_t pm_ncon = ncon;
+        idx_t nparts = _comm_size;
+        idx_t edgecut = 0;
+        std::vector<real_t> tpwgts( static_cast<size_t>( ncon ) * _comm_size,
+                                    real_t( 1 ) / real_t( _comm_size ) );
+        std::vector<real_t> ubvec( ncon,
+                                   static_cast<real_t>( _imbalance_tolerance ) );
+        // use options, no debug output, fixed seed, and part[] on input is the
+        // current partition (sub-domains need not match processes).
+        idx_t options[4] = { 1, 0, 15, PARMETIS_PSR_UNCOUPLED };
+        idx_t dummy_adj = 0, dummy_wgt = 1;
+        idx_t* adj = adjncy.empty() ? &dummy_adj : adjncy.data();
+        idx_t* adj_w = adjwgt.empty() ? &dummy_wgt : adjwgt.data();
+        if ( adaptive && n_keep >= 2 )
+        {
+            std::vector<idx_t> vsize( n_local, 1 );
+            real_t itr = 100.0; // inter-processor comm vs. redistribution cost
+            pm_status = ParMETIS_V3_AdaptiveRepart(
+                pm_vtxdist.data(), xadj.data(), adj, vwgt.data(), vsize.data(),
+                adj_w, &wgtflag, &numflag, &pm_ncon, &nparts, tpwgts.data(),
+                ubvec.data(), &itr, options, &edgecut, part.data(), &pm_comm );
+        }
+        else
+        {
+            pm_status = ParMETIS_V3_PartKway(
+                pm_vtxdist.data(), xadj.data(), adj, vwgt.data(), adj_w,
+                &wgtflag, &numflag, &pm_ncon, &nparts, tpwgts.data(),
+                ubvec.data(), options, &edgecut, part.data(), &pm_comm );
+        }
+        MPI_Comm_free( &pm_comm );
+    }
+    int pm_failed = ( pm_status != METIS_OK ) ? 1 : 0;
+    MPI_Allreduce( MPI_IN_PLACE, &pm_failed, 1, MPI_INT, MPI_MAX, _comm );
+    if ( pm_failed )
+        throw std::runtime_error(
+            std::string( "TreePartitioner::partition_cells: ParMETIS_V3_" ) +
+            ( adaptive && n_keep >= 2 ? "AdaptiveRepart" : "PartKway" ) +
+            " did not return METIS_OK on at least one rank" );
 
-    // Configure Zoltan2
-    Teuchos::ParameterList params;
-    params.set( "algorithm", "multijagged" );
-    params.set( "num_global_parts", _comm_size );
-    params.set( "imbalance_tolerance", _imbalance_tolerance );
-    params.set( "debug_level", "no_status" );
+    // Every rank gets the full key -> rank map its consumers read.
+    std::vector<int> counts( _comm_size ), displs( _comm_size );
+    for ( int r = 0; r < _comm_size; ++r )
+    {
+        displs[r] = static_cast<int>( vtxdist[r] );
+        counts[r] = static_cast<int>( vtxdist[r + 1] - vtxdist[r] );
+    }
+    std::vector<int> local_parts( part.begin(), part.end() );
+    std::vector<int> all_parts( n );
+    MPI_Allgatherv( local_parts.data(), static_cast<int>( n_local ), MPI_INT,
+                    all_parts.data(), counts.data(), displs.data(), MPI_INT,
+                    _comm );
+    for ( int g = 0; g < n; ++g )
+        if ( all_parts[g] < 0 || all_parts[g] >= _comm_size )
+            throw std::runtime_error(
+                "TreePartitioner::partition_cells: ParMETIS returned part " +
+                std::to_string( all_parts[g] ) + " outside [0, " +
+                std::to_string( _comm_size ) + ")" );
 
-    // Need these lines to disable Zoltan-level
-    // status printouts
-    Teuchos::ParameterList zoltanParams;
-    zoltanParams.set( "DEBUG_LEVEL", "0" );
-    params.set( "zoltan_parameters", zoltanParams );
+    for ( int g = 0; g < n; ++g )
+        result[cells[vtx[m_of_gid[g]]].key] = all_parts[g];
 
-    // Solve on rank 0 only, then broadcast. We cannot use ther deterministic "rcb"
-    // algorithm because it breaks on Tuolumne. The "multijagged" algorithm is
-    // non-deterministic, so only rank 0 computes, then broadcasts.
-    std::vector<int> parts_storage( num_leaves );
+#if defined( CANOPY_ENABLE_PROFILING )
     if ( _rank == 0 )
     {
-        Zoltan2::PartitioningProblem<adapter_t> problem( &adapter, &params,
-                                                            teuchos_comm );
-        problem.solve();
-        const auto& solution = problem.getSolution();
-        const int* parts_view = solution.getPartListView();
-        for ( int i = 0; i < num_leaves; i++ )
-            parts_storage[i] = parts_view[i];
+        // Per-constraint max/mean, the non-shared parent-child cut fraction
+        // against the vote rule on the same leaf assignment, and the number
+        // of ranks owning no leaf.
+        std::vector<double> load( static_cast<size_t>( ncon ) * _comm_size,
+                                  0.0 );
+        std::vector<int> leaves_per_rank( _comm_size, 0 );
+        for ( int m = 0; m < n; ++m )
+        {
+            const CellInfo& c = cells[vtx[m]];
+            const int r = all_parts[gid_of_m[m]];
+            if ( c.is_leaf )
+            {
+                load[r] += c.global_count;
+                leaves_per_rank[r]++;
+            }
+            for ( int b = 0; b < num_bands; ++b )
+                if ( c.depth >= _bands[b].depth_lo &&
+                     c.depth <= _bands[b].depth_hi )
+                    load[static_cast<size_t>( 1 + b ) * _comm_size + r] += 1.0;
+        }
+        std::string imb, band_str;
+        for ( int k = 0; k < ncon; ++k )
+        {
+            double mx = 0.0, sum = 0.0;
+            for ( int r = 0; r < _comm_size; ++r )
+            {
+                const double v = load[static_cast<size_t>( k ) * _comm_size + r];
+                mx = std::max( mx, v );
+                sum += v;
+            }
+            char buf[32];
+            std::snprintf( buf, sizeof( buf ), "%s%.4f", k ? "," : "",
+                           sum > 0.0 ? mx * _comm_size / sum : 0.0 );
+            imb += buf;
+        }
+        for ( int b = 0; b < num_bands; ++b )
+            band_str += ( b ? "," : "" ) + std::to_string( _bands[b].depth_lo ) +
+                        "-" + std::to_string( _bands[b].depth_hi );
+        const auto vote = vote_internal_owners( cells, result );
+        long long pairs = 0, cut = 0, cut_vote = 0;
+        for ( int m = 0; m < n; ++m )
+        {
+            const CellInfo& c = cells[vtx[m]];
+            if ( c.depth == 0 )
+                continue;
+            auto pit = result.find( parent_key( c.key ) );
+            if ( pit == result.end() )
+                continue;
+            pairs++;
+            const int child_owner = result.at( c.key );
+            if ( child_owner != pit->second )
+                cut++;
+            const int vc = c.is_leaf ? child_owner : vote.at( c.key );
+            if ( vc != vote.at( pit->first ) )
+                cut_vote++;
+        }
+        int no_leaf = 0;
+        for ( int r = 0; r < _comm_size; ++r )
+            no_leaf += ( leaves_per_rank[r] == 0 );
+        std::fprintf(
+            stderr,
+            "[Canopy diag] partition method=%s np=%d nverts=%d B=%d bands=%s "
+            "imbalance=%s pc_pairs=%lld pc_cut=%.4f pc_cut_vote=%.4f "
+            "ranks_without_leaf=%d\n",
+            adaptive && n_keep >= 2 ? "AdaptiveRepart" : "PartKway",
+            _comm_size, n, num_bands, band_str.empty() ? "none" : band_str.c_str(),
+            imb.c_str(), pairs, pairs ? double( cut ) / pairs : 0.0,
+            pairs ? double( cut_vote ) / pairs : 0.0, no_leaf );
     }
-    MPI_Bcast( parts_storage.data(), num_leaves, MPI_INT, 0, _comm );
-    const int* parts = parts_storage.data();
+#endif
+
+    return result;
+}
+
+template <class MemorySpace, class ExecutionSpace>
+std::unordered_map<MortonKey, int>
+TreePartitioner<MemorySpace, ExecutionSpace>::vote_internal_owners(
+    const std::vector<CellInfo>& cells,
+    const std::unordered_map<MortonKey, int>& owners ) const
+{
+    std::unordered_map<MortonKey, std::unordered_map<int, int64_t>> vote_map;
+    for ( const auto& c : cells )
+    {
+        if ( !c.is_leaf )
+            continue;
+        auto owner_it = owners.find( c.key );
+        if ( owner_it == owners.end() )
+            continue;
+
+        const int leaf_rank = owner_it->second;
+        const int64_t count = static_cast<int64_t>( c.global_count );
+        MortonKey parent = parent_key( c.key );
+        while ( parent >= ROOT_KEY )
+        {
+            if ( key_depth( parent ) <= _replication_depth )
+                break;
+            vote_map[parent][leaf_rank] += count;
+            parent = parent_key( parent );
+        }
+    }
 
     std::unordered_map<MortonKey, int> result;
-    result.reserve( num_leaves );
-    for ( int i = 0; i < num_leaves; i++ )
-        result[leaf_keys[i]] = parts[i];
-
+    result.reserve( vote_map.size() );
+    for ( const auto& [key, votes] : vote_map )
+    {
+        // Lowest rank wins on equal votes: unordered_map iteration order is
+        // not guaranteed identical across processes, so without a total
+        // order two ranks could pick different owners for the same cell.
+        int best_rank = std::numeric_limits<int>::max();
+        int64_t best_count = -1;
+        for ( const auto& [r, cnt] : votes )
+        {
+            if ( cnt > best_count || ( cnt == best_count && r < best_rank ) )
+            {
+                best_count = cnt;
+                best_rank = r;
+            }
+        }
+        result[key] = best_rank;
+    }
     return result;
 }
 
 template <class MemorySpace, class ExecutionSpace>
 void TreePartitioner<MemorySpace, ExecutionSpace>::derive_internal_ownership(
     const std::vector<CellInfo>& cells,
-    const std::unordered_map<MortonKey, int>& leaf_owners )
+    const std::unordered_map<MortonKey, int>& owners )
 {
-    // Build a key -> CellInfo lookup
-    std::unordered_map<MortonKey, const CellInfo*> cell_map;
-    for ( const auto& c : cells )
-        cell_map[c.key] = &c;
+    const auto vote = vote_internal_owners( cells, owners );
 
-    std::unordered_map<MortonKey, std::unordered_map<int, int64_t>> vote_map;
-
-    for ( const auto& c : cells )
-    {
-        // Must start at leaf cells
-        if ( !c.is_leaf )
-            continue;
-
-        auto owner_it = leaf_owners.find( c.key );
-        if ( owner_it == leaf_owners.end() )
-            continue;
-
-        int leaf_rank = owner_it->second;
-        // Get particle count in this leaf cell
-        int64_t count = static_cast<int64_t>( c.global_count );
-
-        // Walk up from this leaf to the root, adding votes
-        MortonKey parent = parent_key( c.key );
-        while ( parent >= ROOT_KEY )
-        {
-            // Count how many particle each rank owns in parent cells
-            vote_map[parent][leaf_rank] += count;
-
-            if ( parent == ROOT_KEY )
-                break;
-            parent = parent_key( parent );
-        }
-    }
-
-    // Phase 2: assign ownership
     _ownership.clear();
     _ownership.reserve( cells.size() );
     _cell_owner_map.clear();
@@ -507,50 +768,26 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::derive_internal_ownership(
 
         if ( c.is_leaf )
         {
-            // Leaf ownership was determined by Zoltan2
-            auto it = leaf_owners.find( c.key );
-            co.owner_rank = ( it != leaf_owners.end() ) ? it->second : 0;
+            auto it = owners.find( c.key );
+            if ( it == owners.end() )
+                throw std::runtime_error(
+                    "TreePartitioner::derive_internal_ownership: leaf " +
+                    std::to_string( c.key ) + " has no owner" );
+            co.owner_rank = it->second;
         }
         else if ( c.depth <= _replication_depth )
         {
-            // Coarse layer — replicated on all ranks
             co.owner_rank = OWNER_SHARED;
+        }
+        else if ( auto it = owners.find( c.key ); it != owners.end() )
+        {
+            co.owner_rank = it->second;
         }
         else
         {
-            // Deep internal cell — pick the rank with the most
-            // descendant particles
-            auto vote_it = vote_map.find( c.key );
-            if ( vote_it != vote_map.end() )
-            {
-                // Iterate unordered_map<int, int64_t> with a deterministic
-                // tiebreaker (lowest rank wins on equal votes). Without the
-                // tiebreaker, two ranks with identical vote_map contents can
-                // still pick different "best_rank" because unordered_map
-                // iteration order is not guaranteed identical across
-                // processes — which silently makes cell ownership disagree
-                // across ranks and causes the comm-plan asymmetry observed
-                // at ~4e8 particles.
-                int best_rank = std::numeric_limits<int>::max();
-                int64_t best_count = -1;
-                for ( const auto& [r, cnt] : vote_it->second )
-                {
-                    if ( cnt > best_count ||
-                         ( cnt == best_count && r < best_rank ) )
-                    {
-                        best_count = cnt;
-                        best_rank = r;
-                    }
-                }
-                if ( best_count < 0 )
-                    best_rank = 0;
-                co.owner_rank = best_rank;
-            }
-            else
-            {
-                // No votes — empty internal cell, assign to rank 0
-                co.owner_rank = 0;
-            }
+            // No leaf below votes only for an empty internal cell.
+            auto vote_it = vote.find( c.key );
+            co.owner_rank = ( vote_it != vote.end() ) ? vote_it->second : 0;
         }
 
         _ownership.push_back( co );
@@ -800,16 +1037,10 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::partition(
 {
     const auto& cells = tree_builder.cells();
 
-    // Step 1: Partition leaf cells via Zoltan2
-    auto leaf_owners = partition_leaves( cells );
+    auto cell_owners = partition_cells( cells, false );
+    derive_internal_ownership( cells, cell_owners );
+    _cached_cell_owners = std::move( cell_owners );
 
-    // Step 2: Derive internal cell ownership
-    derive_internal_ownership( cells, leaf_owners );
-
-    // Cache leaf assignment for refresh_ownership_for_current_tree()
-    _cached_leaf_owners = leaf_owners;
-
-    // Step 3: Migrate particles
     migrate_particles( tree_builder, particles, num_local_particles_before );
 }
 
@@ -843,16 +1074,12 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::repartition(
 {
     const auto& cells = tree_builder.cells();
 
-    // Step 1: Re-partition leaf cells via Zoltan2
-    auto leaf_owners = partition_leaves( cells );
+    // Starts from the current owners, so _cell_owner_map is read before
+    // derive_internal_ownership replaces it.
+    auto cell_owners = partition_cells( cells, true );
+    derive_internal_ownership( cells, cell_owners );
+    _cached_cell_owners = std::move( cell_owners );
 
-    // Step 2: Re-derive internal cell ownership
-    derive_internal_ownership( cells, leaf_owners );
-
-    // Cache leaf assignment for refresh_ownership_for_current_tree()
-    _cached_leaf_owners = leaf_owners;
-
-    // Step 3: Migrate particles to new owners
     migrate_particles( tree_builder, particles, num_local_particles_before );
 }
 
@@ -860,13 +1087,13 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::repartition(
 // refresh_ownership_for_current_tree
 //
 // Re-populate _cell_owner_map against the current tree using the cached
-// leaf assignment from the most recent partition_leaves() call. Particles
-// are NOT migrated; Zoltan2 is NOT re-run.
+// cell assignment from the most recent partition_cells() call. Particles
+// are NOT migrated; ParMETIS is NOT re-run.
 //
-// For leaves present in the cached assignment: reuse the cached owner.
-// For leaves NOT in the cached assignment (e.g., a coarsened tree where
-// a former-internal cell is now a leaf): vote based on local particle
-// counts via a single Allgather of per-leaf vote vectors.
+// For cells present in the cached assignment: reuse the cached owner.
+// For leaves NOT in it (e.g., a coarsened tree where a former-internal cell
+// is now a leaf): vote based on local particle counts via a single Allgather
+// of per-leaf vote vectors. Internal cells NOT in it take the vote rule.
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
 template <class AoSoAType>
@@ -885,17 +1112,17 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::
     {
         if ( !c.is_leaf )
             continue;
-        if ( _cached_leaf_owners.find( c.key ) != _cached_leaf_owners.end() )
+        if ( _cached_cell_owners.find( c.key ) != _cached_cell_owners.end() )
             continue;
         new_leaf_idx[c.key] = static_cast<int>( new_leaf_keys.size() );
         new_leaf_keys.push_back( c.key );
     }
     const int n_new = static_cast<int>( new_leaf_keys.size() );
 
-    // Build a new leaf_owners that starts from the cache and adds entries
-    // for new leaves. Owner of a new leaf = rank with the most local
-    // particles in that leaf, broken by lowest rank on ties.
-    std::unordered_map<MortonKey, int> leaf_owners = _cached_leaf_owners;
+    // Start from the cache and add entries for new leaves. Owner of a new
+    // leaf = rank with the most local particles in that leaf, broken by
+    // lowest rank on ties.
+    std::unordered_map<MortonKey, int> owners = _cached_cell_owners;
 
     if ( n_new > 0 )
     {
@@ -934,18 +1161,37 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::
                     best_rank = r;
                 }
             }
-            leaf_owners[new_leaf_keys[i]] = best_rank;
+            owners[new_leaf_keys[i]] = best_rank;
         }
 
         // Update the cache so subsequent refreshes are cheap.
         for ( int i = 0; i < n_new; i++ )
-            _cached_leaf_owners[new_leaf_keys[i]] =
-                leaf_owners[new_leaf_keys[i]];
+            _cached_cell_owners[new_leaf_keys[i]] = owners[new_leaf_keys[i]];
     }
 
-    // Re-derive internal ownership for the current cells using the
-    // combined leaf_owners.
-    derive_internal_ownership( cells, leaf_owners );
+    derive_internal_ownership( cells, owners );
+
+#if defined( CANOPY_ENABLE_PROFILING )
+    if ( _rank == 0 )
+    {
+        // Non-shared cells of the current tree that are absent from the
+        // partitioned assignment and so fell back to a vote (R9).
+        int non_shared = 0;
+        int fallback = n_new;
+        for ( const auto& c : cells )
+        {
+            if ( !c.is_leaf && c.depth <= _replication_depth )
+                continue;
+            non_shared++;
+            if ( !c.is_leaf &&
+                 _cached_cell_owners.find( c.key ) == _cached_cell_owners.end() )
+                fallback++;
+        }
+        std::fprintf( stderr,
+                      "[Canopy diag] refresh_ownership fallback=%d/%d\n",
+                      fallback, non_shared );
+    }
+#endif
 }
 
 // --------------------------------------------------------------------------

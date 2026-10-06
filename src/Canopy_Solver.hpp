@@ -376,8 +376,8 @@ class Solver
         // Full rebuild of the global tree from current positions.
         // Cheaper paths (TreeBuilder::update) can be substituted later
         // once stable — rebalance still saves work over rebuild() because
-        // the partition step is a re-partition rather than the initial
-        // partition. Today both are equivalent in TreePartitioner.
+        // the partition step is a re-partition (ParMETIS AdaptiveRepart from
+        // the current owners) rather than the initial partition.
         CANOPY_RESET_TIMERS();
         {
             CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REBALANCE_TOTAL );
@@ -584,7 +584,7 @@ class Solver
             }
 
             // Step 5b: refresh ownership against the FINAL tree using the
-            // leaf assignment cached from step 2's partition_leaves. At scale
+            // cell assignment cached from step 2's partition_cells. At scale
             // (~4e8 particles) the post-migration build can produce a tree
             // with substantially fewer cells than the pre-partition build
             // (see MI300A investigation: 4.2M -> 867k). Without this
@@ -594,12 +594,11 @@ class Solver
             // phantom-send M2M plan and an MPI_ERR_TRUNCATE later in the
             // upward sweep.
             //
-            // We DO NOT re-run Zoltan2 here: multijagged is non-deterministic
-            // (per partition_leaves comment) so a second call would emit a
-            // different assignment, triggering a multi-GB Cabana::migrate
-            // that overflows MPI's signed int count. Instead we vote per
-            // leaf using local particle keys for any leaf that wasn't in
-            // step 2's tree.
+            // We DO NOT re-partition here: a second partition can emit a
+            // different assignment, triggering a second multi-GB particle
+            // migration. Cells of step 2's tree keep their partitioned
+            // owners; a leaf that wasn't in it is voted on by local particle
+            // keys, and an internal cell that wasn't by the vote rule.
             {
                 CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_PARTITION );
                 _partitioner.refresh_ownership_for_current_tree(
