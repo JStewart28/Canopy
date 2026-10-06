@@ -573,3 +573,116 @@ section E1.
   an amplification site (AutoRebalance np 5-6) gates on the trajectory or on the
   probe is V1's decision; E2 made none. The other resume items in section V1's
   **Affects** still stand.
+
+## T1 (HIP arm)
+
+Post-H2 re-record of the step-8 lines on both backends, and the HIP arm of the
+exit criterion. Provenance for every figure here: commit `3bb7fb5`, Cray clang
+20.0.0, env `tuolumne_trilinos`; `build-tuolumne` with
+`Canopy_ENABLE_PROFILING:BOOL=ON` and `build-tuolumne-noprof` with `OFF`, both
+read from the cache and echoed at each job's head. Every run went through
+`canopy_ctest` after a passing watchdog self-test, with the HIP environment set
+in a subshell around the HIP calls only. Script:
+`scripts/tuolumne/run_ctest_t1_hip.flux measure|noprof serial|hip`, written
+from `run_ctest_e1.flux` because `run_ctest_t1.flux` predates `canopy_ctest`
+and HIP registration. No entry went over budget and the watchdog cancelled
+nothing.
+
+| job | build | what |
+| --- | --- | --- |
+| `f3cacJQf92r3` | profiling ON | SERIAL np 1-6: two `DownwardSweep` passes, one `MultiSolve` pass |
+| `f3cacJZDntFZ` | profiling ON | HIP np 1-4: the same |
+| `f3cacJgXoLrB` | profiling OFF | SERIAL np 1-6: one `DownwardSweep` pass |
+| `f3cacJp59gyu` | profiling OFF | HIP np 1-4: one `DownwardSweep` pass |
+
+### `build-tuolumne-noprof/` reconfigured
+
+It was configured before `fix-hang-rebalance.md` H0a, so its cache had no
+`Canopy_TEST_MPI_RANKS_HIP` / `Canopy_TEST_MPIEXEC_PREFLAGS_HIP` and its HIP
+entries would have registered at np 1-6 with no GPU binding. Re-ran
+`run_cmake_tuolumne.sh`'s exact arguments with only
+`-DCanopy_ENABLE_PROFILING=OFF` changed. After: cache reads
+`Canopy_ENABLE_PROFILING:BOOL=OFF`, the two HIP variables are set, and
+`ctest -N -R '_MPI_HIP_np_'` lists np 1-4 only (11 stems each).
+
+### The step-8 lines, post-H2
+
+**Reproducible on both backends, and backend-independent.** The two
+`DownwardSweep` passes print identical `[two-scale]` lines, every field of
+every `(nprocs, rank)`, at SERIAL np 1-6 and HIP np 1-4; and at np 1-4 the HIP
+lines equal the SERIAL lines field for field. **The np-4 disagreement the
+SERIAL arm recorded (±25 % on a per-rank `range_guard`) no longer occurs.** It
+came from the MJ partition; the ParMETIS partition H2 put in reproduces, as H2
+measured. So **R6**'s spread does not apply to this fixture on the current
+partitioner: a before/after comparison on it can be read line for line at
+every np, on either backend.
+
+`count_cap == 0`, `depth_dropped == 0` and `range_guard == total_fallback` on
+every line; `unique_ops == demanded_ops == realized_keys` on every line, so the
+column cap (32768) never bound. np 1 is unchanged from the SERIAL arm
+(184 / 162), as it must be with no partition; every np >= 2 line moved.
+
+| nprocs | rank | num_local | range_guard | unique_ops | occupied | shallow leaf | deepest | cells_at_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 1200 | 184 | 162 | 9 | 2 | 8 | 1,8,59,2,2,1,8,34,116 |
+| 2 | 0 | 606 | 141 | 57 | 9 | 2 | 8 | 1,8,57,1,1,1,4,11,61 |
+| 2 | 1 | 594 | 47 | 37 | 7 | 1 | 8 | 1,8,1,0,0,1,4,16,60 |
+| 3 | 0 | 374 | 145 | 80 | 9 | 2 | 8 | 1,7,47,6,1,1,2,6,40 |
+| 3 | 1 | 437 | 35 | 35 | 7 | 1 | 8 | 1,7,4,5,0,0,2,8,42 |
+| 3 | 2 | 389 | 48 | 53 | 9 | 1 | 8 | 1,8,4,6,1,1,4,12,34 |
+| 4 | 0 | 304 | 10 | 9 | 6 | 1 | 8 | 1,8,2,0,0,0,1,6,28 |
+| 4 | 1 | 297 | 20 | 28 | 6 | 1 | 8 | 1,8,2,0,0,0,2,7,26 |
+| 4 | 2 | 304 | 10 | 18 | 7 | 1 | 8 | 1,8,2,5,0,0,1,4,31 |
+| 4 | 3 | 295 | 126 | 50 | 9 | 2 | 8 | 1,8,60,1,1,1,4,7,28 |
+| 5 | 0 | 238 | 46 | 49 | 9 | 2 | 8 | 1,8,8,1,2,1,3,8,22 |
+| 5 | 1 | 238 | 46 | 18 | 7 | 1 | 8 | 1,8,1,0,0,1,2,5,24 |
+| 5 | 2 | 244 | 25 | 11 | 6 | 1 | 8 | 1,8,1,0,0,0,1,5,24 |
+| 5 | 3 | 233 | 21 | 37 | 6 | 1 | 8 | 1,8,1,0,0,0,1,5,25 |
+| 5 | 4 | 247 | 172 | 33 | 6 | 2 | 8 | 1,8,49,0,0,0,1,6,23 |
+| 6 | 0 | 203 | 12 | 42 | 6 | 1 | 8 | 1,8,2,0,0,0,1,5,22 |
+| 6 | 1 | 206 | 44 | 52 | 6 | 2 | 8 | 1,8,24,0,0,0,1,4,23 |
+| 6 | 2 | 202 | 12 | 34 | 6 | 1 | 8 | 1,8,2,0,0,0,1,3,24 |
+| 6 | 3 | 201 | **0** | 22 | 5 | 1 | 8 | 1,8,2,0,0,0,0,3,24 |
+| 6 | 4 | 195 | 44 | 37 | 7 | 2 | 8 | 1,8,12,6,0,0,1,5,22 |
+| 6 | 5 | 193 | 86 | 109 | 9 | 2 | 8 | 1,8,25,2,1,1,4,7,20 |
+
+np 6 rank 3 refuses nothing: its partition holds no pair the guard refuses.
+That is why the assertion is on the all-rank sum, not per rank.
+
+### Failure direction
+
+Profiling OFF, both backends: all three counters read **-1** on every
+`[two-scale]` and `[two-scale-refusals]` line (21 of 21 SERIAL, 10 of 10 HIP),
+`total_fallback` still reads its real value (184 at np 1), and
+`sum identity SKIPPED` prints once per rank count (6 SERIAL, 4 HIP). Every
+entry passes.
+
+### `MultiSolve`: what fails, and what was carried
+
+SERIAL np 1-6 fails exactly the six `1e-8` cases, and only at the two
+trajectory `EXPECT`s (`tests/tstMultiSolve.hpp:929`, `:933` in this binary).
+**HIP np 1-4 fails the same six plus `SolveFusedM2L.multipleSolvesIdempotent`**,
+whose three back-to-back solves differ in about the 12th digit
+(`76.698048540534216` against `76.698048540863965`). That case is HIP-only,
+not exercised by anything T1 added, and **pre-existing**: H0c's baseline log
+`canopy-h0.f3cM4ghTjtiT.log` already shows it failing, as does every H2 and E1
+HIP `MultiSolve` log. Their written summaries ("fails only the six") omitted
+it, so it was never in README. It is carried, and README "Known Issues" now
+has an entry for it.
+
+`M2L_BinEdge_Fallback`'s per-reason assertions (`count_cap == 0`,
+`depth_dropped == 0`, sum identity; V1 step 5) ran here for the first time,
+in the profiling-ON branch, on both backends, and never fired.
+
+**Affects:**
+- **V1** — its exit criterion requires `MultiSolve` HIP with no failure
+  carried, and `multipleSolvesIdempotent` fails on HIP for a reason no bound
+  can move (bit-identity under a run-dependent device accumulation order). V1
+  cannot be **DONE** on HIP until that case is fixed or its claim changed,
+  which is outside V1. Step 5's ON branch is now verified; its OFF branch still
+  needs a run.
+- **B0, A1, C1** — read this table, not the SERIAL arm's: np >= 2 moved with
+  H2. The fixture now reproduces at every np on both backends, so one run per
+  backend is a usable baseline and a second run is a check, not a spread.
+- **B1, A2, B2, A3** — the before/after spread on this fixture is zero at every
+  np; any difference in a step-8 line is the change's.

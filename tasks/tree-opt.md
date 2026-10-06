@@ -191,9 +191,8 @@ count. Every exit criterion below runs two backends:
 | MPI stem, HIP | `Canopy_Test_<Stem>_MPI_HIP` | `Canopy_Test_<Stem>_MPI_HIP_np_<N>`, `N` in 1-4 |
 | non-MPI stem | `Canopy_Test_<Stem>_SERIAL`, `Canopy_Test_<Stem>_HIP` | the same names |
 
-HIP registers at np 1-4 with one APU per rank only once
-`fix-hang-rebalance.md` H0a is **DONE**; every task below
-reach H0c through T1, whose HIP arm depends on it. Run each HIP `ctest` line with the HIP environment
+HIP registers at np 1-4 with one APU per rank because
+`fix-hang-rebalance.md` H0a is **DONE**. Run each HIP `ctest` line with the HIP environment
 set on that command only (`fix-hang-rebalance.md`, Conventions, "HIP
 environment"). Run every `ctest` line through `canopy_ctest` with the same
 regex. That gives each entry a timeout of 1.75x its measured SERIAL runtime
@@ -438,15 +437,11 @@ that way and what was already tried.
 
 ## Task sequence
 
-### T1 — A fixture whose tree has shallow leaves beside deep subtrees — **REOPENED**
+### T1 — A fixture whose tree has shallow leaves beside deep subtrees — **DONE**
 
-SERIAL arm **met**; HIP arm **not started**. The fixture and its assertions are
-in place. What remains is running the exit criterion below on HIP, and fixing
-whatever fails there that H0c did not already record.
-
-**Depends on:** none for the SERIAL arm. HIP arm: `fix-hang-rebalance.md` H0c
-**DONE** (HIP registration and baseline) and H2 **DONE**, both arms, since a
-`MultiSolve` HIP pass that hangs at np 3 cannot be read.
+**Depends on:** `fix-hang-rebalance.md` H0c **DONE** (HIP registration and
+baseline) and H2 **DONE**, both arms, since a `MultiSolve` HIP pass that hangs
+at np 3 cannot be read.
 **Fill in:** `tests/tstMultiSolve.hpp` (the per-reason report on the existing
 clustered fixture); `tests/tstDownwardSweep.hpp` (the reusable fixture and the
 new case). Both stems are already registered
@@ -496,61 +491,41 @@ listed under [Current state](#current-state).
    tasks read their numbers out of this fixture's log rather than re-deriving
    them.
 
-**HIP arm.** `fix-hang-rebalance.md` H2 changes the partition at every
-np ≥ 2, so the per-`(nprocs, rank)` figures the SERIAL arm recorded above np 1
-are stale. This arm records post-H2 figures for both backends. Build and run
-the exit criterion's HIP lines, and the failure
-direction in `build-tuolumne-noprof/` on HIP as well. Record in the log, per
-`(nprocs, rank)` at np 1-4, the line step 8 prints, from two runs, and whether
-they agree with each other and with SERIAL at the same np. A HIP case that
-fails where SERIAL passes, and that H0c did not record, is a defect in T1's
-fixture or in what it exercises: fix it here. A failure H0c did record is
-carried under the same rule as the `MultiSolve` carve-out below.
-
-**Met (SERIAL).** Step 1 settled the open question first, on the clustered fixture
+**Met.** Step 1 settled the open question first, on the clustered fixture
 unchanged at its own `ncrit = 8`, `max_depth = 8`, `mac_theta = 0.3`: **every
 refusal there is a range-guard refusal**, with `count_cap == 0` and
-`depth_dropped == 0` on all 42 `(nprocs, rank, step)` readings and
-`range_guard == total` on every one of them. Within the range guard they are
-**offset** refusals specifically — that tree's occupancy never passes depth 6,
-so `|dd|` cannot exceed `LaplaceKernel`'s `m2l_key_dd_max` of 6 and that half
-of the guard is geometrically unreachable. The four stale `M2L_BIN_RANGE = 3`
-comment sites and the `EXPECT_GT` failure message now name
-`M2L_KEY_OFFSET_MAX = 32` (half-widths at the deeper cell's depth) and
-`KernelType::m2l_key_dd_max`, and the message points at the per-reason lines
-instead of anticipating a condition that cannot occur.
+`depth_dropped == 0` on every `(nprocs, rank, step)` reading and
+`range_guard == total`. Within the range guard they are **offset** refusals
+specifically — that tree's occupancy never passes depth 6, so `|dd|` cannot
+exceed `LaplaceKernel`'s `m2l_key_dd_max` of 6 and that half of the guard is
+geometrically unreachable. The stale `M2L_BIN_RANGE = 3` comment sites and the
+`EXPECT_GT` failure message name `M2L_KEY_OFFSET_MAX = 32` (half-widths at the
+deeper cell's depth) and `KernelType::m2l_key_dd_max`.
 
-That answer put step 2 on the "new two-scale distribution" branch of this
-task's own decision rule, so `DownwardSweepTest::TwoScaleFixture<MS, ES,
-FarField = Kernel>` was built in `tests/tstDownwardSweep.hpp` — a cube of
-half-width 0.01 holding 87.5 % of a **global** 1200-particle set beside a
-uniform halo, templated on the far-field type so B0 can read the same tree for
-both `CartesianTaylorBasis` and `LaplaceKernel`. Verified on it, at ranks 1-6
-over **two separate runs** of the same binary: `deepest == 8` and the
-shallowest *leaf* depth 1 or 2 on every rank of every rank count, an
-occupied-depth span of 6-7 levels; `range_guard > 0` with `count_cap == 0`,
-`depth_dropped == 0` and `range_guard + count_cap == total_fallback_pair_count()`
-exactly, at a column cap left at its default (32768, measured) so no refusal
-can be a budget refusal. The geometry contract is asserted on the depth at
+That answer put step 2 on the "new two-scale distribution" branch, so
+`DownwardSweepTest::TwoScaleFixture<MS, ES, FarField = Kernel>` was built in
+`tests/tstDownwardSweep.hpp` — a cube of half-width 0.01 holding 87.5 % of a
+**global** 1200-particle set beside a uniform halo, templated on the far-field
+type so B0 can read the same tree for both `CartesianTaylorBasis` and
+`LaplaceKernel`. On the post-H2 partition, two separate runs on each backend
+(SERIAL np 1-6, HIP np 1-4) print **identical** step-8 lines, field for field,
+and HIP matches SERIAL field for field at every np 1-4: `deepest == 8` and the
+shallowest leaf at depth 1 or 2 on every rank, `count_cap == 0`,
+`depth_dropped == 0`, `range_guard == total_fallback_pair_count()` on every
+line, and `range_guard > 0` on at least one rank at every rank count, at the
+default column cap (32768). The geometry contract is asserted on the depth at
 which refinement *stops*, not on the shallowest occupied depth — depth 0 is
-occupied on every tree, uniform ones included, so the latter is a vacuous pass
-of exactly the kind **R7** describes. The failure direction was run in a
-separate `build-tuolumne-noprof/`: all six rank counts pass with all three
-counters reading **-1** and the sum identity reported SKIPPED, six of six.
+occupied on every tree, so the latter is a vacuous pass of exactly the kind
+**R7** describes. The failure direction passes in `build-tuolumne-noprof/` on
+both backends: every counter reads **-1** and the sum identity is reported
+SKIPPED once per rank count.
 
-**Two qualifications, both recorded in the log.** First, the two runs agree
-field-for-field at np 1, 2, 3, 5 and 6 but **disagree at np 4** — a per-rank
-`range_guard` moved by up to 25 % — which is **R6** and sets the spread any
-later before/after comparison on this fixture must be read against. Second,
-**the `MultiSolve` arm of the criterion below does not pass, and did not before
-T1**: seven tests fail the `1e-8` multi-step check at every rank count, all
-seven already recorded in README "Known Issues" with error values this run
-reproduces to every digit. T1 did not touch that tolerance — sharpening those
-bounds is V1's task, and loosening one to green a gate would change what
-**DONE** means invisibly. `M2L_BinEdge_Fallback`'s own fallback assertion
-passes; it fails only on the shared accuracy check inside
-`testMultiStepGravity`. The `DownwardSweep` arm passes at ranks 1-6 in both
-runs. See `tree-opt-progress-log.md` `## T1`.
+The `MultiSolve` arm carries the failures README "Known Issues" records: on
+both backends the six `1e-8` multi-step cases, which are V1's to resolve, and
+on HIP alone `SolveFusedM2L.multipleSolvesIdempotent`, which H0c's own log
+already shows failing. `M2L_BinEdge_Fallback`'s fallback and per-reason
+assertions pass; it fails only on the shared `1e-8` check. See
+`tree-opt-progress-log.md` `## T1` and `## T1 (HIP arm)`.
 
 **Exit criterion:** stems `MultiSolve`, `DownwardSweep` pass on SERIAL at ranks
 1-6 and on HIP at ranks 1-4 —

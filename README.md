@@ -482,6 +482,25 @@ records (`tests/tstLaplaceSolve.hpp:1214-1222`); `crossRankAgreement` and
 Reproduce with `scripts/tuolumne/run_ctest_h2.flux prepro hip` and compare the
 two passes' `[multisolve-dev]` lines.
 
+### `SolveFusedM2L.multipleSolvesIdempotent` fails on HIP at every rank count
+
+The case (`tests/tstMultiSolve.hpp`, `TEST( SolveFusedM2L,
+multipleSolvesIdempotent )`) runs three back-to-back solves on one particle
+state and asserts the potential and gradient **bit-identical** across them.
+On `Canopy_Test_MultiSolve_MPI_HIP` it fails at np 1-4: gradients differ in
+about the 12th significant digit (e.g. `76.698048540534216` against
+`76.698048540863965`), which is the run-dependent device accumulation order
+of the entry above, here showing up between solves within one run. SERIAL
+passes at np 1-6. This is **pre-existing**: H0c's baseline job
+`f3cM4ghTjtiT` (`fix-hang-rebalance`) already shows it, as do every H2 and E1
+HIP `MultiSolve` log, though their summaries listed only the six `1e-8` cases.
+Re-observed in `tree-opt` T1's HIP run, flux job `f3cacJZDntFZ`. Making the
+case pass needs either a deterministic device accumulation or a test that
+asserts agreement to a stated tolerance instead of bit-identity — a decision
+about what the test claims, not a bound to widen.
+
+Reproduce with `flux batch scripts/tuolumne/run_ctest_t1_hip.flux measure hip`.
+
 ### Six `MultiSolve` tests fail the `1e-8` multi-step check at every rank count
 
 The `MultiSolve` stem does not currently pass. Six tests fail the multi-step position/velocity comparison at
