@@ -135,7 +135,7 @@ ejected particle (mechanisms a and c) and says nothing about (b).
 | Diagnostic switches | environment variables read in `tests/tstMultiSolve.hpp`, **default off**, one helper each beside `get_test_mac_theta()` (`:38-43`) | `CANOPY_MAC_THETA` is the existing precedent. The suite has no `DISABLED_` tests. An env switch adds no ctest entry and no gtest case, so the `regression` label's registration (`tests/CMakeLists.txt:61-63`) stays unchanged. |
 | Switch names | `CANOPY_MULTISOLVE_PROBE` (`1` enables the per-step probe), `CANOPY_MULTISOLVE_NPP` (positive integer; overrides `num_particles_per_rank` at every site) | One name per quantity, prefixed by the stem it affects. |
 | Probe output | one line per step on rank 0, tag `[multisolve-probe]`, printed with `%.17g` | Matches `[multisolve-dev]` (`:644`). A line must be diffable across runs. |
-| Normalization | report **both** the per-particle max relative error and the field-scale error $\max_i \lvert\Delta g_i\rvert / \max_i \lvert g_i\rvert$ | Per-particle relative error is inflated wherever $\lvert g_i\rvert$ cancels, the way `matchesPriorReference`'s potential figure is (V1 log). The field-scale rule is the suite's own: `field_scales` (`tests/tstLaplaceSolve.hpp:1162-1184`), whose comment makes the same cancellation argument. Reading one figure without the other is how a normalization artifact gets reported as a defect. |
+| Normalization | report **both** the per-particle max relative error and the field-scale error $\max_i \lvert\Delta g_i\rvert / \max_i \lvert g_i\rvert$ | Per-particle relative error is inflated wherever $\lvert g_i\rvert$ cancels, the way `matchesPriorReference`'s potential figure is (V1 log). The field-scale rule is the suite's own: `field_scales` (`tests/tstLaplaceSolve.hpp:1166-1188`), whose comment makes the same cancellation argument. Reading one figure without the other is how a normalization artifact gets reported as a defect. |
 | Floor | $\theta^{P+1}$, `1.95e-3` at `theta = 0.5`, `P_ORDER = 8` | The figure every task here reads against, stated once. |
 | Watchdog | `scripts/tuolumne/flux_watchdog.sh`, **sourced** by a batch script after setting `WATCHDOG_S`; starts a background loop; `watchdog_stop` ends it, and `watchdog_wait_idle` blocks until no sub-job is running | A copy per script drifts. Call `watchdog_wait_idle` after any ctest that may have timed out: ctest returns before the watchdog has stacked and cancelled the hung sub-job. |
 | Time budget | per ctest entry, `ceil(1.75 * t_ref_s) + extra_s` s, where `t_ref_s` is the `(stem, np, config)` row of `scripts/tuolumne/serial_runtimes.tsv`: the maximum completed SERIAL runtime over three calibration passes. `extra_s` (default 0) is a measured allowance for work outside the solve, with its reason in the row's `extra_reason`. The first entry `canopy_ctest` runs after the watchdog is sourced also gets `CANOPY_COLD_START_S` (6 s). The same budget is the ctest `--timeout` (plus 5 s) and the watchdog threshold, applied by `canopy_ctest` (H0b), for every backend. | An entry past 1.75x its SERIAL time is hung or wrong, and finding out at 1.75x saves the rest of 300 s. The maximum rather than the mean is used because the first pass in a job can run ~4 s slow at np 1. The first Canopy binary launched in a job runs ~4 s slow, which calibration's maximum does not cover for any entry that was not first. |
@@ -702,10 +702,19 @@ partition that E1 measures, and a HIP pass that hangs cannot be measured. H0c
 (`:354` onward, after `solve()` and before the integrate kernel); the
 `CANOPY_MULTISOLVE_NPP` override where `num_particles_per_rank` is consumed.
 New `scripts/tuolumne/run_ctest_e1.flux`.
+`scripts/tuolumne/run_ctest_h0b.flux`: its calibrate phase writes `default`
+into every row's `config` column (`:143-147`); it writes
+`${CANOPY_BUDGET_CONFIG:-default}` instead, so the switch configurations get
+their own rows.
 **Reference:** `brute_force_gradient` (`:75-107`); the end-of-run GlobalId
 gather and alignment (`:524-595`), which the probe repeats per step;
-`field_scales` (`tests/tstLaplaceSolve.hpp:1162-1184`).
+`field_scales` (`tests/tstLaplaceSolve.hpp:1166-1188`).
 **Do:**
+0. **HIP baseline, before any edit to `tests/tstMultiSolve.hpp`.** Run the
+   unmodified `Canopy_Test_MultiSolve_MPI_HIP` binary at np 1 and np 2 twice
+   each, with `-V`. The pre-E1 HIP spread at each np is the relative spread of
+   every `[multisolve-dev]` figure over those passes plus `f3cZDLuHNyCT` (np 1)
+   and `f3cZDMd8JhWw`'s two passes (np 2). Record it in the log.
 1. With `CANOPY_MULTISOLVE_PROBE=1`, gather positions, charges, FMM gradient
    and GlobalId to rank 0 after each `solve()`. Compute the brute-force gradient
    **at those positions**, then print one `[multisolve-probe]` line per step:
@@ -741,17 +750,15 @@ and the HIP-against-SERIAL comparison. Both directions:
 - **Measuring:** at np 1, `CANOPY_MAC_THETA=0.7` raises the per-step
   field-scale error above its theta-0.5 value. This shows the probe measures
   the far field.
-- **Inert when off:** with the probe unset, the six np-1 `[multisolve-dev]`
-  lines match the corresponding lines of `canopy-v1.f3bmo4JYikKh.log` (repo
-  root, untracked; V1's step-1 job) character for character. np 1 never
-  partitions, so H2 cannot move it. The six np-2 lines match H2 step 7's
-  post-change SERIAL run character for character if step 7 found them
-  reproducible. Otherwise they fall within step 7's measured spread. H2
-  changes the np-2 cut, so V1's np-2 lines are no longer a baseline. The V1 table in `tree-opt-progress-log.md` is
-  rounded to three figures and cannot decide this. On HIP, with the probe
-  unset, the np 1-2 `[multisolve-dev]` lines match H0c's character for
-  character if H0c found them identical between its two passes. Otherwise they
-  fall within H0c's measured spread, stated in the log.
+- **Inert when off:** with the probe unset, the six SERIAL np-1
+  `[multisolve-dev]` lines match those of job `f3cZDLkZqC6s`
+  (`canopy-h2.f3cZDLkZqC6s.log`, repo root, untracked) character for
+  character, and the six SERIAL np-2 lines match those of `f3cZDMUWgsYj`,
+  whose two passes are identical. Both jobs ran commit `49dce0b`. V1's
+  `canopy-v1.f3bmo4JYikKh.log` is not a baseline at any np: F4's MAC-tie guard
+  (`01_fix-tests.md`) moved np 1, and the partitioner arm moved np >= 2. On
+  HIP, with the probe unset, every np 1-2 `[multisolve-dev]` figure falls
+  within step 0's pre-E1 spread.
 
 ### E2 — Resolve the excess per E1's classification — **NOT STARTED**
 
