@@ -457,7 +457,7 @@ and it is cell *ownership* that moves; the interaction lists, the M2L operator
 table and `locals()` all follow it. np=1 and np=2 are stable, the multijagged
 cut being trivial for one or two parts. Those figures were measured on the
 harness's earlier per-rank 400-particle generator — the absolute numbers a run
-prints today differ (686 realized operators at np=1 on the current 600-particle
+prints today differ (724 realized operators at np=1 on the current 600-particle
 global set), but the run-to-run drift above two parts does not.
 
 This is **pre-existing** — a property of the partitioner, untouched by the
@@ -550,30 +550,6 @@ potential half is sound: it compares two distinct views. Found by
 the zeroing `deep_copy` removed from `UpwardSweep::execute()`, its SERIAL
 entry still passed. Fixed there with `create_mirror` + `deep_copy`; not yet
 applied to `DownwardSweep`. Found by reading, not by a run.
-
-### `LaplaceSolve.crossRankAgreement` fails intermittently on HIP: MAC ties decided by rounding
-
-On HIP, about 1 run in 4 at np 2-4, and about half at np 1 when np 1 is
-compared, the 12-step field deviates from the SERIAL-generated np-1 field by
-`7.7e-8` to `4.2e-7`, against `LS_CROSS_RANK_TOL = 5.6e-10`. Passing runs sit
-at `1e-13` to `1e-12`.
-
-**The cause is in `mac_satisfied`** (`src/Canopy_CommunicationPlan.hpp:337-346`):
-- Octree cells produce exact ties of $R^2\theta^2 > (\sqrt{3}(h_A+h_B))^2$. At
-  θ = 0.5, same-depth cells offset by (2,2,2) cells are one example. This
-  configuration has 32 such pairs every step.
-- Floating-point rounding of the cell centers decides those ties, and the
-  centers come from a root box rebuilt from particle positions every step.
-- SERIAL decides them repeatably, but arbitrarily: 0-32 accepted, varying by
-  step. HIP's last-bit position differences sometimes flip a reachable tie,
-  which changes the far field by truncation size (~2e-7) from then on.
-
-It is neither HIP-specific nor distributed. Compare `is_well_separated`, which
-guards its tie with an epsilon. Fixing it changes SERIAL's accepted pairs, and
-so the committed `tests/data/laplace_solve_P6.txt`.
-
-Flux jobs `f3cNfrMYm1GB` (HIP np 1) and `f3cNt51qKjWw` (per-step tie trace).
-Figures in `tasks/01_fix-tests-progress-log.md`, section F4.
 
 ### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
 

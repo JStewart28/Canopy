@@ -1,6 +1,6 @@
 # Make `UpwardSweep` and `LaplaceSolve` pass on SERIAL and HIP
 
-**Status:** IN PROGRESS — F1, F2, F3 done; F4 stopped: cause is a MAC tie defect in `src/`, fix not decided
+**Status:** DONE
 
 ## Problem
 
@@ -43,8 +43,9 @@ The failures, measured in `fix-hang-rebalance` H0b and H0c (flux jobs
 - The OPENMP test variants. They also accumulate with atomics, and nothing
   here builds or runs them.
 - `MultiSolve`'s failures and its HIP stall (`fix-hang-rebalance` H1, H2, E1).
-- Any change to `LS_CROSS_RANK_TOL`, `LS_DIRECT_SUM_TOL`, `LS_NUM_STEPS` or
-  the committed `tests/data/laplace_solve_P6.txt` records.
+- Any change to `LS_CROSS_RANK_TOL`, `LS_DIRECT_SUM_TOL` or `LS_NUM_STEPS`.
+  The committed `tests/data/laplace_solve_P6.txt` records change only by F4's
+  regeneration after the `src/` fix.
 
 ## Approach
 
@@ -285,7 +286,7 @@ changed to `6dd7`), SERIAL np 1 failed on `locals_hash` alone. The data file
 was restored with `git checkout`. In the same pass run, HIP np 2
 `crossRankAgreement` failed at `1.6e-7` (log, section F3; F4's business).
 
-### F4 — Classify and resolve `crossRankAgreement` on HIP np 2-4 — **STOPPED: MAC tie defect found, fix not decided**
+### F4 — Classify and resolve `crossRankAgreement` on HIP np 2-4 — **DONE**
 
 **Depends on:** F3 (its criterion runs the whole `LaplaceSolve` stem).
 
@@ -346,6 +347,28 @@ they decide. `git status` shows no instrumentation left. Then, per branch:
   the HIP np 1-4 equivalent report every entry `completed` at the unchanged
   `LS_CROSS_RANK_TOL`. Temporarily reintroducing the defect makes a HIP rank
   count in the failing set fail again.
+
+**Met.** The measurements did not match any row of the Approach table, and
+the log, section F4, records them:
+- The failure is not specific to the partition or to more than one rank. HIP
+  np 1 fails 11 of 20 against the SERIAL record (job `f3cNfrMYm1GB`), and
+  forcing Zoltan2 onto the host leaves it unchanged (job `f3cNWTvVDx7h`).
+- A per-step trace (job `f3cNt51qKjWw`) found 32 cell pairs exactly on the
+  `mac_satisfied` threshold every step, decided by last-bit rounding. That is
+  a `src/` defect, so it was resolved as under (c).
+
+`mac_satisfied` now rejects pairs within a $10^{-10}$ relative band of the
+threshold, and `tests/data/laplace_solve_P6.txt` was regenerated (job
+`f3cP3HeeQ4oZ`).
+
+In job `f3cP6CubiRBM`, every entry reported `completed`:
+- `(UpwardSweep|LaplaceSolve)` SERIAL np 1-6 and `UpwardSweep` HIP np 1-4;
+- `LaplaceSolve` HIP np 1-4 five times (20 of 20).
+
+Worst cross-rank deviation was `7.2e-12`, at unchanged tolerances. With the
+band set to 0 (job `f3cW2MtcJkto`), SERIAL and HIP np 2-4 failed at the
+tie-flip deviations `4.2e-7` and `2.0e-7`. `git status` shows no
+instrumentation. The README `crossRankAgreement` entry is removed.
 
 ## Known risks
 

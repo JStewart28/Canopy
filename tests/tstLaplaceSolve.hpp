@@ -160,24 +160,29 @@ enum FieldIdx
 // every rank count from 1 to 6, against the committed reference data, at the
 // frozen configuration above (600 particles, num_steps = 12, charges on
 // [0.5, 1.5], dt = 1.0e-4, softening = 0.0, migrate between steps) on the
-// SERIAL backend. Every rank count had a live far field at the last solve:
-// 103 cells, n_unique_ops 686 at np=1 and 111-386 per rank at np 2-6, with
-// total_fallback_pair_count() 0 throughout. The full per-rank-count tables
-// are in tasks/abstract-solver-backend-progress-log.md, section T1.
+// SERIAL backend (tasks/abstract-solver-backend-progress-log.md, section T1).
+// They were pinned before mac_satisfied rejected exact ties
+// (tasks/01_fix-tests-progress-log.md, F4), and were not moved by it. Since
+// that change every rank count still has a live far field at the last solve:
+// 103 cells, n_unique_ops 724 at np=1 and 121-400 per rank at np 2-6, with
+// total_fallback_pair_count() 0 throughout.
 //
-// LS_CROSS_RANK_TOL is 100x the worst measured cross-rank deviation, which is
-// 5.5987399483706545e-12 (np=4, gradient). The potential deviations run
-// 9.6e-14 to 1.1e-12 and the gradient deviations 6.4e-13 to 5.6e-12 across
-// np 2-6 — reassociation level, three orders of magnitude below the 1.0e-9
-// threshold above which a deviation would no longer be attributable to
-// summation order (see risk R8). Do not raise this to accommodate a failure:
-// re-measure at LS_NUM_STEPS = 1 and report.
+// LS_CROSS_RANK_TOL was set at 100x the worst cross-rank deviation measured
+// then, 5.5987399483706545e-12 (np=4, gradient). With ties rejected the worst
+// SERIAL deviation is 6.1748535032248251e-12 (np=5, gradient), a 91x margin;
+// the potential deviations run 2.8e-13 to 1.2e-12 and the gradient deviations
+// 1.5e-12 to 6.2e-12 across np 2-6, HIP within the same range — reassociation
+// level, three orders of magnitude below the 1.0e-9 threshold above which a
+// deviation would no longer be attributable to summation order (see risk R8).
+// Do not raise this to accommodate a failure: re-measure at LS_NUM_STEPS = 1
+// and report.
 //
-// LS_DIRECT_SUM_TOL is 3x the worst measured direct-sum deviation, which is
-// 3.2093610363952985e-07 (np=2, potential). The gradient deviations are
-// 4.24e-08 at every rank count and the potential deviations agree to ten
-// digits across all six, as they should: the direct-sum error is truncation,
-// not partitioning.
+// LS_DIRECT_SUM_TOL was set at 3x the worst direct-sum deviation measured
+// then, 3.2093610363952985e-07 (np=2, potential). With ties rejected the worst
+// is 3.3063265504587434e-07 (np=2, potential), a 2.9x margin. The gradient
+// deviations are 4.33e-08 at every rank count and the potential deviations
+// agree to nine digits across all six, as they should: the direct-sum error
+// is truncation, not partitioning.
 //
 // The direct-sum check is a truncation bound in any case: the solid-harmonic
 // far-field error goes as theta^(P+1) = 0.5^7 ~ 8e-3 at this configuration,

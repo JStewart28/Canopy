@@ -382,3 +382,82 @@ every watchdog cancel record held only the self-test.
   tolerance until the MAC tie is fixed or the gate changes. The same tie
   sensitivity can shift any MultiSolve or LaplaceSolve comparison whose
   inputs differ in the last bit.
+
+## F4 — fix
+
+**Decision.** F4 is widened to fix the MAC tie in `src/` and regenerate
+`tests/data/laplace_solve_P6.txt`, which the design had put out of scope. No
+tolerance and no `LS_NUM_STEPS` changed.
+
+**Change.** `mac_satisfied` (`src/Canopy_CommunicationPlan.hpp:338-356`)
+accepts only when $R^2\theta^2 > r_{sum}^2 (1 + 10^{-10})$, through a local
+constant `MAC_TIE_REL = 1.0e-10`. An exact geometric tie is now always
+rejected (the pair is refined or goes to P2P), whatever the last bits of the
+cell centers. A pair that is not tied clears the threshold by O(1) relative,
+so no other decision moves. The relative band matches `is_well_separated`'s
+absolute `eps = 1.0e-10` next to it. A lattice-exact test from Morton keys was
+not chosen: it needs depth-aware integer offsets for cross-depth pairs, for
+no gain at this tie margin. `mac_satisfied` has one caller, the dual-tree
+traversal (`:624` before the change).
+
+**Regeneration** (job `f3cP3HeeQ4oZ`, `run_laplace_solve_regenerate.flux`,
+SERIAL np 1-6 all passed). The three parts were merged under the existing
+header, and the `initial` hash is unchanged (`0xb6ad437608ad69b7`).
+Final-solve `n_unique_ops` at np 1 rose from 686 to 724: the ties that SERIAL
+used to accept by rounding are now refined into more, smaller M2L pairs.
+Per rank, np 2 is 390/400 (was 368/386), and np 2-6 span 121-400. The header,
+the tolerance comment in `tests/tstLaplaceSolve.hpp` and README's partition
+paragraph carry the new counts.
+
+**Pass** (job `f3cP6CubiRBM`, `-V`): every entry `completed`.
+- `(UpwardSweep|LaplaceSolve)` SERIAL np 1-6 once, `UpwardSweep` HIP np 1-4
+  once.
+- `LaplaceSolve` HIP np 1-4 five times: 20 of 20 entries, against 4 of 18
+  failing before the fix.
+- `crossRankAgreement` SERIAL np 2-6:
+
+  | np | pot | grad |
+  | --- | --- | --- |
+  | 2 | 4.32e-13 | 2.20e-12 |
+  | 3 | 2.84e-13 | 1.46e-12 |
+  | 4 | 9.79e-13 | 4.93e-12 |
+  | 5 | 1.23e-12 | 6.1748535032248251e-12 |
+  | 6 | 2.83e-13 | 1.47e-12 |
+
+- HIP np 2-4 over the five passes: potential `1.8e-13` to `1.4e-12`, gradient
+  `9.7e-13` to `7.2e-12`.
+- Direct sum: potential `3.3063e-07` (worst `3.3063265504587434e-07`, np 2)
+  and gradient `4.33e-08` at every np, on both backends.
+
+**Tolerance margins moved, the tolerances did not.**
+- `LS_CROSS_RANK_TOL = 5.6e-10` was 100x the old worst SERIAL deviation. It
+  is now 91x the new worst (`6.17e-12`, np 5 gradient).
+- `LS_DIRECT_SUM_TOL = 9.63e-07` was 3x; it is now 2.9x. The truncation
+  error rose slightly because more pairs went from M2L to finer M2L/P2P at
+  different cells, not less accurate ones.
+
+The comment above the tolerances records both. Neither tolerance needs
+re-pinning, and the design keeps them out of scope.
+
+**Fails for the intended reason** (job `f3cW2MtcJkto`). Perturbation:
+`MAC_TIE_REL = 0.0`, which is the old test. Every entry failed: SERIAL np 1
+on `bitForBitArtifacts`, SERIAL np 2-4 and HIP np 2-4 (three passes) on
+`crossRankAgreement`. The deviations were the tie-flip values from before,
+`4.2274511e-07` and `1.9545431e-07`. SERIAL fails deterministically, because
+it accepts some ties that the new reference rejects; HIP lands on one of the
+recurring values. Reverted from a saved copy and both targets rebuilt. `grep
+"F4 SCRATCH"` over `src/` and `tests/` is empty.
+
+**Not run, and why.** `mac_satisfied` sits on every solve's path. Every
+solver test therefore moves by up to truncation size wherever its trees have
+exact ties: `MultiSolve`, `SolveFusedM2L`, `CartesianTaylorSolve`,
+`FarFieldContract` and the examples. Their tolerances are not this tight, and
+`tests/data/` holds no other committed record. The `CLAUDE.md` build rule
+limits this task to its two stems, so none were built or run.
+
+**Affects:**
+- `fix-hang-rebalance.md` H2: the partitioner arm starts with `UpwardSweep`
+  and `LaplaceSolve` passing at SERIAL np 1-6 and HIP np 1-4. Nothing is
+  carried.
+- V1's and E1's recorded M2L operator counts and accuracy figures predate the
+  tie guard, so a comparison against them must account for it.

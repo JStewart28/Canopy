@@ -343,7 +343,13 @@ class CommunicationPlan
         const double R2 = dx * dx + dy * dy + dz * dz;
         constexpr double SQRT3 = 1.7320508075688772;
         const double r_sum = SQRT3 * ( a.half_width + b.half_width );
-        if ( !( R2 * _theta * _theta > r_sum * r_sum ) )
+        // Octree geometry puts some pairs exactly on the threshold (at
+        // theta = 0.5, same-depth cells offset by (2,2,2) cells), where
+        // last-bit noise in the cell centers would decide acceptance run to
+        // run. Require a relative margin so ties are always rejected; a
+        // pair that is not tied clears the threshold by O(1) relative.
+        constexpr double MAC_TIE_REL = 1.0e-10;
+        if ( !( R2 * _theta * _theta > r_sum * r_sum * ( 1.0 + MAC_TIE_REL ) ) )
             return false;
         // Softening floor: the multipole far-field uses the UNSOFTENED 1/r
         // kernel, so it is only accurate where the Plummer softening is
