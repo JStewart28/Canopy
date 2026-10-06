@@ -231,7 +231,7 @@ criterion.
 
 **Which gtest suites live in which stem**, where it is not the stem's own name:
 the `MultiSolve` stem carries both `MultiSolve.*` and `SolveFusedM2L.*`
-(`tests/tstMultiSolve.hpp:560-1079`); the `LaplaceSolve` stem carries
+(`tests/tstMultiSolve.hpp:1041-1600`); the `LaplaceSolve` stem carries
 `LaplaceSolve.*` only; the `CartesianTaylorSolve` stem carries
 `CartesianTaylorSolve.*` only.
 
@@ -299,11 +299,11 @@ retention or occupied depth.
 
 **A non-uniform fixture already exists, and it already produces refusals.**
 `testMultiStepGravity` takes a `clustered` flag — 80 % of particles from a tight
-Gaussian blob in one corner, 20 % uniform (`tests/tstMultiSolve.hpp:159-171`,
+Gaussian blob in one corner, 20 % uniform (`tests/tstMultiSolve.hpp:261`,
 `:211-233`) — and `MultiSolve.M2L_BinEdge_Fallback`
-(`tests/tstMultiSolve.hpp:734-748`) drives it at `ncrit = 8`, `max_depth = 8`
+(`tests/tstMultiSolve.hpp:1197-1213`) drives it at `ncrit = 8`, `max_depth = 8`
 and `mac_theta = 0.3`, asserting that the fallback population is non-zero
-(`:751-762`). That test is the `regression` label's only member
+(`:1214-1229`). That test is the `regression` label's only member
 (`tests/CMakeLists.txt:61-63`).
 
 **Every refusal on that fixture is an offset refusal.** The range guard carries
@@ -348,19 +348,19 @@ Also true now:
 - **The `regression`-labeled stem exercises `LaplaceKernel` only.**
   `REGRESSION_MPI_TESTS` is the single stem `MultiSolve`
   (`tests/CMakeLists.txt:61-63`), and `tstMultiSolve.hpp` instantiates
-  `Canopy::Solver<..., Scalar, P, 1>` (`:744-745`) without a far-field
+  `Canopy::Solver<..., Scalar, P, 1>` (`:274-275`) without a far-field
   argument, so it takes the default `FarField = LaplaceKernel`
   (`src/Canopy_Solver.hpp:146-148`). **No `regression`-labeled test
   instantiates `CartesianTaylorBasis.`** Its only direct-sum coverage is
   `CartesianTaylorSolve.matchesDirectSumThetaRef` and `...ThetaCanopy`
-  (`tests/tstCartesianTaylorSolve.hpp:976-1006`), both in the `unit` tier, and
+  (`tests/tstCartesianTaylorSolve.hpp:977-1007`), both in the `unit` tier, and
   that is where its coverage stays. So a chain-B change is
   checked by the `unit` tier alone: B1's and B2's exit criteria are the only
   thing standing between a broken `CartesianTaylorBasis` and a green run of
   whatever stems some other task happens to name.
 - **The two operator-cache drift cases assert no accuracy at all.**
   `CartesianTaylorSolve.operatorCacheAcrossDriftThetaCanopy` and
-  `...ThetaRef` (`tests/tstCartesianTaylorSolve.hpp:1040-1062`) state in place
+  `...ThetaRef` (`tests/tstCartesianTaylorSolve.hpp:1041-1061`) state in place
   that they "MAKE NO ACCURACY CLAIM AND ASSERT NO DEVIATION"; their only
   assertions are that the far field was live and that at least one operator was
   built. They also run a **longer** trajectory than the gating arms, precisely
@@ -447,7 +447,7 @@ clustered fixture); `tests/tstDownwardSweep.hpp` (the reusable fixture and the
 new case). Both stems are already registered
 (`tests/CMakeLists.txt:46-57`, `:61-63`), so no CMake change is needed.
 **Reference:** the existing clustered distribution and the test that drives it
-(`tests/tstMultiSolve.hpp:158-167`, `:205-220`, `:686-708`) — **the starting
+(`tests/tstMultiSolve.hpp:309-322`, `:230-262`, `:1197-1229`) — **the starting
 point, not a model to copy**; `with_laplace_solve`
 (`tests/tstLaplaceSolve.hpp:793-800`) for the shape of a fixture that configures
 a solve and hands an outcome plus the sweep to a callback; the refusal accessors
@@ -546,18 +546,19 @@ counters reading $-1$, not $0$, and the sum identity reported as skipped.
 
 ---
 
-### V1 — Sharpen the checks these chains will be verified against — **NOT STARTED**
+### V1 — Sharpen the checks these chains will be verified against — **BLOCKED**
 
-**Resume from step 1.** A first pass stopped at step 1 because
-`MultiSolve.AutoRebalance`'s trajectory deviation exceeds $\theta^{P+1}$ at
-np 5-6 (`tree-opt-progress-log.md` section V1). `fix-hang-rebalance.md` E1
-attributed that excess to trajectory amplification at unsoftened close
-encounters: the per-step far-field error is at most `9.5e-7` there
-(`fix-hang-rebalance-progress-log.md` section E1). Step 1's derivation and stop
-clause below now say so. The partition changed since the first pass
-(`fix-hang-rebalance.md` H2), so re-measure every figure before pinning a bound.
-Steps 2, 4 and 5 are in place from the first pass; step 3 was measured but not
-applied.
+**Blocked on HIP by one case V1 does not own.** Every step below is done, and
+the exit criterion is met on SERIAL: three successive passes of both stems at
+np 1-6 with no failure. On HIP, `CartesianTaylorSolve` passes at np 1-4 in all
+three passes and every `MultiSolve` case V1 changed passes, but
+`SolveFusedM2L.multipleSolvesIdempotent` fails at np 1-4 (README "Known
+Issues"): it asserts bit-identity across back-to-back solves, which the HIP
+backend's run-dependent accumulation order does not give. It predates V1 and
+no bound governs it. V1 is **DONE** once that case passes on HIP, which needs
+either a deterministic device accumulation or a decision to assert agreement to
+a tolerance; nothing else in V1 remains. Figures and job IDs:
+`tree-opt-progress-log.md` `## V1 (resume)`.
 
 **Depends on:** T1 **DONE**, both arms; `fix-hang-rebalance.md` E2 **DONE**.
 **Fill in:** `tests/tstMultiSolve.hpp` (the six `fmm_tolerance` call sites,
@@ -571,17 +572,18 @@ rewritten to what still fails); `scripts/tuolumne/serial_runtimes.tsv`
 unconditional probe changes the stem's runtime — `fix-hang-rebalance.md`
 Conventions, "Budget rows"; `run_ctest_h0b.flux calibrate` with
 `CANOPY_CAL_REGEX`).
-**Reference:** the measured deviations and bounds recorded in place — the six
-`fmm_tolerance` call sites at `1.0e-8` (`tests/tstMultiSolve.hpp:955`, `:972`,
-`:990`, `:1008`, `:1045`, `:1094`), applied to `max_pos_rel` and `max_vel_rel` at
-`:929-933`; `SolveFusedM2L.matchesPriorReference` (`:1320-1350`) at `5.0e-2` /
-`1.0e-1` (`:1349-1350`); `CTS_DEV_TOL_THETA_CANOPY = 3.74e-02`
-(`tests/tstCartesianTaylorSolve.hpp:365`), which the rationale block above it
-(`:334-363`) records as **2x the worst measured figure** — gradient
-`1.8651556395e-02`, potential `9.9666798509e-04`, the six rank counts agreeing
-to 15 significant figures; `CTS_DEV_TOL_THETA_REF`, the `1e-3` bar itself
-(`:364`); the two arms that consume them (`:976`, `:998`); the drift cases'
-explicit absence of any accuracy claim (`:1040-1062`).
+**Reference:** the bounds as they now stand, each with its derivation in
+place — the six call sites' `pos_tol` / `vel_tol` (`tests/tstMultiSolve.hpp:1051`,
+`:1070`, `:1090`, `:1111`, `:1154`, `:1209`) under the shared derivation block
+above `:1041`, applied to `max_pos_rel` and `max_vel_rel` at `:1006-1013`;
+AutoRebalance's `probe_field_tol` (`:1157`), checked per step in the probe
+block; `SolveFusedM2L.matchesPriorReference` (`:1435-1466`) at `5.0e-2` /
+`5.7e-4`; `CTS_DEV_TOL_THETA_CANOPY = 3.74e-02`
+(`tests/tstCartesianTaylorSolve.hpp`), which the rationale block above it
+records as **2x the worst measured figure** — gradient `1.8651551291e-02`,
+potential `9.9666786091e-04`, identical at every rank count on both backends;
+`CTS_DEV_TOL_THETA_REF`, the `1e-3` bar itself; the drift cases' explicit
+absence of any accuracy claim (`:1041-1061`).
 **Do:**
 1. **Re-derive the six `fmm_tolerance` bounds, one per call site.** `1.0e-8` has
    no derivation behind it, and the prose at `tests/tstMultiSolve.hpp:1032` still
@@ -874,7 +876,7 @@ the tree builder's tests). No `src/` change.
    far field, so comparing their fields costs one extra comparison and closes
    the gap that chains A and B both rest on. Nothing in the suite asserts this
    today: `MultiSolve.M2L_BinEdge_Fallback` asserts the fallback is
-   *exercised* (`tests/tstMultiSolve.hpp:751-762`), not that it produces the
+   *exercised* (`tests/tstMultiSolve.hpp:1214-1229`), not that it produces the
    same answer as the tabulated path. **Chain A's entire purpose is to move
    pairs between those two paths**, so without this assertion a chain-A change
    that silently broke one of them would present as an accuracy shift with no
@@ -1137,7 +1139,7 @@ per-level `unit_w` array the operator builder indexes by `max_d`
    than the input.
 6. **Add a direct-sum deviation assertion to the drift trajectory.** The two
    `operatorCacheAcrossDrift*` cases assert no accuracy today
-   (`tests/tstCartesianTaylorSolve.hpp:1040-1062`), and they run the trajectory
+   (`tests/tstCartesianTaylorSolve.hpp:1041-1061`), and they run the trajectory
    on which this task's relabelling operates — so a column reused at the wrong
    width would change only the `keys_built` figure those cases print and would
    corrupt the field silently (**R4**, **R9**). Give them the same
@@ -1239,7 +1241,7 @@ structure and step 4 asserts `range_guard > 0`, so a flattened fixture fails
 loudly at the source rather than silently downstream. A1's failure direction
 asserts a neighbour level difference of at least 2 for the same reason. The
 clustered fixture's own guard against this
-(`tests/tstMultiSolve.hpp:751-762`) names the bounds actually in force,
+(`tests/tstMultiSolve.hpp:1214-1229`) names the bounds actually in force,
 `M2L_KEY_OFFSET_MAX` and `KernelType::m2l_key_dd_max`, and points at the
 per-reason lines rather than at a condition that cannot occur — a guard written
 against one of those is not a guard, which is what V1 step 5 turns from a report
@@ -1256,7 +1258,7 @@ A3 is blocked on C1 for exactly that reason.
 **R9 — The one trajectory that exercises cache reuse has no correctness check.**
 `CartesianTaylorSolve.operatorCacheAcrossDriftThetaCanopy` and `...ThetaRef`
 assert only that the far field was live and that an operator was built
-(`tests/tstCartesianTaylorSolve.hpp:1040-1062`), and they deliberately run a
+(`tests/tstCartesianTaylorSolve.hpp:1041-1061`), and they deliberately run a
 longer trajectory than the gating arms so the bounding box drifts — which is
 exactly the condition B2 changes the handling of. Presentation: B2 lands, the
 `keys_built` figure improves, every test passes, and the field is wrong wherever
@@ -1266,22 +1268,23 @@ deviation bound measured on that trajectory. **Until that exists, a `keys_built`
 improvement from B2 is not evidence of correctness**, and the gating arms do not
 cover it — they run a shorter trajectory on which the box barely drifts.
 
-**R10 — A pinned tolerance absorbs a real degradation.** Three of the bounds
-these chains are checked against are loose relative to the method's measured
-accuracy: `SolveFusedM2L.matchesPriorReference` runs at `5.0e-2` potential and
-`1.0e-1` gradient and says in place that it exists to catch "a
-complete-regression bug" rather than a degradation
-(`tests/tstMultiSolve.hpp:962-983`); `CartesianTaylorSolve`'s
-`theta_canopy` arm is pinned at `3.74e-02`, 2x its own worst measured figure;
-and the `MultiSolve` tests compare **positions and
-velocities after a short integration** at `1.0e-8`
-(`tests/tstMultiSolve.hpp:585-589`), which at `dt = 1.0e-4` over five steps
-bounds a force error only very weakly, since the particles barely move.
-Presentation: a tree or key change degrades the far field by a few percent and
-every bound still passes. Distinguishing measurement: record the **measured
-deviations**, not the pass/fail, before and after any task that changes the tree
-or the key — A3's failure direction requires exactly that, and it is the only
-reason an unchanged pass there means anything.
+**R10 — A pinned tolerance absorbs a real degradation.** Every bound these
+chains are checked against is a constant, and a constant set at a measured
+deviation times 2 still passes a regression smaller than that factor.
+`SolveFusedM2L.matchesPriorReference`'s potential bound (`5.0e-2`,
+`tests/tstMultiSolve.hpp:1464`) is already 0.87 used by cancellation at
+`|phi| -> 0`, so it can catch only a complete regression; its gradient bound
+(`5.7e-4`, `:1465`) is 2x the worst measured. `CartesianTaylorSolve`'s
+`theta_canopy` arm is pinned at `3.74e-02`, 2x its own worst figure. The six
+`MultiSolve` trajectory sites (`pos_tol`/`vel_tol`, checked at `:1006-1013`)
+are each 2x their worst over np 1-6, so at np 1, where the deviation is up to
+1000x smaller, they bound little. Presentation: a tree or key change degrades
+the far field by a few percent and every bound still passes. Distinguishing
+measurement: record the **measured deviations**, not the pass/fail, before
+and after any task that changes the tree or the key — the `[multisolve-dev]`,
+`[multisolve-probe]`, `[fusedm2l-dev]` and `[ct-solve]` lines print on every
+run and repeat bit for bit on SERIAL. A3's failure direction requires exactly
+that, and it is the only reason an unchanged pass there means anything.
 
 **R11 — A HIP failure is attributed to the task that ran into it.** No HIP
 test ran before this design's tasks, so a HIP arm may fail for a reason that

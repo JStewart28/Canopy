@@ -140,6 +140,28 @@ brute_force_gradient( const std::vector<double>& pos, // 3 * N
     }
 }
 
+// Absolute field A_i = sum_{j != i} |q_j| / |r_i - r_j|^2, charge per
+// length^2, >= |g_i|. A far-field truncation error of relative size eps per
+// interaction moves g_i by at most eps * A_i whatever the signs, which is why
+// the derived trajectory bound is built on A rather than on |g| (|g| cancels).
+inline void absolute_field( const std::vector<double>& pos, // 3 * N
+                            const std::vector<double>& chg, // N
+                            std::vector<double>& afield )   // N (output)
+{
+    const int N = static_cast<int>( chg.size() );
+    afield.assign( N, 0.0 );
+    for ( int i = 0; i < N; i++ )
+        for ( int j = 0; j < N; j++ )
+        {
+            if ( j == i )
+                continue;
+            const double dx = pos[3 * i + 0] - pos[3 * j + 0];
+            const double dy = pos[3 * i + 1] - pos[3 * j + 1];
+            const double dz = pos[3 * i + 2] - pos[3 * j + 2];
+            afield[i] += std::abs( chg[j] ) / ( dx * dx + dy * dy + dz * dz );
+        }
+}
+
 // Distance from each particle to its nearest other particle, O(N^2), in
 // position units. Used by the probe to flag close encounters.
 inline std::vector<double>
@@ -209,7 +231,10 @@ inline void testMultiStepGravity(
     MultiSolveTest::Mode mode, const char* case_label,
     int num_particles_per_rank, int num_steps,
     double dt, double drift_multiplier, int ncrit, int max_depth,
-    double tree_tolerance, int replication_depth, double fmm_tolerance,
+    double tree_tolerance, int replication_depth,
+    // pos_tolerance, vel_tolerance: bounds on the end-of-run max_pos_rel and
+    //   max_vel_rel (dimensionless); each call site states its derivation.
+    double pos_tolerance, double vel_tolerance,
     int* out_action_counts = nullptr,
     // The next three knobs are used by the bin-edge regression test.
     // clustered: draw 80% of particles from a tight Gaussian blob in
@@ -229,8 +254,13 @@ inline void testMultiStepGravity(
     // out_max_fallback_total: if non-null, written with the maximum
     //   (across solves and across MPI ranks summed) fallback pair count
     //   observed during the run.
+    // probe_field_tol: if positive, the per-step probe runs whatever
+    //   CANOPY_MULTISOLVE_PROBE says, and every step's field_err must be
+    //   below it (dimensionless). This is the far-field gate for a site whose
+    //   trajectory deviation is dominated by close-encounter dynamics.
     bool clustered = false, double mac_theta_override = 0.0,
-    long long* out_max_fallback_total = nullptr )
+    long long* out_max_fallback_total = nullptr,
+    double probe_field_tol = 0.0 )
 {
     using namespace MultiSolveTest;
 
@@ -250,7 +280,7 @@ inline void testMultiStepGravity(
 
     if ( const int npp = get_test_npp_override(); npp > 0 )
         num_particles_per_rank = npp;
-    const bool probe = get_test_probe_enabled();
+    const bool probe = probe_field_tol > 0.0 || get_test_probe_enabled();
 
     // -----------------------------------------------------------------------
     // Generate random initial particles on host.
@@ -422,6 +452,24 @@ inline void testMultiStepGravity(
     if ( probe && rank == 0 )
         run_min_sep.assign( total_particles,
                             std::numeric_limits<double>::infinity() );
+
+    // First-order error budget per unit relative field error, accumulated
+    // along the brute-force shadow (rank 0, brute-force index). If every
+    // far-field interaction is in error by at most eps relative, and the two
+    // trajectories stay close enough that the error does not feed back
+    // through the dynamics, then after the run
+    //   |dv_i| <= eps * budget_dv[i],  budget_dv = dt * sum_n A_i(n)
+    //     (velocity units), and
+    //   |dr_i| <= eps * budget_dr[i],  budget_dr = dt * drift * sum_k
+    //     budget_dv after kick k (position units),
+    // A being absolute_field(). Feedback is what a close encounter adds, so a
+    // deviation above eps * budget is dynamics, not far-field error.
+    std::vector<double> budget_dv, budget_dr;
+    if ( rank == 0 )
+    {
+        budget_dv.assign( total_particles, 0.0 );
+        budget_dr.assign( total_particles, 0.0 );
+    }
 
     // -----------------------------------------------------------------------
     // Time loop
@@ -658,6 +706,13 @@ inline void testMultiStepGravity(
                     max_dg, gmag( i_abs ), nn[i_abs], min_sep, n_close,
                     close_thr );
                 std::fflush( stdout );
+
+                if ( probe_field_tol > 0.0 )
+                    EXPECT_LT( ( g_scale > 0.0 ) ? max_dg / g_scale : max_dg,
+                               probe_field_tol )
+                        << "step " << step << ": the FMM gradient at the "
+                           "FMM's own positions deviates from brute force "
+                           "by more than the per-step far-field bound";
             }
         }
 
@@ -692,10 +747,13 @@ inline void testMultiStepGravity(
         // Brute-force shadow on rank 0
         if ( rank == 0 )
         {
-            std::vector<double> bf_grad;
+            std::vector<double> bf_grad, bf_afield;
             brute_force_gradient( bf_pos, bf_chg, bf_grad );
+            absolute_field( bf_pos, bf_chg, bf_afield );
             for ( int i = 0; i < total_particles; i++ )
             {
+                budget_dv[i] += dt * bf_afield[i];
+                budget_dr[i] += dt * drift_multiplier * budget_dv[i];
                 bf_vel[3 * i + 0] += dt * bf_grad[3 * i + 0];
                 bf_vel[3 * i + 1] += dt * bf_grad[3 * i + 1];
                 bf_vel[3 * i + 2] += dt * bf_grad[3 * i + 2];
@@ -807,6 +865,12 @@ inline void testMultiStepGravity(
         double max_pos_rel = 0.0;
         double max_vel_rel = 0.0;
         int max_vel_gid = -1;
+        // Largest per-particle budget relative to the state it is compared
+        // against, with the same |brute| < 1e-10 fallback as the deviation:
+        // kappa_pos = max_i budget_dr[i] / |r_i|, kappa_vel = max_i
+        // budget_dv[i] / |v_i|, both dimensionless.
+        double kappa_pos = 0.0;
+        double kappa_vel = 0.0;
         // Probe only, indexed by GlobalId: |v_bf| and the relative velocity
         // deviation of each particle.
         std::vector<double> vmag_of_gid, vrel_of_gid;
@@ -836,6 +900,9 @@ inline void testMultiStepGravity(
             const double prel = ( pmag > 1.0e-10 ) ? perr / pmag : perr;
             if ( prel > max_pos_rel )
                 max_pos_rel = prel;
+            kappa_pos = std::max(
+                kappa_pos,
+                ( pmag > 1.0e-10 ) ? budget_dr[j] / pmag : budget_dr[j] );
 
             const double vdx = fmm_vel_f[3 * i + 0] - bf_vel[3 * j + 0];
             const double vdy = fmm_vel_f[3 * i + 1] - bf_vel[3 * j + 1];
@@ -846,6 +913,9 @@ inline void testMultiStepGravity(
                            bf_vel[3 * j + 2] * bf_vel[3 * j + 2] );
             const double verr = std::sqrt( vdx * vdx + vdy * vdy + vdz * vdz );
             const double vrel = ( vmag > 1.0e-10 ) ? verr / vmag : verr;
+            kappa_vel = std::max(
+                kappa_vel,
+                ( vmag > 1.0e-10 ) ? budget_dv[j] / vmag : budget_dv[j] );
             if ( vrel > max_vel_rel )
             {
                 max_vel_rel = vrel;
@@ -918,24 +988,48 @@ inline void testMultiStepGravity(
         //     on the final state (position and velocity respectively);
         //     the |brute| < 1e-10 particles fall back to the absolute
         //     deviation, same units as the state itself.
-        //   tol: the per-call-site fmm_tolerance the two are checked against.
+        //   derived_pos, derived_vel: the first-order bounds
+        //     theta^(P+1) * kappa_pos and theta^(P+1) * kappa_vel, the
+        //     per-solve floor carried through this run's integration
+        //     (budget_dv / budget_dr above); dimensionless.
+        //   pos_tol, vel_tol: the call site's bounds on the two deviations.
+        const double floor_eps = std::pow( mac_theta_used, P_ORDER + 1 );
         std::printf( "[multisolve-dev] case %s nprocs %d nsteps %d "
                      "drift %.17g max_pos_rel %.17g max_vel_rel %.17g "
-                     "tol %.17g\n",
+                     "derived_pos %.17g derived_vel %.17g "
+                     "pos_tol %.17g vel_tol %.17g\n",
                      case_label, nprocs, num_steps, drift_multiplier,
-                     max_pos_rel, max_vel_rel, fmm_tolerance );
+                     max_pos_rel, max_vel_rel, floor_eps * kappa_pos,
+                     floor_eps * kappa_vel, pos_tolerance, vel_tolerance );
         std::fflush( stdout );
 
-        EXPECT_LT( max_pos_rel, fmm_tolerance )
+        EXPECT_LT( max_pos_rel, pos_tolerance )
             << "FMM multi-step position deviates from brute-force; "
                "max relative error = "
             << max_pos_rel;
-        EXPECT_LT( max_vel_rel, fmm_tolerance )
+        EXPECT_LT( max_vel_rel, vel_tolerance )
             << "FMM multi-step velocity deviates from brute-force; "
                "max relative error = "
             << max_vel_rel;
     }
 }
+
+//---------------------------------------------------------------------------//
+// Trajectory bounds (pos_tol, vel_tol at each call site below).
+//
+// Each is the tighter of two figures, both stated at the site:
+//   derived:  theta^(P+1) carried through the site's integration -- the
+//     first-order budget of testMultiStepGravity (derived_pos/derived_vel on
+//     the [multisolve-dev] line), worst over np. It holds while the FMM and
+//     brute-force trajectories stay close; above it is dynamics.
+//   measured: the worst deviation over three runs on each backend (SERIAL
+//     np 1-6, HIP np 1-4; flux jobs f3cajPhDd7dZ, f3cajPqbu44f) times 2.
+//     SERIAL repeats bit for bit and HIP moves by at most 1.0004x run to run,
+//     so the 2x margin covers the spread.
+// Every measured figure sits under its derived one at every np, so measured
+// x 2 sets every bound. One bound per site covers all rank counts; the
+// deviation grows with np (global N = 200 * np), so a site is loose at np 1.
+//---------------------------------------------------------------------------//
 
 //---------------------------------------------------------------------------//
 // Test 1: Stable tree, only inter-rank migration.
@@ -952,7 +1046,9 @@ TEST( MultiSolve, StableTree_Migrate )
                           /*dt=*/1.0e-4, /*drift_multiplier=*/1.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/1.0e-8 );
+                          // derived 9.64e-6 / 1.97e-1; measured 3.367e-9
+                          // (np 6) / 9.364e-6 (np 5).
+                          /*pos_tol=*/6.8e-9, /*vel_tol=*/1.9e-5 );
 }
 
 //---------------------------------------------------------------------------//
@@ -969,7 +1065,9 @@ TEST( MultiSolve, IntermediateMotion_Rebalance )
                           /*dt=*/1.0e-3, /*drift_multiplier=*/5.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/1.0e-8 );
+                          // derived 1.76e-2 / 9.73e-2; measured 2.203e-4
+                          // (np 5) / 6.182e-4 (np 5).
+                          /*pos_tol=*/4.5e-4, /*vel_tol=*/1.3e-3 );
 }
 
 //---------------------------------------------------------------------------//
@@ -987,7 +1085,9 @@ TEST( MultiSolve, LargeMotion_Rebuild )
                           /*dt=*/1.0e-3, /*drift_multiplier=*/50.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/1.0e-8 );
+                          // derived 9.33e-2 / 2.24e-1; measured 1.742e-3
+                          // (np 4) / 1.612e-3 (np 4, HIP).
+                          /*pos_tol=*/3.5e-3, /*vel_tol=*/3.3e-3 );
 }
 
 //---------------------------------------------------------------------------//
@@ -1005,7 +1105,10 @@ TEST( MultiSolve, AutoMaintain )
                           /*dt=*/1.0e-3, /*drift_multiplier=*/5.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/1.0e-8, counts );
+                          // derived 1.76e-2 / 9.73e-2; measured 2.203e-4
+                          // (np 5) / 6.182e-4 (np 5) -- the same trajectory
+                          // as IntermediateMotion_Rebalance at every np.
+                          /*pos_tol=*/4.5e-4, /*vel_tol=*/1.3e-3, counts );
 
     int rank;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
@@ -1028,10 +1131,14 @@ TEST( MultiSolve, AutoMaintain )
 // to change the cell-key set, and run for more steps so at least one
 // per-step topology change is virtually certain.
 //
-// The assertion is that the Rebalance count is >0. The trajectory
-// tolerance is the same as the other Rebalance/Auto tests (fmm_tol=2e-2),
-// so this also serves as a regression check on the Rebalance physics
-// path itself.
+// The assertion is that the Rebalance count is >0. Its far-field gate is the
+// per-step probe, not the trajectory: the test runs unsoftened, and at np 5-6
+// close encounters amplify a per-step field error of < 1e-6 into a velocity
+// deviation of 1.7e-2 (fix-hang-rebalance E1). probe_field_tol bounds every
+// step's field-scale error at the tighter of theta^(P+1) = 1.95e-3 and the
+// measured worst 9.509e-7 (np 3, both backends) x 2. The trajectory bounds
+// are measured x 2 like the other sites, and catch a complete regression of
+// the Rebalance path; they make no far-field claim.
 //---------------------------------------------------------------------------//
 TEST( MultiSolve, AutoRebalance )
 {
@@ -1042,7 +1149,12 @@ TEST( MultiSolve, AutoRebalance )
                           /*dt=*/1.0e-3, /*drift_multiplier=*/2.0,
                           /*ncrit=*/16, /*max_depth=*/6,
                           /*tree_tol=*/0.3, /*repl_depth=*/2,
-                          /*fmm_tol=*/1.0e-8, counts );
+                          // derived 3.26e-2 / 4.01e-1; measured 3.160e-3
+                          // (np 6) / 1.713e-2 (np 6).
+                          /*pos_tol=*/6.4e-3, /*vel_tol=*/3.5e-2, counts,
+                          /*clustered=*/false, /*mac_theta_override=*/0.0,
+                          /*out_max_fallback_total=*/nullptr,
+                          /*probe_field_tol=*/1.9e-6 );
 
     int rank;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
@@ -1091,7 +1203,10 @@ TEST( MultiSolve, M2L_BinEdge_Fallback )
                           /*dt=*/1.0e-4, /*drift_multiplier=*/1.0,
                           /*ncrit=*/8, /*max_depth=*/8,
                           /*tree_tol=*/0.1, /*repl_depth=*/2,
-                          /*fmm_tol=*/1.0e-8,
+                          // theta = 0.3, so theta^(P+1) = 1.97e-5: derived
+                          // 2.28e-5 / 4.92e-4; measured 1.715e-9 (np 6) /
+                          // 1.661e-6 (np 3).
+                          /*pos_tol=*/3.5e-9, /*vel_tol=*/3.4e-6,
                           /*out_action_counts=*/nullptr,
                           /*clustered=*/true,
                           /*mac_theta_override=*/0.3, &max_fallback );
@@ -1324,13 +1439,13 @@ TEST( SolveFusedM2L, matchesPriorReference )
                                             /*mac_theta=*/0.5,
                                             /*ncrit=*/16, /*max_depth=*/6,
                                             pot_err, grad_err );
-    // The spec calls for N=200k uniform-cube where FMM at P=6, theta=0.5
-    // achieves ~3e-6 vs direct N^2. We can't run brute force at that N in
-    // CI; with the smaller N here the FMM is much less well-conditioned,
-    // so we relax the bound. The point of this test is to catch a
-    // complete-regression bug in the fused kernel — even a ~5% bound
-    // would fire on, e.g., a sign error in the conjugate-symmetry
-    // expansion or an op_idx misalignment.
+    // Bounds. pot_err is per-particle relative with mixed-sign charges, so
+    // |phi| -> 0 inflates it: measured 8.93e-4 to 4.32e-2 over np 1-6 (worst
+    // np 5), which is cancellation, not the far field. Its 5.0e-2 bound is
+    // left as it is -- measured x 2 would loosen it. grad_err is stable:
+    // identical over three runs on each backend (SERIAL np 1-6, HIP np 1-4;
+    // flux jobs f3cajPhDd7dZ, f3cajPqbu44f), worst 2.847e-4 at np 3, under
+    // the floor theta^(P+1) = 0.5^7 = 7.8e-3. Its bound is that worst x 2.
     int rank, nprocs;
     MPI_Comm_rank( MPI_COMM_WORLD, &rank );
     MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
@@ -1347,7 +1462,7 @@ TEST( SolveFusedM2L, matchesPriorReference )
         std::fflush( stdout );
     }
     EXPECT_LT( pot_err, 5.0e-2 );
-    EXPECT_LT( grad_err, 1.0e-1 );
+    EXPECT_LT( grad_err, 5.7e-4 );
 }
 
 //---------------------------------------------------------------------------//

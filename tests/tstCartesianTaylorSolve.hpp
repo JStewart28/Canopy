@@ -334,10 +334,11 @@ static constexpr double CTS_REFERENCE_BAR = 1.0e-3;
 //
 // CTS_DEV_TOL_THETA_REF IS THE BAR ITSELF, not a measurement, because the bar
 // is T4's exit criterion. The theta = 0.3 arm runs at CTS_P_THETA_REF = 3 and
-// achieves 7.0132e-04 on the gradient and 1.8963e-05 on the potential
-// (f3YfvsefN86T), so it clears the bar by 1.43x. It is NOT pinned at 2x the
-// measurement — that would be 1.40e-03, above the bar, which would be a
-// weaker gate than the criterion itself.
+// achieves 7.0717918545e-04 on the gradient and 1.9263340835e-05 on the
+// potential (tree-opt V1, flux jobs f3cajPhDd7dZ and f3cajPqbu44f: identical
+// over three runs at SERIAL np 1-6 and HIP np 1-4), so it clears the bar by
+// 1.41x. It is NOT pinned at 2x the measurement — that would be 1.41e-03,
+// above the bar, which would be a weaker gate than the criterion itself.
 //
 // WHY THAT ARM IS AT p = 3 WHILE THE REFERENCE IS ORDER 2. At p = 2 its
 // gradient is 8.996e-03, a factor of 9 over the bar, and that is structural
@@ -352,9 +353,9 @@ static constexpr double CTS_REFERENCE_BAR = 1.0e-3;
 // reference's velocity has, which is what makes the comparison a comparison.
 //
 // CTS_DEV_TOL_THETA_CANOPY is 2x the worst measured theta = 0.5 figure,
-// 1.8651556395e-02 (gradient; the potential is 9.9666798509e-04), measured on
-// job f3Yg13MRtyp3 at np 1-6 — the six rank counts agree to 15 significant
-// figures. That arm stays at CTS_P = 2, the reference's order, because its job
+// 1.8651551291e-02 (gradient; the potential is 9.9666786091e-04), identical
+// over three runs at SERIAL np 1-6 and HIP np 1-4 (tree-opt V1, flux jobs
+// f3cajPhDd7dZ and f3cajPqbu44f); 3.74e-02 is 2.005x it. That arm stays at CTS_P = 2, the reference's order, because its job
 // is to record what Canopy's own default admissibility delivers rather than to
 // meet a bar, and it has no bar to meet. It lands ABOVE the 1e-3 bar on both
 // fields, which is the expected ordering and the whole point of running two

@@ -686,3 +686,182 @@ in the profiling-ON branch, on both backends, and never fired.
   backend is a usable baseline and a second run is a check, not a spread.
 - **B1, A2, B2, A3** — the before/after spread on this fixture is zero at every
   np; any difference in a step-8 line is the change's.
+
+## V1 (resume)
+
+**Outcome: every step done; the exit criterion is met on SERIAL and blocked on
+HIP by `SolveFusedM2L.multipleSolvesIdempotent` alone**, a pre-existing
+HIP-only failure V1 does not own (see `## T1 (HIP arm)` and README "Known
+Issues"). V1 is marked **BLOCKED**, not **DONE**.
+
+Provenance: commit `1e6185d` plus this section's test edits, Cray clang 20.0.0,
+env `tuolumne_trilinos`, `build-tuolumne` (`Canopy_ENABLE_PROFILING:BOOL=ON`)
+and `build-tuolumne-noprof` (`OFF`), read from the cache and echoed at each
+job's head. Every run went through `canopy_ctest` after a passing watchdog
+self-test; no entry went over budget, none was refused, and the watchdog
+cancelled nothing. Script: `scripts/tuolumne/run_ctest_v1_bounds.flux
+measure|exit [serial|hip]`, `noprof`, `fail`.
+
+### Decisions recorded (made before the session, not reopened)
+
+- **Each `MultiSolve` trajectory bound is the tighter of a derived figure and a
+  measured one**: $\theta^{P+1}$ carried through the site's integration, and
+  the worst deviation over three runs per backend (SERIAL np 1-6, HIP np 1-4)
+  times a margin no smaller than the run-to-run spread. The "leave it as it
+  is" rule applies only to tightening `matchesPriorReference`'s passing
+  gradient bound.
+- **`AutoRebalance` gates on both** an unconditional per-step probe (field-scale
+  error on every step) and a trajectory bound commented as a dynamics catch.
+  Any other site whose trajectory exceeds its derived bound with a clean probe
+  would get the same treatment — none did (below). `MultiSolve`'s `default`
+  rows were re-calibrated for the probe's runtime.
+- **`matchesPriorReference`'s potential bound stays at `5.0e-2`.**
+
+### Signature changed, and why
+
+`testMultiStepGravity` (`tests/tstMultiSolve.hpp:230`): `double fmm_tolerance`
+became **`double pos_tolerance, double vel_tolerance`**, and a trailing
+**`double probe_field_tol = 0.0`** was added. Position and velocity deviations
+differ by up to four orders of magnitude at one site (StableTree: pos 3.4e-9,
+vel 9.4e-6), so one shared tolerance would have been 1000x loose on position.
+`probe_field_tol > 0` turns the probe on regardless of
+`CANOPY_MULTISOLVE_PROBE` and `EXPECT`s every step's field-scale error under
+it. The six call sites in the same file are the only callers.
+
+### The derived figure, as implemented
+
+The shadow loop on rank 0 accumulates, per particle, a first-order error
+budget: `budget_dv += dt * A_i` before each kick and
+`budget_dr += dt * drift * budget_dv` after it, where
+$A_i = \sum_{j\ne i} |q_j| / r_{ij}^2$ (new `absolute_field()`). If every
+far-field interaction is in error by at most $\varepsilon$ relative, then
+$|\delta v_i| \le \varepsilon\,\texttt{budget\_dv}_i$ and
+$|\delta r_i| \le \varepsilon\,\texttt{budget\_dr}_i$ while the trajectories
+stay close (no feedback). $A$ rather than $|g|$ because $|g|$ cancels and $A$
+does not. The `[multisolve-dev]` line now prints
+`derived_pos` $= \theta^{P+1} \max_i \texttt{budget\_dr}_i / |r_i|$ and
+`derived_vel` $= \theta^{P+1} \max_i \texttt{budget\_dv}_i / |v_i|$ (same
+$<10^{-10}$ fallback as the deviation), plus `pos_tol` / `vel_tol` in place of
+`tol`. The site constant is the worst derived figure over np.
+
+### Step 1 — measured: flux jobs `f3cajPhDd7dZ` (SERIAL) and `f3cajPqbu44f` (HIP)
+
+Three passes each, `MultiSolve` under `CANOPY_MULTISOLVE_PROBE=1` (config
+`probe`; the probe is read-only and inert on `[multisolve-dev]`, E1) and
+`CartesianTaylorSolve` at default. **SERIAL repeats bit for bit across the
+three passes at every np; HIP moves by at most 1.0004x** (IntermediateMotion
+np 2 position). HIP figures equal SERIAL's to about four digits. np 1 matches
+the first pass's table to every printed digit; np >= 2 moved with H2.
+
+**Stop clause: not triggered.** The per-step field-scale error is at most
+`1.52e-6` (LargeMotion np 5) on any step, site, np or backend, against
+`1.95e-3`; `M2L_BinEdge_Fallback` peaks at `2.33e-8` against its own floor
+$0.3^9 = 1.97 \times 10^{-5}$. AutoRebalance's probe `end` line: `n_excess` 2
+(1 close) at np 5 and 11 (10 close) at np 6, zero elsewhere.
+
+**Every measured deviation is under its derived figure at every np** —
+AutoRebalance np 6 velocity `1.713e-2` against `4.01e-1`, LargeMotion np 4
+position `1.742e-3` against `6.23e-2` — so measured x 2 is the tighter figure
+at every site, and no site beyond AutoRebalance needed the dynamics
+treatment. (The first-order budget is generous where particles pass close,
+because $A_i$ is large exactly there; that is why E1's close-encounter excess
+still sits inside it.)
+
+| site | derived pos / vel (worst np) | measured worst pos / vel | old | new pos / vel |
+| --- | --- | --- | --- | --- |
+| `StableTree_Migrate` | 9.64e-6 / 1.97e-1 | 3.367e-9 (np 6) / 9.364e-6 (np 5) | 1.0e-8 | **6.8e-9 / 1.9e-5** |
+| `IntermediateMotion_Rebalance` | 1.76e-2 / 9.73e-2 | 2.203e-4 (np 5) / 6.182e-4 (np 5) | 1.0e-8 | **4.5e-4 / 1.3e-3** |
+| `LargeMotion_Rebuild` | 9.33e-2 / 2.24e-1 | 1.742e-3 (np 4) / 1.612e-3 (np 4, HIP) | 1.0e-8 | **3.5e-3 / 3.3e-3** |
+| `AutoMaintain` | 1.76e-2 / 9.73e-2 | 2.203e-4 (np 5) / 6.182e-4 (np 5) | 1.0e-8 | **4.5e-4 / 1.3e-3** |
+| `AutoRebalance` (trajectory) | 3.26e-2 / 4.01e-1 | 3.160e-3 (np 6) / 1.713e-2 (np 6) | 1.0e-8 | **6.4e-3 / 3.5e-2** |
+| `AutoRebalance` (probe, per step) | 1.95e-3 | 9.509e-7 (np 3, both backends) | none | **1.9e-6** |
+| `M2L_BinEdge_Fallback` (θ 0.3) | 2.28e-5 / 4.92e-4 | 1.715e-9 (np 6) / 1.661e-6 (np 3) | 1.0e-8 | **3.5e-9 / 3.4e-6** |
+
+`AutoMaintain` and `IntermediateMotion_Rebalance` print identical figures at
+every np: with `drift 5` every Auto step takes Rebuild or Rebalance along the
+same trajectory. Two position bounds (StableTree, BinEdge) land below the old
+`1e-8`; both deviations are bit-stable on SERIAL and within 1.0004x on HIP,
+so the tightening is explained (step 7).
+
+### Step 3 — `matchesPriorReference`, applied
+
+Identical over three runs on each backend: `grad_err` 7.256e-5, 1.421e-4,
+**2.847e-4**, 2.286e-4, 1.764e-4, 2.463e-4 at np 1-6; `pot_err` 8.93e-4,
+2.82e-3, 2.21e-2, 8.29e-4, **4.32e-2**, 1.80e-2. **Gradient bound
+`1.0e-1` → `5.7e-4`** (worst x 2; floor at P = 6 is $0.5^7 = 7.8\times10^{-3}$).
+Potential stays `5.0e-2` (0.87 used, cancellation-inflated). The comment's old
+"complete-regression bug" prose was replaced by these figures.
+
+### Step 4 — `theta_canopy` confirmed, rationale figures refreshed
+
+Gradient `1.8651551291e-02`, potential `9.9666786091e-04`, identical at all 30
+readings (SERIAL np 1-6, HIP np 1-4, three passes). These differ from the
+block's `1.8651556395e-02` / `9.9666798509e-04` in the seventh digit, so the
+block was updated; `3.74e-02` is 2.005x the new gradient, so the constant
+stands. `theta_ref`: `7.0717918545e-04` / `1.9263340835e-05`, identical at all
+30, 1.41x under the untouched `1e-3` bar; the stale `7.0132e-04` /
+`1.8963e-05` / "1.43x" prose was replaced.
+
+### Step 5 — both branches run
+
+Profiling ON: the per-reason assertions ran in T1's HIP-arm jobs and in every
+job here and never fired. Profiling OFF (`f3cax1mLU4mu`,
+`build-tuolumne-noprof`, SERIAL np 1-6): all 42 `[m2l-fallback-reason]` lines
+read -1 on all three counters, `sum identity SKIPPED` prints at all six rank
+counts, and `M2L_BinEdge_Fallback` passes.
+
+### Budget rows re-calibrated
+
+`run_ctest_h0b.flux calibrate`, `CANOPY_CAL_REGEX` = `MultiSolve` SERIAL
+np 1-6: `default` (`f3cajB3pSQ1m`), `probe` (`f3camEXYMR7u`), and a new
+`theta0.7` config for the failure direction (`f3caoGecUY71`). The default
+rows barely moved at np >= 2 (6.63-16.25 s against 6.81-15.8 s); np 1 rose
+to 8.56 s, the cold first entry of the job.
+
+### Failure direction — `f3carGPn6qH9`
+
+Temporarily made `matchesPriorReference` read `get_test_mac_theta()`, rebuilt,
+ran `MultiSolve` SERIAL np 1-6 under `CANOPY_MAC_THETA=0.7` (config
+`theta0.7`), reverted, rebuilt. Demonstrated:
+- **`matchesPriorReference` gradient**: 2.31e-3 to 1.23e-2 at np 1-6, failing
+  `5.7e-4` at every np; the old `1.0e-1` passes all six.
+- **AutoRebalance probe gate**: per-step field error up to 2.04e-5, failing
+  `1.9e-6` (8 `EXPECT`s over np 1-6); a gate at the floor `1.95e-3` passes.
+- The six trajectory sites fail too (StableTree position at np 1, 3.5e-9,
+  stays under `6.8e-9`); the old `1e-8` already failed them, so they
+  demonstrate nothing new. `M2L_BinEdge_Fallback` pins θ = 0.3 and is
+  unchanged — the control.
+
+### Exit criterion — `f3cax1EfQvc7` (SERIAL), `f3cax1ePDS87` (HIP)
+
+Three successive passes of `CartesianTaylorSolve` then `MultiSolve`, default
+config. **SERIAL: 36 of 36 entries pass**, every figure identical to the
+measurement runs; the largest fraction of any bound used is 0.498
+(LargeMotion np 4 position). **HIP: all 12 `CartesianTaylorSolve` entries
+pass; 11 of 12 `MultiSolve` entries fail, every failure in
+`SolveFusedM2L.multipleSolvesIdempotent`** (58 failure lines, all in that
+case; it passed once at np 1). Every case V1 changed passes on HIP, at most
+0.498 of its bound, and AutoRebalance's probe peaks at 9.51e-7 of `1.9e-6`.
+
+### Doc corrections made
+
+`tree-opt.md`: R10 rewritten for the new bounds; stale `tstMultiSolve.hpp`
+citations in Test naming, Current state, T1, C1 and R7; the drift-case
+citation (`:1041-1061`) and the direct-sum arms (`:977-1007`). README: the
+"Six `MultiSolve` tests fail the `1e-8`" entry removed, the FP32 entry's
+citation and its cross-reference fixed, the idempotence entry updated.
+
+**Affects:**
+- **V1** — **DONE** once `multipleSolvesIdempotent` passes on HIP; rerun
+  `run_ctest_v1_bounds.flux exit hip` and nothing else. It needs either
+  deterministic device accumulation (a `src/` change) or a decision that the
+  case asserts agreement to a tolerance — neither is V1's.
+- **B1, A2, B2, A3** — the `MultiSolve` trajectory sites now gate, and
+  `[multisolve-dev]` prints `derived_pos` / `derived_vel` beside each
+  deviation. SERIAL figures repeat bit for bit, so a before/after comparison is
+  exact on SERIAL and within 1.0004x on HIP. Bounds are 2x the worst over
+  np 1-6, so record figures, not pass/fail (R10).
+- **A2, A3** — `matchesPriorReference`'s gradient bound is now `5.7e-4`, about
+  2x its worst; a balanced tree that moves it by more than that fails.
+- **Any task that adds work to `MultiSolve`** — re-calibrate its `default`,
+  `probe` and `theta0.7` rows.

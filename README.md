@@ -494,57 +494,15 @@ of the entry above, here showing up between solves within one run. SERIAL
 passes at np 1-6. This is **pre-existing**: H0c's baseline job
 `f3cM4ghTjtiT` (`fix-hang-rebalance`) already shows it, as do every H2 and E1
 HIP `MultiSolve` log, though their summaries listed only the six `1e-8` cases.
-Re-observed in `tree-opt` T1's HIP run, flux job `f3cacJZDntFZ`. Making the
+Re-observed in `tree-opt` T1's HIP run, flux job `f3cacJZDntFZ`. Since
+`tree-opt` V1 re-derived the trajectory bounds it is the stem's only failure,
+on HIP only, and it fails intermittently (one of three np-1 passes passed in
+job `f3cax1ePDS87`); it is what keeps V1's HIP arm from passing. Making the
 case pass needs either a deterministic device accumulation or a test that
 asserts agreement to a stated tolerance instead of bit-identity — a decision
 about what the test claims, not a bound to widen.
 
 Reproduce with `flux batch scripts/tuolumne/run_ctest_t1_hip.flux measure hip`.
-
-### Six `MultiSolve` tests fail the `1e-8` multi-step check at every rank count
-
-The `MultiSolve` stem does not currently pass. Six tests fail the multi-step position/velocity comparison at
-`fmm_tolerance = 1e-8` (`tests/tstMultiSolve.hpp:929,933`) at **all six** rank
-counts: `MultiSolve.StableTree_Migrate`, `IntermediateMotion_Rebalance`,
-`LargeMotion_Rebuild`, `AutoMaintain`, `AutoRebalance`, `M2L_BinEdge_Fallback`.
-The measured deviations are printed unconditionally on a `[multisolve-dev]`
-line (`tests/tstMultiSolve.hpp:922`) and span 3e-11 to 1.7e-2 across sites and
-rank counts; at np 1 they are the 3e-7 to 9e-6 first recorded here.
-
-**The `1e-8` bound has not been re-derived yet.** Task V1 in
-`tasks/tree-opt.md` replaces it with per-site measured bounds, read against the
-far-field truncation floor $\theta^{P+1} \approx 1.95 \times 10^{-3}$ at
-`P_ORDER = 8`, `theta = 0.5`. `MultiSolve.AutoRebalance`'s trajectory
-deviation exceeds that floor: max relative velocity deviation `6.52e-3` at np 5
-and `1.71e-2` at np 6, position `3.15e-3` at np 6.
-
-**That excess is trajectory amplification, not a far-field defect**
-(`tasks/fix-hang-rebalance.md` E1). The far field is healthy on every step:
-the per-step field-scale error of the FMM gradient against brute force at the
-FMM's own positions is at most `9.5e-7` for AutoRebalance and `1.52e-6` for any
-case, at SERIAL np 1-6 and HIP np 1-4. The test runs unsoftened
-(`cfg.softening = 0.0`), and close encounters amplify that small force error
-into a large velocity difference. The excess is N-driven, not rank-driven:
-SERIAL np 1 at N = 1200, with no partition, reaches `max_vel_rel = 2.67e-3`,
-about 7000x the solve error its trajectory saw. At np 6, 10 of the 11 particles
-above the floor had a close encounter, against a 48% base rate. A trajectory
-bound at such a site measures the dynamics; how V1 gates it is V1's decision.
-Do not widen a bound over it without the per-step probe showing the far field
-under the floor. Full figures are in `tasks/fix-hang-rebalance-progress-log.md`
-section E1 and `tasks/tree-opt-progress-log.md` section V1. Reproduce the
-per-step figures with `CANOPY_MULTISOLVE_PROBE=1`
-(`flux batch scripts/tuolumne/run_ctest_e1.flux measure serial|hip`), and the
-trajectory figures with `scripts/tuolumne/run_ctest_v1.flux`.
-
-This is **pre-existing**: checking out `src/Canopy_DownwardSweep.hpp` at
-`a6c90de`, the commit before the Laplace-solve harness work began, rebuilding
-and rerunning reproduces the identical error values to every digit
-(`3.485035469067542e-07`, `6.8419528791564039e-07`, `9.1947965989306709e-06`).
-
-The partition is not their cause: on the reproducible ParMETIS cell partition
-the same six cases fail, and `AutoRebalance` still reaches `max_vel_rel`
-`6.52e-3` at np 5 and `1.71e-2` at np 6 (flux job `f3cZDMUWgsYj`,
-`fix-hang-rebalance` H2).
 
 ### `DownwardSweep.testIdempotentExecution` compares `locals()` with itself on SERIAL
 
@@ -560,7 +518,7 @@ applied to `DownwardSweep`. Found by reading, not by a run.
 
 ### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
 
-**The case is commented out** (`tests/tstMultiSolve.hpp:1210`), not filtered,
+**The case is commented out** (`tests/tstMultiSolve.hpp:1603-1656`), not filtered,
 so it is absent from the `Canopy_Test_MultiSolve_MPI_SERIAL` binary, pending
 the investigation below. Re-enable it as written once the defect is fixed — do
 **not** re-enable it by widening its `5e-2` budget, which would retire the only
@@ -568,8 +526,7 @@ signal this defect has.
 
 It passes at 1 rank but fails at 2–6 ranks: the FP32 max relative gradient error
 is ≈ 0.277 at np=2, rising to ≈ 0.339 at np=3, well over the test's `5e-2`
-budget. It is not the suite's only failure — the six `MultiSolve` tests of the
-entry above fail at every rank count.
+budget.
 
 This is a **pre-existing** failure, not a regression from the
 registration-coalesced migration work (issue #22): checking out the parent
