@@ -91,9 +91,9 @@ budget after H0b), and **before cancelling it takes
 watchdog. At ~1 in 3 per np-3 run, 20 runs miss it with probability
 $(2/3)^{20} \approx 3 \times 10^{-4}$. H2 reads the stacks, names the mechanism,
 fixes it, and turns the precondition that was violated into a loud check.
-H1 carries a SERIAL arm, met, and a HIP arm. H2's SERIAL fix leaves a HIP solver
-running Zoltan2 on HIP, the device H1's SERIAL stacks stalled on. H2's second
-arm replaces the partitioner on both backends. A distributed ParMETIS graph
+H2's SERIAL fix leaves a HIP solver running Zoltan2 on HIP, the device H1's
+SERIAL stacks stalled on, and H0c captured that stall on HIP. H2's second arm
+replaces the partitioner on both backends. A distributed ParMETIS graph
 partition over every non-shared cell replaces the rank-0 MJ solve on leaves
 and the majority-vote rule for their parents. It balances each band of tree
 levels and minimizes the parent-child and neighbour edges that the sweeps
@@ -419,12 +419,9 @@ at every np. README "Known Issues" records the Zoltan2-on-HIP stall, the
 `UpwardSweep` HIP idempotence failures, the `LaplaceSolve` HIP bit-level
 failures, and a SERIAL `UpwardSweep` failure found on the way.
 
-### H1 — Contain the np-3 hang and capture its stacks — **REOPENED**
+### H1 — Contain the np-3 hang and capture its stacks — **DONE**
 
-SERIAL arm **met**; HIP arm **not started**. **Fill in** through the SERIAL
-exit criterion below are the SERIAL arm's; the HIP arm follows them.
-
-**Depends on:** none for the SERIAL arm. HIP arm: H0c **DONE**.
+**Depends on:** none.
 **Fill in:** new `scripts/tuolumne/flux_watchdog.sh`;
 `scripts/tuolumne/run_ctest_v1.flux` (replace its inline loop at `:69-90` and
 `:107` with the sourced helper); new `scripts/tuolumne/run_ctest_h1.flux`;
@@ -453,7 +450,7 @@ README "Known Issues", the np-3 hang entry.
 3. Record the stack of every rank of the captured hang in the log, plus the
    last gtest case and the last `[multisolve-dev]` line before it.
 
-**SERIAL exit criterion:** one `run_ctest_h1.flux` job whose log shows:
+**Exit criterion:** one `run_ctest_h1.flux` job whose log shows:
 - the self-test sub-job cancelled between 300 and 330 s, with exactly three
   `sleep` stacks, each a child of the self-test sub-job's shell, and the np-4
   follow-on started;
@@ -464,23 +461,7 @@ Failure direction: the self-test proves the watchdog cancels and captures. If
 20 np-3 runs complete with no hang, record that as the finding, with its
 $(2/3)^{20}$ odds, and stop; do not run more to force one.
 
-**HIP arm.**
-1. Add a backend argument to `run_ctest_h1.flux` (`serial`, the default, or
-   `hip`). Under `hip` the loop runs
-   `canopy_ctest '^Canopy_Test_MultiSolve_MPI_HIP_np_3$'` with the HIP
-   environment, and also every HIP rank count at which H0c recorded a
-   `MultiSolve` entry over budget. The self-test is H0b's.
-2. Record the stacks of every rank of each captured HIP hang, plus the last
-   gtest case and last `[multisolve-dev]` line before it, as in step 3.
-
-**HIP exit criterion:** one `run_ctest_h1.flux hip` job whose log shows H0b's
-self-test passing and either:
-- at least one HIP `MultiSolve` run cancelled over budget, with a non-empty
-  `gstack` for every rank; or
-- 20 clean runs at each looped rank count, recorded as "not reproduced at 20"
-  and never as "no hang" (**R2**).
-
-**Met (SERIAL).** Job `f3bnfasqQDAo`. The self-test sub-job was cancelled at a runtime
+**Met.** Job `f3bnfasqQDAo`. The self-test sub-job was cancelled at a runtime
 of 303.6 s with exactly three `sleep` stacks, each a direct child of its
 `flux-shell` (`matched=3 children=3 nonempty=3`), and the np-4 `hostname`
 follow-on then ran. In the np-3 loop, run 1 completed and run 2 hung in
@@ -488,14 +469,21 @@ follow-on then ran. In the np-3 loop, run 1 completed and run 2 hung in
 non-empty `gstack` captures of all three ranks. The stacks are verbatim in the
 progress log, section H1.
 
+H1 has no HIP run. The HIP stall is already captured: H0c's job
+`f3cM4ghTjtiT` stacked every rank at HIP np 3 and np 4 (2 stalls in 8
+`MultiSolve` HIP entries), and `01_fix-tests.md` F4's sweep job
+`f3cWVibHs6gf` stacked the same signature at HIP np 3. Rank 0 is in Zoltan2
+`AlgMJ`'s `hipDeviceSynchronize` under `partition_leaves`, the others in its
+`MPI_Bcast`. That path is the one H2's partitioner arm deletes.
+
 ### H2 — Name the hang's mechanism and fix it — **REOPENED**
 
 SERIAL arm **met**; partitioner arm **not started**. **Fill in** through the
 SERIAL exit criterion below are the SERIAL arm's; the partitioner arm follows
 them.
 
-**Depends on:** H1's SERIAL arm for the SERIAL arm. Partitioner arm: H1's HIP
-arm **met**, and `01_fix-tests.md` F1-F4 **DONE**.
+**Depends on:** H1 for the SERIAL arm. Partitioner arm: H0c **DONE** and
+`01_fix-tests.md` F1-F4 **DONE**.
 **Fill in:** `src/Canopy_TreePartitioner.hpp`: the Zoltan2 adapter type at
 `:367`. New `scripts/tuolumne/run_ctest_h2.flux`, which sources the
 watchdog and runs against `build-tuolumne/`.
@@ -557,12 +545,13 @@ backends at once. That removes Zoltan2-on-HIP from every solver, and it removes
 the rank-0 solve. Every rank already holds the full tree topology, so no tree
 data is gathered anywhere.
 
-**Depends on:** H1's HIP arm **met**; `01_fix-tests.md` F1-F4 **DONE**, so
-`UpwardSweep` and `LaplaceSolve` start this arm passing, or with F4's carried
-HIP np 3-4 `crossRankAgreement` cases named. Its stacks say whether the HIP stall is
-in the partitioner. If it is anywhere else, that cause is fixed in this arm as
-well, under the SERIAL arm's step-2 rules. The "all ranks inside Kokkos/HIP"
-case needs a decision with the user before any change.
+**Depends on:** H0c **DONE**; `01_fix-tests.md` F1-F4 **DONE**, so
+`UpwardSweep` and `LaplaceSolve` start this arm passing at SERIAL np 1-6 and
+HIP np 1-4, with nothing carried. H0c's and F4's stacks put the HIP stall in
+Zoltan2 MJ under `partition_leaves`, the path this arm deletes. A stall this arm
+meets anywhere else is fixed in this arm as well, under the SERIAL arm's step-2
+rules. The "all ranks inside Kokkos/HIP" case needs a decision with the user
+before any change.
 **Fill in:**
 - `src/Canopy_TreePartitioner.hpp`: replace `partition_leaves` (`:313-456`)
   with `partition_cells`. Restrict `derive_internal_ownership` (`:459-552`) to
@@ -665,19 +654,18 @@ cells (`:459-552`), which is the comparison baseline in step 6.
 
 **Exit criterion:** both directions, on both backends.
 - **Fixed:** 15 consecutive
-  `canopy_ctest '^Canopy_Test_MultiSolve_MPI_HIP_np_3$'` runs, and 15 at each
-  other rank count H1's HIP arm hung at, finish with no entry over budget. So do
+  `canopy_ctest '^Canopy_Test_MultiSolve_MPI_HIP_np_3$'` runs, and 15
+  `canopy_ctest '^Canopy_Test_MultiSolve_MPI_HIP_np_4$'` runs, finish with no
+  entry over budget. np 3 and np 4 are the rank counts H0c recorded stalling. So do
   15 `canopy_ctest '^Canopy_Test_MultiSolve_MPI_SERIAL_np_3$'` runs. Stems
   `TreePartitioner`, `CommunicationPlan`, `UpwardSweep`, `DownwardSweep`,
   `LaplaceSolve` and `MultiSolve` pass through `canopy_ctest` at SERIAL np 1-6
   and HIP np 1-4. `MultiSolve` carries only the failures README "Known Issues"
   already records. `nm -C` on every `*_MPI_HIP` binary shows no `AlgMJ` and no
   `KokkosDeviceWrapperNode<Kokkos::HIP` partitioner symbol.
-- **Checked:** with the partitioner change temporarily reverted, the
-  `run_ctest_h1.flux hip` loop reproduces at least one hang that the watchdog
-  cancels. If H1's HIP arm reproduced no hang, there is nothing to revert
-  against: record that, and the Fixed direction is the whole criterion. Test
-  (c) fails when the partition is swapped for a random assignment: run it once
+- **Checked:** the pre-change HIP stall is H0c's record (H1, **Met.**), and
+  the `nm -C` check above shows its path is gone; no reverted build is rerun.
+  Test (c) fails when the partition is swapped for a random assignment: run it once
   that way and record the failure. That shows the comparison can fail.
 
 **Met (SERIAL).** Zoltan2 MJ was running on Tpetra's default HIP node. It now runs on the
@@ -691,7 +679,7 @@ and the np 1-2 lines match `canopy-v1.f3bmo4JYikKh.log`.
 
 ### E1 — Classify the AutoRebalance excess — **NOT STARTED**
 
-**Depends on:** H1 **DONE**, both arms: its watchdog keeps an np-3 hang from costing
+**Depends on:** H1 **DONE**: its watchdog keeps an np-3 hang from costing
 np 4-6 of a measurement pass. H2 **DONE**, both arms: H2 changes the np >= 2
 partition that E1 measures, and a HIP pass that hangs cannot be measured. H0c
 **DONE**: its HIP `[multisolve-dev]` lines are E1's HIP baseline.
