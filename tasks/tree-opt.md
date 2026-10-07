@@ -14,7 +14,7 @@ pairs collide on one key.
 On a **deeply non-uniform tree it stops paying**, in three separate ways that
 all trace to the same cause. The tree is built purely by density — a cell
 becomes a leaf as soon as it holds at most `ncrit` particles
-(`src/Canopy_TreeBuilder.hpp:769`), with no reference to its neighbours' depths
+(`src/Canopy_TreeBuilder.hpp:804`), with no reference to its neighbours' depths
 — so a sparse region produces a **shallow leaf** that can sit adjacent to a
 deeply refined region. The dual-tree traversal cannot split a leaf, so when one
 side is a shallow leaf it splits the other side instead
@@ -334,10 +334,10 @@ Also true now:
 
 - **No balancing of any kind exists.** `TreeBuilder` refines a cell iff its
   global particle count exceeds `ncrit` and its depth is below `max_depth`
-  (`src/Canopy_TreeBuilder.hpp:769-776`), and nothing anywhere consults a
+  (`src/Canopy_TreeBuilder.hpp:804`), and nothing anywhere consults a
   neighbour's depth. There is no post-pass, no flag and no partial form of it.
 - **`max_depth` is capped at 19 by Morton-key storage**, which `TreeBuilder`'s
-  constructor enforces by throwing (`src/Canopy_TreeBuilder.hpp:177-182`). Any
+  constructor enforces by throwing (`src/Canopy_TreeBuilder.hpp:192`). Any
   smaller limit a caller runs at is that caller's choice, not a library limit.
 - **`CartesianTaylorBasis` declares `key_needs_level = true` and
   `key_needs_dd = false`** (`:486`, `:492`). Its `canonicalize_key` keeps
@@ -523,7 +523,9 @@ deeper cell's depth) and `KernelType::m2l_key_dd_max`.
 That answer put step 2 on the "new two-scale distribution" branch, so
 `DownwardSweepTest::TwoScaleFixture<MS, ES, FarField = Kernel>` was built in
 `tests/tstDownwardSweep.hpp` — a cube of half-width 0.01 holding 87.5 % of a
-**global** 1200-particle set beside a uniform halo, templated on the far-field
+**global** 1200-particle set beside a uniform halo (since A1, with a 5 % skirt
+of half-width 0.04 about the blob; the baseline step-8 lines are A1's, see
+`tree-opt-progress-log.md` `## A1`), templated on the far-field
 type so B0 can read the same tree for both `CartesianTaylorBasis` and
 `LaplaceKernel`. On the post-H2 partition, two separate runs on each backend
 (SERIAL np 1-6, HIP np 1-4) print **identical** step-8 lines, field for field,
@@ -958,7 +960,7 @@ is pointed at the two-scale draw (`f3ccKujp6xQP`). See
 
 ---
 
-### A1 — Measure the depth imbalance and the cost of removing it — **NOT STARTED**
+### A1 — Measure the depth imbalance and the cost of removing it — **DONE**
 
 **Depends on:** T1 **DONE**.
 **Fill in:** `tests/tstDownwardSweep.hpp` — a measurement case beside T1's,
@@ -1015,6 +1017,23 @@ level-difference maximum is **at least 2** on T1's distribution — if it is 1,
 the fixture is already balanced and is the wrong fixture for chain A, which is a
 finding about T1 and must fail here rather than silently making A2 untestable.
 
+**Met.** `DownwardSweepTwoScale.balanceCost` prints one `[a1-balance]` line per
+`(draw, nprocs, rank)` and passes on SERIAL np 1-6 (`f3cmHLxa4PFM`) and HIP
+np 1-4 (`f3cmHMF2pQjR`), two passes each, every `canopy_ctest` outcome
+`completed`. Both passes are identical on each backend, and HIP equals SERIAL
+at np 1-4. Asserted: the lines are identical across ranks; the particle walk
+reproduces `builder.cells()`' occupancy; each simulated balance ends within
+its delta; at np 1 the per-depth cell count equals T1's `[two-scale]` line;
+and the two-scale draw's largest touching-leaf level difference is at least 2
+(it is 3-4). **Deviation:** T1's draw as it stood failed that last assertion
+at np 2, 5 and 6 (largest difference 1; the blob bordered only empty cells),
+so `generate_two_scale_particles` gained a skirt. Every line that reads the
+two-scale draw moved and was re-baselined in the log. The graded-draw lines
+are byte-identical to B2's `f3cj6QNSmYfy` / `f3cj6QWEwmd9` (210 SERIAL and
+100 HIP lines per pass). Multipliers at delta 1 / 2 / 3: two-scale
+1.096-1.280 / 1.031-1.135 / 1.000-1.022, graded 1.316-1.465 / 1 / 1. The
+`default` rows are re-calibrated (`f3cmFUQpEFXd`). No `src/` change.
+
 ---
 
 ### C1 — Depth and fallback-cost headroom against problem size — **NOT STARTED**
@@ -1024,13 +1043,13 @@ finding about T1 and must fail here rather than silently making A2 untestable.
 `tests/tstCartesianTaylorSolve.hpp` (the path-equivalence and timing case, which
 needs a solve and so belongs beside `with_cartesian_taylor_solve` rather than in
 the tree builder's tests). No `src/` change.
-**Reference:** the Morton depth limit (`src/Canopy_TreeBuilder.hpp:177-182`);
+**Reference:** the Morton depth limit (`src/Canopy_TreeBuilder.hpp:192`);
 `m2l_cells_at_depth()`.
 **Do:**
 1. Build T1's two-scale distribution at a geometric sweep of particle counts and
    record, at each: the deepest occupied depth, the **count of occupied depths**,
    and whether any cell hit `max_depth` and so was made a leaf by the depth
-   limit rather than by `ncrit` (`src/Canopy_TreeBuilder.hpp:769`). The second
+   limit rather than by `ncrit` (`src/Canopy_TreeBuilder.hpp:804`). The second
    case is a silent accuracy change, not an error, and nothing currently reports
    it.
 2. Fit the growth of occupied-depth count against particle count, and state the

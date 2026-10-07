@@ -29,7 +29,9 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
+#include <map>
 #include <random>
 #include <set>
 #include <string>
@@ -1406,9 +1408,17 @@ namespace DownwardSweepTest
 // asserts it rather than trusting it.
 constexpr double TWO_SCALE_BLOB_CENTER = 0.15;
 constexpr double TWO_SCALE_BLOB_HALF_WIDTH = 0.01;
-// Particles in the blob, as a fraction of the per-rank count. The remainder
-// is the halo.
+// Particles in the blob, as a fraction of the per-rank count.
 constexpr double TWO_SCALE_BLOB_FRACTION = 0.875;
+// The skirt (A1 of tasks/tree-opt.md): a sparse cube about the blob centre,
+// half-width 0.04, so the cells beside the blob at depth 5 (width ~0.0375)
+// are occupied, with a few particles each, and stop as leaves against the
+// blob's depth 7-8 leaves. Without it those cells are empty, so they are not
+// in the cell list, and no shallow leaf TOUCHES a deep one: the touching-leaf
+// level difference was 1 at np 2, 5 and 6. The remainder of the per-rank
+// count, after blob and skirt, is the halo.
+constexpr double TWO_SCALE_SKIRT_HALF_WIDTH = 0.04;
+constexpr double TWO_SCALE_SKIRT_FRACTION = 0.05;
 
 // Two-scale positions in [0, 1)^3 with strictly positive charges in
 // [0.1, 1.0], seeded per rank so each rank draws a different halo while the
@@ -1425,16 +1435,23 @@ void generate_two_scale_particles( AoSoA_t& particles, int num_particles,
     std::uniform_real_distribution<double> blob_dist(
         TWO_SCALE_BLOB_CENTER - TWO_SCALE_BLOB_HALF_WIDTH,
         TWO_SCALE_BLOB_CENTER + TWO_SCALE_BLOB_HALF_WIDTH );
+    std::uniform_real_distribution<double> skirt_dist(
+        TWO_SCALE_BLOB_CENTER - TWO_SCALE_SKIRT_HALF_WIDTH,
+        TWO_SCALE_BLOB_CENTER + TWO_SCALE_SKIRT_HALF_WIDTH );
     std::uniform_real_distribution<double> q_dist( 0.1, 1.0 );
 
     const int num_blob =
         static_cast<int>( TWO_SCALE_BLOB_FRACTION * num_particles );
+    const int num_skirt =
+        static_cast<int>( TWO_SCALE_SKIRT_FRACTION * num_particles );
 
     for ( int i = 0; i < num_particles; i++ )
     {
-        const bool in_blob = ( i < num_blob );
+        auto& dist = i < num_blob               ? blob_dist
+                     : i < num_blob + num_skirt ? skirt_dist
+                                                : halo_dist;
         for ( int d = 0; d < 3; d++ )
-            h_pos( i, d ) = in_blob ? blob_dist( gen ) : halo_dist( gen );
+            h_pos( i, d ) = dist( gen );
         h_q( i, 0 ) = q_dist( gen );
     }
 
@@ -2130,6 +2147,409 @@ void testRootWidthQuantizationRetainsCache()
         }
     }
 }
+
+// A1 of tasks/tree-opt.md: how far apart in depth touching leaves are, and how
+// many cells a balance to within `delta` levels would add. A model of the
+// balance over builder.cells(), not an implementation of it.
+//
+// Leaves touch if their closed cubes meet: face, edge or corner. A cell is
+// (depth d, integer anchor a), in units of a depth-d cell width; the bits of
+// a are the key's octants, bit 0 x, bit 1 y, bit 2 z (which_octant).
+struct BalanceCellCoord
+{
+    int depth;
+    long long a[3];
+};
+
+inline BalanceCellCoord balance_decode( MortonKey k )
+{
+    BalanceCellCoord c{ key_depth( k ), { 0, 0, 0 } };
+    for ( int l = c.depth - 1; l >= 0; --l )
+    {
+        const int oct = static_cast<int>( ( k >> ( 3 * l ) ) & 7 );
+        for ( int ax = 0; ax < 3; ++ax )
+            c.a[ax] = 2 * c.a[ax] + ( ( oct >> ax ) & 1 );
+    }
+    return c;
+}
+
+inline MortonKey balance_encode( int depth, const long long a[3] )
+{
+    MortonKey k = ROOT_KEY;
+    for ( int l = depth - 1; l >= 0; --l )
+    {
+        int oct = 0;
+        for ( int ax = 0; ax < 3; ++ax )
+            oct |= static_cast<int>( ( a[ax] >> l ) & 1 ) << ax;
+        k = child_key( k, oct );
+    }
+    return k;
+}
+
+// The tree as a key -> is_leaf map. Occupied cells only, as in cells().
+using BalanceTree = std::map<MortonKey, bool>;
+
+// The touching leaves of `leaf` at its own depth or shallower. A deeper
+// neighbour is found from its own side, so over all leaves this enumerates
+// every touching pair. For each of the 26 same-depth cells beside `leaf`, the
+// first existing cell walking up its ancestors is either a leaf (the
+// neighbour), the same-depth cell itself as an internal cell (deeper
+// neighbours), or a shallower internal cell (an empty region, no neighbour).
+inline std::set<MortonKey> balance_coarser_neighbours( const BalanceTree& tree,
+                                                       MortonKey leaf )
+{
+    const BalanceCellCoord c = balance_decode( leaf );
+    const long long side = 1LL << c.depth;
+    std::set<MortonKey> out;
+    for ( int dx = -1; dx <= 1; ++dx )
+        for ( int dy = -1; dy <= 1; ++dy )
+            for ( int dz = -1; dz <= 1; ++dz )
+            {
+                if ( dx == 0 && dy == 0 && dz == 0 )
+                    continue;
+                const long long n[3] = { c.a[0] + dx, c.a[1] + dy,
+                                         c.a[2] + dz };
+                if ( n[0] < 0 || n[1] < 0 || n[2] < 0 || n[0] >= side ||
+                     n[1] >= side || n[2] >= side )
+                    continue;
+                for ( int d = c.depth; d >= 0; --d )
+                {
+                    const int s = c.depth - d;
+                    const long long up[3] = { n[0] >> s, n[1] >> s,
+                                              n[2] >> s };
+                    auto it = tree.find( balance_encode( d, up ) );
+                    if ( it == tree.end() )
+                        continue;
+                    if ( it->second )
+                        out.insert( it->first );
+                    break;
+                }
+            }
+    return out;
+}
+
+// Touching-leaf level differences: hist[ld] counts unordered pairs.
+inline std::vector<long long> balance_level_hist( const BalanceTree& tree,
+                                                  int max_depth )
+{
+    std::vector<long long> hist( max_depth + 1, 0 );
+    for ( const auto& [key, is_leaf] : tree )
+    {
+        if ( !is_leaf )
+            continue;
+        const int d = key_depth( key );
+        for ( MortonKey nb : balance_coarser_neighbours( tree, key ) )
+        {
+            const int dn = key_depth( nb );
+            // Equal-depth pairs are found from both sides; count one.
+            if ( dn == d && nb > key )
+                continue;
+            ++hist[d - dn];
+        }
+    }
+    return hist;
+}
+
+struct BalanceCost
+{
+    long long added = 0; // cells the balance creates
+    int passes = 0;      // refinement passes that refined something
+    long long stuck = 0; // leaves out of balance and already at max_depth
+};
+
+// Refine every leaf more than `delta` levels shallower than a touching leaf,
+// until none is. Refining creates only the children `occupied` holds, so the
+// balanced tree keeps the builder's rule that every cell is occupied. A leaf
+// at max_depth cannot be refined; it is counted in `stuck`, not dropped.
+inline BalanceCost balance_simulate( BalanceTree& tree, int delta,
+                                     int max_depth,
+                                     const std::set<MortonKey>& occupied )
+{
+    // A pass deepens every refined leaf by one level, and no leaf is deeper
+    // than max_depth, so a terminating balance needs well under this.
+    const int max_passes = 8 * ( max_depth + 1 );
+    BalanceCost cost;
+    for ( int pass = 0;; ++pass )
+    {
+        if ( pass == max_passes )
+            throw std::runtime_error(
+                "balance_simulate: no fixed point after " +
+                std::to_string( max_passes ) + " passes" );
+        std::set<MortonKey> refine;
+        for ( const auto& [key, is_leaf] : tree )
+        {
+            if ( !is_leaf )
+                continue;
+            const int d = key_depth( key );
+            for ( MortonKey nb : balance_coarser_neighbours( tree, key ) )
+                if ( d - key_depth( nb ) > delta )
+                    refine.insert( nb );
+        }
+        long long stuck = 0;
+        bool refined = false;
+        for ( MortonKey k : refine )
+        {
+            if ( key_depth( k ) >= max_depth )
+            {
+                ++stuck;
+                continue;
+            }
+            tree[k] = false;
+            refined = true;
+            for ( int oct = 0; oct < 8; ++oct )
+            {
+                const MortonKey ck = child_key( k, oct );
+                if ( occupied.count( ck ) )
+                {
+                    tree[ck] = true;
+                    ++cost.added;
+                }
+            }
+        }
+        cost.stuck = stuck;
+        if ( !refined )
+            break;
+        ++cost.passes;
+    }
+    return cost;
+}
+
+template <class TEST_MS, class TEST_ES>
+void testTwoScaleBalanceCost()
+{
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    // The range guard's two bounds, for reading max_ld against: Laplace's
+    // |dd| <= m2l_key_dd_max, and DownwardSweep::M2L_KEY_OFFSET_MAX (private),
+    // in half-widths at the finer cell's depth.
+    constexpr int dd_bound = Kernel::m2l_key_dd_max;
+    constexpr int offset_bound = 32;
+    const int deltas[3] = { 1, 2, 3 };
+
+    for ( const TwoScaleDraw draw :
+          { TwoScaleDraw::TwoScale, TwoScaleDraw::Graded } )
+    {
+        // Root quantization off, the fixture default: B2 showed knob-on is a
+        // different tree.
+        TwoScaleFixture<TEST_MS, TEST_ES> fix( draw, 0.3 );
+        const auto& cells = fix.builder.cells();
+        const int max_depth = fix.max_depth;
+
+        BalanceTree tree;
+        std::vector<int> per_depth( max_depth + 1, 0 );
+        long long n_leaves = 0;
+        const CellInfo* root = nullptr;
+        for ( const auto& c : cells )
+        {
+            tree[c.key] = c.is_leaf;
+            ++per_depth[c.depth];
+            n_leaves += c.is_leaf;
+            if ( c.key == ROOT_KEY )
+                root = &c;
+        }
+        ASSERT_NE( root, nullptr );
+
+        // Global occupancy, as build() counts it: each rank walks its local
+        // particles down from the root with the builder's own arithmetic,
+        // and the occupied keys are united over ranks.
+        auto particles_h = Cabana::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), fix.particles );
+        auto pos = Cabana::slice<Position>( particles_h );
+        std::vector<MortonKey> local_keys;
+        local_keys.reserve( static_cast<std::size_t>( fix.num_local ) *
+                            ( max_depth + 1 ) );
+        using TB = TreeBuilder<TEST_MS, TEST_ES>;
+        for ( int i = 0; i < fix.num_local; ++i )
+        {
+            MortonKey k = ROOT_KEY;
+            double c[3] = { root->center[0], root->center[1],
+                            root->center[2] };
+            double hw = root->half_width;
+            local_keys.push_back( k );
+            for ( int d = 1; d <= max_depth; ++d )
+            {
+                const int oct = TB::which_octant( pos( i, 0 ), pos( i, 1 ),
+                                                  pos( i, 2 ), c[0], c[1],
+                                                  c[2] );
+                TB::child_center( c[0], c[1], c[2], hw, oct, c[0], c[1],
+                                  c[2] );
+                hw *= 0.5;
+                k = child_key( k, oct );
+                local_keys.push_back( k );
+            }
+        }
+        std::sort( local_keys.begin(), local_keys.end() );
+        local_keys.erase( std::unique( local_keys.begin(), local_keys.end() ),
+                          local_keys.end() );
+        int n_local_keys = static_cast<int>( local_keys.size() );
+        std::vector<int> counts( nprocs ), displs( nprocs, 0 );
+        MPI_Allgather( &n_local_keys, 1, MPI_INT, counts.data(), 1, MPI_INT,
+                       MPI_COMM_WORLD );
+        for ( int r = 1; r < nprocs; ++r )
+            displs[r] = displs[r - 1] + counts[r - 1];
+        std::vector<MortonKey> all_keys( displs[nprocs - 1] +
+                                         counts[nprocs - 1] );
+        static_assert( sizeof( MortonKey ) == sizeof( std::uint64_t ) );
+        MPI_Allgatherv( local_keys.data(), n_local_keys, MPI_UINT64_T,
+                        all_keys.data(), counts.data(), displs.data(),
+                        MPI_UINT64_T, MPI_COMM_WORLD );
+        const std::set<MortonKey> occupied( all_keys.begin(),
+                                            all_keys.end() );
+
+        // The occupancy model must reproduce the builder's tree: every cell
+        // occupied, and an internal cell's children exactly its occupied
+        // octants. Otherwise the cost model refines into the wrong cells.
+        long long occupancy_mismatch = 0;
+        for ( const auto& c : cells )
+        {
+            occupancy_mismatch += !occupied.count( c.key );
+            if ( !c.is_leaf )
+                for ( int oct = 0; oct < 8; ++oct )
+                {
+                    const MortonKey ck = child_key( c.key, oct );
+                    occupancy_mismatch +=
+                        tree.count( ck ) != occupied.count( ck );
+                }
+        }
+
+        const std::vector<long long> hist =
+            balance_level_hist( tree, max_depth );
+        long long n_pairs = 0, ld_gt1 = 0;
+        int ld_min = -1, ld_max = -1;
+        for ( int ld = 0; ld <= max_depth; ++ld )
+        {
+            n_pairs += hist[ld];
+            if ( ld > 1 )
+                ld_gt1 += hist[ld];
+            if ( hist[ld] > 0 )
+            {
+                if ( ld_min < 0 )
+                    ld_min = ld;
+                ld_max = ld;
+            }
+        }
+
+        BalanceCost cost[3];
+        int balanced_ld_max[3];
+        long long balanced_cells[3];
+        for ( int i = 0; i < 3; ++i )
+        {
+            BalanceTree balanced = tree;
+            cost[i] = balance_simulate( balanced, deltas[i], max_depth,
+                                        occupied );
+            balanced_cells[i] = static_cast<long long>( balanced.size() );
+            const auto h = balance_level_hist( balanced, max_depth );
+            balanced_ld_max[i] = 0;
+            for ( int ld = 0; ld <= max_depth; ++ld )
+                if ( h[ld] > 0 )
+                    balanced_ld_max[i] = ld;
+        }
+
+        std::string depth_str, hist_str, cost_str;
+        for ( int d = 0; d <= max_depth; ++d )
+        {
+            depth_str += std::to_string( per_depth[d] );
+            hist_str += std::to_string( hist[d] );
+            if ( d < max_depth )
+            {
+                depth_str += ",";
+                hist_str += ",";
+            }
+        }
+        const long long n_cells = static_cast<long long>( cells.size() );
+        for ( int i = 0; i < 3; ++i )
+        {
+            char buf[160];
+            std::snprintf( buf, sizeof( buf ),
+                           " d%d added %lld cells %lld mult %.4f passes %d "
+                           "stuck %lld",
+                           deltas[i], cost[i].added, balanced_cells[i],
+                           double( balanced_cells[i] ) / double( n_cells ),
+                           cost[i].passes, cost[i].stuck );
+            cost_str += buf;
+        }
+        std::printf( "[a1-balance] draw %s nprocs %d rank %d cells %lld "
+                     "leaves %lld cells_at_depth [%s] pairs %lld "
+                     "ld_hist [%s] ld_min %d ld_max %d ld_gt1 %lld "
+                     "dd_bound %d offset_bound %d%s\n",
+                     to_string( draw ), nprocs, rank, n_cells, n_leaves,
+                     depth_str.c_str(), n_pairs, hist_str.c_str(), ld_min,
+                     ld_max, ld_gt1, dd_bound, offset_bound,
+                     cost_str.c_str() );
+        std::fflush( stdout );
+
+        // The cell list is the global tree, so every figure above is the same
+        // on every rank. Compare each rank's against the min and max over
+        // ranks; a cell-list digest covers what the figures do not.
+        std::uint64_t digest = 1469598103934665603ULL;
+        auto mix = [&]( std::uint64_t v )
+        {
+            digest = ( digest ^ v ) * 1099511628211ULL;
+        };
+        for ( const auto& c : cells )
+        {
+            mix( c.key );
+            mix( static_cast<std::uint64_t>( c.global_count ) );
+            mix( c.is_leaf );
+        }
+        std::vector<long long> sig = { n_cells, n_leaves, n_pairs, ld_gt1,
+                                       ld_min, ld_max,
+                                       static_cast<long long>( digest >> 1 ),
+                                       static_cast<long long>(
+                                           occupied.size() ) };
+        sig.insert( sig.end(), hist.begin(), hist.end() );
+        for ( int i = 0; i < 3; ++i )
+        {
+            sig.push_back( cost[i].added );
+            sig.push_back( cost[i].passes );
+            sig.push_back( cost[i].stuck );
+        }
+        std::vector<long long> sig_min( sig.size() ), sig_max( sig.size() );
+        MPI_Allreduce( sig.data(), sig_min.data(),
+                       static_cast<int>( sig.size() ), MPI_LONG_LONG,
+                       MPI_MIN, MPI_COMM_WORLD );
+        MPI_Allreduce( sig.data(), sig_max.data(),
+                       static_cast<int>( sig.size() ), MPI_LONG_LONG,
+                       MPI_MAX, MPI_COMM_WORLD );
+        EXPECT_EQ( sig_min, sig_max )
+            << "draw " << to_string( draw ) << ": ranks disagree on the "
+            << "global tree or on a figure computed from it";
+
+        EXPECT_EQ( occupancy_mismatch, 0 )
+            << "draw " << to_string( draw ) << ": the particle walk does not "
+            << "reproduce builder.cells()' occupancy";
+
+        for ( int i = 0; i < 3; ++i )
+        {
+            EXPECT_EQ( cost[i].added, balanced_cells[i] - n_cells );
+            if ( cost[i].stuck == 0 )
+            {
+                EXPECT_LE( balanced_ld_max[i], deltas[i] )
+                    << "draw " << to_string( draw ) << ": the simulated "
+                    << "balance at delta " << deltas[i] << " left a pair "
+                    << balanced_ld_max[i] << " levels apart";
+            }
+        }
+
+        if ( draw != TwoScaleDraw::TwoScale )
+            continue;
+
+        // T1's tree: at np 1 the per-depth count is T1's cells_at_depth line.
+        if ( nprocs == 1 )
+        {
+            EXPECT_EQ( depth_str, "1,8,42,2,8,11,8,30,135" )
+                << "builder.cells() at np 1 is not the tree T1 recorded";
+        }
+
+        // The failure direction: a largest level difference of 1 means the
+        // fixture is already balanced, and A2 would have nothing to test.
+        EXPECT_GE( ld_max, 2 )
+            << "T1's two-scale tree has no touching leaves 2 or more levels "
+               "apart (ld_hist [" << hist_str << "])";
+    }
+}
 } // namespace DownwardSweepTest
 
 TEST( DownwardSweepTwoScale, treeHasShallowAndDeepLeaves )
@@ -2160,6 +2580,12 @@ TEST( DownwardSweepTwoScale, rootWidthQuantizationRetainsCache )
 {
     DownwardSweepTest::testRootWidthQuantizationRetainsCache<
         TEST_MEMSPACE, TEST_EXECSPACE>();
+}
+
+TEST( DownwardSweepTwoScale, balanceCost )
+{
+    DownwardSweepTest::testTwoScaleBalanceCost<TEST_MEMSPACE,
+                                               TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

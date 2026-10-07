@@ -1839,3 +1839,258 @@ first entry of each job: 9.68 s of 12 s on SERIAL and 10.18 s of 12 s on HIP.
 - **A3 / the default**: the knob stays off. Before anything turns it on by
   default, `MultiSolve`'s and both gating arms' figures must be re-pinned on the
   knob-on tree. Its accuracy is different, not worse by construction.
+
+## A1
+
+**Outcome: on T1's draw as it stood, touching leaves were at most 1 level apart
+at np 2, 5 and 6, so the failure direction fired. The draw now has a skirt
+about the blob, and on it the largest touching-leaf level difference is 3-4 at
+every np.** On the new draw, balancing to delta 1 adds 9.6-28.0 % cells, delta
+2 adds 3.1-13.5 %, and delta 3 adds 0-2.2 %. The graded draw costs
+31.6-46.5 % at delta 1 and nothing at delta 2 or 3. **Recommendation:
+delta 1**; reasons under "Against the two bounds".
+
+Provenance: commit `4ed1596` plus this section's edits to
+`tests/tstDownwardSweep.hpp`, `scripts/tuolumne/serial_runtimes.tsv`,
+`scripts/tuolumne/run_ctest_a1.flux` and the two task docs. Cray clang 20.0.0,
+env `tuolumne_trilinos`, `build-tuolumne` (`Canopy_ENABLE_PROFILING:BOOL=ON`,
+echoed at each job's head; HIP registered at np 1-4 with
+`--gpus-per-task=1 --cores-per-task=8`, and the np 5-6 abort check passed).
+Every run went through `canopy_ctest` after a passing watchdog self-test, with
+the HIP environment in a subshell. The watchdog cancelled nothing but the
+self-test. Script: `scripts/tuolumne/run_ctest_a1.flux measure serial|hip`,
+copied from `run_ctest_b0.flux` with the `noprof` mode dropped and the binary
+`stat` narrowed to the backend's. Submitted with `-t 8m`, preamble 8.
+
+| job | what |
+| --- | --- |
+| `f3ckyne9Q8Gf` | calibrate, original draw (rows superseded) |
+| `f3cm2nPmiCX1` | `measure serial`, original draw: np 2, 5, 6 fail `ld_max >= 2` only |
+| `f3cmCB9oJ4mM` | `measure serial`, skirted draw: only np 1 fails, on the stale np-1 constant |
+| `f3cmFUQpEFXd` | `run_ctest_h0b.flux calibrate`, `CANOPY_CAL_REGEX` = `DownwardSweep` SERIAL np 1-6 |
+| `f3cmHLxa4PFM` | exit criterion, SERIAL np 1-6, two passes: 12 of 12 `completed`, `rc=0` |
+| `f3cmHMF2pQjR` | exit criterion, HIP np 1-4, two passes: 8 of 8 `completed`, `rc=0` |
+
+### Decisions recorded (made before the session, not reopened)
+
+- **Neighbours are leaves that touch**, by a face, an edge or a corner (26
+  directions). The level-difference distribution and the cost model both use
+  this definition.
+- **The cost model is computed at `max_level_delta` 1, 2 and 3**, one
+  cell-count multiplier each. A2 decides from these three.
+- **Both draws are measured with root quantization off**, the fixture default.
+  The two-scale draw at θ 0.3 carries the assertion. The graded draw is
+  reported only, for **R1**. Nothing is measured knob-on.
+- **The balance is simulated with the tree's own rules.** Refining a leaf
+  creates only the children that hold particles, and nothing refines past
+  `max_depth`. Occupancy comes from the global particle set: each rank walks
+  its local particles down from the root cell with
+  `TreeBuilder::which_octant` / `child_center` (the builder's own arithmetic),
+  and the occupied keys are united over ranks with `MPI_Allgatherv`.
+  Refinement repeats to a fixed point, with a pass bound of
+  `8 * (max_depth + 1)` that throws. A leaf at `max_depth` still out of balance
+  is counted as `stuck` and not refined.
+
+Decision made in this session, by the user: **fix T1's draw itself**, and
+re-baseline every line that reads it (below).
+
+### The case
+
+`DownwardSweepTwoScale.balanceCost` (`testTwoScaleBalanceCost`) builds
+`TwoScaleFixture( draw, 0.3 )` for the two-scale and graded draws and works on
+`builder.cells()` only. Leaves are addressed as (depth, integer anchor) decoded
+from the Morton key. For each leaf, each of the 26 same-depth cells beside it
+is walked up its ancestors to the first existing cell. If that cell is a leaf,
+it is a touching neighbour at the same depth or shallower. If it is the
+same-depth cell and is internal, the neighbours are deeper and are found from
+their own side. If it is a shallower internal cell, the region is empty. So
+every touching pair is counted once (same-depth pairs once, by key order).
+
+Line: `[a1-balance] draw <d> nprocs <n> rank <r> cells leaves cells_at_depth
+pairs ld_hist [ld 0..8] ld_min ld_max ld_gt1 dd_bound 6 offset_bound 32`,
+then for each delta 1, 2 and 3: `added cells mult passes stuck`.
+
+Asserted, in this order of reasons:
+
+- the rank-independent figures and an FNV digest of the cell list (key,
+  global count, leaf flag) are equal across ranks (min == max over
+  `MPI_Allreduce`);
+- the particle walk reproduces the cell list: every cell occupied, and every
+  internal cell's children are exactly its occupied octants (0 mismatches);
+- each simulated balance, when nothing is stuck, ends with no touching pair
+  more than delta apart, and `added == balanced cells - cells`;
+- two-scale only: at np 1 the per-depth count equals T1's `[two-scale]`
+  `cells_at_depth`, and the largest level difference is at least 2.
+
+### What only running revealed: T1's draw failed the failure direction
+
+On the original draw, touching leaves reached a level difference of 2 only at
+np 1, 3 and 4. At np 2, 5 and 6 the largest was 1, with `ld_gt1 = 0` and
+multiplier 1.0000 at every delta (`f3cm2nPmiCX1`; both passes identical; every
+other assertion passed). At np 1 it was 2, with a single pair above 1 and a
+delta-1 multiplier of 1.0173. The np-1 cross-check against T1's
+`1,8,59,2,2,1,8,34,116` passed.
+
+**Why.** The cell list holds occupied cells only. The halo was 150 particles
+over the whole box, so a cell beside the blob at depths 4-5 expected about
+0.06 halo particles. Those cells were empty, and so absent. The blob's deep
+leaves bordered empty space, and the shallow halo leaves sat 2-3 levels up
+across that gap. `cells_at_depth` shows it: 1-2 cells at each of depths 3-5.
+T1's refusals come from the traversal pairing a shallow leaf with deep cells
+**across empty space**, which a balance of touching leaves never sees.
+
+**The fix: a skirt.** `TWO_SCALE_SKIRT_FRACTION = 0.05` of each rank's count
+is drawn uniformly in a cube of half-width `TWO_SCALE_SKIRT_HALF_WIDTH = 0.04`
+about the blob centre. It is drawn after the blob and before the halo, from
+the same `mt19937` stream. The blob is unchanged and the halo shrinks (globally
+1050 / 60 / 90). Cells beside the blob at depth 5 (width about 0.0375) then
+hold a few particles each and stop as leaves against the blob's depth 7-8
+leaves.
+
+The constants came from a host-side Python model of the build (occupied-only,
+ncrit 8, max_depth 8, padding 0.1, cubic root; numpy draws, so statistically
+rather than bit-for-bit like the test). On the original draw the model
+reproduced the failure: largest difference at least 2 in 21 of 48 modelled
+trees, against 3 of 6 np in the real run. With the skirt, over 180 modelled
+trees (30 seeds × np 1-6): the largest difference is 3-4 in every tree at
+fractions 0.02-0.05, with at least 15 (2 %) to 37 (5 %) pairs above 1. The
+real tree agrees: 3-4 at every np, with 77-115 pairs above 1.
+
+The np-1 constant is now `1,8,42,2,8,11,8,30,135`. It is still an independent
+cross-check: it was read from T1's `[two-scale]` line in `f3cmCB9oJ4mM`
+(`m2l_cells_at_depth()`), which equals `builder.cells()`' per-depth count in
+the same job.
+
+### Measured: `[a1-balance]`, `f3cmHLxa4PFM` / `f3cmHMF2pQjR`
+
+**Reproducibility.** Every rank prints the identical line, as asserted, so each
+row stands for all of its np's ranks. Both passes are identical on each backend
+(675 tagged lines per SERIAL pass, 326 per HIP pass), and HIP equals SERIAL at
+np 1-4 line for line. R6's spread is zero here.
+
+*ld_hist* counts touching leaf pairs at level difference 0, 1, 2, …; every
+entry above 4 is 0. Each delta column reads *cells added → multiplier
+(passes)*. `stuck` is 0 on every line, at every delta.
+
+| draw | np | cells | leaves | pairs | ld_hist 0..4 | max | > 1 | delta 1 | delta 2 | delta 3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| two-scale | 1 | 245 | 198 | 1553 | 1400,76,9,68,0 | 3 | 77 | 67 → 1.2735 (3) | 33 → 1.1347 (2) | 0 → 1.0000 |
+| two-scale | 2 | 243 | 201 | 1658 | 1340,203,46,69,0 | 3 | 115 | 68 → 1.2798 (3) | 22 → 1.0905 (2) | 0 → 1.0000 |
+| two-scale | 3 | 238 | 191 | 1452 | 1238,102,47,63,2 | 4 | 112 | 56 → 1.2353 (3) | 16 → 1.0672 (2) | 2 → 1.0084 (1) |
+| two-scale | 4 | 233 | 186 | 1434 | 1232,96,34,63,9 | 4 | 106 | 58 → 1.2489 (3) | 26 → 1.1116 (2) | 5 → 1.0215 (1) |
+| two-scale | 5 | 255 | 205 | 1563 | 1374,100,71,18,0 | 3 | 89 | 47 → 1.1843 (3) | 8 → 1.0314 (1) | 0 → 1.0000 |
+| two-scale | 6 | 282 | 230 | 1793 | 1442,262,72,17,0 | 3 | 89 | 27 → 1.0957 (2) | 10 → 1.0355 (1) | 0 → 1.0000 |
+| graded | 1 | 532 | 445 | 3800 | 2140,1542,118,0,0 | 2 | 118 | 180 → 1.3383 (2) | 0 → 1.0000 | 0 → 1.0000 |
+| graded | 2 | 503 | 423 | 3658 | 2014,1561,83,0,0 | 2 | 83 | 234 → 1.4652 (3) | 0 → 1.0000 | 0 → 1.0000 |
+| graded | 3 | 519 | 436 | 3743 | 2073,1594,76,0,0 | 2 | 76 | 193 → 1.3719 (4) | 0 → 1.0000 | 0 → 1.0000 |
+| graded | 4 | 539 | 453 | 3942 | 2220,1612,110,0,0 | 2 | 110 | 193 → 1.3581 (4) | 0 → 1.0000 | 0 → 1.0000 |
+| graded | 5 | 531 | 448 | 3921 | 2157,1670,94,0,0 | 2 | 94 | 168 → 1.3164 (3) | 0 → 1.0000 | 0 → 1.0000 |
+| graded | 6 | 495 | 418 | 3676 | 1958,1620,98,0,0 | 2 | 98 | 200 → 1.4040 (3) | 0 → 1.0000 | 0 → 1.0000 |
+
+The graded rows are identical to the original-draw run `f3cm2nPmiCX1`, as they
+must be: the skirt does not touch that draw.
+
+### Against the two bounds
+
+- **`|dd| <= m2l_key_dd_max = 6`.** The largest touching-leaf difference is 4,
+  so a balance is not needed for this bound on either draw. That reading says
+  nothing about refusals, because T1 found every refusal on these fixtures is
+  an offset refusal.
+- **`M2L_KEY_OFFSET_MAX = 32`.** Take a pair whose coarse side is a leaf of
+  half-width $2^k w$ and whose fine side's parent (half-width $2w$) failed the
+  MAC against it. Extending the design's equal-depth bound argument to this
+  case, its centre offset in units of $w$ is at most
+  $\sqrt{3}\,(2^k + 2)/\theta$. At θ 0.3 that is 23.1 for $k = 1$, 34.6 for
+  $k = 2$ and 57.7 for $k = 3$. Only $k \le 1$ stays inside 32. This is a
+  worst-case estimate, not a measured offset.
+- **Recommendation: delta 1.** Delta 2 is cheaper (1.031-1.135 against
+  1.096-1.280 on the two-scale draw, and 1.0 against 1.32-1.47 on the graded
+  one). But it admits $k = 2$ neighbours, whose estimated offsets exceed 32.
+  Delta 3 is nearly free and leaves the guard where it is. **Caveat for A2:**
+  touching-leaf balance bounds the level difference between *touching* leaves
+  only. Pairs across empty space, the mechanism behind T1's original refusals,
+  remain possible at any depth difference. So delta 1 may not take
+  `range_guard` to 0, and A2's exit criterion asserts exactly that.
+
+### Baselines re-recorded: every line that reads the two-scale draw moved
+
+The task asked for the `[two-scale]`, `[two-scale-refusals]`, `[b0-dd]`,
+`[b0b-*]` and `[dd-hist]` lines to be byte-identical to B2's `f3cj6QNSmYfy`
+(SERIAL) and `f3cj6QWEwmd9` (HIP). With the draw changed, that holds for the
+lines that do not read it. The rest are the new baseline. Compared by script,
+as multisets per pass:
+
+| lines | SERIAL (per pass) | HIP (per pass) |
+| --- | --- | --- |
+| graded draw: `[b0b-dd]`, `[dd-hist]`, `[b0b-tree]` with `draw graded` | **210 of 210 identical**, both passes | **100 of 100 identical**, both passes |
+| reads the two-scale draw: `[two-scale]`, `[two-scale-refusals]`, `[b0-dd]`, two-scale `[b0b-*]`/`[dd-hist]`, `[b0b-cross]` | 360; 12 unchanged | 176; 8 unchanged |
+
+The unchanged ones are `CartesianTaylor` `[b0b-cross]` lines. That basis's
+cross-level count has been 0 on both draws since B1. Every T1, B0, B0b and B2
+assertion still passes on the new draw, including `range_guard > 0`, B0b's
+graded-above-two-scale contract, and B2's retention arms.
+
+**New `[two-scale]` baseline** (identical on both passes, and on HIP at
+np 1-4). `count_cap == 0`, `depth_dropped == 0`,
+`range_guard == total_fallback` and `unique_ops == demanded_ops ==
+realized_keys` on every line, and `occupied_depths` is 7-9.
+
+| nprocs | rank | num_local | range_guard | unique_ops | shallow leaf | deepest | cells_at_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 1200 | 214 | 310 | 2 | 8 | 1,8,42,2,8,11,8,30,135 |
+| 2 | 0 | 608 | 213 | 176 | 2 | 8 | 1,8,45,1,3,8,4,19,61 |
+| 2 | 1 | 592 | 73 | 116 | 1 | 8 | 1,7,1,0,4,8,4,17,60 |
+| 3 | 0 | 398 | 40 | 79 | 1 | 8 | 1,6,2,1,4,6,4,11,45 |
+| 3 | 1 | 390 | 23 | 64 | 1 | 8 | 1,6,2,0,3,9,1,6,40 |
+| 3 | 2 | 412 | 137 | 131 | 2 | 8 | 1,8,40,5,0,1,7,12,34 |
+| 4 | 0 | 307 | 197 | 68 | 2 | 8 | 1,6,40,0,1,4,4,8,25 |
+| 4 | 1 | 306 | 35 | 61 | 1 | 8 | 1,6,1,1,4,5,3,4,33 |
+| 4 | 2 | 290 | 44 | 39 | 1 | 8 | 1,6,2,0,0,1,6,8,30 |
+| 4 | 3 | 297 | 42 | 36 | 1 | 8 | 1,8,1,0,0,1,7,7,31 |
+| 5 | 0 | 215 | 42 | 29 | 1 | 8 | 1,8,1,0,1,4,3,7,21 |
+| 5 | 1 | 232 | 50 | 37 | 1 | 8 | 1,8,1,0,1,3,5,3,26 |
+| 5 | 2 | 262 | 65 | 27 | 1 | 8 | 1,8,1,0,0,1,6,6,25 |
+| 5 | 3 | 255 | 41 | 64 | 1 | 8 | 1,8,1,1,4,5,1,6,27 |
+| 5 | 4 | 236 | 336 | 113 | 2 | 8 | 1,8,50,0,1,2,6,7,24 |
+| 6 | 0 | 212 | 53 | 20 | 1 | 8 | 1,7,1,0,0,1,6,7,21 |
+| 6 | 1 | 190 | 40 | 67 | 1 | 8 | 1,7,1,0,1,2,8,7,23 |
+| 6 | 2 | 177 | 49 | 72 | 1 | 8 | 1,7,4,0,1,5,3,5,25 |
+| 6 | 3 | 210 | 55 | 75 | 1 | 8 | 1,8,1,1,5,5,5,7,22 |
+| 6 | 4 | 193 | 45 | 33 | 1 | 8 | 1,7,1,0,0,2,8,6,20 |
+| 6 | 5 | 218 | 338 | 72 | 2 | 8 | 1,7,38,0,0,1,9,7,19 |
+
+Unlike the old baseline, `range_guard > 0` now holds on **every** rank
+(np 6 rank 3 used to read 0). At np 1 the draw's Laplace θ 0.3 `[dd-hist]` is
+`-2:54 -1:14 0:174 1:14 2:54` (310 admitted, 136 cross-level), against 162
+admitted and 48 cross-level before. The other fields are in the logs.
+`[b2-retain]`, knob on at np 1, now reads `unique1` 158 (was 54). The
+in-octave knob-on increment is still 0 on every rank, and the cross-octave and
+knob-off arms still equal `unique2`.
+
+### Budget rows re-calibrated
+
+`f3cmFUQpEFXd`, `DownwardSweep` `default` rows, max of three passes, np 1-6:
+9.47, 6.35, 9.24, 8.33, 9.36, 10.54 s (before: 5.58, 6.15, 7.57, 8.33, 9.27,
+10.2). np 1 and np 3 are first-pass maxima. The other two passes read
+5.5 and 7.4-7.5 s. The exit runs' highest runtime/budget ratio was 0.56 on
+SERIAL and 0.67 on HIP.
+
+**Affects:**
+- **A2**: implement delta 1. Its step-5 multiplier must match this table per
+  np: two-scale **1.2735, 1.2798, 1.2353, 1.2489, 1.1843, 1.0957** at np 1-6
+  (added 67, 68, 56, 58, 47, 27), and graded 1.3383-1.4652. It must match
+  exactly if A2's pass refines as modelled (occupied children only, to a fixed
+  point). Two cautions. First, the exit criterion's
+  `m2l_n_fallback_pairs_range_guard() == 0` at knob 1 may not hold, because
+  refusals across empty space are untouched by a touching-leaf balance. Measure
+  it before asserting it. Second, T1's draw now has a skirt, so A2's knob-off
+  bit-for-bit claim is against the new baseline above.
+- **R1**: the graded draw costs materially more at delta 1: 1.32-1.47, against
+  1.10-1.28 on the two-scale draw, with 2-4 passes and nothing stuck. It is
+  not an explosion on either draw. At delta 2 and 3 the graded draw costs
+  nothing, because its touching leaves are never more than 2 apart.
+- **C1**: it reads T1's draw, which changed: the per-depth occupancy and the
+  fallback counts are the new baseline above, not T1's or T1 (HIP arm)'s.
+- **A3**: its arithmetic should use the delta-1 multipliers above.
+- **T1, T1 (HIP arm), B0, B0b, B2 records**: their two-scale tables describe
+  the pre-skirt draw. They are history, not the current baseline.
