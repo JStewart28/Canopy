@@ -431,8 +431,8 @@ refusal.
   ParMETIS graph partition over every non-shared cell, with one balance
   constraint per band of depths. A2 changes the cell set that partition
   consumes, so **A2 is the task here that first opens it**, and A1 must not.
-  A1's cost model is a cell count, which `m2l_cells_at_depth()` and
-  `TreeBuilder`'s own cell list answer without it. A balanced tree also changes
+  A1's cost model is a cell count, which `TreeBuilder`'s own cell list answers
+  without it. A balanced tree also changes
   the band populations H2's constraints are drawn from, so A2 records the
   per-band imbalance before and after.
 - **The upward sweep's coefficient formation.**
@@ -961,10 +961,20 @@ is pointed at the two-scale draw (`f3ccKujp6xQP`). See
 ### A1 — Measure the depth imbalance and the cost of removing it — **NOT STARTED**
 
 **Depends on:** T1 **DONE**.
-**Fill in:** `tests/tstTreeBuilder.hpp` (a measurement case). No `src/` change.
-**Reference:** `TreeBuilder`'s cell list and its refinement decision
-(`src/Canopy_TreeBuilder.hpp:769-776`); `m2l_cells_at_depth()` for the
-per-depth occupancy.
+**Fill in:** `tests/tstDownwardSweep.hpp` — a measurement case beside T1's,
+reading `DownwardSweepTest::TwoScaleFixture`'s `builder.cells()` directly. The
+two-scale draw (`generate_two_scale_particles`, `:1416`), the graded draw
+(`generate_graded_particles`, `:1459`) and the fixture all live in that file,
+on its `Position` + `Charge` AoSoA. No `src/` change.
+**Reference:** `TreeBuilder::cells()` (`src/Canopy_TreeBuilder.hpp:202`) and
+the refinement loop (`:692-812`), whose leaf decision is at `:804`. A candidate
+with no particles is skipped (`:789`), so the cell list holds occupied cells
+only. Counts are `MPI_Allreduce`d (`:778`), so the cell list is the **global**
+tree, identical on every rank: per-rank figures at one np must agree. The tree
+differs between rank counts, because the draw is seeded per rank.
+`m2l_cells_at_depth()` (`src/Canopy_DownwardSweep.hpp:1152`) is a sweep
+accessor and serves only as a cross-check: at np 1 the per-depth count of
+`builder.cells()` equals T1's `cells_at_depth` line.
 **Do:**
 1. On T1's distribution, build the tree and compute, over all leaf pairs that
    are spatial neighbours, the distribution of the **level difference** —
@@ -987,18 +997,20 @@ depending on how the surface folds, and **A2 must not be started until this
 number is in the log** — it is the input to A2's decision about whether to
 balance fully or only against the deepest neighbour.
 
-**Exit criterion:** stem `TreeBuilder` passes on SERIAL at ranks 1-6 and on HIP
-at ranks 1-4 —
+**Exit criterion:** stem `DownwardSweep` passes on SERIAL at ranks 1-6 and on
+HIP at ranks 1-4 —
 
 ```bash
-make -j Canopy_Test_TreeBuilder_MPI_SERIAL Canopy_Test_TreeBuilder_MPI_HIP
-ctest --output-on-failure -R '^Canopy_Test_TreeBuilder_MPI_SERIAL_np_[1-6]$'
-ctest --output-on-failure -R '^Canopy_Test_TreeBuilder_MPI_HIP_np_[1-4]$'
+make -j Canopy_Test_DownwardSweep_MPI_SERIAL Canopy_Test_DownwardSweep_MPI_HIP
+ctest --output-on-failure -R '^Canopy_Test_DownwardSweep_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_DownwardSweep_MPI_HIP_np_[1-4]$'
 ```
 
 — and the log records, per `(nprocs, rank)`, the neighbour
 level-difference distribution, the count exceeding 1, and the implied cell-count
-multiplier, from two separate runs. Failure direction: the case asserts the
+multiplier, from two separate runs. T1's, B0's, B0b's and B1's existing lines
+in the stem stay byte-identical, and the stem's `default` rows in
+`scripts/tuolumne/serial_runtimes.tsv` are re-calibrated for the added case. Failure direction: the case asserts the
 level-difference maximum is **at least 2** on T1's distribution — if it is 1,
 the fixture is already balanced and is the wrong fixture for chain A, which is a
 finding about T1 and must fail here rather than silently making A2 untestable.
