@@ -1057,14 +1057,28 @@ a test rather than by a comment.
 **Depends on:** B0b **DONE**, V1 **DONE**.
 **Fill in:** `src/Canopy_CartesianTaylorBasis.hpp` (the new trait,
 `canonicalize_key`); `src/Canopy_LaplaceKernel.hpp` (the new trait);
-`tests/CanopyTest_MonopoleBasis.hpp` (the new trait, both bases it declares —
-see `:131` and `:150`); `tests/tstFarFieldContract.hpp`
-(`expectKeyTraitsAgree`).
-**Reference:** `key_needs_level`'s declaration and its two readers
-(`src/Canopy_LaplaceKernel.hpp:704-721`) as the exact pattern to mirror;
+`tests/CanopyTest_MonopoleBasis.hpp` (the new trait on `MonopoleBasis`, its one
+basis, in the key-contract block `:131-177`; `LevelBlindBasis`
+(`tests/tstFarFieldContract.hpp:897`) derives from it and inherits the trait);
+`tests/tstFarFieldContract.hpp` (`expectKeyTraitsAgree` and its call sites);
+`tests/tstDownwardSweep.hpp` (`testGradedDdDuplicates`'s contract).
+**Reference:** `key_needs_level`'s declaration
+(`src/Canopy_LaplaceKernel.hpp:704-721`) and its two readers,
+`set_root_half_width` (`src/Canopy_DownwardSweep.hpp:455`) and the diagnostic
+print (`:2007-2018`), as the exact pattern to mirror;
 `CartesianTaylorBasis`'s no-`dd`-dependence statement
 (`src/Canopy_CartesianTaylorBasis.hpp:972-979`); the current conformance
-assertions (`tests/tstFarFieldContract.hpp:934-937`).
+assertions (`tests/tstFarFieldContract.hpp:934-937`) and their only call sites
+(`:970-971`); B0b's cross-level count (`tests/tstDownwardSweep.hpp:1854-1864`)
+and contract (`:1987-1999`).
+
+**Payoff.** B0b measured it on the graded draw: `CartesianTaylorBasis`'s
+duplicate factor is 1.0000-1.0403 per rank at θ 0.3 (np 1: 4162 → 4068
+columns) and 1.0896-1.3163 at θ 0.5 (np 1: 26 702 → 20 286, 85.4 MB →
+64.9 MB). That is small at the downstream configuration's θ 0.3 and
+substantial at θ 0.5. The change is exact, since the operator ignores `dd`, and
+B2 depends on it, so B1 proceeds.
+
 **Do:**
 1. Add `static constexpr bool key_needs_dd` to every basis, beside
    `key_needs_level`, documented in the same style: what it declares, and that a
@@ -1082,11 +1096,27 @@ assertions (`tests/tstFarFieldContract.hpp:934-937`).
    branches on `key_needs_level`: when the trait is true, `dd` must survive
    canonicalization and two keys differing only in `dd` must stay distinct; when
    false, they must collapse. **The existing unconditional `EXPECT_EQ(a.dd,
-   ca.dd)` must go** — it currently forbids what this task does.
+   ca.dd)` must go** — it currently forbids what this task does. Call it on
+   `CartesianTaylorBasis` and `LaplaceKernel` as well (include
+   `src/Canopy_CartesianTaylorBasis.hpp`). Today it runs only on
+   `MonopoleBasis` and `LevelBlindBasis` (`:970-971`), and both keep `dd`:
+   `MonopoleBasis`'s operator carries $F(\texttt{dd}) = 2^{\max(0,-\texttt{dd})}$
+   (`tests/CanopyTest_MonopoleBasis.hpp:382-425`), so its trait is `true`.
+   Without the two new calls, the `false` branch runs on no basis.
 5. Leave `m2l_key_dd_max` and the sweep's `dd` range guard in place and
    unchanged. `LaplaceKernel` still needs both.
-6. Re-run B0b's duplicate count and confirm the admitted column count fell by
-   the factor B0b measured on the graded draw.
+6. **Change B0b's contract to match.** `reportTwoScaleDdDuplicates` counts
+   cross-level keys from `m2l_realized_keys()`, which holds canonical keys
+   (`src/Canopy_DownwardSweep.hpp:1715-1716`). Once `CartesianTaylorBasis`
+   zeroes `dd`, its cross-level count is 0 on both draws, and
+   `EXPECT_GT( sum[1], sum[0] )` (`tests/tstDownwardSweep.hpp:1997`) fails
+   `0 vs 0`. For a basis declaring `key_needs_dd = false`, assert instead that
+   the cross-level count is **0 on every rank**, which checks that the trait
+   reaches the table. Keep the graded-greater-than-two-scale contract on
+   `LaplaceKernel` only. It sees the same tree, so the geometry claim is
+   unchanged.
+7. Re-run B0b's case and compare it line by line with the tables in
+   `tree-opt-progress-log.md` `## B0b` (see the exit criterion).
 
 **Exit criterion:** six stems, and **`CartesianTaylorSolve` is the authority
 here while `MultiSolve` is not** — the `MultiSolve` stem instantiates
@@ -1107,13 +1137,22 @@ ctest --output-on-failure -R '^Canopy_Test_(CartesianTaylorSolve|FarFieldContrac
 ctest --output-on-failure -R '^Canopy_Test_CartesianTaylor_(SERIAL|HIP)$'
 ```
 
-All pass on SERIAL at ranks 1-6 and on HIP at ranks 1-4, and B0b's graded case
-reports a duplicate factor of exactly **1.0** for
-`CartesianTaylorBasis` — every admitted key now has a distinct
-$(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$ — with its absolute
-column count reduced by B0b's measured factor and `LaplaceKernel`'s count
-**unchanged**, at both angles. B0's two-scale case already reads 1.0 for both
-bases and must not move. Failure direction: a basis declaring `key_needs_dd = true` whose
+All pass on SERIAL at ranks 1-6 and on HIP at ranks 1-4. Each line is compared
+with the tables in `tree-opt-progress-log.md` `## B0b`. Those tables reproduce
+exactly on both backends, so any difference comes from this change:
+
+- On every `[b0b-dd]` line (both draws, θ 0.3 and 0.5) and every `[b0-dd]`
+  line, `CartesianTaylorBasis`'s admitted count equals B0b's recorded CT
+  *distinct* count, and its factor reads 1.0000.
+- `CartesianTaylorBasis`'s `[dd-hist]` lines put every admitted key at
+  `dd = 0`.
+- `LaplaceKernel`'s admitted count, distinct count, factor, bytes and histogram
+  are **unchanged** on every line. A drop in any of them is **R3** firing.
+- B0's `[b0-dd]` lines (two-scale, θ 0.3) keep their admitted and distinct
+  counts and factor for both bases, because CT's distinct count already equals
+  its admitted count there.
+
+Failure direction: a basis declaring `key_needs_dd = true` whose
 `canonicalize_key` zeroes `dd`, and the converse, both fail
 `expectKeyTraitsAgree` with a message naming the basis; verify by temporarily
 mis-declaring one and seeing the named failure, then reverting.
