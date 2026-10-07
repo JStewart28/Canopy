@@ -846,13 +846,14 @@ only the gated `demanded_ops` reads $-1$. See `tree-opt-progress-log.md`
 
 ---
 
-### B0b — The `dd`-duplicate factor on a tree dense in cross-level keys — **NOT STARTED**
+### B0b — The `dd`-duplicate factor on a tree dense in cross-level keys — **DONE**
 
 **Depends on:** B0 **DONE**.
 **Fill in:** `tests/tstDownwardSweep.hpp` — a second draw beside
 `generate_two_scale_particles` (`:1416`), a draw selector on `TwoScaleFixture`
-(`:1461-1550`), a per-`dd` histogram in `reportTwoScaleDdDuplicates`
-(`:1757-1784`), and a case beside `ddDuplicateColumns` (`:1822`).
+(`:1529-1644` after this task), a per-`dd` histogram in
+`reportTwoScaleDdDuplicates` (`:1757-1784` before this task), and a case beside
+`ddDuplicateColumns` (`:1822` before this task).
 **Reference:** B0's case (`testTwoScaleDdDuplicates`, `:1787-1805`), which
 this task reuses unchanged in what it counts; the classify pass's offset
 computation (`src/Canopy_DownwardSweep.hpp:1671-1697`).
@@ -920,6 +921,22 @@ re-calibrated for the added cases. Failure direction: the graded case's
 contract assertion fails when the case is temporarily pointed at the
 two-scale draw — the cross-level sum is then equal, not greater — demonstrated
 once and reverted, with the failure message recorded.
+
+**Met.** The factor **exceeds 1.0**. On the graded draw,
+`CartesianTaylorBasis` measures 1.0000-1.0403 per rank at θ 0.3 and
+1.0896-1.3163 at θ 0.5. At np 1 that is 4162 → 4068 columns at θ 0.3 and
+26 702 → 20 286 at θ 0.5 (85.4 MB → 64.9 MB at 3200 B). T1's draw stays at
+exactly 1.0 at θ 0.3, but reaches 1.1449 at θ 0.5. `LaplaceKernel`'s control
+reads 1.0079-1.5246 on the graded draw. That figure is not a saving, because
+its operator depends on `dd`. By B0's parity argument, every collision is
+between two non-zero `dd` values. No admitted key has `|dd|` above 3.
+`DownwardSweepTwoScale.ddDuplicateColumnsGraded` (`testGradedDdDuplicates`,
+`tests/tstDownwardSweep.hpp:1925-2004`) passes on SERIAL np 1-6 and HIP np 1-4,
+two passes each (`f3ccGbJHwxPy`, `f3ccGbSC48UX`). The two passes are identical,
+HIP equals SERIAL line for line, and T1's and B0's lines are byte-identical to
+B0's jobs. The contract assertion fails `48 vs 48` at np 1 when the graded case
+is pointed at the two-scale draw (`f3ccKujp6xQP`). See
+`tree-opt-progress-log.md` `## B0b`.
 
 ---
 

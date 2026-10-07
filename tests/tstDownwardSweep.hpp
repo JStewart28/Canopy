@@ -1442,9 +1442,78 @@ void generate_two_scale_particles( AoSoA_t& particles, int num_particles,
     Cabana::deep_copy( particles, particles_h );
 }
 
+// Geometry of the graded draw (B0b of tasks/tree-opt.md), in DOMAIN units:
+// r = R_MIN * (R_MAX / R_MIN)^u, u ~ U(0,1), isotropic about the centre.
+// Density falls as r^-3, so the leaf depth drops one level per octave of r
+// and every shell boundary is a one-level step -- the geometry that admits
+// the most |dd| = 1 pairs inside the range guard. Six octaves put leaves at
+// depths 2-8 at ncrit = 8, max_depth = 8.
+constexpr double TWO_SCALE_GRADED_CENTER = 0.5;
+constexpr double TWO_SCALE_GRADED_R_MAX = 0.45;
+constexpr double TWO_SCALE_GRADED_R_MIN = TWO_SCALE_GRADED_R_MAX / 64.0;
+
+// Graded positions, charges as generate_two_scale_particles, seeded per
+// rank. A position outside [0, 1)^3 is REJECTED and redrawn, not clamped:
+// clamping would pile particles onto the box faces. At the constants above
+// the sphere lies inside the box, so the rejection never fires.
+void generate_graded_particles( AoSoA_t& particles, int num_particles,
+                                int rank )
+{
+    AoSoA_ht particles_h( "particles_h", num_particles );
+    auto h_pos = Cabana::slice<Position>( particles_h );
+    auto h_q = Cabana::slice<Charge>( particles_h );
+
+    std::mt19937 gen( 42 + rank * 7919 );
+    std::uniform_real_distribution<double> u_dist( 0.0, 1.0 );
+    std::uniform_real_distribution<double> cos_dist( -1.0, 1.0 );
+    std::uniform_real_distribution<double> phi_dist( 0.0,
+                                                     2.0 * std::acos( -1.0 ) );
+    std::uniform_real_distribution<double> q_dist( 0.1, 1.0 );
+
+    for ( int i = 0; i < num_particles; i++ )
+    {
+        double x[3];
+        bool inside = false;
+        while ( !inside )
+        {
+            const double r =
+                TWO_SCALE_GRADED_R_MIN *
+                std::pow( TWO_SCALE_GRADED_R_MAX / TWO_SCALE_GRADED_R_MIN,
+                          u_dist( gen ) );
+            const double ct = cos_dist( gen );
+            const double st = std::sqrt( 1.0 - ct * ct );
+            const double phi = phi_dist( gen );
+            x[0] = TWO_SCALE_GRADED_CENTER + r * st * std::cos( phi );
+            x[1] = TWO_SCALE_GRADED_CENTER + r * st * std::sin( phi );
+            x[2] = TWO_SCALE_GRADED_CENTER + r * ct;
+            inside = true;
+            for ( int d = 0; d < 3; d++ )
+                inside = inside && x[d] >= 0.0 && x[d] < 1.0;
+        }
+        for ( int d = 0; d < 3; d++ )
+            h_pos( i, d ) = x[d];
+        h_q( i, 0 ) = q_dist( gen );
+    }
+
+    particles.resize( num_particles );
+    Cabana::deep_copy( particles, particles_h );
+}
+
+// Which draw TwoScaleFixture builds its tree over.
+enum class TwoScaleDraw
+{
+    TwoScale, // generate_two_scale_particles: T1's fixture
+    Graded    // generate_graded_particles: B0b's cross-level-dense tree
+};
+
+inline const char* to_string( TwoScaleDraw draw )
+{
+    return draw == TwoScaleDraw::Graded ? "graded" : "two-scale";
+}
+
 // The fixture: a built tree, partition, communication plan and upward sweep
-// over the two-scale draw, with the downward sweep set up and ready to
-// execute. Same shape as CachingFixture above, and the same two-phase build
+// over the selected draw (two-scale by default), with the downward sweep set
+// up and ready to execute. Same shape as CachingFixture above, and the same two-phase build
 // (global tree, partition, rebuild on the local particles).
 //
 // TEMPLATED ON THE FAR-FIELD TYPE, not fixed to this file's `Kernel`, because
@@ -1477,11 +1546,14 @@ struct TwoScaleFixture
     int max_depth = 8;      // depth cap; the blob reaches 7-8 at this ncrit
     double tolerance = 0.1; // tree bounding-box padding, domain units
     int replication_depth = 2;
-    // MAC opening angle. Tighter than the 0.5 default on purpose: a tighter
-    // theta descends further before admitting a pair, which is what puts
-    // admitted pairs at the deep end of the tree where an offset can exceed
-    // M2L_KEY_OFFSET_MAX = 32 half-widths at that depth.
-    double mac_theta = 0.3;
+    // MAC opening angle, dimensionless; a constructor argument because it
+    // reaches comm_plan in the initializer list. The default 0.3 is tighter
+    // than the solver's 0.5 on purpose: a tighter theta descends further
+    // before admitting a pair, which is what puts admitted pairs at the deep
+    // end of the tree where an offset can exceed M2L_KEY_OFFSET_MAX = 32
+    // half-widths at that depth.
+    double mac_theta;
+    TwoScaleDraw draw;
     // Plummer softening LENGTH eps, domain units; the kernel's b is eps^2.
     // Positive because CartesianTaylorBasis aborts on b <= 0. It moves no
     // integer key and no interaction-list entry, and nothing here asserts
@@ -1496,8 +1568,11 @@ struct TwoScaleFixture
     DownwardSweep<TEST_MS, TEST_ES, kernel> downward;
     int num_local = 0;
 
-    TwoScaleFixture()
-        : builder( MPI_COMM_WORLD, ncrit, max_depth,
+    explicit TwoScaleFixture( TwoScaleDraw draw_in = TwoScaleDraw::TwoScale,
+                              double mac_theta_in = 0.3 )
+        : mac_theta( mac_theta_in )
+        , draw( draw_in )
+        , builder( MPI_COMM_WORLD, ncrit, max_depth,
                    std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance, tolerance, tolerance },
                    tolerance )
         , partitioner( MPI_COMM_WORLD, replication_depth )
@@ -1515,7 +1590,10 @@ struct TwoScaleFixture
                                   ( rank < num_particles_global % nprocs );
 
         particles = AoSoA_t( "particles", num_particles );
-        generate_two_scale_particles( particles, num_particles, rank );
+        if ( draw == TwoScaleDraw::Graded )
+            generate_graded_particles( particles, num_particles, rank );
+        else
+            generate_two_scale_particles( particles, num_particles, rank );
 
         auto positions = Cabana::slice<Position>( particles );
         builder.build( positions, num_particles );
@@ -1753,34 +1831,67 @@ void testTwoScaleRefusalsAreRangeGuard()
 // LaplaceKernel's operator does depend on dd, so its figure is the control,
 // not a saving. A measurement: the only assertion on the counts is the
 // by-construction distinct <= admitted.
+//
+// `tag` and `context` name the counts line: B0's case prints "[b0-dd] basis
+// ..." unchanged, B0b's prefixes its draw and angle. The [dd-hist] line
+// (B0b step 1) histograms the admitted keys by signed dd = d_s - d_t, from
+// -m2l_key_dd_max to +m2l_key_dd_max; the range guard admits nothing outside,
+// so `outside` must read 0. Returns the number of admitted keys with dd != 0.
 template <class FarField, class Fixture>
-void reportTwoScaleDdDuplicates( const char* basis, const Fixture& fix,
-                                 int nprocs, int rank )
+long long reportTwoScaleDdDuplicates( const char* basis, const Fixture& fix,
+                                      int nprocs, int rank,
+                                      const char* tag = "b0-dd",
+                                      const std::string& context = "" )
 {
     const auto& keys = fix.downward.m2l_realized_keys();
     std::set<std::array<int, 4>> distinct;
+    constexpr int dd_max = FarField::m2l_key_dd_max;
+    std::array<long long, 2 * dd_max + 1> hist{};
+    long long outside = 0;
     for ( const auto& k : keys )
+    {
         distinct.insert( { k.max_d, k.ii, k.jj, k.kk } );
+        if ( std::abs( k.dd ) <= dd_max )
+            ++hist[k.dd + dd_max];
+        else
+            ++outside;
+    }
 
     const long long admitted = static_cast<long long>( keys.size() );
     const long long n_distinct = static_cast<long long>( distinct.size() );
     const long long bytes_per_key =
         static_cast<long long>( FarField::bytes_per_key );
+    const long long cross_level = admitted - hist[dd_max];
 
-    std::printf( "[b0-dd] basis %s nprocs %d rank %d admitted %lld "
+    std::printf( "[%s] %sbasis %s nprocs %d rank %d admitted %lld "
                  "distinct_no_dd %lld factor %.4f demanded_ops %d "
                  "bytes_per_key %lld admitted_bytes %lld "
                  "distinct_bytes %lld\n",
-                 basis, nprocs, rank, admitted, n_distinct,
+                 tag, context.c_str(), basis, nprocs, rank, admitted,
+                 n_distinct,
                  n_distinct > 0 ? double( admitted ) / double( n_distinct )
                                 : 1.0,
                  fix.downward.m2l_n_demanded_ops(), bytes_per_key,
                  admitted * bytes_per_key, n_distinct * bytes_per_key );
+
+    std::string hist_str;
+    for ( int dd = -dd_max; dd <= dd_max; ++dd )
+    {
+        hist_str += std::to_string( dd ) + ":" +
+                    std::to_string( hist[dd + dd_max] );
+        if ( dd < dd_max )
+            hist_str += " ";
+    }
+    std::printf( "[dd-hist] draw %s theta %.2f basis %s nprocs %d rank %d "
+                 "admitted %lld cross_level %lld outside %lld hist [%s]\n",
+                 to_string( fix.draw ), fix.mac_theta, basis, nprocs, rank,
+                 admitted, cross_level, outside, hist_str.c_str() );
     std::fflush( stdout );
 
     EXPECT_LE( n_distinct, admitted )
         << basis << ": more distinct (max_d, ii, jj, kk) tuples than "
                     "admitted keys, so the count itself is wrong";
+    return cross_level;
 }
 
 template <class TEST_MS, class TEST_ES>
@@ -1805,6 +1916,92 @@ void testTwoScaleDdDuplicates()
     EXPECT_EQ( ct.downward.m2l_cells_at_depth(),
                laplace.downward.m2l_cells_at_depth() );
 }
+
+// B0b of tasks/tree-opt.md: B0's count on the graded draw, beside T1's draw,
+// at the fixture's angle and the solver default. Its contract: the graded
+// tree admits more cross-level (dd != 0) keys, summed over ranks, than T1's
+// at the same rank count and angle -- otherwise it tests nothing B0 did not.
+// No threshold on the factor.
+template <class TEST_MS, class TEST_ES>
+void testGradedDdDuplicates()
+{
+    using CTBasis = CartesianTaylorBasis<double, 3, 1>;
+    // The draw under test. Pointing it at TwoScaleDraw::TwoScale is the
+    // failure direction: the contract below must then fail.
+    const TwoScaleDraw graded = TwoScaleDraw::Graded;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    for ( const double theta : { 0.3, 0.5 } )
+    {
+        // Cross-level admitted keys on this rank, [draw][basis], draw 0 the
+        // two-scale baseline and 1 the graded draw; basis 0 CT, 1 Laplace.
+        long long cross[2][2] = {};
+        for ( int di = 0; di < 2; ++di )
+        {
+            const TwoScaleDraw draw = di == 0 ? TwoScaleDraw::TwoScale : graded;
+            char context[64];
+            std::snprintf( context, sizeof( context ), "draw %s theta %.2f ",
+                           to_string( draw ), theta );
+
+            TwoScaleFixture<TEST_MS, TEST_ES, CTBasis> ct( draw, theta );
+            ct.solve();
+            cross[di][0] = reportTwoScaleDdDuplicates<CTBasis>(
+                "CartesianTaylor", ct, nprocs, rank, "b0b-dd", context );
+
+            TwoScaleFixture<TEST_MS, TEST_ES, Kernel> laplace( draw, theta );
+            laplace.solve();
+            cross[di][1] = reportTwoScaleDdDuplicates<Kernel>(
+                "Laplace", laplace, nprocs, rank, "b0b-dd", context );
+
+            EXPECT_EQ( ct.downward.m2l_cells_at_depth(),
+                       laplace.downward.m2l_cells_at_depth() );
+
+            // Leaves per depth of the global tree, so the log shows how many
+            // depths the draw actually spans.
+            std::vector<int> leaves( ct.max_depth + 1, 0 );
+            for ( const auto& c : ct.builder.cells() )
+                if ( c.is_leaf && c.depth >= 0 && c.depth <= ct.max_depth )
+                    ++leaves[c.depth];
+            int leaf_depths = 0;
+            std::string leaf_str;
+            for ( std::size_t d = 0; d < leaves.size(); ++d )
+            {
+                leaf_depths += leaves[d] > 0;
+                leaf_str += std::to_string( leaves[d] );
+                if ( d + 1 < leaves.size() )
+                    leaf_str += ",";
+            }
+            std::printf( "[b0b-tree] %snprocs %d rank %d leaf_depths %d "
+                         "leaves_at_depth [%s]\n",
+                         context, nprocs, rank, leaf_depths,
+                         leaf_str.c_str() );
+            std::fflush( stdout );
+        }
+
+        const char* basis_name[2] = { "CartesianTaylor", "Laplace" };
+        for ( int b = 0; b < 2; ++b )
+        {
+            long long sum[2] = {};
+            MPI_Allreduce( &cross[0][b], &sum[0], 1, MPI_LONG_LONG, MPI_SUM,
+                           MPI_COMM_WORLD );
+            MPI_Allreduce( &cross[1][b], &sum[1], 1, MPI_LONG_LONG, MPI_SUM,
+                           MPI_COMM_WORLD );
+            if ( rank == 0 )
+                std::printf( "[b0b-cross] theta %.2f basis %s nprocs %d "
+                             "two-scale %lld graded %lld\n",
+                             theta, basis_name[b], nprocs, sum[0], sum[1] );
+            std::fflush( stdout );
+            EXPECT_GT( sum[1], sum[0] )
+                << basis_name[b] << " at theta " << theta
+                << ": the graded draw admits no more cross-level (dd != 0) "
+                   "keys, summed over ranks, than T1's two-scale draw, so it "
+                   "tests nothing B0 did not";
+        }
+    }
+}
 } // namespace DownwardSweepTest
 
 TEST( DownwardSweepTwoScale, treeHasShallowAndDeepLeaves )
@@ -1823,6 +2020,12 @@ TEST( DownwardSweepTwoScale, ddDuplicateColumns )
 {
     DownwardSweepTest::testTwoScaleDdDuplicates<TEST_MEMSPACE,
                                                 TEST_EXECSPACE>();
+}
+
+TEST( DownwardSweepTwoScale, ddDuplicateColumnsGraded )
+{
+    DownwardSweepTest::testGradedDdDuplicates<TEST_MEMSPACE,
+                                              TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

@@ -1044,3 +1044,278 @@ entry of the job. The exit-criterion runs used these budgets (np 1 timeout
   reuse it.
 - **A1, C1** — `TwoScaleFixture` takes a `FarField` and now runs
   `CartesianTaylorBasis`. Their T1 baseline is unchanged.
+
+## B0b
+
+**Outcome: the duplicate factor exceeds 1.0.** On the graded draw,
+`CartesianTaylorBasis` measures 1.0000-1.0403 per rank at θ 0.3 (above 1.0 on
+17 of 21 ranks) and 1.0896-1.3163 at θ 0.5 (all 21). T1's two-scale draw stays
+at exactly 1.0 at θ 0.3, which reproduces B0. At θ 0.5 the same draw reaches
+1.1449 (14 of 21 ranks above 1.0). B0's null result was a property of that
+draw **at that angle**, not of the key.
+
+Provenance: commit `cac7036` plus this section's edits to
+`tests/tstDownwardSweep.hpp` and `scripts/tuolumne/serial_runtimes.tsv`, Cray
+clang 20.0.0, env `tuolumne_trilinos`, `build-tuolumne`
+(`Canopy_ENABLE_PROFILING:BOOL=ON`, read from the cache and echoed at each
+job's head; HIP registered at np 1-4 with
+`--gpus-per-task=1 --cores-per-task=8`). Every run went through `canopy_ctest`
+after a passing watchdog self-test, with the HIP environment set in a subshell
+around the HIP calls only. The watchdog cancelled nothing but the self-test, and
+every entry's `canopy_ctest` outcome is `completed`. Script:
+`scripts/tuolumne/run_ctest_b0.flux` unchanged, submitted with `-t 8m`, because
+each job takes about 3 minutes against the preamble's 15.
+
+| job | what |
+| --- | --- |
+| `f3ccEbJQDASb` | `run_ctest_h0b.flux calibrate`, `DownwardSweep` SERIAL np 1-6, three passes |
+| `f3ccGbJHwxPy` | `measure serial`: SERIAL np 1-6, two passes, all `rc=0` |
+| `f3ccGbSC48UX` | `measure hip`: HIP np 1-4, two passes, all `rc=0` |
+| `f3ccKujp6xQP` | failure direction: `measure serial` with the graded case pointed at the two-scale draw |
+| `f3ccPJ3uuANT` | `measure serial` again after the revert and rebuild, all `rc=0` |
+
+### Decisions
+
+- **The graded draw.** $r = r_{\min}(r_{\max}/r_{\min})^u$ about the centre
+  $(0.5, 0.5, 0.5)$, with $r_{\max} = 0.45$ and $r_{\min} = r_{\max}/64$, so
+  six octaves, in domain units. The constants were chosen with a host-side
+  Python octree model of the build (ncrit 8, max_depth 8, padding 0.1), which
+  put leaves at depths 2-8. The real tree agrees: `[b0b-tree]` reports 7 leaf
+  depths (2-8) at every np. T1's draw has 3-7 at θ 0.3. A position outside
+  $[0, 1)^3$ is **rejected and redrawn**, not clamped, because clamping would
+  pile particles onto the faces. The sphere lies inside the box at these
+  constants, so the rejection never fires. The draw keeps the global count of
+  1200 and per-rank seeding `42 + rank * 7919`.
+- **One case, both draws, both angles.** `testGradedDdDuplicates` builds eight
+  fixtures: {two-scale, graded} × θ {0.3, 0.5} × {CT order 3, Laplace}. The
+  contract compares the two draws within the same binary, the same np and the
+  same angle, so it reads its baseline live rather than from a constant.
+- **The contract is asserted for both bases.** Both bases see the same tree,
+  and the cross-level sums differ between them only because Laplace's
+  canonicalization collapses `max_d`.
+- **B0's `[b0-dd]` line is untouched.** `reportTwoScaleDdDuplicates` gained
+  `tag` and `context` parameters, defaulting to `"b0-dd"` and `""`, and now
+  returns the rank's cross-level count. B0b prints
+  `[b0b-dd] draw <d> theta <t> basis ...` with the same fields. Both cases
+  print the new `[dd-hist]` line, so T1's fixture at θ 0.3 gets its histogram
+  twice per rank, identical both times (step 1).
+- **No leaf-depth assertion.** The task's step 5 lists the case's assertions,
+  and a depth floor is not among them. The leaf depths are printed on
+  `[b0b-tree]` and not asserted.
+
+### Constructor change and call sites
+
+`TwoScaleFixture()` became
+`explicit TwoScaleFixture( TwoScaleDraw draw_in = TwoScaleDraw::TwoScale, double mac_theta_in = 0.3 )`.
+`mac_theta` lost its in-class `= 0.3` and is set in the member-initializer
+list, ahead of `comm_plan( MPI_COMM_WORLD, mac_theta )`, so the angle reaches
+the comm plan. The new `TwoScaleDraw draw` member is declared before `builder`
+for the same reason. `enum class TwoScaleDraw { TwoScale, Graded }` and
+`to_string( TwoScaleDraw )` sit just before the fixture. The existing sites
+(`testTwoScaleTreeHasShallowAndDeepLeaves`, `testTwoScaleRefusalsAreRangeGuard`
+and both of `testTwoScaleDdDuplicates`'s) compile unchanged on the defaults.
+Their lines are **byte-identical** to B0's jobs: every `[two-scale]`,
+`[two-scale-refusals]` and `[b0-dd]` line in `f3ccGbJHwxPy` matches
+`f3cc4m4y111Z` (84 distinct lines), and every one in `f3ccGbSC48UX` matches
+`f3cc4mDrvh5Z` (40).
+
+### What only running showed
+
+No bug surfaced. Two results were not expected beforehand:
+
+- **θ 0.5 admits far more keys than θ 0.3.** At np 1 it admits 1312 against 162
+  on T1's draw and 26 702 against 4162 on the graded one, and it also admits
+  more `|dd| = 3` keys. One plausible reason, **not measured**: a tighter angle
+  admits pairs at larger offsets, and more of those exceed the 32-half-width
+  guard.
+- **T1's draw duplicates at θ 0.5.** B0 measured it at θ 0.3 only.
+
+### Reproducibility
+
+Both passes print identical lines on each backend: 570 sorted record lines on
+SERIAL and 276 on HIP. At np 1-4, HIP equals SERIAL line for line. The
+post-revert run `f3ccPJ3uuANT` equals `f3ccGbJHwxPy` line for line in both
+passes. So **R6**'s spread is zero here too, and the tables below come from a
+single pass.
+
+### Contract: summed cross-level (`dd != 0`) admitted keys
+
+| θ | basis | np 1 | np 2 | np 3 | np 4 | np 5 | np 6 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.30 | CartesianTaylor | 48 → 3698 | 18 → 3022 | 70 → 3019 | 28 → 4003 | 34 → 4132 | 28 → 3729 |
+| 0.30 | Laplace | 48 → 3188 | 18 → 2884 | 69 → 2723 | 28 → 3843 | 34 → 3840 | 27 → 3212 |
+| 0.50 | CartesianTaylor | 614 → 23990 | 283 → 24254 | 650 → 25908 | 311 → 29178 | 518 → 30211 | 375 → 25344 |
+| 0.50 | Laplace | 598 → 9688 | 282 → 11798 | 627 → 15273 | 310 → 18225 | 518 → 16632 | 373 → 14902 |
+
+Each cell reads two-scale → graded. The graded draw admits 16-168 times as many
+cross-level keys.
+
+### Measured
+
+Each row is one `(nprocs, rank)`. *adm* is `m2l_realized_keys().size()`, and
+*dist* is the number of distinct $(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$
+tuples. The factor is adm / dist, bold where it exceeds 1. Bytes use each
+basis's `bytes_per_key`: 3200 for CT order 3 and 21 952 for Laplace P 6.
+*hist* is the admitted-key count at signed `dd` = −3/−2/−1/0/1/2/3. Every line
+reads 0 at `|dd|` 4-6, and `outside` reads 0. `demanded_ops == adm` on every
+line, so the column cap never bound. The Laplace columns are the control. That
+operator depends on `dd`, so its factor is **not** a saving. Its `max_d` is
+canonicalized to 0, so its *dist* also merges levels.
+
+**two-scale, θ 0.30**
+
+| np | rank | CT adm | CT dist | CT factor | CT bytes adm → dist | CT hist dd −3..3 | L adm | L dist | L factor | L bytes adm → dist | L hist dd −3..3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 162 | 162 | 1.0000 | 518 400 → 518 400 | 0/19/5/114/5/19/0 | 162 | 162 | 1.0000 | 3 556 224 → 3 556 224 | 0/19/5/114/5/19/0 |
+| 2 | 0 | 57 | 57 | 1.0000 | 182 400 → 182 400 | 0/8/1/39/1/8/0 | 57 | 57 | 1.0000 | 1 251 264 → 1 251 264 | 0/8/1/39/1/8/0 |
+| 2 | 1 | 37 | 37 | 1.0000 | 118 400 → 118 400 | 0/0/0/37/0/0/0 | 37 | 37 | 1.0000 | 812 224 → 812 224 | 0/0/0/37/0/0/0 |
+| 3 | 0 | 85 | 85 | 1.0000 | 272 000 → 272 000 | 0/11/4/46/3/21/0 | 80 | 80 | 1.0000 | 1 756 160 → 1 756 160 | 0/11/3/42/3/21/0 |
+| 3 | 1 | 35 | 35 | 1.0000 | 112 000 → 112 000 | 0/0/0/26/5/4/0 | 35 | 35 | 1.0000 | 768 320 → 768 320 | 0/0/0/26/5/4/0 |
+| 3 | 2 | 57 | 57 | 1.0000 | 182 400 → 182 400 | 0/14/6/35/2/0/0 | 53 | 53 | 1.0000 | 1 163 456 → 1 163 456 | 0/14/6/31/2/0/0 |
+| 4 | 0 | 9 | 9 | 1.0000 | 28 800 → 28 800 | 0/0/0/9/0/0/0 | 9 | 9 | 1.0000 | 197 568 → 197 568 | 0/0/0/9/0/0/0 |
+| 4 | 1 | 28 | 28 | 1.0000 | 89 600 → 89 600 | 0/0/0/28/0/0/0 | 28 | 28 | 1.0000 | 614 656 → 614 656 | 0/0/0/28/0/0/0 |
+| 4 | 2 | 19 | 19 | 1.0000 | 60 800 → 60 800 | 0/0/0/15/3/1/0 | 18 | 18 | 1.0000 | 395 136 → 395 136 | 0/0/0/14/3/1/0 |
+| 4 | 3 | 51 | 51 | 1.0000 | 163 200 → 163 200 | 0/10/4/27/1/9/0 | 50 | 50 | 1.0000 | 1 097 600 → 1 097 600 | 0/10/4/26/1/9/0 |
+| 5 | 0 | 49 | 49 | 1.0000 | 156 800 → 156 800 | 0/16/1/24/1/7/0 | 49 | 49 | 1.0000 | 1 075 648 → 1 075 648 | 0/16/1/24/1/7/0 |
+| 5 | 1 | 18 | 18 | 1.0000 | 57 600 → 57 600 | 0/0/0/18/0/0/0 | 18 | 18 | 1.0000 | 395 136 → 395 136 | 0/0/0/18/0/0/0 |
+| 5 | 2 | 11 | 11 | 1.0000 | 35 200 → 35 200 | 0/0/0/11/0/0/0 | 11 | 11 | 1.0000 | 241 472 → 241 472 | 0/0/0/11/0/0/0 |
+| 5 | 3 | 37 | 37 | 1.0000 | 118 400 → 118 400 | 0/0/0/37/0/0/0 | 37 | 37 | 1.0000 | 812 224 → 812 224 | 0/0/0/37/0/0/0 |
+| 5 | 4 | 33 | 33 | 1.0000 | 105 600 → 105 600 | 0/0/0/24/0/9/0 | 33 | 33 | 1.0000 | 724 416 → 724 416 | 0/0/0/24/0/9/0 |
+| 6 | 0 | 42 | 42 | 1.0000 | 134 400 → 134 400 | 0/0/0/42/0/0/0 | 42 | 42 | 1.0000 | 921 984 → 921 984 | 0/0/0/42/0/0/0 |
+| 6 | 1 | 52 | 52 | 1.0000 | 166 400 → 166 400 | 0/0/0/50/0/2/0 | 52 | 52 | 1.0000 | 1 141 504 → 1 141 504 | 0/0/0/50/0/2/0 |
+| 6 | 2 | 34 | 34 | 1.0000 | 108 800 → 108 800 | 0/0/0/34/0/0/0 | 34 | 34 | 1.0000 | 746 368 → 746 368 | 0/0/0/34/0/0/0 |
+| 6 | 3 | 22 | 22 | 1.0000 | 70 400 → 70 400 | 0/0/0/22/0/0/0 | 22 | 22 | 1.0000 | 482 944 → 482 944 | 0/0/0/22/0/0/0 |
+| 6 | 4 | 43 | 43 | 1.0000 | 137 600 → 137 600 | 0/0/0/40/1/2/0 | 37 | 37 | 1.0000 | 812 224 → 812 224 | 0/0/0/34/1/2/0 |
+| 6 | 5 | 115 | 115 | 1.0000 | 368 000 → 368 000 | 0/8/6/92/5/4/0 | 109 | 109 | 1.0000 | 2 392 768 → 2 392 768 | 0/8/5/87/5/4/0 |
+
+**two-scale, θ 0.50**
+
+| np | rank | CT adm | CT dist | CT factor | CT bytes adm → dist | CT hist dd −3..3 | L adm | L dist | L factor | L bytes adm → dist | L hist dd −3..3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 1312 | 1146 | **1.1449** | 4 198 400 → 3 667 200 | 0/12/295/698/295/12/0 | 1114 | 944 | **1.1801** | 24 454 528 → 20 722 688 | 0/12/287/516/287/12/0 |
+| 2 | 0 | 652 | 651 | **1.0015** | 2 086 400 → 2 083 200 | 0/6/113/506/21/6/0 | 519 | 518 | **1.0019** | 11 393 088 → 11 371 136 | 0/6/112/374/21/6/0 |
+| 2 | 1 | 445 | 443 | **1.0045** | 1 424 000 → 1 417 600 | 0/0/25/308/112/0/0 | 445 | 443 | **1.0045** | 9 768 640 → 9 724 736 | 0/0/25/308/112/0/0 |
+| 3 | 0 | 730 | 720 | **1.0139** | 2 336 000 → 2 304 000 | 0/5/168/398/149/10/0 | 604 | 539 | **1.1206** | 13 259 008 → 11 832 128 | 0/5/152/288/149/10/0 |
+| 3 | 1 | 423 | 422 | **1.0024** | 1 353 600 → 1 350 400 | 0/0/101/277/45/0/0 | 403 | 377 | **1.0690** | 8 846 656 → 8 275 904 | 0/0/94/264/45/0/0 |
+| 3 | 2 | 408 | 408 | 1.0000 | 1 305 600 → 1 305 600 | 0/6/58/236/107/1/0 | 392 | 359 | **1.0919** | 8 605 184 → 7 880 768 | 0/6/58/220/107/1/0 |
+| 4 | 0 | 232 | 232 | 1.0000 | 742 400 → 742 400 | 0/0/0/211/21/0/0 | 209 | 209 | 1.0000 | 4 587 968 → 4 587 968 | 0/0/0/188/21/0/0 |
+| 4 | 1 | 364 | 364 | 1.0000 | 1 164 800 → 1 164 800 | 0/0/18/295/51/0/0 | 364 | 364 | 1.0000 | 7 990 528 → 7 990 528 | 0/0/18/295/51/0/0 |
+| 4 | 2 | 331 | 331 | 1.0000 | 1 059 200 → 1 059 200 | 0/4/79/245/3/0/0 | 325 | 324 | **1.0031** | 7 134 400 → 7 112 448 | 0/4/78/240/3/0/0 |
+| 4 | 3 | 531 | 531 | 1.0000 | 1 699 200 → 1 699 200 | 0/5/45/396/76/9/0 | 426 | 415 | **1.0265** | 9 351 552 → 9 110 080 | 0/5/45/291/76/9/0 |
+| 5 | 0 | 439 | 430 | **1.0209** | 1 404 800 → 1 376 000 | 5/12/42/307/73/0/0 | 408 | 399 | **1.0226** | 8 956 416 → 8 758 848 | 5/12/42/276/73/0/0 |
+| 5 | 1 | 261 | 256 | **1.0195** | 835 200 → 819 200 | 0/0/47/177/37/0/0 | 258 | 253 | **1.0198** | 5 663 616 → 5 553 856 | 0/0/47/174/37/0/0 |
+| 5 | 2 | 233 | 219 | **1.0639** | 745 600 → 700 800 | 0/0/28/163/42/0/0 | 231 | 217 | **1.0645** | 5 070 912 → 4 763 584 | 0/0/28/161/42/0/0 |
+| 5 | 3 | 365 | 345 | **1.0580** | 1 168 000 → 1 104 000 | 0/0/72/251/42/0/0 | 360 | 340 | **1.0588** | 7 902 720 → 7 463 680 | 0/0/72/246/42/0/0 |
+| 5 | 4 | 486 | 483 | **1.0062** | 1 555 200 → 1 545 600 | 0/0/37/368/64/12/5 | 393 | 386 | **1.0181** | 8 627 136 → 8 473 472 | 0/0/37/275/64/12/5 |
+| 6 | 0 | 297 | 296 | **1.0034** | 950 400 → 947 200 | 0/0/29/261/7/0/0 | 273 | 272 | **1.0037** | 5 992 896 → 5 970 944 | 0/0/29/237/7/0/0 |
+| 6 | 1 | 401 | 399 | **1.0050** | 1 283 200 → 1 276 800 | 0/0/28/316/55/2/0 | 366 | 362 | **1.0110** | 8 034 432 → 7 946 624 | 0/0/28/281/55/2/0 |
+| 6 | 2 | 269 | 269 | 1.0000 | 860 800 → 860 800 | 0/0/3/254/12/0/0 | 269 | 269 | 1.0000 | 5 905 088 → 5 905 088 | 0/0/3/254/12/0/0 |
+| 6 | 3 | 284 | 284 | 1.0000 | 908 800 → 908 800 | 0/0/6/271/7/0/0 | 284 | 284 | 1.0000 | 6 234 368 → 6 234 368 | 0/0/6/271/7/0/0 |
+| 6 | 4 | 373 | 371 | **1.0054** | 1 193 600 → 1 187 200 | 0/0/60/257/54/2/0 | 354 | 330 | **1.0727** | 7 771 008 → 7 244 160 | 0/0/60/238/54/2/0 |
+| 6 | 5 | 513 | 511 | **1.0039** | 1 641 600 → 1 635 200 | 0/6/52/403/50/2/0 | 446 | 437 | **1.0206** | 9 790 592 → 9 593 024 | 0/6/51/338/49/2/0 |
+
+**graded, θ 0.30**
+
+| np | rank | CT adm | CT dist | CT factor | CT bytes adm → dist | CT hist dd −3..3 | L adm | L dist | L factor | L bytes adm → dist | L hist dd −3..3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 4162 | 4068 | **1.0231** | 13 318 400 → 13 017 600 | 0/1269/580/464/580/1269/0 | 3480 | 3208 | **1.0848** | 76 392 960 → 70 422 016 | 0/1132/462/292/462/1132/0 |
+| 2 | 0 | 1461 | 1441 | **1.0139** | 4 675 200 → 4 611 200 | 0/432/244/177/239/367/2 | 1346 | 1257 | **1.0708** | 29 547 392 → 27 593 664 | 0/429/224/128/196/367/2 |
+| 2 | 1 | 2005 | 1978 | **1.0137** | 6 416 000 → 6 329 600 | 2/559/299/267/273/605/0 | 1854 | 1724 | **1.0754** | 40 699 008 → 37 845 248 | 2/555/250/188/258/601/0 |
+| 3 | 0 | 1143 | 1140 | **1.0026** | 3 657 600 → 3 648 000 | 0/308/283/160/108/284/0 | 1034 | 1005 | **1.0289** | 22 698 368 → 22 061 760 | 0/293/238/124/107/272/0 |
+| 3 | 1 | 1266 | 1260 | **1.0048** | 4 051 200 → 4 032 000 | 0/241/108/138/257/522/0 | 1094 | 1062 | **1.0301** | 24 015 488 → 23 313 024 | 0/234/103/107/185/465/0 |
+| 3 | 2 | 1025 | 1022 | **1.0029** | 3 280 000 → 3 270 400 | 0/407/191/117/190/120/0 | 918 | 882 | **1.0408** | 20 151 936 → 19 361 664 | 0/378/170/92/169/109/0 |
+| 4 | 0 | 1355 | 1344 | **1.0082** | 4 336 000 → 4 300 800 | 0/289/249/176/203/435/3 | 1276 | 1190 | **1.0723** | 28 010 752 → 26 122 880 | 0/287/214/138/199/435/3 |
+| 4 | 1 | 1110 | 1083 | **1.0249** | 3 552 000 → 3 465 600 | 1/227/141/146/249/346/0 | 1054 | 1003 | **1.0508** | 23 137 408 → 22 017 856 | 1/227/140/122/224/340/0 |
+| 4 | 2 | 997 | 986 | **1.0112** | 3 190 400 → 3 155 200 | 2/366/188/139/116/186/0 | 919 | 888 | **1.0349** | 20 173 888 → 19 493 376 | 2/348/163/106/114/186/0 |
+| 4 | 3 | 1140 | 1123 | **1.0151** | 3 648 000 → 3 593 600 | 0/353/241/138/187/221/0 | 1078 | 1014 | **1.0631** | 23 664 256 → 22 259 328 | 0/345/227/118/167/221/0 |
+| 5 | 0 | 1318 | 1267 | **1.0403** | 4 217 600 → 4 054 400 | 0/266/83/133/250/586/0 | 1220 | 1149 | **1.0618** | 26 781 440 → 25 222 848 | 0/260/82/118/203/557/0 |
+| 5 | 1 | 1044 | 1040 | **1.0038** | 3 340 800 → 3 328 000 | 0/240/131/119/147/407/0 | 952 | 917 | **1.0382** | 20 898 304 → 20 129 984 | 0/237/127/97/127/364/0 |
+| 5 | 2 | 774 | 774 | 1.0000 | 2 476 800 → 2 476 800 | 0/188/131/77/105/273/0 | 706 | 690 | **1.0232** | 15 498 112 → 15 146 880 | 0/184/124/52/81/265/0 |
+| 5 | 3 | 713 | 713 | 1.0000 | 2 281 600 → 2 281 600 | 0/347/143/54/55/114/0 | 652 | 599 | **1.0885** | 14 312 704 → 13 149 248 | 0/331/123/40/49/109/0 |
+| 5 | 4 | 728 | 727 | **1.0014** | 2 329 600 → 2 326 400 | 0/432/188/62/34/12/0 | 662 | 642 | **1.0312** | 14 532 224 → 14 093 184 | 0/412/159/45/34/12/0 |
+| 6 | 0 | 522 | 522 | 1.0000 | 1 670 400 → 1 670 400 | 0/180/95/62/36/149/0 | 503 | 458 | **1.0983** | 11 041 856 → 10 054 016 | 0/171/91/56/36/149/0 |
+| 6 | 1 | 861 | 854 | **1.0082** | 2 755 200 → 2 732 800 | 0/195/138/82/102/344/0 | 742 | 728 | **1.0192** | 16 288 384 → 15 981 056 | 0/171/130/69/87/285/0 |
+| 6 | 2 | 657 | 656 | **1.0015** | 2 102 400 → 2 099 200 | 0/251/99/56/78/173/0 | 510 | 506 | **1.0079** | 11 195 520 → 11 107 712 | 0/214/68/45/56/127/0 |
+| 6 | 3 | 952 | 924 | **1.0303** | 3 046 400 → 2 956 800 | 0/214/101/99/165/373/0 | 741 | 708 | **1.0466** | 16 266 432 → 15 542 016 | 0/191/81/80/124/265/0 |
+| 6 | 4 | 519 | 519 | 1.0000 | 1 660 800 → 1 660 800 | 0/266/82/31/45/95/0 | 473 | 438 | **1.0799** | 10 383 296 → 9 614 976 | 0/228/78/27/45/95/0 |
+| 6 | 5 | 609 | 603 | **1.0100** | 1 948 800 → 1 929 600 | 0/207/83/61/118/140/0 | 573 | 527 | **1.0873** | 12 578 496 → 11 568 704 | 0/191/71/53/118/140/0 |
+
+**graded, θ 0.50**
+
+| np | rank | CT adm | CT dist | CT factor | CT bytes adm → dist | CT hist dd −3..3 | L adm | L dist | L factor | L bytes adm → dist | L hist dd −3..3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 26702 | 20286 | **1.3163** | 85 446 400 → 64 915 200 | 3165/5385/3445/2712/3445/5385/3165 | 10352 | 6790 | **1.5246** | 227 247 104 → 149 054 080 | 1956/2080/808/664/808/2080/1956 |
+| 2 | 0 | 14072 | 11556 | **1.2177** | 45 030 400 → 36 979 200 | 1377/2586/2363/1582/1942/2706/1516 | 6505 | 4793 | **1.3572** | 142 797 760 → 105 215 936 | 989/1155/750/481/637/1319/1174 |
+| 2 | 1 | 13343 | 10900 | **1.2241** | 42 697 600 → 34 880 000 | 1443/2653/2256/1579/1754/2354/1304 | 6311 | 4596 | **1.3732** | 138 539 072 → 100 891 392 | 924/1275/729/537/651/1246/949 |
+| 3 | 0 | 10220 | 9132 | **1.1191** | 32 704 000 → 29 222 400 | 814/1725/1612/1256/1177/2062/1574 | 6166 | 4468 | **1.3800** | 135 356 032 → 98 081 536 | 750/1176/650/511/563/1207/1309 |
+| 3 | 1 | 9450 | 8296 | **1.1391** | 30 240 000 → 26 547 200 | 1026/2031/1869/1200/1205/1509/610 | 5275 | 4110 | **1.2835** | 115 796 800 → 90 222 720 | 870/1211/657/422/534/1049/532 |
+| 3 | 2 | 9898 | 8476 | **1.1678** | 31 673 600 → 27 123 200 | 1070/1947/1715/1204/1593/1643/726 | 5242 | 3934 | **1.3325** | 115 072 384 → 86 359 168 | 832/1088/626/477/631/1006/582 |
+| 4 | 0 | 8491 | 7596 | **1.1178** | 27 171 200 → 24 307 200 | 691/1588/1697/1144/1068/1444/859 | 5108 | 4042 | **1.2637** | 112 130 816 → 88 729 984 | 609/1141/680/478/536/955/709 |
+| 4 | 1 | 8619 | 7607 | **1.1330** | 27 580 800 → 24 342 400 | 799/1696/1698/1021/1098/1434/873 | 5143 | 4115 | **1.2498** | 112 899 136 → 90 332 480 | 704/1221/693/371/472/922/760 |
+| 4 | 2 | 8036 | 7006 | **1.1470** | 25 715 200 → 22 419 200 | 701/1598/1708/990/1069/1335/635 | 4671 | 3676 | **1.2707** | 102 537 792 → 80 695 552 | 560/1081/716/408/494/836/576 |
+| 4 | 3 | 8220 | 7371 | **1.1152** | 26 304 000 → 23 587 200 | 846/1500/1522/1033/1376/1273/670 | 5020 | 3883 | **1.2928** | 110 199 040 → 85 239 616 | 667/1079/722/460/622/879/591 |
+| 5 | 0 | 7260 | 6498 | **1.1173** | 23 232 000 → 20 793 600 | 582/1541/1663/972/965/1036/501 | 4084 | 3214 | **1.2707** | 89 651 968 → 70 553 728 | 372/922/680/426/501/743/440 |
+| 5 | 1 | 7072 | 6320 | **1.1190** | 22 630 400 → 20 224 000 | 583/1250/1701/1078/919/1055/486 | 3762 | 3114 | **1.2081** | 82 583 424 → 68 358 528 | 476/818/699/443/384/581/361 |
+| 5 | 2 | 6879 | 6057 | **1.1357** | 22 012 800 → 19 382 400 | 567/1374/1418/826/898/1125/671 | 3420 | 2887 | **1.1846** | 75 075 840 → 63 375 424 | 377/823/573/315/319/569/444 |
+| 5 | 3 | 6528 | 5813 | **1.1230** | 20 889 600 → 18 601 600 | 554/1152/1440/847/891/1096/548 | 3742 | 2959 | **1.2646** | 82 144 384 → 64 955 968 | 414/850/597/339/451/674/417 |
+| 5 | 4 | 7108 | 6073 | **1.1704** | 22 745 600 → 19 433 600 | 595/1231/1316/913/1050/1328/675 | 3485 | 2772 | **1.2572** | 76 502 720 → 60 850 944 | 436/677/533/338/383/609/509 |
+| 6 | 0 | 5079 | 4588 | **1.1070** | 16 252 800 → 14 681 600 | 386/841/1045/668/695/904/540 | 2744 | 2375 | **1.1554** | 60 236 288 → 52 136 000 | 326/524/509/294/253/467/371 |
+| 6 | 1 | 5058 | 4642 | **1.0896** | 16 185 600 → 14 854 400 | 435/869/1025/727/654/895/453 | 3092 | 2521 | **1.2265** | 67 875 584 → 55 340 992 | 312/566/578/384/365/553/334 |
+| 6 | 2 | 4931 | 4421 | **1.1154** | 15 779 200 → 14 147 200 | 418/891/998/621/756/837/410 | 2417 | 2031 | **1.1901** | 53 057 984 → 44 584 512 | 248/504/471/249/276/425/244 |
+| 6 | 3 | 4561 | 4103 | **1.1116** | 14 595 200 → 13 129 600 | 441/929/1055/660/602/587/287 | 2522 | 2142 | **1.1774** | 55 362 944 → 47 021 184 | 321/617/498/281/266/343/196 |
+| 6 | 4 | 4846 | 4397 | **1.1021** | 15 507 200 → 14 070 400 | 442/808/1032/646/663/793/462 | 2874 | 2365 | **1.2152** | 63 090 048 → 51 916 480 | 356/570/508/268/341/482/349 |
+| 6 | 5 | 4870 | 4462 | **1.0914** | 15 584 000 → 14 278 400 | 403/909/1181/679/645/680/373 | 3072 | 2542 | **1.2085** | 67 436 544 → 55 801 984 | 315/621/599/343/399/467/328 |
+
+### Why the factor exceeds 1.0 here
+
+B0's parity argument still holds: a `dd == 0` key never collides with a
+`dd != 0` one, so every duplicate comes from the cross-level part of each
+histogram. On the graded draw that part is most of the table. At np 1 it is
+3698 of 4162 keys at θ 0.3 and 23 990 of 26 702 at θ 0.5. On T1's draw at
+θ 0.3 it is 48 of 162, and none of those 48 collide.
+
+The per-`dd` collision pairs (`+k` against `−k`, or `k` against `k'`) were not
+broken down. The histograms are symmetric at np 1, which fits `+k`/`−k`
+mirrors, but that is **not measured**.
+
+### Failure direction
+
+With `testGradedDdDuplicates`'s `graded` constant set to
+`TwoScaleDraw::TwoScale` (`f3ccKujp6xQP`), every SERIAL entry at np 1-6 failed
+in both passes. That is 168 failures: 2 passes × 21 ranks × 2 bases × 2 angles.
+All of them are the contract assertion, and no other case failed. At np 1:
+
+```
+tests/tstDownwardSweep.hpp:1997: Failure
+Expected: (sum[1]) > (sum[0]), actual: 48 vs 48
+CartesianTaylor at theta 0.29999999999999999: the graded draw admits no more cross-level (dd != 0) keys, summed over ranks, than T1's two-scale draw, so it tests nothing B0 did not
+```
+
+The change was reverted and both targets rebuilt. `f3ccPJ3uuANT` then passed
+with lines identical to `f3ccGbJHwxPy`.
+
+### Budget rows re-calibrated
+
+`DownwardSweep` SERIAL `default` rows from `f3ccEbJQDASb`: 9.1, 6.12, 7.26,
+8.04, 8.92 and 9.9 s at np 1-6 (previously 7.45-9.61 s). np 1 is the cold first
+entry. The exit-criterion runs took at most 10.04 s, on HIP at np 1, against a
+22 s budget.
+
+**Affects:**
+- **B1**: it now has a measured payoff, on the graded draw. Its step 6 and exit
+  criterion must reproduce `CartesianTaylorBasis`'s admitted count falling to
+  *dist*, which is a factor of **1.0000-1.0403** per rank at θ 0.3 and
+  **1.0896-1.3163** at θ 0.5. At np 1 that is 4162 → 4068 and 26 702 → 20 286,
+  from the `graded` tables above. Read them per `(nprocs, rank)`; they
+  reproduce exactly. `LaplaceKernel`'s *adm* must stay unchanged (**R3**).
+  Unlike on T1's draw at θ 0.3, its *dist* is now below *adm*, so a B1 that
+  wrongly drops `dd` for Laplace would show up as a measurable drop. At the
+  downstream configuration's θ 0.3, the payoff is small: about 2 % of columns
+  at np 1, and at most 4 % on any rank. Whether that justifies B1 is for this
+  document to decide, per B0b's "Additional information needed". B1 is not
+  edited here.
+- **B0's record**: "1.0 on T1's fixture" holds at θ 0.3 only. The same draw
+  reaches 1.1449 at θ 0.5.
+- **A1, C1, B2**: `TwoScaleFixture` now takes a draw and an angle. The graded
+  draw reproduces at every np on both backends, with 7 leaf depths, and is
+  available to them.
