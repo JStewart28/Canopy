@@ -758,14 +758,42 @@ order cannot give. `FP32_smokeTest` is commented out. See
 ### B0 — Measure how many admitted columns are `dd` duplicates — **NOT STARTED**
 
 **Depends on:** T1 **DONE**.
-**Fill in:** `tests/tstDownwardSweep.hpp` (a case beside T1's, reusing its
-fixture).
+**Fill in:** `tests/tstDownwardSweep.hpp` — `TwoScaleFixture`'s constructor
+(`:1457-1545`), and a case beside T1's that instantiates the fixture for both
+bases.
 **Reference:** `m2l_realized_keys()`
 (`src/Canopy_DownwardSweep.hpp:1060-1063`) returns the admitted key list by
 const reference; `CartesianTaylorBasis`'s no-`dd`-dependence statement
-(`src/Canopy_CartesianTaylorBasis.hpp:972-979`).
+(`src/Canopy_CartesianTaylorBasis.hpp:972-979`); `Solver::_push_root_half_width`
+(`src/Canopy_Solver.hpp:780-791`) for the root half-width a solve hands the
+sweep; the `[two-scale]` table in `tree-opt-progress-log.md` `## T1 (HIP arm)`,
+the baseline every per-`(nprocs, rank)` figure here is read beside — it
+reproduces line for line on both backends at every np on the current
+partitioner.
 **Do:**
-1. On T1's fixture, with `CartesianTaylorBasis`, count the admitted keys and
+0. **Make the fixture able to run `CartesianTaylorBasis`.** It drives the
+   sweeps directly, so it runs at `M2LKernelParams::softening = 0.0` and a root
+   half-width of 0 — and `CartesianTaylorBasis` aborts on both:
+   `build_m2l_operators` requires a positive softening
+   (`src/Canopy_CartesianTaylorBasis.hpp:1187`) and a positive `unit_w` entry
+   (`:1220`), and `m2l_translate` reads `b` from the aux tables
+   `UpwardSweep::setup` builds and `DownwardSweep` borrows
+   (`src/Canopy_UpwardSweep.hpp:174-198`). Give the fixture a positive
+   `softening` member (a LENGTH $\varepsilon$; document on it that it moves
+   neither the integer keys nor the interaction list), pass it through
+   `set_m2l_kernel_params` to the upward sweep **before** `upward.setup()` and
+   to the downward sweep, and set the downward sweep's root half-width from
+   `builder.root_box()` exactly as `_push_root_half_width` does. Neither setting
+   reaches `LaplaceKernel`'s keys — they are integer, and that basis declares
+   `key_needs_level = false` — so T1's two cases must print `[two-scale]` lines
+   identical to the baseline table. That is the check that this step moved
+   nothing.
+1. On T1's fixture, with `CartesianTaylorBasis` **at order 3** — the order of
+   the downstream configuration the chains are sized from (3200 B per column,
+   [Measured on a downstream application's
+   configuration](#measured-on-a-downstream-applications-configuration)), so
+   the byte figures compare directly; the key set itself does not depend on
+   the order — count the admitted keys and
    count the **distinct** key tuples ignoring `dd`, i.e. distinct
    $(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$.
    The ratio is the duplicate factor B1 would remove.
@@ -796,7 +824,9 @@ ctest --output-on-failure -R '^Canopy_Test_DownwardSweep_MPI_HIP_np_[1-4]$'
 ```
 
 — and the log records the duplicate factor per `(nprocs, rank)` for both bases,
-with the absolute column counts and byte figures. Failure direction: the `-DCanopy_ENABLE_PROFILING=OFF`
+with the absolute column counts and byte figures. The stem's rows in
+`scripts/tuolumne/serial_runtimes.tsv` are re-calibrated for the added case
+([Test naming](#test-naming-and-how-to-run-only-what-a-task-needs)). Failure direction: the `-DCanopy_ENABLE_PROFILING=OFF`
 build passes the same case, since `m2l_realized_keys()` is ungated — a $-1$
 anywhere in this case's output would be this case reading the wrong accessor.
 
