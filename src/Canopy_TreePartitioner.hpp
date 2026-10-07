@@ -67,35 +67,6 @@ struct PartitionBand
     int depth_hi;
 };
 
-// ============================================================================
-// Lattice coordinates of a cell at its own depth, in [0, 2^depth) per axis.
-// Octant bit 0 is x, bit 1 is y, bit 2 is z (TreeBuilder::which_octant).
-// ============================================================================
-
-inline void key_to_lattice( MortonKey k, int depth, uint64_t ijk[3] )
-{
-    ijk[0] = ijk[1] = ijk[2] = 0;
-    for ( int l = depth - 1; l >= 0; --l )
-    {
-        const int oct = static_cast<int>( ( k >> ( 3 * l ) ) & 7 );
-        for ( int a = 0; a < 3; ++a )
-            ijk[a] = ( ijk[a] << 1 ) | static_cast<uint64_t>( ( oct >> a ) & 1 );
-    }
-}
-
-inline MortonKey lattice_to_key( const uint64_t ijk[3], int depth )
-{
-    MortonKey k = ROOT_KEY;
-    for ( int l = depth - 1; l >= 0; --l )
-    {
-        int oct = 0;
-        for ( int a = 0; a < 3; ++a )
-            oct |= static_cast<int>( ( ijk[a] >> l ) & 1 ) << a;
-        k = child_key( k, oct );
-    }
-    return k;
-}
-
 // FNV-1a-64 over (key, owner) pairs in key order: one number that names an
 // ownership map, for comparing runs ([Canopy diag] lines).
 inline uint64_t owner_map_hash( const std::unordered_map<MortonKey, int>& owners )

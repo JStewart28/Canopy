@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
+#include <Canopy_Solver.hpp>
 #include <Canopy_TreeBuilder.hpp>
 
 #include <Cabana_Core.hpp>
@@ -22,6 +23,8 @@
 #include <cmath>
 #include <random>
 #include <set>
+#include <stdexcept>
+#include <string>
 
 namespace Test
 {
@@ -113,6 +116,42 @@ int count_particles_in_leaves(
             bad_count++;
     }
     return bad_count;
+}
+
+// T1's two-scale draw (tests/tstDownwardSweep.hpp,
+// generate_two_scale_particles), positions only, over 1200 particles in
+// total: the same stream, so the same tree, which A1 measured to have
+// touching leaves 3-4 levels apart at every np. The charge draw is kept so
+// the stream matches.
+int generate_two_scale_positions( AoSoA_t& particles, int rank, int nprocs )
+{
+    const int num_global = 1200;
+    const int n = num_global / nprocs + ( rank < num_global % nprocs );
+    AoSoA_ht particles_h( "particles_h", n );
+    auto h_pos = Cabana::slice<Position>( particles_h );
+
+    const double blob_c = 0.15, blob_hw = 0.01, skirt_hw = 0.04;
+    std::mt19937 gen( 42 + rank * 7919 );
+    std::uniform_real_distribution<double> halo_dist( 0.0, 1.0 );
+    std::uniform_real_distribution<double> blob_dist( blob_c - blob_hw,
+                                                      blob_c + blob_hw );
+    std::uniform_real_distribution<double> skirt_dist( blob_c - skirt_hw,
+                                                       blob_c + skirt_hw );
+    std::uniform_real_distribution<double> q_dist( 0.1, 1.0 );
+    const int num_blob = static_cast<int>( 0.875 * n );
+    const int num_skirt = static_cast<int>( 0.05 * n );
+    for ( int i = 0; i < n; i++ )
+    {
+        auto& dist = i < num_blob               ? blob_dist
+                     : i < num_blob + num_skirt ? skirt_dist
+                                                : halo_dist;
+        for ( int d = 0; d < 3; d++ )
+            h_pos( i, d ) = dist( gen );
+        q_dist( gen );
+    }
+    particles.resize( n );
+    Cabana::deep_copy( particles, particles_h );
+    return n;
 }
 
 } // namespace TreeBuilderTest
@@ -291,6 +330,120 @@ void testQuantizedRootHalfWidth()
 }
 
 //---------------------------------------------------------------------------//
+// A2 of tasks/tree-opt.md: the balancing pass's failure directions.
+//---------------------------------------------------------------------------//
+
+// A balance knob below 1 is rejected through FmmConfig's route into the
+// builder, and by the builder itself; the default is off.
+void testBalanceKnobRejectsBelowOne()
+{
+    using builder_type = TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>;
+    using solver_type =
+        Solver<TEST_MEMSPACE, TEST_EXECSPACE, double, /*P_ORDER=*/1, 1>;
+    const std::array<double, 6> tol{ 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 };
+
+    FmmConfig cfg;
+    cfg.ncrit = 8;
+    cfg.max_depth = 8;
+    EXPECT_EQ( cfg.tree_balance_max_level_delta, TREE_BALANCE_OFF );
+    EXPECT_EQ( builder_type( MPI_COMM_WORLD, 8, 8, tol ).balance_max_level_delta(),
+               TREE_BALANCE_OFF );
+
+    for ( const int bad : { 0, -1 } )
+    {
+        cfg.tree_balance_max_level_delta = bad;
+        try
+        {
+            solver_type solver( MPI_COMM_WORLD, cfg );
+            ADD_FAILURE() << "FmmConfig::tree_balance_max_level_delta = "
+                          << bad << " did not throw";
+        }
+        catch ( const std::runtime_error& e )
+        {
+            std::printf( "[a2-fail] knob %d: %s\n", bad, e.what() );
+        }
+        EXPECT_THROW( builder_type( MPI_COMM_WORLD, 8, 8, tol, 0.1, false,
+                                    bad ),
+                      std::runtime_error );
+    }
+    std::fflush( stdout );
+}
+
+// On T1's draw at knob 1: a pass bound one below the passes the balance
+// takes throws; the bound equal to it does not. A depth limit below the
+// shallow leaves the balance must refine leaves them unbalanced, reports
+// them, and does not refine them.
+void testBalancePassBoundAndDepthReport()
+{
+    using namespace TreeBuilderTest;
+    using builder_type = TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>;
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    AoSoA_t particles( "particles", 0 );
+    const int n = generate_two_scale_positions( particles, rank, nprocs );
+    auto positions = Cabana::slice<Position>( particles );
+    const std::array<double, 6> tol{ 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 };
+    const int ncrit = 8, max_depth = 8;
+
+    builder_type off( MPI_COMM_WORLD, ncrit, max_depth, tol, 0.1 );
+    off.build( positions, n );
+    EXPECT_EQ( off.balance_stats().passes, 0 );
+    EXPECT_EQ( off.balance_stats().cells_added, 0 );
+
+    builder_type full( MPI_COMM_WORLD, ncrit, max_depth, tol, 0.1, false, 1 );
+    full.build( positions, n );
+    const TreeBalanceStats st = full.balance_stats();
+    ASSERT_GE( st.passes, 1 ) << "T1's draw needed no balancing";
+    EXPECT_EQ( st.stuck, 0 );
+    EXPECT_EQ( st.cells_before,
+               static_cast<long long>( off.cells().size() ) );
+    {
+        auto h_keys = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), full.particle_keys() );
+        EXPECT_EQ( count_particles_in_leaves( full.cells(), h_keys, n ), 0 );
+    }
+
+    builder_type exact( MPI_COMM_WORLD, ncrit, max_depth, tol, 0.1, false, 1 );
+    exact.set_balance_max_passes( st.passes );
+    EXPECT_NO_THROW( exact.build( positions, n ) );
+    EXPECT_EQ( exact.cells().size(), full.cells().size() );
+
+    builder_type short_bound( MPI_COMM_WORLD, ncrit, max_depth, tol, 0.1,
+                              false, 1 );
+    short_bound.set_balance_max_passes( st.passes - 1 );
+    try
+    {
+        short_bound.build( positions, n );
+        ADD_FAILURE() << "a pass bound of " << st.passes - 1
+                      << " did not throw";
+    }
+    catch ( const std::runtime_error& e )
+    {
+        std::printf( "[a2-fail] pass bound %d of %d: %s\n", st.passes - 1,
+                     st.passes, e.what() );
+    }
+
+    // Every leaf the balance must refine is at depth >= 1, so a limit of 1
+    // strands them all: the report fires and nothing is refined.
+    builder_type limited( MPI_COMM_WORLD, ncrit, max_depth, tol, 0.1, false,
+                          1 );
+    limited.set_balance_depth_limit( 1 );
+    std::fflush( stdout );
+    limited.build( positions, n );
+    const TreeBalanceStats ls = limited.balance_stats();
+    std::printf( "[a2-fail] depth limit 1: nprocs %d rank %d stuck %lld "
+                 "passes %d added %lld (unlimited: passes %d added %lld)\n",
+                 nprocs, rank, ls.stuck, ls.passes, ls.cells_added, st.passes,
+                 st.cells_added );
+    std::fflush( stdout );
+    EXPECT_GT( ls.stuck, 0 ) << "no leaf left unbalanced at depth limit 1";
+    EXPECT_EQ( ls.cells_added, 0 );
+    EXPECT_EQ( limited.cells().size(), off.cells().size() );
+}
+
+//---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
@@ -302,6 +455,10 @@ TEST( TreeBuilder, testIncrementalUpdates )
 TEST( TreeBuilder, testSmallTree ) { testTreeBuilder( 500, 32, 10, std::array<double, 6>{0.1, 0.1, 0.1, 0.1, 0.1, 0.1}, 0.1, 10 ); }
 
 TEST( TreeBuilder, quantizedRootHalfWidth ) { testQuantizedRootHalfWidth(); }
+
+TEST( TreeBuilder, balanceKnobRejectsBelowOne ) { testBalanceKnobRejectsBelowOne(); }
+
+TEST( TreeBuilder, balancePassBoundAndDepthReport ) { testBalancePassBoundAndDepthReport(); }
 
 //---------------------------------------------------------------------------//
 

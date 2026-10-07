@@ -1226,7 +1226,7 @@ exit-criterion run line for line. See `tree-opt-progress-log.md` `## B1`.
 
 ---
 
-### A2 — 2:1 tree balancing, configurable, default off — **NOT STARTED**
+### A2 — 2:1 tree balancing, configurable, default off — **DONE**
 
 **Depends on:** A1 **DONE**, V1 **DONE**.
 **Fill in:** `src/Canopy_TreeBuilder.hpp` (the balancing pass, at the end of
@@ -1344,6 +1344,30 @@ Failure direction: `tree_balance_max_level_delta = 0` throws from `FmmConfig`'s
 route; a pass whose iteration bound is set below what a balance needs throws
 rather than returning; and a distribution that cannot be balanced within
 `max_depth` produces the loud report rather than a silently unbalanced tree.
+
+**Met.** Flux jobs `f3cmue2op151` (SERIAL np 1-6) and `f3cmueBubbPm` (HIP
+np 1-4) ran the seven stems through `canopy_ctest`, with a second
+`DownwardSweep` pass. Every entry finished `completed` (48 of 48 and 32 of 32),
+every `rc=0`, and the watchdog cancelled nothing. **Knob off:** all 2622 SERIAL
+tagged lines are byte-identical to the baseline `f3cmTeajNv8o`, taken on the
+unmodified `e06996d`. On HIP the structural lines are identical (1207 of 1284).
+The 77 that differ are the accuracy-figure lines, and they differ from the HIP
+baseline `f3cmTeofYejH` by as much as two unmodified HIP runs differ from each
+other (R11). `LaplaceSolve.bitForBitArtifacts` passes with `tests/data`
+untouched. **Knob 1** (`DownwardSweepTwoScale.balancePass`): at every np the
+balanced tree equals `balance_simulate`'s, run in the same binary on the
+knob-off tree. That holds key for key and leaf flag for leaf flag, with the
+same cell count and passes. So the multipliers are A1's 1.2735, 1.2798,
+1.2353, 1.2489, 1.1843 and 1.0957. The largest touching-leaf difference is 1,
+nothing is stuck, and the figures are identical across ranks, across both
+passes, and between HIP and SERIAL. The failure directions fire
+(`TreeBuilder.balanceKnobRejectsBelowOne`,
+`TreeBuilder.balancePassBoundAndDepthReport`). **Deviation:** a leaf at
+`max_depth` can never be the shallower side of an unbalanced pair, so through
+`build()` the stuck report is unreachable. It is exercised through a
+test-only depth limit (`set_balance_depth_limit`). **Finding:** balancing does
+not remove T1's refusals. It raises `range_guard` 1.6-3.5x per np. Tables and
+messages are under `## A2` in the log.
 
 ---
 

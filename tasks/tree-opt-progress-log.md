@@ -2094,3 +2094,266 @@ SERIAL and 0.67 on HIP.
 - **A3**: its arithmetic should use the delta-1 multipliers above.
 - **T1, T1 (HIP arm), B0, B0b, B2 records**: their two-scale tables describe
   the pre-skirt draw. They are history, not the current baseline.
+
+## A2
+
+**Outcome: the balancing pass reproduces A1's model exactly, and it does not
+remove T1's refusals. It multiplies them.** At knob 1 the pass builds, at every
+np, the tree that `balance_simulate` predicts from the knob-off tree, key for
+key. So the multipliers are A1's 1.2735, 1.2798, 1.2353, 1.2489, 1.1843 and
+1.0957. Touching leaves end at most 1 level apart. `range_guard` *rises*
+1.6-3.5x per np (np 1: 214 → 590). With the knob off, nothing moved.
+
+Provenance: commit `e06996d` plus this section's changes to
+`src/Canopy_TreeBuilder.hpp`, `src/Canopy_Solver.hpp`,
+`src/Canopy_TreePartitioner.hpp`, `tests/tstDownwardSweep.hpp`,
+`tests/tstTreeBuilder.hpp`, `README.md`, `scripts/tuolumne/serial_runtimes.tsv`,
+`scripts/tuolumne/run_ctest_a2.flux` and `scripts/tuolumne/compare_tagged_lines.py`.
+Cray clang 20.0.0, env `tuolumne_trilinos`, `build-tuolumne`
+(`Canopy_ENABLE_PROFILING:BOOL=ON`; HIP registered at np 1-4 with
+`--gpus-per-task=1 --cores-per-task=8`; the np 5-6 abort check passed in every
+job). Every run went through `canopy_ctest` after a passing watchdog self-test,
+with the HIP environment in a subshell. The watchdog cancelled nothing but the
+self-test. Script: `run_ctest_a2.flux measure serial|hip`, copied from
+`run_ctest_b2.flux`. It runs the seven stems once, then `DownwardSweep` a second
+time (R6), with the binary `stat` narrowed to the backend's. Submitted with
+`-t 20m`. The longest job took 9.2 min.
+
+| job | what |
+| --- | --- |
+| `f3cmTeajNv8o` | baseline, SERIAL, binaries built at `e06996d` before any edit: 48 of 48 `completed` |
+| `f3cmTeofYejH` | baseline, HIP, same binaries: 32 of 32 `completed` |
+| `f3cmnR7TCRY3` | `measure serial` on the A2 build, before calibration: 48 of 48 `completed` |
+| `f3cmrmX2JYWT` | `run_ctest_h0b.flux calibrate`, `CANOPY_CAL_REGEX` = `TreeBuilder`/`DownwardSweep` SERIAL np 1-6 |
+| `f3cmue2op151` | exit criterion, SERIAL np 1-6: 48 of 48 `completed`, every `rc=0` |
+| `f3cmueBubbPm` | exit criterion, HIP np 1-4: 32 of 32 `completed`, every `rc=0` |
+
+(The baselines' porcelain lists the edited sources, because I edited while they
+ran. Their binaries predate every edit: their `stat` lines show 09:12-14:51,
+and the first A2 build started after both jobs finished.)
+
+### Decisions recorded (made before the session, not reopened)
+
+- **Neighbours are leaves that touch**, by a face, an edge or a corner (26
+  directions), the definition A1 measured with.
+- **Refinement creates only occupied children**, from particle counts reduced
+  over all ranks as `build()` reduces them. `refine_leaf` is not used.
+- **The pass runs at the end of `build()` only.** `update()` does not balance,
+  and its declaration says so. `Solver` calls `_builder.build()` only (searched:
+  seven call sites, no `update()`).
+- **`range_guard` at knob 1 is recorded, not asserted to be 0.**
+- **Only the new cases set the knob.** There is no environment override, so
+  only the `default` rows of `TreeBuilder` and `DownwardSweep` were
+  re-calibrated.
+- **The asserted cases run at `max_level_delta = 1`.**
+
+### The pass
+
+`TreeBuilder::balance` runs after `rebuild_cell_lookup()` at the end of
+`build()`. If the knob is `>= max_depth` it returns at once (the off value
+`TREE_BALANCE_OFF = INT_MAX` included), so a knob-off build executes no new
+code beyond zeroing the stats. Each pass works like `balance_simulate`: it
+marks every leaf more than delta levels shallower than a touching leaf, using
+the same ancestor walk as `balance_coarser_neighbours`, against the
+pass-start tree, and refines all marked leaves together. A marked leaf at the
+depth limit is counted `stuck`, not refined. `refine_leaves_occupied` repeats
+`build()`'s per-candidate arithmetic:
+
+- `which_octant` against the leaf's centre;
+- per-octant counts `MPI_Allreduce`d over ranks;
+- a child is created only where the count is non-zero, at `child_center`, with
+  the reduced count;
+- particle keys move to the child on the device.
+
+The pass bound is `8 * (max_depth + 1)` refining passes, as in A1. Needing one
+more pass throws on every rank together, because the cell list is identical
+on every rank. A stuck leaf prints one `[Canopy] WARNING` line on rank 0, and
+`balance_stats().stuck` carries it. When the pass added cells, `_cells` is
+sorted by key. **Ascending key is `build()`'s own order**: candidates are
+emitted parent by parent, octant by octant, and key depth is monotone in key
+value. So a balanced cell list is ordered exactly as a build that had produced
+that tree would order it.
+
+**Deviation: the stuck report is unreachable through `build()`.** The leaf a
+balance refines is the shallower side of a pair, and the deeper side is at most
+`max_depth`. So a leaf at `max_depth` is never marked. To exercise the report,
+`set_balance_depth_limit` (a test hook, `[0, max_depth]`) lowers the depth the
+pass may refine into. `set_balance_max_passes` is the other hook, for the
+pass-bound direction.
+
+### Readers of `TreeBuilder::cells()`, by search
+
+I searched for `cells()` over `src/`, `tests/` and `examples/`. The pass
+preserves every invariant `build()` provides:
+
+- each cell is occupied, with its exact global count;
+- an internal cell's children are exactly its occupied octants;
+- the order is ascending key;
+- particle keys point at leaves;
+- the list is identical on every rank.
+
+So no reader changed:
+
+| reader | reads | change |
+| --- | --- | --- |
+| `Solver::migrate`, auto-maintain (`Canopy_Solver.hpp:333-347`, `:467-488`) | the key set before and after a rebuild | none: compares sets, and both builds balance alike |
+| `Solver` auto-softening (`:810`) | the root's `global_count` | none: the root is never refined by the pass |
+| `Solver` → `CommunicationPlan::build`, `UpwardSweep::setup` (`:627-710`) | the whole list | none |
+| `TreePartitioner::partition` / `repartition` / `partition_cells` | vertices and depth bands | none in logic. The band populations change, recorded below. `key_to_lattice` / `lattice_to_key` **moved** from this file to `Canopy_TreeBuilder.hpp`, unchanged, because the pass needs them |
+| `TreePartitioner::refresh_ownership_for_current_tree`, `sort_particles_by_leaf` | leaves, key → index | none |
+| `P2P::setup` (`Canopy_P2P.hpp:272`) | key → index | none |
+| `DownwardSweep` | `upward.device_cells()`, the per-depth occupancy | none |
+
+### Signatures changed
+
+- `TreeBuilder(comm, ncrit, max_depth, bb_tf, ncrit_tf = 0.1, quantize = false,
+  tree_balance_max_level_delta = TREE_BALANCE_OFF)`: a new last argument; below
+  1 throws `std::runtime_error`. Callers: `Solver`'s constructor (passes
+  `cfg.tree_balance_max_level_delta`), `TwoScaleFixture`, and the new
+  `tstTreeBuilder` cases. Every other construction is unchanged.
+- New: `FmmConfig::tree_balance_max_level_delta`, `TREE_BALANCE_OFF`,
+  `TreeBalanceStats`, `TreeBuilder::balance_stats()`,
+  `balance_max_level_delta()`, `set_balance_max_passes()`,
+  `set_balance_depth_limit()`.
+- `TwoScaleFixture(draw, theta, quantize, tree_balance_max_level_delta =
+  TREE_BALANCE_OFF)`: the only caller setting it is `balancePass`.
+- `testTwoScaleBalanceCost`'s occupancy walk was extracted unchanged as
+  `balance_global_occupancy(fix, root)`. The `[a1-balance]` lines are
+  byte-identical (84 of 84).
+
+### Bugs only running revealed
+
+None: the first run of the new cases passed every assertion. The one finding
+that running produced is `range_guard`'s rise, below.
+
+### Knob off: compared by script
+
+`scripts/tuolumne/compare_tagged_lines.py <baseline> <run>` compares the tagged
+lines as multisets, after stripping ctest's `NN: ` prefix. The tags are
+`[two-scale]`, `[two-scale-refusals]`, `[b0-dd]`, `[b0b-*]`, `[dd-hist]`,
+`[a1-balance]`, `[b2-retain]`, `[ct-solve]`, `[ct-cache*]`,
+`[multisolve-dev]`, `[multisolve-probe]` and `[fusedm2l-*]`. I checked it
+first on A1's `f3cmHLxa4PFM` against the baseline: 1350 of 1350
+`DownwardSweep` lines matched, so the baseline is A1's.
+
+| comparison | lines | matched |
+| --- | --- | --- |
+| SERIAL exit `f3cmue2op151` vs `f3cmTeajNv8o` | 2622 | **2622, byte-identical** |
+| SERIAL dev `f3cmnR7TCRY3` vs `f3cmTeajNv8o` | 2622 | 2622 |
+| HIP exit `f3cmueBubbPm` vs `f3cmTeofYejH` | 1284 | 1207. All structural tags match: `two-scale*`, `b0*`, `dd-hist`, `a1-balance`, `b2-retain`, `ct-cache*`. The 77 that differ are `ct-solve` (74 of 84), `multisolve-*` (1 of 60), `fusedm2l-*` (0 of 8). |
+
+The HIP differences are R11's nondeterminism, not this change. Two unmodified
+HIP runs, B2's `f3cj6QWEwmd9` and this baseline, disagree on the same tags by
+the same amount. Of the 152 accuracy lines, 84 match at 12 significant digits
+and 137 at 4. The exit run against the baseline gives 85 and 135. So HIP is
+pass/fail, and it passes. `LaplaceSolve.bitForBitArtifacts` is `OK` at np 1-2
+and `SKIPPED` at np 3-6, the same in the baseline and the exit run, so the
+skip predates this work. `tests/data` is untouched.
+
+### Measured: `[a2-balance]`, knob 1 against knob off
+
+Each figure below is the same on every rank of its np (asserted, with a digest
+of the balanced cell list). Both `DownwardSweep` passes of `f3cmue2op151`, and
+the dev run `f3cmnR7TCRY3`, print identical lines, and HIP equals SERIAL at
+np 1-4. R6's spread is zero here. *model* is `balance_simulate` at delta 1 on
+the knob-off tree, in the same binary, and the balanced tree equals it
+exactly (`tree_on == model`).
+
+| np | cells before | after | model | added | mult | passes (model) | stuck | ld max before → after |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 245 | 312 | 312 | 67 | 1.2735 | 3 (3) | 0 | 3 → 1 |
+| 2 | 243 | 311 | 311 | 68 | 1.2798 | 3 (3) | 0 | 3 → 1 |
+| 3 | 238 | 294 | 294 | 56 | 1.2353 | 3 (3) | 0 | 4 → 1 |
+| 4 | 233 | 291 | 291 | 58 | 1.2489 | 3 (3) | 0 | 4 → 1 |
+| 5 | 255 | 302 | 302 | 47 | 1.1843 | 3 (3) | 0 | 3 → 1 |
+| 6 | 282 | 309 | 309 | 27 | 1.0957 | 2 (2) | 0 | 3 → 1 |
+
+These are A1's recorded multipliers to four places, and the cells added equal
+A1's 67, 68, 56, 58, 47 and 27. **R1 is answered: the pass and the model
+agree.**
+
+**`range_guard`, per `(nprocs, rank)`, knob off → knob 1** (identical in both
+passes, and on HIP at np 1-4):
+
+| np | rank 0 | rank 1 | rank 2 | rank 3 | rank 4 | rank 5 | sum | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 214 → 590 | | | | | | 214 → 590 | 2.76 |
+| 2 | 213 → 618 | 73 → 224 | | | | | 286 → 842 | 2.94 |
+| 3 | 40 → 469 | 23 → 128 | 137 → 111 | | | | 200 → 708 | 3.54 |
+| 4 | 197 → 86 | 35 → 94 | 44 → 118 | 42 → 458 | | | 318 → 756 | 2.38 |
+| 5 | 42 → 96 | 50 → 115 | 65 → 78 | 41 → 186 | 336 → 461 | | 534 → 936 | 1.75 |
+| 6 | 53 → 389 | 40 → 77 | 49 → 71 | 55 → 256 | 45 → 72 | 338 → 77 | 580 → 942 | 1.62 |
+
+**Balancing did not remove T1's refusals. It raised them at every np, by 1.6x
+to 3.5x in total, and on 18 of 21 ranks.** A1's caveat holds: a touching-leaf
+balance does not bound pairs across empty space. The rise suggests it does
+worse than leave them alone. Here is a hypothesis I have not measured: the
+balance turns shallow halo leaves beside the blob into intermediate-depth
+cells, and each of those can form an offset-refused pair across the empty
+region with the blob's deep cells, where one shallow leaf formed one before.
+A per-pair breakdown (depth difference and offset of each refused pair) would
+test it.
+
+**Per-band partition imbalance**: max-over-ranks × np / total, per ParMETIS
+constraint. [0] is the leaf particle count, then one entry per band of
+`partitioner.bands()`. These are global figures, identical on every rank and in
+both passes.
+
+| np | knob off: bands, imbalance | knob 1: bands, imbalance |
+| --- | --- | --- |
+| 1 | 3-4,5-6,7-8: 1.0000, 1.0000, 1.0000, 1.0000 | 3-4,5-6,7-8: 1.0000, 1.0000, 1.0000, 1.0000 |
+| 2 | 3-4,5-6,7-8: 1.0133, 1.0000, 1.0000, 1.0191 | 3-4,5-6,7-8: 1.0133, 1.0000, 1.0149, 1.0060 |
+| 3 | 3-4,5-6,7-8: 1.0300, 1.1538, 1.0714, 1.1351 | 3-4,5-6,7-8: 1.0125, 1.0000, 1.0345, 1.0325 |
+| 4 | 5-6,7-8: 1.0233, 1.0323, 1.0411 | **3-4**,5-6,7-8: 1.0700, 1.0909, 1.0526, 1.0581 |
+| 5 | 5-6,7-8: 1.0917, 1.1111, 1.0855 | 5-6,7-8: 1.0500, 1.0656, 1.0606 |
+| 6 | 5-6,7-8: 1.0900, 1.0909, 1.0651 | 5-6,7-8: 1.0700, 1.0820, 1.0690 |
+
+Balancing lowers the imbalance at np 3, 5 and 6. At np 4 the added depth 3-4
+cells push band 3-4 over H2's threshold of 4 cells per rank. That adds a
+constraint, and every constraint gets worse (particle 1.023 → 1.070). Every
+vertex has an owner on both trees (asserted).
+
+### Failure directions, with their messages
+
+- **Knob below 1**, through `FmmConfig` → `Solver` → `TreeBuilder`, at 0 and
+  -1 (`TreeBuilder.balanceKnobRejectsBelowOne`, all ranks, every np):
+  `Canopy::TreeBuilder: tree_balance_max_level_delta must be >= 1 (1 is the
+  2:1 balance; TREE_BALANCE_OFF disables it), got 0`.
+- **Pass bound one below the passes the balance needs**
+  (`TreeBuilder.balancePassBoundAndDepthReport`): at np 6, `balance: 4 leaves
+  still need refining after the pass bound of 1 passes (max_level_delta 1)`;
+  at np 1-5, the same with bound 2 of 3 and 1-6 leaves. The bound equal to the
+  passes does not throw, and builds the full tree. The case uses its own copy
+  of T1's generator, and its unlimited balance adds the same 67/68/56/58/47/27
+  cells, so it is T1's tree.
+- **A leaf left unbalanced at the depth limit** (the same case, depth limit 1):
+  `[Canopy] WARNING: TreeBuilder::balance: 16 leaves at depth limit 1 are
+  still more than 1 levels shallower than a touching leaf; the tree is NOT
+  balanced`. The count is 16, 17, 20, 16, 19 and 14 at np 1-6. Nothing is
+  refined, and `stuck > 0` is asserted.
+
+### Budget rows re-calibrated
+
+`f3cmrmX2JYWT`, the max of three passes, np 1-6. `DownwardSweep`: 9.6, 6.73,
+8.05, 8.66, 9.63, 10.58 s (before 9.47, 6.35, 9.24, 8.33, 9.36, 10.54).
+`TreeBuilder`: 3.34, 3.9, 5.09, 5.87, 6.69, 7.56 s (before 3.26, 3.98, 5.01,
+5.89, 6.73, 7.62). The exit runs' highest runtime/budget ratio was 0.60 on
+SERIAL.
+
+**Affects:**
+- **A3**: the cell-count multiplier at delta 1 is measured on the real pass,
+  not only the model: 1.0957-1.2798 on T1's draw (table above), and it agrees
+  with A1's model exactly, so A1's graded-draw 1.32-1.47 can be read as the
+  pass's too. But **balancing raised `range_guard` 1.6-3.5x per np** instead of
+  lowering it. So on T1's geometry a default-on balance buys no refusal
+  reduction, and costs both cells and refusals. A3's arithmetic must take this
+  as its input, and probably needs the per-pair breakdown above before it can
+  recommend turning the knob on. The per-band imbalance moves both ways (better
+  at np 3, 5, 6, worse at np 4 where a band appears).
+- **R1**: closed for the cost model. The pass and `balance_simulate` build
+  identical trees at np 1-6, so the multiplier is not a model artifact.
+  R1's other half, the slowdown in every phase, is still unmeasured.
+- **R2 / R10**: not exercised. No accuracy-bearing case sets the knob, so
+  `[multisolve-*]`, `[fusedm2l-*]` and `[ct-solve]` say nothing about a
+  balanced tree yet.
+- **C1**: unaffected. Its inputs are knob-off and unchanged byte for byte.

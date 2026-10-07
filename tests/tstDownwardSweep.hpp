@@ -35,6 +35,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace Test
@@ -1585,14 +1586,19 @@ struct TwoScaleFixture
     DownwardSweep<TEST_MS, TEST_ES, kernel> downward;
     int num_local = 0;
 
+    // tree_balance_max_level_delta: TreeBuilder's balancing knob, in levels;
+    // off by default. Only A2's cases set it.
     explicit TwoScaleFixture( TwoScaleDraw draw_in = TwoScaleDraw::TwoScale,
                               double mac_theta_in = 0.3,
-                              bool quantize_root_half_width = false )
+                              bool quantize_root_half_width = false,
+                              int tree_balance_max_level_delta =
+                                  TREE_BALANCE_OFF )
         : mac_theta( mac_theta_in )
         , draw( draw_in )
         , builder( MPI_COMM_WORLD, ncrit, max_depth,
                    std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance, tolerance, tolerance },
-                   tolerance, quantize_root_half_width )
+                   tolerance, quantize_root_half_width,
+                   tree_balance_max_level_delta )
         , partitioner( MPI_COMM_WORLD, replication_depth )
         , comm_plan( MPI_COMM_WORLD, mac_theta )
         , upward( MPI_COMM_WORLD )
@@ -2314,6 +2320,56 @@ inline BalanceCost balance_simulate( BalanceTree& tree, int delta,
     return cost;
 }
 
+// Global occupancy, as build() counts it: each rank walks its local particles
+// down from `root` with the builder's own arithmetic to max_depth, and the
+// occupied keys are united over ranks.
+template <class Fixture>
+std::set<MortonKey> balance_global_occupancy( Fixture& fix,
+                                              const CellInfo& root )
+{
+    int nprocs;
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+    const int max_depth = fix.max_depth;
+    auto particles_h = Cabana::create_mirror_view_and_copy(
+        Kokkos::HostSpace(), fix.particles );
+    auto pos = Cabana::slice<Position>( particles_h );
+    std::vector<MortonKey> local_keys;
+    local_keys.reserve( static_cast<std::size_t>( fix.num_local ) *
+                        ( max_depth + 1 ) );
+    using TB = std::decay_t<decltype( fix.builder )>;
+    for ( int i = 0; i < fix.num_local; ++i )
+    {
+        MortonKey k = ROOT_KEY;
+        double c[3] = { root.center[0], root.center[1], root.center[2] };
+        double hw = root.half_width;
+        local_keys.push_back( k );
+        for ( int d = 1; d <= max_depth; ++d )
+        {
+            const int oct = TB::which_octant( pos( i, 0 ), pos( i, 1 ),
+                                              pos( i, 2 ), c[0], c[1], c[2] );
+            TB::child_center( c[0], c[1], c[2], hw, oct, c[0], c[1], c[2] );
+            hw *= 0.5;
+            k = child_key( k, oct );
+            local_keys.push_back( k );
+        }
+    }
+    std::sort( local_keys.begin(), local_keys.end() );
+    local_keys.erase( std::unique( local_keys.begin(), local_keys.end() ),
+                      local_keys.end() );
+    int n_local_keys = static_cast<int>( local_keys.size() );
+    std::vector<int> counts( nprocs ), displs( nprocs, 0 );
+    MPI_Allgather( &n_local_keys, 1, MPI_INT, counts.data(), 1, MPI_INT,
+                   MPI_COMM_WORLD );
+    for ( int r = 1; r < nprocs; ++r )
+        displs[r] = displs[r - 1] + counts[r - 1];
+    std::vector<MortonKey> all_keys( displs[nprocs - 1] + counts[nprocs - 1] );
+    static_assert( sizeof( MortonKey ) == sizeof( std::uint64_t ) );
+    MPI_Allgatherv( local_keys.data(), n_local_keys, MPI_UINT64_T,
+                    all_keys.data(), counts.data(), displs.data(),
+                    MPI_UINT64_T, MPI_COMM_WORLD );
+    return std::set<MortonKey>( all_keys.begin(), all_keys.end() );
+}
+
 template <class TEST_MS, class TEST_ES>
 void testTwoScaleBalanceCost()
 {
@@ -2351,52 +2407,8 @@ void testTwoScaleBalanceCost()
         }
         ASSERT_NE( root, nullptr );
 
-        // Global occupancy, as build() counts it: each rank walks its local
-        // particles down from the root with the builder's own arithmetic,
-        // and the occupied keys are united over ranks.
-        auto particles_h = Cabana::create_mirror_view_and_copy(
-            Kokkos::HostSpace(), fix.particles );
-        auto pos = Cabana::slice<Position>( particles_h );
-        std::vector<MortonKey> local_keys;
-        local_keys.reserve( static_cast<std::size_t>( fix.num_local ) *
-                            ( max_depth + 1 ) );
-        using TB = TreeBuilder<TEST_MS, TEST_ES>;
-        for ( int i = 0; i < fix.num_local; ++i )
-        {
-            MortonKey k = ROOT_KEY;
-            double c[3] = { root->center[0], root->center[1],
-                            root->center[2] };
-            double hw = root->half_width;
-            local_keys.push_back( k );
-            for ( int d = 1; d <= max_depth; ++d )
-            {
-                const int oct = TB::which_octant( pos( i, 0 ), pos( i, 1 ),
-                                                  pos( i, 2 ), c[0], c[1],
-                                                  c[2] );
-                TB::child_center( c[0], c[1], c[2], hw, oct, c[0], c[1],
-                                  c[2] );
-                hw *= 0.5;
-                k = child_key( k, oct );
-                local_keys.push_back( k );
-            }
-        }
-        std::sort( local_keys.begin(), local_keys.end() );
-        local_keys.erase( std::unique( local_keys.begin(), local_keys.end() ),
-                          local_keys.end() );
-        int n_local_keys = static_cast<int>( local_keys.size() );
-        std::vector<int> counts( nprocs ), displs( nprocs, 0 );
-        MPI_Allgather( &n_local_keys, 1, MPI_INT, counts.data(), 1, MPI_INT,
-                       MPI_COMM_WORLD );
-        for ( int r = 1; r < nprocs; ++r )
-            displs[r] = displs[r - 1] + counts[r - 1];
-        std::vector<MortonKey> all_keys( displs[nprocs - 1] +
-                                         counts[nprocs - 1] );
-        static_assert( sizeof( MortonKey ) == sizeof( std::uint64_t ) );
-        MPI_Allgatherv( local_keys.data(), n_local_keys, MPI_UINT64_T,
-                        all_keys.data(), counts.data(), displs.data(),
-                        MPI_UINT64_T, MPI_COMM_WORLD );
-        const std::set<MortonKey> occupied( all_keys.begin(),
-                                            all_keys.end() );
+        const std::set<MortonKey> occupied =
+            balance_global_occupancy( fix, *root );
 
         // The occupancy model must reproduce the builder's tree: every cell
         // occupied, and an internal cell's children exactly its occupied
@@ -2550,6 +2562,232 @@ void testTwoScaleBalanceCost()
                "apart (ld_hist [" << hist_str << "])";
     }
 }
+// Partition imbalance per balance constraint, as TreePartitioner's
+// [Canopy diag] line computes it: max over ranks of the constraint's load,
+// times nprocs, over its total (1 is perfect). [0] is the leaf particle
+// count, [1 + b] the cell count of partitioner.bands()[b]. Vertices are the
+// partition's: leaves, and cells deeper than replication_depth. `unowned`
+// counts vertices with no owner in cell_owner_map().
+template <class Fixture>
+std::vector<double> balance_band_imbalance( const Fixture& fix,
+                                            long long& unowned )
+{
+    int nprocs;
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+    const auto& bands = fix.partitioner.bands();
+    const auto& owners = fix.partitioner.cell_owner_map();
+    const int ncon = 1 + static_cast<int>( bands.size() );
+    std::vector<double> load( static_cast<std::size_t>( ncon ) * nprocs, 0.0 );
+    unowned = 0;
+    for ( const auto& c : fix.builder.cells() )
+    {
+        if ( !c.is_leaf && c.depth <= fix.replication_depth )
+            continue;
+        auto it = owners.find( c.key );
+        if ( it == owners.end() || it->second < 0 || it->second >= nprocs )
+        {
+            ++unowned;
+            continue;
+        }
+        const int r = it->second;
+        if ( c.is_leaf )
+            load[r] += c.global_count;
+        for ( std::size_t b = 0; b < bands.size(); ++b )
+            if ( c.depth >= bands[b].depth_lo && c.depth <= bands[b].depth_hi )
+                load[( 1 + b ) * nprocs + r] += 1.0;
+    }
+    std::vector<double> imb( ncon, 0.0 );
+    for ( int k = 0; k < ncon; ++k )
+    {
+        double mx = 0.0, sum = 0.0;
+        for ( int r = 0; r < nprocs; ++r )
+        {
+            mx = std::max( mx, load[static_cast<std::size_t>( k ) * nprocs + r] );
+            sum += load[static_cast<std::size_t>( k ) * nprocs + r];
+        }
+        imb[k] = sum > 0.0 ? mx * nprocs / sum : 0.0;
+    }
+    return imb;
+}
+
+template <class Fixture>
+std::string balance_band_string( const Fixture& fix,
+                                 const std::vector<double>& imb )
+{
+    std::string out = "bands [";
+    const auto& bands = fix.partitioner.bands();
+    for ( std::size_t b = 0; b < bands.size(); ++b )
+        out += ( b ? "," : "" ) + std::to_string( bands[b].depth_lo ) + "-" +
+               std::to_string( bands[b].depth_hi );
+    out += "] imbalance [";
+    for ( std::size_t k = 0; k < imb.size(); ++k )
+    {
+        char buf[32];
+        std::snprintf( buf, sizeof( buf ), "%s%.4f", k ? "," : "", imb[k] );
+        out += buf;
+    }
+    return out + "]";
+}
+
+// A2 of tasks/tree-opt.md: the balancing pass at the end of TreeBuilder::build()
+// on T1's draw at max_level_delta 1. It must build exactly the tree A1's model
+// predicts from the knob-off tree in this binary (balance_simulate: the same
+// keys and leaf flags, so the same cell count, and the same passes), with no
+// touching leaves more than 1 level apart. range_guard and the partition's
+// per-band imbalance are recorded knob-off against knob 1, not asserted: a
+// touching-leaf balance does not bound a pair across empty space, where T1's
+// refusals come from (tree-opt-progress-log.md A1).
+template <class TEST_MS, class TEST_ES>
+void testTwoScaleBalancePass()
+{
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+    constexpr int delta = 1;
+
+    TwoScaleFixture<TEST_MS, TEST_ES> off( TwoScaleDraw::TwoScale, 0.3 );
+    off.solve();
+    const long long rg_off = off.downward.m2l_n_fallback_pairs_range_guard();
+    long long unowned_off = 0;
+    const auto imb_off = balance_band_imbalance( off, unowned_off );
+
+    TwoScaleFixture<TEST_MS, TEST_ES> on( TwoScaleDraw::TwoScale, 0.3, false,
+                                          delta );
+    on.solve();
+    const long long rg_on = on.downward.m2l_n_fallback_pairs_range_guard();
+    long long unowned_on = 0;
+    const auto imb_on = balance_band_imbalance( on, unowned_on );
+
+    const int max_depth = off.max_depth;
+    const auto& cells_off = off.builder.cells();
+    const auto& cells_on = on.builder.cells();
+
+    BalanceTree tree_off;
+    const CellInfo* root = nullptr;
+    for ( const auto& c : cells_off )
+    {
+        tree_off[c.key] = c.is_leaf;
+        if ( c.key == ROOT_KEY )
+            root = &c;
+    }
+    ASSERT_NE( root, nullptr );
+    const std::set<MortonKey> occupied = balance_global_occupancy( off, *root );
+    BalanceTree model = tree_off;
+    const BalanceCost cost =
+        balance_simulate( model, delta, max_depth, occupied );
+
+    // The balanced cell list: in build()'s ascending key order, every cell
+    // occupied, and every knob-off cell kept with its geometry and count
+    // (a knob-off internal cell stays internal).
+    BalanceTree tree_on;
+    std::map<MortonKey, const CellInfo*> on_by_key;
+    long long order_breaks = 0, unoccupied = 0, changed = 0;
+    for ( std::size_t i = 0; i < cells_on.size(); ++i )
+    {
+        const auto& c = cells_on[i];
+        tree_on[c.key] = c.is_leaf;
+        on_by_key[c.key] = &c;
+        order_breaks += i > 0 && cells_on[i - 1].key >= c.key;
+        unoccupied += c.global_count <= 0;
+    }
+    for ( const auto& c : cells_off )
+    {
+        auto it = on_by_key.find( c.key );
+        if ( it == on_by_key.end() )
+        {
+            ++changed;
+            continue;
+        }
+        const CellInfo& b = *it->second;
+        changed += b.depth != c.depth || b.half_width != c.half_width ||
+                   b.center[0] != c.center[0] || b.center[1] != c.center[1] ||
+                   b.center[2] != c.center[2] ||
+                   b.global_count != c.global_count ||
+                   ( !c.is_leaf && b.is_leaf );
+    }
+
+    auto h_keys = Kokkos::create_mirror_view_and_copy(
+        Kokkos::HostSpace(), on.builder.particle_keys() );
+    long long off_leaf = 0;
+    for ( int i = 0; i < on.num_local; ++i )
+    {
+        auto it = tree_on.find( h_keys( i ) );
+        off_leaf += it == tree_on.end() || !it->second;
+    }
+
+    const auto ld_max = []( const std::vector<long long>& h )
+    {
+        int m = 0;
+        for ( std::size_t ld = 0; ld < h.size(); ++ld )
+            if ( h[ld] > 0 )
+                m = static_cast<int>( ld );
+        return m;
+    };
+    const int ld_max_off = ld_max( balance_level_hist( tree_off, max_depth ) );
+    const int ld_max_on = ld_max( balance_level_hist( tree_on, max_depth ) );
+
+    const TreeBalanceStats& st = on.builder.balance_stats();
+    const long long n_off = static_cast<long long>( cells_off.size() );
+    const long long n_on = static_cast<long long>( cells_on.size() );
+    const long long n_model = static_cast<long long>( model.size() );
+
+    std::printf( "[a2-balance] nprocs %d rank %d delta %d cells_before %lld "
+                 "cells_after %lld model_cells %lld added %lld mult %.4f "
+                 "passes %d model_passes %d stuck %lld ld_max_before %d "
+                 "ld_max_after %d range_guard_off %lld range_guard_on %lld\n",
+                 nprocs, rank, delta, n_off, n_on, n_model, st.cells_added,
+                 double( n_on ) / double( n_off ), st.passes, cost.passes,
+                 st.stuck, ld_max_off, ld_max_on, rg_off, rg_on );
+    std::printf( "[a2-band] nprocs %d rank %d off %s on %s\n", nprocs, rank,
+                 balance_band_string( off, imb_off ).c_str(),
+                 balance_band_string( on, imb_on ).c_str() );
+    std::fflush( stdout );
+
+    // The figures are global, so equal on every rank; a digest of the
+    // balanced cell list covers the rest.
+    std::uint64_t digest = 1469598103934665603ULL;
+    for ( const auto& c : cells_on )
+        for ( std::uint64_t v :
+              { std::uint64_t( c.key ), std::uint64_t( c.global_count ),
+                std::uint64_t( c.is_leaf ) } )
+            digest = ( digest ^ v ) * 1099511628211ULL;
+    std::vector<long long> sig = { n_off,       n_on,       n_model,
+                                   st.cells_added, st.passes, st.stuck,
+                                   ld_max_off,  ld_max_on,
+                                   static_cast<long long>( digest >> 1 ) };
+    std::vector<long long> sig_min( sig.size() ), sig_max( sig.size() );
+    MPI_Allreduce( sig.data(), sig_min.data(), static_cast<int>( sig.size() ),
+                   MPI_LONG_LONG, MPI_MIN, MPI_COMM_WORLD );
+    MPI_Allreduce( sig.data(), sig_max.data(), static_cast<int>( sig.size() ),
+                   MPI_LONG_LONG, MPI_MAX, MPI_COMM_WORLD );
+    EXPECT_EQ( sig_min, sig_max )
+        << "ranks disagree on the balanced cell list or a figure from it";
+
+    // Without a pair 2+ levels apart there is nothing to balance (R7).
+    EXPECT_GE( ld_max_off, 2 );
+
+    // R1: the pass and A1's model must agree exactly.
+    EXPECT_EQ( n_on, n_model )
+        << "the pass built " << n_on << " cells, balance_simulate " << n_model;
+    EXPECT_TRUE( tree_on == model )
+        << "the pass and balance_simulate built different trees";
+    EXPECT_EQ( st.cells_before, n_off );
+    EXPECT_EQ( st.cells_added, cost.added );
+    EXPECT_EQ( st.cells_added, n_on - n_off );
+    EXPECT_EQ( st.passes, cost.passes );
+    EXPECT_EQ( st.stuck, 0 );
+    EXPECT_EQ( cost.stuck, 0 );
+
+    EXPECT_LE( ld_max_on, delta )
+        << "touching leaves " << ld_max_on << " levels apart after balancing";
+
+    EXPECT_EQ( order_breaks, 0 ) << "cells() not in ascending key order";
+    EXPECT_EQ( unoccupied, 0 ) << "the pass created empty cells";
+    EXPECT_EQ( changed, 0 ) << "the pass moved or dropped a knob-off cell";
+    EXPECT_EQ( off_leaf, 0 ) << "particles keyed to a non-leaf after the pass";
+    EXPECT_EQ( unowned_off, 0 );
+    EXPECT_EQ( unowned_on, 0 );
+}
 } // namespace DownwardSweepTest
 
 TEST( DownwardSweepTwoScale, treeHasShallowAndDeepLeaves )
@@ -2585,6 +2823,12 @@ TEST( DownwardSweepTwoScale, rootWidthQuantizationRetainsCache )
 TEST( DownwardSweepTwoScale, balanceCost )
 {
     DownwardSweepTest::testTwoScaleBalanceCost<TEST_MEMSPACE,
+                                               TEST_EXECSPACE>();
+}
+
+TEST( DownwardSweepTwoScale, balancePass )
+{
+    DownwardSweepTest::testTwoScaleBalancePass<TEST_MEMSPACE,
                                                TEST_EXECSPACE>();
 }
 

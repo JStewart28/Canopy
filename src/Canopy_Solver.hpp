@@ -124,6 +124,15 @@ struct FmmConfig
     // basis: the root cell becomes up to 2x wider than the bounding box,
     // which can add one level at the top of the tree.
     bool quantize_root_half_width = false;
+
+    // Balance the tree at the end of every tree build: refine any leaf more
+    // than this many levels shallower than a leaf it touches (by a face, an
+    // edge or a corner), to a fixed point. In levels, >= 1; 1 is the 2:1
+    // balance. Refinement creates only occupied children, so every cell
+    // stays occupied. A value below 1 is rejected by TreeBuilder's
+    // constructor. The default, TREE_BALANCE_OFF, never refines and keeps
+    // today's tree bit for bit. Not applied by TreeBuilder::update().
+    int tree_balance_max_level_delta = TREE_BALANCE_OFF;
 };
 
 // ============================================================================
@@ -205,7 +214,8 @@ class Solver
                     std::array<double, 6>{ cfg.xmin_tol, cfg.xmax_tol,
                                            cfg.ymin_tol, cfg.ymax_tol,
                                            cfg.zmin_tol, cfg.zmax_tol },
-                    cfg.ncrit_tol, cfg.quantize_root_half_width )
+                    cfg.ncrit_tol, cfg.quantize_root_half_width,
+                    cfg.tree_balance_max_level_delta )
         , _partitioner( comm, cfg.replication_depth, cfg.imbalance_tolerance )
         , _comm_plan( comm, cfg.mac_theta )
         , _upward( comm )

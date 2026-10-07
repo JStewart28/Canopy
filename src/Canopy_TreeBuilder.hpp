@@ -22,6 +22,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -78,6 +82,36 @@ int key_octant( MortonKey k )
     return static_cast<int>( k & 7 ); // last 3 bits
 }
 
+// Lattice coordinates of a cell at its own depth, in [0, 2^depth) per axis.
+// Octant bit 0 is x, bit 1 is y, bit 2 is z (TreeBuilder::which_octant).
+inline void key_to_lattice( MortonKey k, int depth, uint64_t ijk[3] )
+{
+    ijk[0] = ijk[1] = ijk[2] = 0;
+    for ( int l = depth - 1; l >= 0; --l )
+    {
+        const int oct = static_cast<int>( ( k >> ( 3 * l ) ) & 7 );
+        for ( int a = 0; a < 3; ++a )
+            ijk[a] = ( ijk[a] << 1 ) | static_cast<uint64_t>( ( oct >> a ) & 1 );
+    }
+}
+
+inline MortonKey lattice_to_key( const uint64_t ijk[3], int depth )
+{
+    MortonKey k = ROOT_KEY;
+    for ( int l = depth - 1; l >= 0; --l )
+    {
+        int oct = 0;
+        for ( int a = 0; a < 3; ++a )
+            oct |= static_cast<int>( ( ijk[a] >> l ) & 1 ) << a;
+        k = child_key( k, oct );
+    }
+    return k;
+}
+
+// The off value of the tree-balance knob (FmmConfig::tree_balance_max_level_delta):
+// no two depths differ by this much, so build() never balances.
+static constexpr int TREE_BALANCE_OFF = std::numeric_limits<int>::max();
+
 // ============================================================================
 // Cell data (global tree topology)
 // ============================================================================
@@ -98,6 +132,17 @@ struct BoundingBox
 {
     double min[3];
     double max[3];
+};
+
+// ============================================================================
+// TreeBalanceStats — what the balancing pass at the end of build() did
+// ============================================================================
+struct TreeBalanceStats
+{
+    long long cells_before = 0; // cell count before the pass
+    long long cells_added = 0;  // occupied cells the pass created
+    int passes = 0;             // passes that refined at least one leaf
+    long long stuck = 0;        // leaves left unbalanced at the depth limit
 };
 
 // ============================================================================
@@ -172,18 +217,33 @@ class TreeBuilder
     //! possibly empty, level at the top of the tree (tree-opt.md R5).
     double _root_half_width = 0.0;
 
+    //! Balance: largest level difference, in levels (>= 1), allowed between
+    //! touching leaves after build(); TREE_BALANCE_OFF disables the pass.
+    //! FmmConfig::tree_balance_max_level_delta.
+    int _balance_max_level_delta;
+    //! Refining passes the balance may take before it throws, >= 0.
+    int _balance_max_passes;
+    //! Deepest depth the balance may refine into, in [0, _max_depth].
+    int _balance_depth_limit;
+    TreeBalanceStats _balance_stats;
+
   public:
-    // Constructor
+    // Constructor. tree_balance_max_level_delta: see
+    // FmmConfig::tree_balance_max_level_delta; below 1 throws.
     TreeBuilder( MPI_Comm comm, const int ncrit, const int max_depth,
                  const std::array<double, 6> bb_tolerance_factor,
                  const double ncrit_tolerance_factor = 0.1,
-                 const bool quantize_root_half_width = false )
+                 const bool quantize_root_half_width = false,
+                 const int tree_balance_max_level_delta = TREE_BALANCE_OFF )
         : _ncrit( ncrit )
         , _max_depth( max_depth )
         , _comm( comm )
         , _bb_tf( bb_tolerance_factor )
         , _ncrit_tf( ncrit_tolerance_factor )
         , _quantize_root_hw( quantize_root_half_width )
+        , _balance_max_level_delta( tree_balance_max_level_delta )
+        , _balance_max_passes( 8 * ( max_depth + 1 ) )
+        , _balance_depth_limit( max_depth )
     {
         MPI_Comm_rank( _comm, &_rank );
         MPI_Comm_size( _comm, &_comm_size );
@@ -194,6 +254,15 @@ class TreeBuilder
             throw std::runtime_error(
                 "Canopy::TreeBuilder only supports depths up to 20!" );
         }
+
+        // 0 would mean every leaf at one depth: abandoning adaptivity, and
+        // far more likely a typo than a request.
+        if ( _balance_max_level_delta < 1 )
+            throw std::runtime_error(
+                "Canopy::TreeBuilder: tree_balance_max_level_delta must be "
+                ">= 1 (1 is the 2:1 balance; TREE_BALANCE_OFF disables it), "
+                "got " +
+                std::to_string( _balance_max_level_delta ) );
     }
 
     // -----------------------------------------------------------------------
@@ -206,6 +275,31 @@ class TreeBuilder
     // re-derivation from root_box(), which differs once quantized.
     double root_half_width() const { return _root_half_width; }
     bool tree_valid() const { return _tree_valid; }
+    int balance_max_level_delta() const { return _balance_max_level_delta; }
+    // What the balancing pass of the most recent build() did.
+    const TreeBalanceStats& balance_stats() const { return _balance_stats; }
+
+    // Test hooks for the balancing pass. The pass bound is in refining passes
+    // (default 8 * (max_depth + 1)); exceeding it throws. The depth limit is
+    // the deepest depth the pass refines into (default max_depth); a leaf
+    // that must be refined but sits at it is reported, not refined. Through
+    // build() alone a leaf at max_depth is never the shallower side of a
+    // pair, so a lower limit is the only way to exercise that report.
+    void set_balance_max_passes( int passes )
+    {
+        if ( passes < 0 )
+            throw std::runtime_error(
+                "Canopy::TreeBuilder::set_balance_max_passes: must be >= 0" );
+        _balance_max_passes = passes;
+    }
+    void set_balance_depth_limit( int depth )
+    {
+        if ( depth < 0 || depth > _max_depth )
+            throw std::runtime_error(
+                "Canopy::TreeBuilder::set_balance_depth_limit: must be in "
+                "[0, max_depth]" );
+        _balance_depth_limit = depth;
+    }
 
     // The smallest power of two >= hw, domain units; hw itself when it is
     // already a power of two, or is not positive and finite. Exact: frexp
@@ -260,6 +354,22 @@ class TreeBuilder
     // Split a leaf cell into an internal cell + 8 children
     void refine_leaf( MortonKey leaf_key );
 
+    // The balancing pass at the end of build(): refine every leaf more than
+    // _balance_max_level_delta levels shallower than a leaf it touches (face,
+    // edge or corner), all such leaves at once per pass, to a fixed point.
+    // Requires _cell_lookup current; leaves _cells in ascending key order,
+    // which is build()'s own order.
+    template <class PositionType>
+    void balance( PositionType positions, int num_local_particles );
+
+    // Split each leaf in `leaves` into its occupied children only, counted
+    // over all ranks as build() counts them, and move its particles' keys
+    // to those children.
+    template <class PositionType>
+    void refine_leaves_occupied( const std::vector<MortonKey>& leaves,
+                                 PositionType positions,
+                                 int num_local_particles );
+
     // -----------------------------------------------------------------------
     // Main functions
     // -----------------------------------------------------------------------
@@ -276,6 +386,8 @@ class TreeBuilder
     //                       to the Morton key of its enclosing leaf cell
     //   - root_box()        returns the global bounding box
     //   - root_half_width() returns the root cell's half-width
+    //   - balance_stats()   reports the balancing pass, which runs last
+    //                       unless tree_balance_max_level_delta is off
     template <class PositionType>
     void build( PositionType positions, int num_local_particles );
 
@@ -283,7 +395,9 @@ class TreeBuilder
     template <class PositionType>
     bool needs_rebuild( PositionType positions, int num_local_particles ) const;
 
-    // update() — incremental tree adaptation
+    // update() — incremental tree adaptation. Does NOT balance: a tree that
+    // build() balanced can leave balance here. Solver changes the tree only
+    // through build().
     template <class PositionType>
     UpdateResult update( PositionType positions, int num_local_particles );
 
@@ -869,7 +983,225 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
     // Build the host-side lookup map
     rebuild_cell_lookup();
 
+    balance( positions, num_local_particles );
+
     _tree_valid = true;
+}
+
+template <class MemorySpace, class ExecutionSpace>
+template <class PositionType>
+void TreeBuilder<MemorySpace, ExecutionSpace>::balance(
+    PositionType positions, int num_local_particles )
+{
+    _balance_stats = TreeBalanceStats{};
+    _balance_stats.cells_before = static_cast<long long>( _cells.size() );
+
+    // No two depths in [0, max_depth] differ by more than max_depth.
+    if ( _balance_max_level_delta >= _max_depth )
+        return;
+
+    for ( int pass = 0;; ++pass )
+    {
+        // The cell list is identical on every rank, so is this set, and
+        // every rank refines, stops or throws together.
+        std::unordered_set<MortonKey> marked;
+        for ( const auto& ci : _cells )
+        {
+            if ( !ci.is_leaf )
+                continue;
+            uint64_t a[3];
+            key_to_lattice( ci.key, ci.depth, a );
+            const int64_t side = int64_t( 1 ) << ci.depth;
+            for ( int dx = -1; dx <= 1; ++dx )
+                for ( int dy = -1; dy <= 1; ++dy )
+                    for ( int dz = -1; dz <= 1; ++dz )
+                    {
+                        if ( dx == 0 && dy == 0 && dz == 0 )
+                            continue;
+                        const int64_t n[3] = { int64_t( a[0] ) + dx,
+                                               int64_t( a[1] ) + dy,
+                                               int64_t( a[2] ) + dz };
+                        if ( n[0] < 0 || n[1] < 0 || n[2] < 0 ||
+                             n[0] >= side || n[1] >= side || n[2] >= side )
+                            continue;
+                        // The first existing cell up the touching cell's
+                        // ancestry: a leaf is the neighbour; an internal cell
+                        // means deeper neighbours (found from their side) or
+                        // empty space.
+                        for ( int d = ci.depth; d >= 0; --d )
+                        {
+                            const int s = ci.depth - d;
+                            const uint64_t up[3] = { uint64_t( n[0] ) >> s,
+                                                     uint64_t( n[1] ) >> s,
+                                                     uint64_t( n[2] ) >> s };
+                            auto it =
+                                _cell_lookup.find( lattice_to_key( up, d ) );
+                            if ( it == _cell_lookup.end() )
+                                continue;
+                            const CellInfo& nb = _cells[it->second];
+                            if ( nb.is_leaf &&
+                                 ci.depth - d > _balance_max_level_delta )
+                                marked.insert( nb.key );
+                            break;
+                        }
+                    }
+        }
+
+        std::vector<MortonKey> to_refine;
+        long long stuck = 0;
+        for ( MortonKey k : marked )
+        {
+            if ( key_depth( k ) >= _balance_depth_limit )
+                ++stuck;
+            else
+                to_refine.push_back( k );
+        }
+        _balance_stats.stuck = stuck;
+        if ( to_refine.empty() )
+            break;
+        if ( pass == _balance_max_passes )
+            throw std::runtime_error(
+                "Canopy::TreeBuilder::balance: " +
+                std::to_string( to_refine.size() ) +
+                " leaves still need refining after the pass bound of " +
+                std::to_string( _balance_max_passes ) +
+                " passes (max_level_delta " +
+                std::to_string( _balance_max_level_delta ) + ")" );
+        std::sort( to_refine.begin(), to_refine.end() );
+
+        const std::size_t before = _cells.size();
+        refine_leaves_occupied( to_refine, positions, num_local_particles );
+        _balance_stats.cells_added +=
+            static_cast<long long>( _cells.size() - before );
+        ++_balance_stats.passes;
+    }
+
+    // Every downstream claim about a bounded depth difference rests on the
+    // balance, so a leaf left out of it is reported, not passed over.
+    if ( _balance_stats.stuck > 0 && _rank == 0 )
+    {
+        std::fprintf( stderr,
+                      "[Canopy] WARNING: TreeBuilder::balance: %lld leaves "
+                      "at depth limit %d are still more than %d levels "
+                      "shallower than a touching leaf; the tree is NOT "
+                      "balanced\n",
+                      _balance_stats.stuck, _balance_depth_limit,
+                      _balance_max_level_delta );
+        std::fflush( stderr );
+    }
+
+    if ( _balance_stats.cells_added > 0 )
+    {
+        std::sort( _cells.begin(), _cells.end(),
+                   []( const CellInfo& x, const CellInfo& y )
+                   { return x.key < y.key; } );
+        rebuild_cell_lookup();
+    }
+}
+
+template <class MemorySpace, class ExecutionSpace>
+template <class PositionType>
+void TreeBuilder<MemorySpace, ExecutionSpace>::refine_leaves_occupied(
+    const std::vector<MortonKey>& leaves, PositionType positions,
+    int num_local_particles )
+{
+    const int num_candidates = static_cast<int>( leaves.size() );
+
+    Kokkos::View<MortonKey*, memory_space> cand_keys( "bal_cand_keys",
+                                                      num_candidates );
+    Kokkos::View<double* [3], memory_space> cand_centers( "bal_cand_centers",
+                                                          num_candidates );
+    auto h_cand_keys = Kokkos::create_mirror_view( cand_keys );
+    auto h_cand_centers = Kokkos::create_mirror_view( cand_centers );
+    for ( int c = 0; c < num_candidates; ++c )
+    {
+        const CellInfo& ci = _cells[_cell_lookup.at( leaves[c] )];
+        h_cand_keys( c ) = ci.key;
+        for ( int d = 0; d < 3; ++d )
+            h_cand_centers( c, d ) = ci.center[d];
+    }
+    Kokkos::deep_copy( cand_keys, h_cand_keys );
+    Kokkos::deep_copy( cand_centers, h_cand_centers );
+
+    Kokkos::UnorderedMap<MortonKey, int, memory_space> key_to_cand_idx(
+        num_candidates * 2 );
+    Kokkos::parallel_for(
+        "BalancePopulateKeyMap",
+        Kokkos::RangePolicy<execution_space>( 0, num_candidates ),
+        KOKKOS_LAMBDA( int c ) {
+            key_to_cand_idx.insert( cand_keys( c ), c );
+        } );
+    Kokkos::fence();
+
+    Kokkos::View<int* [8], memory_space> local_octant_counts(
+        "bal_local_octant_counts", num_candidates );
+    Kokkos::View<int*, memory_space> particle_octant( "bal_particle_octant",
+                                                      num_local_particles );
+    Kokkos::deep_copy( particle_octant, -1 );
+    auto particle_keys = _particle_keys;
+
+    // Same octant arithmetic as build()'s refinement loop.
+    Kokkos::parallel_for(
+        "BalanceCountOctants",
+        Kokkos::RangePolicy<execution_space>( 0, num_local_particles ),
+        KOKKOS_LAMBDA( int i ) {
+            auto idx = key_to_cand_idx.find( particle_keys( i ) );
+            if ( !key_to_cand_idx.valid_at( idx ) )
+                return;
+            const int c = key_to_cand_idx.value_at( idx );
+            const int oct = which_octant(
+                positions( i, 0 ), positions( i, 1 ), positions( i, 2 ),
+                cand_centers( c, 0 ), cand_centers( c, 1 ),
+                cand_centers( c, 2 ) );
+            particle_octant( i ) = oct;
+            Kokkos::atomic_inc( &local_octant_counts( c, oct ) );
+        } );
+    Kokkos::fence();
+
+    auto h_local = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                        local_octant_counts );
+    std::vector<int> local_counts( static_cast<std::size_t>( num_candidates ) *
+                                   8 );
+    for ( int c = 0; c < num_candidates; ++c )
+        for ( int oct = 0; oct < 8; ++oct )
+            local_counts[8 * c + oct] = h_local( c, oct );
+    std::vector<int> global_counts( local_counts.size() );
+    MPI_Allreduce( local_counts.data(), global_counts.data(),
+                   num_candidates * 8, MPI_INT, MPI_SUM, _comm );
+
+    for ( int c = 0; c < num_candidates; ++c )
+    {
+        const int idx = _cell_lookup.at( leaves[c] );
+        _cells[idx].is_leaf = false;
+        const CellInfo parent = _cells[idx];
+        for ( int oct = 0; oct < 8; ++oct )
+        {
+            const int g = global_counts[8 * c + oct];
+            if ( g == 0 )
+                continue;
+            CellInfo child;
+            child.key = child_key( parent.key, oct );
+            child.depth = parent.depth + 1;
+            child_center( parent.center[0], parent.center[1],
+                          parent.center[2], parent.half_width, oct,
+                          child.center[0], child.center[1], child.center[2] );
+            child.half_width = parent.half_width * 0.5;
+            child.global_count = g;
+            child.is_leaf = true;
+            _cell_lookup[child.key] = static_cast<int>( _cells.size() );
+            _cells.push_back( child );
+        }
+    }
+
+    Kokkos::parallel_for(
+        "BalanceUpdateParticleKeys",
+        Kokkos::RangePolicy<execution_space>( 0, num_local_particles ),
+        KOKKOS_LAMBDA( int i ) {
+            const int oct = particle_octant( i );
+            if ( oct >= 0 )
+                particle_keys( i ) = child_key( particle_keys( i ), oct );
+        } );
+    Kokkos::fence();
 }
 
 template <class MemorySpace, class ExecutionSpace>
