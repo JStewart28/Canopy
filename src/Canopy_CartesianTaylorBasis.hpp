@@ -461,10 +461,11 @@ struct CartesianTaylorBasis
     // The |dd| range guard. 6, but NOT for LaplaceKernel's reason: there, 6 is
     // a precision bound on a scale-normalized operator carrying a residual
     // 2^{j|dd|} factor, and a basis carrying PHYSICAL operators inherits
-    // neither that factor nor that bound. Here 6 merely bounds the key space,
-    // and it is chosen so the set of pairs routed to the fallback path is the
-    // same one every other basis in this repository sees -- which keeps
-    // total_fallback_pair_count() comparable across bases. It is not a
+    // neither that factor nor that bound. dd is not in this basis's key
+    // (key_needs_dd is false), so the bound does not size the key space
+    // either. Its only job is to keep the set of pairs routed to the fallback
+    // path the same one every other basis in this repository sees -- which
+    // keeps total_fallback_pair_count() comparable across bases. It is not a
     // precision claim about this basis.
     static constexpr int m2l_key_dd_max = 6;
 
@@ -484,9 +485,15 @@ struct CartesianTaylorBasis
     // level-dependent operator from being served stale (risk R5).
     static constexpr bool key_needs_level = true;
 
-    // Identity -- the key is returned unchanged, max_d and all, because
-    // key_needs_level is true and the level is part of what distinguishes one
-    // operator from another here.
+    // FALSE. The operator is a function of R alone (m2l_operator_block), and
+    // R is fixed by (max_d, ii, jj, kk); dd is not an input. So
+    // canonicalize_key zeroes dd, and keys differing only in it share one
+    // column instead of each building an identical one.
+    static constexpr bool key_needs_dd = false;
+
+    // Zeroes dd and keeps max_d: key_needs_level is true and the level is
+    // part of what distinguishes one operator from another here, while dd is
+    // not (key_needs_dd is false). The canonical key is (max_d, 0, ii, jj, kk).
     //
     // A function template on the key type, deliberately: M2LKey is a nested
     // type of DownwardSweep<..., KernelType>, so a basis cannot name it
@@ -496,6 +503,7 @@ struct CartesianTaylorBasis
     template <class Key>
     static Key canonicalize_key( Key k )
     {
+        k.dd = 0;
         return k;
     }
 
@@ -973,9 +981,9 @@ struct CartesianTaylorBasis
     // function of the physical (R, b) alone. That is why this takes R and not
     // a key: m2l_translate is handed two cell centers and cannot reconstruct
     // max_d from two half-widths, so a key-parameterized operator would be
-    // unreachable from the fallback path. One consequence to expect rather
-    // than debug: two keys differing only in dd produce IDENTICAL columns.
-    // That is duplication in the table, not an error.
+    // unreachable from the fallback path. This is why the basis declares
+    // key_needs_dd = false and canonicalize_key zeroes dd: two keys differing
+    // only in dd would build identical columns, so they are one key.
     // =======================================================================
     KOKKOS_INLINE_FUNCTION
     static void m2l_operator_block( const Scalar R[3], Scalar b,
@@ -1119,8 +1127,8 @@ struct CartesianTaylorBasis
     //
     //   keys[0..n_keys)   canonical keys; column j of `ops` is keys[j].
     //                     Already through canonicalize_key, which for THIS
-    //                     basis is the identity -- key_needs_level is true --
-    //                     so max_d survives and is a real tree level here.
+    //                     basis keeps max_d -- key_needs_level is true -- so
+    //                     it is a real tree level here, and zeroes dd.
     //   unit_w[0..n_levels)
     //                     the HALF-WIDTH at each depth, w_root / 2^d, indexed
     //                     by the key's max_d.
@@ -1138,10 +1146,9 @@ struct CartesianTaylorBasis
     //
     //     R = -(ii, jj, kk) * unit_w[max_d].
     //
-    // kk.dd IS READ ONLY BY THE GUARDS. This operator has no dd dependence, so
-    // two keys differing only in dd get identical columns; that is duplication
-    // in the table, not an error, and CanopyTest::MonopoleBasis records the
-    // same effect for the same reason.
+    // dd IS NOT READ. This operator has no dd dependence, and canonicalize_key
+    // has already zeroed it (key_needs_dd = false), so every key here has
+    // dd == 0 and no two columns differ only in dd.
     //
     // THREE GUARDS, each naming its convention, because each of these values
     // has a reachable DEFAULT that would make the operator silently wrong
@@ -1205,10 +1212,10 @@ struct CartesianTaylorBasis
                 Kokkos::abort(
                     "CartesianTaylorBasis::build_m2l_operators: a key's "
                     "max_d is outside [0, n_levels). This basis declares "
-                    "key_needs_level = true, so canonicalize_key is the "
-                    "identity and max_d is a real tree level that indexes "
-                    "unit_w; an out-of-range one would read past the end of "
-                    "that array." );
+                    "key_needs_level = true, so canonicalize_key keeps "
+                    "max_d and it is a real tree level that indexes unit_w; "
+                    "an out-of-range one would read past the end of that "
+                    "array." );
 
             const double w_unit = unit_w[max_d];
 

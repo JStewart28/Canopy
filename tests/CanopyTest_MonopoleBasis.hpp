@@ -128,7 +128,7 @@ struct MonopoleBasis
     static constexpr int m2l_num_src_coeffs = 1;
 
     // -----------------------------------------------------------------------
-    // The M2L key contract: m2l_key_dd_max, key_needs_level,
+    // The M2L key contract: m2l_key_dd_max, key_needs_level, key_needs_dd,
     // canonicalize_key. See LaplaceKernel for the full statement of what the
     // five key integers are.
     // -----------------------------------------------------------------------
@@ -162,8 +162,12 @@ struct MonopoleBasis
     // is not silently dropped.
     static constexpr bool key_needs_level = true;
 
-    // Identity: the key is returned unchanged, max_d and all. The mirror
-    // image of LaplaceKernel::canonicalize_key, which zeroes max_d.
+    // TRUE: m2l_operator_entry carries F(dd) = 2^{max(0,-dd)}, so keys
+    // differing only in dd are different operators.
+    static constexpr bool key_needs_dd = true;
+
+    // Identity: the key is returned unchanged, max_d and dd and all. The
+    // mirror image of LaplaceKernel::canonicalize_key, which zeroes max_d.
     //
     // A function template on the key type for the reason given there: the key
     // struct is a nested type of DownwardSweep<..., KernelType> and a basis

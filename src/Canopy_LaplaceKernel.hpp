@@ -671,7 +671,7 @@ struct LaplaceKernel
     static constexpr int m2l_num_src_coeffs = ( P + 1 ) * ( P + 1 );
 
     // =======================================================================
-    // The M2L key contract: m2l_key_dd_max, key_needs_level,
+    // The M2L key contract: m2l_key_dd_max, key_needs_level, key_needs_dd,
     // canonicalize_key.
     //
     // The sweep builds one integer key per (target, source) pair,
@@ -681,7 +681,7 @@ struct LaplaceKernel
     // with max_d the deeper of the two depths, dd = d_source - d_target, and
     // (ii, jj, kk) the center offset measured in half-widths at max_d (see
     // the key comment in src/Canopy_DownwardSweep.hpp). Pairs sharing a key
-    // share one operator column. The three members below are how a basis says
+    // share one operator column. The four members below are how a basis says
     // WHICH of those five integers its operator actually depends on, and how
     // far dd may range before a pair is refused.
     // =======================================================================
@@ -720,16 +720,26 @@ struct LaplaceKernel
     // below — a conformance test asserts that it does.
     static constexpr bool key_needs_level = false;
 
+    // Does this basis's operator depend on dd? For the solid-harmonic basis,
+    // YES: the scale-normalized operator carries the residual factor
+    // F(dd, n, j), so keys differing only in dd are different operators and
+    // canonicalize_key must keep dd. A basis whose operator ignores dd
+    // declares false and must zero dd in canonicalize_key, or the table holds
+    // one identical column per dd value. The same conformance test asserts
+    // this agrees with canonicalize_key.
+    static constexpr bool key_needs_dd = true;
+
     // Reduce a key to the form this basis's operator actually depends on.
     // Called once, at key construction in the classify pass, BEFORE the key
     // is hashed — so every downstream structure (the per-thread key maps, the
     // global key_to_op, the realized key list, the operator table's column
     // order) sees only canonical keys.
     //
-    // This basis ZEROES max_d. Its operators are scale-normalized and
-    // therefore depth-independent given (dd, ii, jj, kk), so collapsing every
-    // level onto one key is what keeps the table at the realized-offset count
-    // rather than multiplying it by occupied tree depth. A basis with
+    // This basis ZEROES max_d and keeps dd. Its operators are
+    // scale-normalized and therefore depth-independent given
+    // (dd, ii, jj, kk), so collapsing every level onto one key is what keeps
+    // the table at the realized-offset count rather than multiplying it by
+    // occupied tree depth. A basis with
     // physical operators returns the key unchanged instead and must set
     // key_needs_level = true to match.
     //

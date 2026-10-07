@@ -38,8 +38,9 @@ Three consequences:
 2. **The table holds provably duplicate columns.**
    `CartesianTaylorBasis`'s operator is a function of the physical
    $(R, b)$ alone and has no `dd` dependence at all
-   (`src/Canopy_CartesianTaylorBasis.hpp:972-979`), yet `dd` is in its key, so
-   keys differing only in `dd` build identical columns.
+   (`src/Canopy_CartesianTaylorBasis.hpp:980-986`), yet `dd` was in its key, so
+   keys differing only in `dd` built identical columns. B1 removed `dd` from
+   that basis's key.
 3. **The operator cache retains nothing across rebuilds.** The key carries
    `max_d`, which indexes a per-level physical half-width, and the root
    half-width is the global particle bounding box recomputed on every full
@@ -163,7 +164,7 @@ drifting level index with a stable one.
 | --- | --- | --- |
 | New basis trait name | `key_needs_dd` | Mirrors `key_needs_level` exactly in name, placement (beside it in the basis's M2L key-contract block), type (`static constexpr bool`) and role: a basis declaring which of the key's five integers its operator depends on. A reader who knows one knows the other. |
 | Trait default | none — every basis states it explicitly | `key_needs_level` has no default either. A silent default on a correctness-critical trait is how a new basis gets the wrong one; the conformance test in B1 fails a basis that omits it. |
-| Trait/`canonicalize_key` agreement | asserted, never trusted | `expectKeyTraitsAgree` (`tests/tstFarFieldContract.hpp:925-958`) already enforces this for `key_needs_level`; B1 extends the same function rather than adding a second one. |
+| Trait/`canonicalize_key` agreement | asserted, never trusted | `expectKeyTraitsAgree` (`tests/tstFarFieldContract.hpp:927-983`) enforces this for `key_needs_level` and, since B1, for `key_needs_dd`, in the same function. |
 | Balancing knob name | `FmmConfig::tree_balance_max_level_delta` | `FmmConfig` is where every other tree and table knob lives (`src/Canopy_Solver.hpp`), and the name states the invariant as a number rather than as a mode, so "2:1" is the value 1 and "off" is a large value rather than a second boolean. |
 | Balancing knob default | the off value, until A3 | A2 must not move any existing result. A knob whose default is the current behavior is a change with no runtime surface until something sets it, which is what makes A2's exit criterion checkable against the existing stems, unmodified. |
 | Root-width quantization | `std::ldexp`/`std::frexp`, never `pow(2, round(log2(w)))` | Exact in binary floating point. A rounded `pow` reintroduces the drift the quantization exists to remove, and would do it only on some inputs. |
@@ -251,7 +252,7 @@ the `MultiSolve` stem carries both `MultiSolve.*` and `SolveFusedM2L.*`
   Lowering the bound would refuse *more* pairs; removing the field refuses none
   and deletes duplicate columns. The two are opposite directions, and the field
   is removable only because the basis's operator provably ignores it
-  (`src/Canopy_CartesianTaylorBasis.hpp:972-979`).
+  (`src/Canopy_CartesianTaylorBasis.hpp:980-986`).
 - **B1 keeps `m2l_key_dd_max` as a trait and keeps the sweep's `dd` guard.**
   Once `dd` is out of `CartesianTaylorBasis`'s key, that basis has no
   representability reason to bound `dd` — but `LaplaceKernel` does: its own
@@ -328,17 +329,23 @@ Also true now:
 - **`max_depth` is capped at 19 by Morton-key storage**, which `TreeBuilder`'s
   constructor enforces by throwing (`src/Canopy_TreeBuilder.hpp:177-182`). Any
   smaller limit a caller runs at is that caller's choice, not a library limit.
-- **`CartesianTaylorBasis` declares `key_needs_level = true`** (`:485`) and its
-  `canonicalize_key` is the identity (`:497-501`). `LaplaceKernel` declares
-  `false` (`:721`) and zeroes `max_d` (`:742-746`).
+- **`CartesianTaylorBasis` declares `key_needs_level = true` and
+  `key_needs_dd = false`** (`:486`, `:492`). Its `canonicalize_key` keeps
+  `max_d` and zeroes `dd` (`:503-508`), so its canonical key is
+  $(\texttt{max\_d}, 0, \texttt{ii}, \texttt{jj}, \texttt{kk})$. `LaplaceKernel`
+  declares `key_needs_level = false` and `key_needs_dd = true` (`:721`,
+  `:730`) and zeroes `max_d` only (`:752-756`). `MonopoleBasis` declares both `true`.
 - **`m2l_key_dd_max` is 6 for `CartesianTaylorBasis`** (`:469`) and its comment
   states that for this basis the number "merely bounds the key space" and "is
   not a precision claim about this basis" — chosen so the refused set matches
   what other bases see. For `LaplaceKernel` it is 6 for `double` and 4 for
   `float`, and there it *is* a precision bound (`:689-702`).
-- **`expectKeyTraitsAgree` asserts that `canonicalize_key` does NOT alter `dd`**
-  for any basis (`tests/tstFarFieldContract.hpp:934-937`). B1 must change that
-  function; it is not merely extended by it.
+- **`expectKeyTraitsAgree` branches on `key_needs_dd` as it does on
+  `key_needs_level`** (`tests/tstFarFieldContract.hpp:927-983`): a `true` basis
+  must preserve `dd` and keep two keys differing only in `dd` distinct, a
+  `false` one must collapse them. Only the offset `(ii, jj, kk)` is asserted
+  unaltered for every basis. It runs on `MonopoleBasis`, `LevelBlindBasis`,
+  `LaplaceKernel` and `CartesianTaylorBasis` (`:994-998`).
 - **`set_root_half_width` clears the whole operator cache** when
   `key_needs_level` is true, and deliberately does not when it is false
   (`src/Canopy_DownwardSweep.hpp:435-460`). The root half-width is the largest
@@ -1052,7 +1059,7 @@ a test rather than by a comment.
 
 ---
 
-### B1 — `key_needs_dd`, and a `CartesianTaylorBasis` key without `dd` — **NOT STARTED**
+### B1 — `key_needs_dd`, and a `CartesianTaylorBasis` key without `dd` — **DONE**
 
 **Depends on:** B0b **DONE**, V1 **DONE**.
 **Fill in:** `src/Canopy_CartesianTaylorBasis.hpp` (the new trait,
@@ -1156,6 +1163,25 @@ Failure direction: a basis declaring `key_needs_dd = true` whose
 `canonicalize_key` zeroes `dd`, and the converse, both fail
 `expectKeyTraitsAgree` with a message naming the basis; verify by temporarily
 mis-declaring one and seeing the named failure, then reverting.
+
+**Met.** All six stems pass through `canopy_ctest` on SERIAL np 1-6
+(`f3chRgEQqzd5`) and HIP np 1-4 (`f3chRgNMv9GK`): 37 and 25 entries, none over
+budget, nothing cancelled. All 378 SERIAL count lines (`[b0b-dd]`, `[b0-dd]`,
+`[dd-hist]`) were compared by script with B0b's job `f3ccGbJHwxPy`, and all 180
+HIP lines with both B0b jobs. On every line `CartesianTaylorBasis`'s admitted
+count, `demanded_ops` and bytes equal B0b's CT *distinct* figures, its factor
+reads 1.0000, and its histogram is entirely at `dd = 0`. Every `LaplaceKernel`
+line is identical to B0b's, and so are its `[b0b-cross]` sums. At np 1 CT goes
+from 4162 to 4068 columns at θ 0.3 and from 26 702 to 20 286 at θ 0.5 on the
+graded draw. `CartesianTaylorSolve`'s own fixture drops by 1.38-1.46x, with
+fallback counts unchanged. Its SERIAL `[ct-solve]` deviation lines, and
+`MultiSolve`'s `[multisolve-dev]`, `[multisolve-probe]` and `[fusedm2l-*]` lines,
+are bit-identical to V1 (close)'s `f3cbCkKDsirK`. Both trait mismatches fail
+`FarFieldContract.levelReachesTheKey` with a message naming
+`CartesianTaylorBasis` (`f3chWq7XkJbH`, `f3chZbiYKp7h`). Zeroing `dd` in
+`LaplaceKernel` drops its admitted count to B0b's *distinct* count on all 42
+graded lines (`f3chc3fq5LqM`). After the revert, `f3cheVoEuy9Z` matched the
+exit-criterion run line for line. See `tree-opt-progress-log.md` `## B1`.
 
 ---
 

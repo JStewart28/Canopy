@@ -1319,3 +1319,270 @@ entry. The exit-criterion runs took at most 10.04 s, on HIP at np 1, against a
 - **A1, C1, B2**: `TwoScaleFixture` now takes a draw and an angle. The graded
   draw reproduces at every np on both backends, with 7 leaf depths, and is
   available to them.
+
+## B1
+
+**Outcome: `CartesianTaylorBasis`'s key no longer carries `dd`, and the column
+counts fall exactly as B0b predicted.** On every line its admitted count now
+equals B0b's *distinct* count. Every `LaplaceKernel` line is unchanged.
+
+Provenance: commit `a57ec2f` plus this section's edits, Cray clang 20.0.0, env
+`tuolumne_trilinos`, `build-tuolumne` (`Canopy_ENABLE_PROFILING:BOOL=ON`, read
+from the cache and echoed at each job's head; HIP registered at np 1-4 with
+`--gpus-per-task=1 --cores-per-task=8`). Every run went through `canopy_ctest`
+after a passing watchdog self-test, with the HIP environment set in a subshell
+around the HIP calls only. The watchdog cancelled nothing but the self-test.
+Script: `scripts/tuolumne/run_ctest_b1.flux measure|noprof|contract
+serial|hip`, copied from `run_ctest_b0.flux`. `measure` runs the five MPI stems
+once, then the non-MPI `CartesianTaylor` stem on the same backend, then a
+second `DownwardSweep` pass. `contract` runs `FarFieldContract` and
+`DownwardSweep` only. The SERIAL `measure` job took 7.5 min and the HIP one
+5 min, against `-t 20m`. The `contract` jobs used `-t 10m`.
+
+| job | what |
+| --- | --- |
+| `f3chRgEQqzd5` | `measure serial`: 37 entries, all `completed`, all `rc=0` |
+| `f3chRgNMv9GK` | `measure hip`: 25 entries, all `completed`, all `rc=0` |
+| `f3chWq7XkJbH` | failure direction: CT declares `key_needs_dd = true` and still zeroes `dd` |
+| `f3chZbiYKp7h` | failure direction: CT declares `false` and keeps `dd` |
+| `f3chc3fq5LqM` | failure direction: `LaplaceKernel`'s `canonicalize_key` also zeroes `dd` (R3) |
+| `f3cheVoEuy9Z` | `contract serial` after the revert and rebuild, all `rc=0` |
+
+### Decisions recorded (made before the session, not reopened)
+
+- **B1 proceeds.** B0b measured a payoff of a few percent of columns at θ 0.3
+  and 9-32 % at θ 0.5. The change is exact, and B2 depends on it.
+- **`key_needs_dd` values:** `false` for `CartesianTaylorBasis`; `true` for
+  `LaplaceKernel` and `MonopoleBasis`. `LevelBlindBasis` inherits
+  `MonopoleBasis`'s value.
+- **`m2l_key_dd_max` and the sweep's `|dd|` range guard stay exactly as they
+  are**, at 6 for CT. Only the comment changed: the value now only keeps the
+  fallback population comparable across bases.
+
+### What changed
+
+- `key_needs_dd` is a `static constexpr bool` declared beside
+  `key_needs_level` on all three bases, with no default.
+  `CartesianTaylorBasis::canonicalize_key` now zeroes `dd`, so its canonical
+  key is $(\texttt{max\_d}, 0, \texttt{ii}, \texttt{jj}, \texttt{kk})$.
+  `m2l_operator_block`, `build_m2l_operators`, the guard and
+  `M2L_KEY_OFFSET_MAX` are untouched. `build_m2l_operators` never read `dd`.
+- `expectKeyTraitsAgree` lost its unconditional `EXPECT_EQ( a.dd, ca.dd )`. It
+  now branches on `key_needs_dd` exactly as it does on `key_needs_level`, with a
+  third probe key that differs from the first in `dd` only. Its call site in
+  `testLevelReachesTheKey` now also covers `LaplaceKernel<double, 6>` and
+  `CartesianTaylorBasis<double, 3>`. The test file now includes
+  `Canopy_CartesianTaylorBasis.hpp`. The calls run before that test's np != 1
+  skip, so they gate at every np.
+- `testGradedDdDuplicates` reads each basis's trait. For a `false` basis it
+  asserts a cross-level count of 0 on every rank, for both draws. For a `true`
+  basis it keeps B0b's graded-greater-than-two-scale contract. `[b0b-cross]`
+  still prints for both bases, so CT's line now reads `two-scale 0 graded 0`.
+- Comments: CT's `m2l_key_dd_max`, `canonicalize_key`, `m2l_operator_block`
+  and `build_m2l_operators` blocks (including the `dd`-is-read-only-by-guards
+  paragraph), and the `max_d` abort message, no longer say the key is the
+  identity or that `dd` duplicates are expected. `LaplaceKernel`'s contract
+  header names four members. Two of these comments were rewrapped to 80
+  columns after the runs above. That was a comment-only edit, so no binary
+  changed and nothing was rebuilt.
+
+The `key_needs_dd` declaration has no reader in `src/`, unlike
+`key_needs_level`. Nothing in the sweep needs it: canonicalization alone does
+the work. The conformance test is the trait's only reader, and a basis that
+omits the trait fails to compile only once it is passed to
+`expectKeyTraitsAgree`.
+
+### `canonicalize_key` callers, by search
+
+`grep -rn "canonicalize_key\s*[<(]" src tests examples benchmarks`, excluding
+the definitions, finds:
+
+- `src/Canopy_DownwardSweep.hpp:1715`, the classify pass's single hash site;
+- `tests/tstFarFieldContract.hpp:932-934`, `expectKeyTraitsAgree`'s three probe
+  calls (two before B1).
+
+There are no others. The definitions are on `LaplaceKernel`,
+`CartesianTaylorBasis`, `MonopoleBasis` and `LevelBlindBasis`.
+
+### Measured
+
+Each `[b0b-dd]`, `[b0-dd]` and `[dd-hist]` line was compared by script with
+B0b's `f3ccGbJHwxPy`, keyed by tag, draw, angle, basis, np and rank. That is
+378 lines on SERIAL. The 180 HIP lines were compared against both
+`f3ccGbSC48UX` and `f3ccGbJHwxPy`. There were no mismatches and no missing
+lines:
+
+- **CT**: admitted, `demanded_ops` and admitted bytes equal B0b's
+  `distinct_no_dd` and distinct bytes, and the factor is 1.0000. Every
+  `[dd-hist]` line has `cross_level 0`, `outside 0` and all keys at `dd = 0`.
+- **Laplace**: every field of every line is identical to B0b, histograms
+  included. Its `[b0b-cross]` sums are identical too.
+- **B0's `[b0-dd]` lines** (two-scale, θ 0.3) are unchanged for both bases,
+  because CT's distinct count already equalled its admitted count there.
+- **Reproducibility (R6)**: both `DownwardSweep` passes in each `measure` job
+  print identical lines, and HIP equals SERIAL at np 1-4. The post-revert
+  `f3cheVoEuy9Z` equals `f3chRgEQqzd5` on all five count tags.
+
+CT's columns per `(nprocs, rank)`, B0b → B1. The two-scale θ 0.30 draw is
+unchanged on all 21 ranks (162 → 162 at np 1), and is omitted. Bytes are at
+3200 B per column. Laplace is unchanged everywhere, and its values are in
+`## B0b`.
+
+**two-scale, θ 0.50**
+
+| np | rank | CT adm B0b → B1 | CT bytes B0b → B1 | saved |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | 1 312 → 1 146 | 4 198 400 → 3 667 200 | 12.7 % |
+| 2 | 0 | 652 → 651 | 2 086 400 → 2 083 200 | 0.2 % |
+| 2 | 1 | 445 → 443 | 1 424 000 → 1 417 600 | 0.4 % |
+| 3 | 0 | 730 → 720 | 2 336 000 → 2 304 000 | 1.4 % |
+| 3 | 1 | 423 → 422 | 1 353 600 → 1 350 400 | 0.2 % |
+| 3 | 2 | 408 → 408 | 1 305 600 → 1 305 600 | 0 |
+| 4 | 0 | 232 → 232 | 742 400 → 742 400 | 0 |
+| 4 | 1 | 364 → 364 | 1 164 800 → 1 164 800 | 0 |
+| 4 | 2 | 331 → 331 | 1 059 200 → 1 059 200 | 0 |
+| 4 | 3 | 531 → 531 | 1 699 200 → 1 699 200 | 0 |
+| 5 | 0 | 439 → 430 | 1 404 800 → 1 376 000 | 2.1 % |
+| 5 | 1 | 261 → 256 | 835 200 → 819 200 | 1.9 % |
+| 5 | 2 | 233 → 219 | 745 600 → 700 800 | 6.0 % |
+| 5 | 3 | 365 → 345 | 1 168 000 → 1 104 000 | 5.5 % |
+| 5 | 4 | 486 → 483 | 1 555 200 → 1 545 600 | 0.6 % |
+| 6 | 0 | 297 → 296 | 950 400 → 947 200 | 0.3 % |
+| 6 | 1 | 401 → 399 | 1 283 200 → 1 276 800 | 0.5 % |
+| 6 | 2 | 269 → 269 | 860 800 → 860 800 | 0 |
+| 6 | 3 | 284 → 284 | 908 800 → 908 800 | 0 |
+| 6 | 4 | 373 → 371 | 1 193 600 → 1 187 200 | 0.5 % |
+| 6 | 5 | 513 → 511 | 1 641 600 → 1 635 200 | 0.4 % |
+
+**graded, θ 0.30**
+
+| np | rank | CT adm B0b → B1 | CT bytes B0b → B1 | saved |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | 4 162 → 4 068 | 13 318 400 → 13 017 600 | 2.3 % |
+| 2 | 0 | 1 461 → 1 441 | 4 675 200 → 4 611 200 | 1.4 % |
+| 2 | 1 | 2 005 → 1 978 | 6 416 000 → 6 329 600 | 1.3 % |
+| 3 | 0 | 1 143 → 1 140 | 3 657 600 → 3 648 000 | 0.3 % |
+| 3 | 1 | 1 266 → 1 260 | 4 051 200 → 4 032 000 | 0.5 % |
+| 3 | 2 | 1 025 → 1 022 | 3 280 000 → 3 270 400 | 0.3 % |
+| 4 | 0 | 1 355 → 1 344 | 4 336 000 → 4 300 800 | 0.8 % |
+| 4 | 1 | 1 110 → 1 083 | 3 552 000 → 3 465 600 | 2.4 % |
+| 4 | 2 | 997 → 986 | 3 190 400 → 3 155 200 | 1.1 % |
+| 4 | 3 | 1 140 → 1 123 | 3 648 000 → 3 593 600 | 1.5 % |
+| 5 | 0 | 1 318 → 1 267 | 4 217 600 → 4 054 400 | 3.9 % |
+| 5 | 1 | 1 044 → 1 040 | 3 340 800 → 3 328 000 | 0.4 % |
+| 5 | 2 | 774 → 774 | 2 476 800 → 2 476 800 | 0 |
+| 5 | 3 | 713 → 713 | 2 281 600 → 2 281 600 | 0 |
+| 5 | 4 | 728 → 727 | 2 329 600 → 2 326 400 | 0.1 % |
+| 6 | 0 | 522 → 522 | 1 670 400 → 1 670 400 | 0 |
+| 6 | 1 | 861 → 854 | 2 755 200 → 2 732 800 | 0.8 % |
+| 6 | 2 | 657 → 656 | 2 102 400 → 2 099 200 | 0.2 % |
+| 6 | 3 | 952 → 924 | 3 046 400 → 2 956 800 | 2.9 % |
+| 6 | 4 | 519 → 519 | 1 660 800 → 1 660 800 | 0 |
+| 6 | 5 | 609 → 603 | 1 948 800 → 1 929 600 | 1.0 % |
+
+**graded, θ 0.50**
+
+| np | rank | CT adm B0b → B1 | CT bytes B0b → B1 | saved |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | 26 702 → 20 286 | 85 446 400 → 64 915 200 | 24.0 % |
+| 2 | 0 | 14 072 → 11 556 | 45 030 400 → 36 979 200 | 17.9 % |
+| 2 | 1 | 13 343 → 10 900 | 42 697 600 → 34 880 000 | 18.3 % |
+| 3 | 0 | 10 220 → 9 132 | 32 704 000 → 29 222 400 | 10.6 % |
+| 3 | 1 | 9 450 → 8 296 | 30 240 000 → 26 547 200 | 12.2 % |
+| 3 | 2 | 9 898 → 8 476 | 31 673 600 → 27 123 200 | 14.4 % |
+| 4 | 0 | 8 491 → 7 596 | 27 171 200 → 24 307 200 | 10.5 % |
+| 4 | 1 | 8 619 → 7 607 | 27 580 800 → 24 342 400 | 11.7 % |
+| 4 | 2 | 8 036 → 7 006 | 25 715 200 → 22 419 200 | 12.8 % |
+| 4 | 3 | 8 220 → 7 371 | 26 304 000 → 23 587 200 | 10.3 % |
+| 5 | 0 | 7 260 → 6 498 | 23 232 000 → 20 793 600 | 10.5 % |
+| 5 | 1 | 7 072 → 6 320 | 22 630 400 → 20 224 000 | 10.6 % |
+| 5 | 2 | 6 879 → 6 057 | 22 012 800 → 19 382 400 | 11.9 % |
+| 5 | 3 | 6 528 → 5 813 | 20 889 600 → 18 601 600 | 11.0 % |
+| 5 | 4 | 7 108 → 6 073 | 22 745 600 → 19 433 600 | 14.6 % |
+| 6 | 0 | 5 079 → 4 588 | 16 252 800 → 14 681 600 | 9.7 % |
+| 6 | 1 | 5 058 → 4 642 | 16 185 600 → 14 854 400 | 8.2 % |
+| 6 | 2 | 4 931 → 4 421 | 15 779 200 → 14 147 200 | 10.3 % |
+| 6 | 3 | 4 561 → 4 103 | 14 595 200 → 13 129 600 | 10.0 % |
+| 6 | 4 | 4 846 → 4 397 | 15 507 200 → 14 070 400 | 9.3 % |
+| 6 | 5 | 4 870 → 4 462 | 15 584 000 → 14 278 400 | 8.4 % |
+
+**`CartesianTaylorSolve`'s own fixture** (`[ct-solve]`, SERIAL, against V1
+(close)'s `f3cbCkKDsirK`) drops much more than the two-scale fixture.
+`n_unique_ops` falls by 1.376-1.457x per rank at θ 0.3 (np 1: 26 468 → 18 588)
+and by 1.331-1.441x at θ 0.5 (np 1: 7756 → 5726). `fallback_pairs` is
+unchanged on every rank. HIP's `n_unique_ops` equals SERIAL's at np 1-4.
+
+**Accuracy did not move (R10).** On SERIAL, every `[ct-solve]` deviation line
+is bit-identical to `f3cbCkKDsirK`: both arms, every np. So are `MultiSolve`'s
+`[multisolve-dev]`, `[multisolve-probe]`, `[fusedm2l-dev]` and
+`[fusedm2l-idem]` lines. The columns are the same values, so only the table's
+size changed. HIP passed every case. It is not bit-reproducible run to run
+(README "Known Issues"), so its lines were not compared. Its worst CT figure is
+`theta_canopy` `max_grad_dev 1.865e-02` against `3.74e-02`.
+
+**Runtime.** No entry approached its budget. The slowest relative to budget was
+`CartesianTaylorSolve` np 1, at 19.98 s against 40 s. `FarFieldContract` took
+4.22-7.64 s and `DownwardSweep` 5.64-10.13 s, both within their existing rows.
+No row was re-calibrated.
+
+### Failure direction
+
+Each change was made to the source, the two SERIAL targets were rebuilt, and
+`contract serial` was run. In each run all 12 entries failed, six per stem.
+Only the cases named here failed, apart from the R3 run's two L2P cases.
+
+1. **Declared `true`, zeroes `dd`** (CT, `f3chWq7XkJbH`).
+   `FarFieldContract.levelReachesTheKey` failed at every np:
+   ```
+   tests/tstFarFieldContract.hpp:965: Failure
+   Expected equality of these values:
+     a.dd
+       Which is: -1
+   ...
+   CartesianTaylorBasis: key_needs_dd is true but canonicalize_key did not preserve dd
+   tests/tstFarFieldContract.hpp:969: Failure
+   Expected: (ca.dd) != (cc.dd), actual: 0 vs 0
+   CartesianTaylorBasis: key_needs_dd is true but canonicalize_key maps two different dd onto the same key, so two different operators would share one column
+   ```
+   `ddDuplicateColumnsGraded` also failed, because CT then took the `true`
+   branch: `Expected: (sum[1]) > (sum[0]), actual: 0 vs 0` for CT at both
+   angles.
+2. **Declared `false`, keeps `dd`** (CT, `f3chZbiYKp7h`, with `k.dd = 0`
+   commented out):
+   ```
+   tests/tstFarFieldContract.hpp:977: Failure
+   CartesianTaylorBasis: key_needs_dd is false but canonicalize_key lets two different dd through as distinct keys, so the operator table would hold one identical column per dd
+   ```
+   `ddDuplicateColumnsGraded` failed with `CartesianTaylor at theta <t>, draw
+   <d>: key_needs_dd is false, yet a realized key carries dd != 0, so
+   canonicalize_key did not reach the table`. That fired on 21 of 21 ranks for
+   graded at both angles and two-scale at θ 0.5, and on 12 of 21 for two-scale
+   at θ 0.3, the ranks whose B0b histogram has any `dd != 0` key.
+3. **`dd` collapse visible in the counts** (R3: `LaplaceKernel` also zeroes
+   `dd`, trait left `true`, `f3chc3fq5LqM`). Laplace's admitted count fell to
+   exactly B0b's Laplace *distinct* count on every line. It **dropped on all 21
+   ranks of both graded angles**: at np 1, 3480 → 3208 at θ 0.3 and
+   10 352 → 6790 at θ 0.5. It also dropped on 17 of 21 ranks of two-scale
+   θ 0.5, and stayed unchanged at two-scale θ 0.3. `expectKeyTraitsAgree`
+   failed naming `LaplaceKernel` with both `true`-branch messages, and the
+   contract failed `0 vs 0` for Laplace. The aliased operator also failed
+   `DownwardSweep.testL2PApproximatesDirectSumAdaptiveBasic` and `...Small` at
+   np 1. That is R3's "wrong velocity, not a slow one" presentation.
+
+Each change was reverted and both targets rebuilt. `f3cheVoEuy9Z` then passed
+with lines identical to `f3chRgEQqzd5`. The HIP binaries and the other SERIAL
+binaries were built before the failure-direction edits, from the final source.
+
+**Affects:**
+- **B2**: `CartesianTaylorBasis`'s canonical key is now
+  $(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$, with `dd` held
+  at 0. B2's relabelling rewrites `max_d` on that key. It no longer has to carry
+  or remap `dd`, and two cached columns cannot differ by `dd` alone. The CT
+  column counts B2 starts from are this section's, not B0b's *adm*. On
+  `CartesianTaylorSolve`'s drift trajectory, the per-build cache size that
+  `keys_built` is read against is about 1.4x smaller than in V1's logs.
+- **A2, A3**: CT's realized key count on any tree is now B0b's *dist* figure.
+  A before/after comparison of CT column counts must start from this section.
+- **R3**: the conformance check now runs the `false` branch on a real basis.
+  The failure direction shows that an aliased `dd` on Laplace is visible both
+  in the counts and in two L2P accuracy cases.

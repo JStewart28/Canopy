@@ -162,6 +162,7 @@
 
 #include "CanopyTest_MonopoleBasis.hpp"
 
+#include "Canopy_CartesianTaylorBasis.hpp"
 #include "Canopy_CommunicationPlan.hpp"
 #include "Canopy_DownwardSweep.hpp"
 #include "Canopy_Solver.hpp"
@@ -918,20 +919,22 @@ struct ProbeKey
     int kk;
 };
 
-// key_needs_level and canonicalize_key state the same fact twice, once for a
-// reader (and for T8's byte accounting) and once for the classify pass. T7
-// requires them to agree; assert it rather than trusting the declaration.
+// key_needs_level, key_needs_dd and canonicalize_key state the same facts
+// twice, once for a reader (and for T8's byte accounting) and once for the
+// classify pass. T7 and B1 require them to agree; assert it rather than
+// trusting the declarations.
 template <class B>
 void expectKeyTraitsAgree( const char* basis_name )
 {
     const ProbeKey a{ 3, -1, 2, -3, 4 };
     const ProbeKey b{ 5, -1, 2, -3, 4 };
+    const ProbeKey c{ 3, 2, 2, -3, 4 };
     const ProbeKey ca = B::template canonicalize_key<ProbeKey>( a );
     const ProbeKey cb = B::template canonicalize_key<ProbeKey>( b );
+    const ProbeKey cc = B::template canonicalize_key<ProbeKey>( c );
 
-    // The offset and depth-difference fields must survive canonicalization
-    // under either answer — they are what the operator builder is handed.
-    EXPECT_EQ( a.dd, ca.dd ) << basis_name << ": canonicalize_key altered dd";
+    // The offset must survive canonicalization under every answer — it is
+    // what the operator builder is handed.
     EXPECT_EQ( a.ii, ca.ii ) << basis_name << ": canonicalize_key altered ii";
     EXPECT_EQ( a.jj, ca.jj ) << basis_name << ": canonicalize_key altered jj";
     EXPECT_EQ( a.kk, ca.kk ) << basis_name << ": canonicalize_key altered kk";
@@ -956,6 +959,27 @@ void expectKeyTraitsAgree( const char* basis_name )
                "different levels through as distinct keys, so the operator "
                "table would hold one column per (level, offset)";
     }
+
+    if ( B::key_needs_dd )
+    {
+        EXPECT_EQ( a.dd, ca.dd )
+            << basis_name
+            << ": key_needs_dd is true but canonicalize_key did not "
+               "preserve dd";
+        EXPECT_NE( ca.dd, cc.dd )
+            << basis_name
+            << ": key_needs_dd is true but canonicalize_key maps two "
+               "different dd onto the same key, so two different operators "
+               "would share one column";
+    }
+    else
+    {
+        EXPECT_EQ( ca.dd, cc.dd )
+            << basis_name
+            << ": key_needs_dd is false but canonicalize_key lets two "
+               "different dd through as distinct keys, so the operator "
+               "table would hold one identical column per dd";
+    }
 }
 
 template <class TEST_MS, class TEST_ES>
@@ -969,6 +993,9 @@ void testLevelReachesTheKey( int num_particles_per_rank, int ncrit,
 
     expectKeyTraitsAgree<Basis>( "MonopoleBasis" );
     expectKeyTraitsAgree<LevelBlindBasis>( "LevelBlindBasis" );
+    expectKeyTraitsAgree<LaplaceKernel<double, 6>>( "LaplaceKernel" );
+    expectKeyTraitsAgree<CartesianTaylorBasis<double, 3>>(
+        "CartesianTaylorBasis" );
     EXPECT_TRUE( Basis::key_needs_level )
         << "MonopoleBasis must keep the level, or this test compares a basis "
            "against itself";

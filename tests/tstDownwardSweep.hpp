@@ -1918,10 +1918,12 @@ void testTwoScaleDdDuplicates()
 }
 
 // B0b of tasks/tree-opt.md: B0's count on the graded draw, beside T1's draw,
-// at the fixture's angle and the solver default. Its contract: the graded
-// tree admits more cross-level (dd != 0) keys, summed over ranks, than T1's
-// at the same rank count and angle -- otherwise it tests nothing B0 did not.
-// No threshold on the factor.
+// at the fixture's angle and the solver default. Its contract, on a basis
+// whose key keeps dd (key_needs_dd): the graded tree admits more cross-level
+// (dd != 0) keys, summed over ranks, than T1's at the same rank count and
+// angle -- otherwise it tests nothing B0 did not. On a basis that zeroes dd
+// (B1), the cross-level count must instead be 0 on every rank, which checks
+// that the trait reaches the table. No threshold on the factor.
 template <class TEST_MS, class TEST_ES>
 void testGradedDdDuplicates()
 {
@@ -1982,6 +1984,8 @@ void testGradedDdDuplicates()
         }
 
         const char* basis_name[2] = { "CartesianTaylor", "Laplace" };
+        const bool needs_dd[2] = { CTBasis::key_needs_dd,
+                                   Kernel::key_needs_dd };
         for ( int b = 0; b < 2; ++b )
         {
             long long sum[2] = {};
@@ -1994,6 +1998,17 @@ void testGradedDdDuplicates()
                              "two-scale %lld graded %lld\n",
                              theta, basis_name[b], nprocs, sum[0], sum[1] );
             std::fflush( stdout );
+            if ( !needs_dd[b] )
+            {
+                for ( int di = 0; di < 2; ++di )
+                    EXPECT_EQ( cross[di][b], 0 )
+                        << basis_name[b] << " at theta " << theta
+                        << ", draw " << ( di == 0 ? "two-scale" : "graded" )
+                        << ": key_needs_dd is false, yet a realized key "
+                           "carries dd != 0, so canonicalize_key did not "
+                           "reach the table";
+                continue;
+            }
             EXPECT_GT( sum[1], sum[0] )
                 << basis_name[b] << " at theta " << theta
                 << ": the graded draw admits no more cross-level (dd != 0) "
