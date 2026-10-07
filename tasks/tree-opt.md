@@ -96,7 +96,7 @@ chain-B regression of a few percent passes every existing check (**R9**,
 | | removes | tasks |
 | --- | --- | --- |
 | **A** | the refusals, by balancing the tree | A1, A2, A3 |
-| **B** | the duplicate and drifting columns, by fixing the key | B0, B1, B2 |
+| **B** | the duplicate and drifting columns, by fixing the key | B0, B0b, B1, B2 |
 | **C** | the unknowns about scale and about what the fallback costs | C1 |
 
 The instrumentation needed to measure all of this already exists and is listed
@@ -846,6 +846,83 @@ only the gated `demanded_ops` reads $-1$. See `tree-opt-progress-log.md`
 
 ---
 
+### B0b — The `dd`-duplicate factor on a tree dense in cross-level keys — **NOT STARTED**
+
+**Depends on:** B0 **DONE**.
+**Fill in:** `tests/tstDownwardSweep.hpp` — a second draw beside
+`generate_two_scale_particles` (`:1416`), a draw selector on `TwoScaleFixture`
+(`:1461-1550`), a per-`dd` histogram in `reportTwoScaleDdDuplicates`
+(`:1757-1784`), and a case beside `ddDuplicateColumns` (`:1822`).
+**Reference:** B0's case (`testTwoScaleDdDuplicates`, `:1787-1805`), which
+this task reuses unchanged in what it counts; the classify pass's offset
+computation (`src/Canopy_DownwardSweep.hpp:1671-1697`).
+
+B0 measured a factor of exactly 1.0 on T1's fixture, and part of that is
+structural: at `dd == 0` every offset component is even, and at `dd != 0`
+every component is odd (`src/Canopy_DownwardSweep.hpp:1671-1697`), so a
+same-level key never collides with a cross-level one. Only keys with
+**different non-zero** `dd` — including $+k$ against $-k$ — can collide. A
+duplicate factor above 1.0 therefore needs a tree that admits many keys at
+$|\texttt{dd}| \ge 1$, and T1's fixture was built for a step change in depth
+(most cross-level pairs exceed the range guard) rather than for that.
+
+**Do:**
+1. **Histogram the admitted keys by signed `dd`** in
+   `reportTwoScaleDdDuplicates`, on one extra line per basis per rank, and
+   report it for T1's fixture first. This is the number B0 did not record: how
+   many cross-level keys that fixture admitted at all.
+2. **Add a graded draw**: particles at a log-uniform radius
+   $r = r_{\min} (r_{\max}/r_{\min})^{u}$, $u \sim U(0,1)$, isotropic in
+   direction, about a centre inside the unit box. Density then falls as
+   $r^{-3}$, the leaf width needed to hold `ncrit` particles grows as $r$, and
+   the leaf depth drops by one level per octave of radius — every shell
+   boundary is a one-level step, which is the geometry that admits the most
+   $|\texttt{dd}| = 1$ pairs inside the range guard. Choose
+   $r_{\min}, r_{\max}$ so the tree spans at least five occupied depths at
+   `max_depth = 8`; record the values on their declarations, in domain units.
+3. **Select the draw with an enum**, not a bool: a `TwoScaleDraw` (or
+   similarly named) enumerator passed to `TwoScaleFixture`'s constructor,
+   defaulting to the existing two-scale draw so T1's and B0's cases are
+   unchanged. Enumerate the fixture's construction sites before changing the
+   constructor; they are all in this file.
+4. Run B0's count — admitted, distinct $(\texttt{max\_d}, \texttt{ii},
+   \texttt{jj}, \texttt{kk})$, factor, bytes, and the step-1 histogram — on the
+   graded draw for both bases, at `mac_theta` **0.3** (the downstream
+   configuration's value and the fixture's) and **0.5** (the solver default).
+   Admissibility moves which `|dd|` shells are populated, so one angle is not
+   the measurement.
+5. **Assert the graded tree's contract**, as T1 does for its own: the sum over
+   ranks of admitted keys with `dd != 0` is **greater than** the same sum on T1's
+   fixture at the same rank count and angle. A graded draw that admits no more
+   cross-level keys than T1's has not tested anything B0 did not. Keep
+   `distinct <= admitted` per rank. **Assert no threshold on the factor.**
+
+**Additional information needed:** whether the factor exceeds 1.0 anywhere.
+If it is 1.0 on the graded draw at both angles as well, B1 has no measured
+payoff on any tree in this suite. Record that in the log with the histograms
+that show why, and stop: whether B1 is still worth doing is then a change to
+this document, not a decision for the session that runs B0b.
+
+**Exit criterion:** stem `DownwardSweep` passes on SERIAL at ranks 1-6 and on
+HIP at ranks 1-4 —
+
+```bash
+make -j Canopy_Test_DownwardSweep_MPI_SERIAL Canopy_Test_DownwardSweep_MPI_HIP
+ctest --output-on-failure -R '^Canopy_Test_DownwardSweep_MPI_SERIAL_np_[1-6]$'
+ctest --output-on-failure -R '^Canopy_Test_DownwardSweep_MPI_HIP_np_[1-4]$'
+```
+
+— T1's and B0's lines unchanged against `## B0`'s table, and the log records,
+per `(nprocs, rank)`, basis and angle, the admitted and distinct counts, the
+factor, the bytes and the signed-`dd` histogram, for both draws, from two runs
+per backend. The stem's rows in `scripts/tuolumne/serial_runtimes.tsv` are
+re-calibrated for the added cases. Failure direction: the graded case's
+contract assertion fails when the case is temporarily pointed at the
+two-scale draw — the cross-level sum is then equal, not greater — demonstrated
+once and reverted, with the failure message recorded.
+
+---
+
 ### A1 — Measure the depth imbalance and the cost of removing it — **NOT STARTED**
 
 **Depends on:** T1 **DONE**.
@@ -960,7 +1037,7 @@ a test rather than by a comment.
 
 ### B1 — `key_needs_dd`, and a `CartesianTaylorBasis` key without `dd` — **NOT STARTED**
 
-**Depends on:** B0 **DONE**, V1 **DONE**.
+**Depends on:** B0b **DONE**, V1 **DONE**.
 **Fill in:** `src/Canopy_CartesianTaylorBasis.hpp` (the new trait,
 `canonicalize_key`); `src/Canopy_LaplaceKernel.hpp` (the new trait);
 `tests/CanopyTest_MonopoleBasis.hpp` (the new trait, both bases it declares —
@@ -991,8 +1068,8 @@ assertions (`tests/tstFarFieldContract.hpp:934-937`).
    ca.dd)` must go** — it currently forbids what this task does.
 5. Leave `m2l_key_dd_max` and the sweep's `dd` range guard in place and
    unchanged. `LaplaceKernel` still needs both.
-6. Re-run B0's duplicate count and confirm the admitted column count fell by the
-   factor B0 predicted.
+6. Re-run B0b's duplicate count and confirm the admitted column count fell by
+   the factor B0b measured on the graded draw.
 
 **Exit criterion:** six stems, and **`CartesianTaylorSolve` is the authority
 here while `MultiSolve` is not** — the `MultiSolve` stem instantiates
@@ -1013,12 +1090,13 @@ ctest --output-on-failure -R '^Canopy_Test_(CartesianTaylorSolve|FarFieldContrac
 ctest --output-on-failure -R '^Canopy_Test_CartesianTaylor_(SERIAL|HIP)$'
 ```
 
-All pass on SERIAL at ranks 1-6 and on HIP at ranks 1-4, and B0's case reports
-a duplicate factor of exactly **1.0** for
+All pass on SERIAL at ranks 1-6 and on HIP at ranks 1-4, and B0b's graded case
+reports a duplicate factor of exactly **1.0** for
 `CartesianTaylorBasis` — every admitted key now has a distinct
 $(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$ — with its absolute
-column count reduced by B0's measured factor and `LaplaceKernel`'s count
-**unchanged**. Failure direction: a basis declaring `key_needs_dd = true` whose
+column count reduced by B0b's measured factor and `LaplaceKernel`'s count
+**unchanged**, at both angles. B0's two-scale case already reads 1.0 for both
+bases and must not move. Failure direction: a basis declaring `key_needs_dd = true` whose
 `canonicalize_key` zeroes `dd`, and the converse, both fail
 `expectKeyTraitsAgree` with a message naming the basis; verify by temporarily
 mis-declaring one and seeing the named failure, then reverting.
