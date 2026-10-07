@@ -51,8 +51,8 @@ Three consequences:
 
 The end state is that all three are bounded independently of tree depth: the
 range guard stops firing because no pair has a large depth difference
-(**chain A**), the table stops holding duplicate columns and stops being keyed
-on a quantity that drifts (**chain B**), and the depth a large problem actually
+(**chain A**), the table stops holding duplicate columns and stops being rebuilt
+whenever the bounding box drifts (**chain B**), and the depth a large problem actually
 needs is measured rather than assumed (**chain C**).
 
 ### What this is not
@@ -97,7 +97,7 @@ chain-B regression of a few percent passes every existing check (**R9**,
 | | removes | tasks |
 | --- | --- | --- |
 | **A** | the refusals, by balancing the tree | A1, A2, A3 |
-| **B** | the duplicate and drifting columns, by fixing the key | B0, B0b, B1, B2 |
+| **B** | the duplicate columns, by fixing the key; the drifting ones, by quantizing the root width | B0, B0b, B1, B2 |
 | **C** | the unknowns about scale and about what the fallback costs | C1 |
 
 The instrumentation needed to measure all of this already exists and is listed
@@ -155,8 +155,9 @@ the dimensionless $b/W^{2}$, which differs at every level. Two pairs with the
 same integer offset at different depths therefore have genuinely different
 operators, and `max_d` must stay in the key. Chain B pursues the two aims a
 level-blind key would have served by other means that are exact: B1 removes
-`dd`, which the operator provably does not depend on, and B2 replaces the
-drifting level index with a stable one.
+`dd`, which the operator provably does not depend on, and B2 quantizes the
+root half-width to a power of two, so the per-depth widths `max_d` indexes stay
+fixed while the box drifts within an octave and the cache survives the rebuild.
 
 ### Conventions
 
@@ -167,6 +168,8 @@ drifting level index with a stable one.
 | Trait/`canonicalize_key` agreement | asserted, never trusted | `expectKeyTraitsAgree` (`tests/tstFarFieldContract.hpp:927-983`) enforces this for `key_needs_level` and, since B1, for `key_needs_dd`, in the same function. |
 | Balancing knob name | `FmmConfig::tree_balance_max_level_delta` | `FmmConfig` is where every other tree and table knob lives (`src/Canopy_Solver.hpp`), and the name states the invariant as a number rather than as a mode, so "2:1" is the value 1 and "off" is a large value rather than a second boolean. |
 | Balancing knob default | the off value, until A3 | A2 must not move any existing result. A knob whose default is the current behavior is a change with no runtime surface until something sets it, which is what makes A2's exit criterion checkable against the existing stems, unmodified. |
+| Root-width quantization knob | `FmmConfig::quantize_root_half_width`, `bool`, default `false` | Quantizing moves the cell set for every basis, so it has no runtime surface until something sets it — the same reason the balancing knob defaults off. A `bool` because it is a mode with no magnitude. |
+| Root half-width source | `TreeBuilder::root_half_width()`, the value `build()` stamped on the root cell | `_root_box` is the expanded, non-cubic bounding box and stays so: `needs_rebuild` (`src/Canopy_TreeBuilder.hpp:860-890`) and the auto-softening volume (`src/Canopy_Solver.hpp:797-815`) read it as a box. Every reader that needs the root cell's half-width reads the accessor, never a re-derivation from `root_box()`, so the sweep is told exactly the width the tree was built at. |
 | Root-width quantization | `std::ldexp`/`std::frexp`, never `pow(2, round(log2(w)))` | Exact in binary floating point. A rounded `pow` reintroduces the drift the quantization exists to remove, and would do it only on some inputs. |
 | Where a refused pair goes | unchanged — `m2l_overflow_policy` | `CartesianTaylorBasis` selects `PerPairTranslate` (`src/Canopy_CartesianTaylorBasis.hpp:516`) and that stays. Nothing here changes what happens to a refused pair, only how many pairs are refused. |
 | New test tier | `unit`, always | Every task here adds a component-level claim, and none of them relabels an existing test. `regression` has one member, `MultiSolve` (`tests/CMakeLists.txt:61-63`). Each task's exit criterion names the stems it must pass, so the label does not decide what a task is held to. |
@@ -201,8 +204,9 @@ instead of 300 s (`fix-hang-rebalance.md` H0b and Conventions, "Time
 budget"). The code blocks below show the bare `ctest`. A task that adds a case
 to a stem, or changes its runtime, re-calibrates that stem's rows in
 `scripts/tuolumne/serial_runtimes.tsv` in the same change. That includes a
-knob turned on in an exit criterion (A2, B2), which runs under its own budget
-config. So a task that names
+knob turned on in A2's exit criterion, which runs under its own budget
+config. B2's knob is set by the cases that need it, so B2 re-calibrates only
+the `default` rows of the stems it adds cases to. So a task that names
 stems `DownwardSweep` and `MultiSolve` is run by building exactly four targets
 and matching exactly twenty ctest entries:
 
@@ -261,12 +265,18 @@ the `MultiSolve` stem carries both `MultiSolve.*` and `SolveFusedM2L.*`
   (`src/Canopy_LaplaceKernel.hpp:689-702`). The guard is therefore still needed
   and still basis-driven; what changes is only that one basis can now set the
   bound by precision alone rather than inheriting a key-space limit.
-- **B2 quantizes the root half-width rather than making the cache key physical.**
+- **B2 quantizes the root half-width and keeps `max_d` as the cache key.**
   Keying the cache on the floating-point width would make cache identity depend
   on bit-exact equality of a derived quantity, which is the kind of thing that
-  works until a reduction order changes. Quantizing the root width to a power of
-  two makes the *set* of per-depth widths recur exactly across rebuilds, so an
-  integer exponent is a faithful key.
+  works until a reduction order changes. Quantized to a power of two, the root
+  half-width is bit-identical across every rebuild whose box stays inside one
+  octave, so `set_root_half_width` sees an unchanged value, does nothing, and
+  the cache survives with its keys untouched. A box that crosses an octave
+  changes the value and clears the cache exactly as an unquantized change does
+  today. Shifting cached keys' `max_d` by the exponent change instead of
+  clearing would keep the cache across octaves too; it is recorded in
+  `README.md` "Future Optimizations" and not done here, because every column it
+  reuses is a column a wrong shift would corrupt (**R4**).
 - **The three mechanism chains are independent and may land in any order.**
   They share T1's fixture and V1's sharpened bounds, and nothing else — no task
   in one chain depends on a task in another, except that A3 waits on C1 for the
@@ -292,7 +302,7 @@ for every one of these:
 | `m2l_n_demanded_ops()` | `:1055` | distinct canonical keys the merge saw, admitted or not |
 | `m2l_realized_keys()` | `:1060-1063` | the admitted key list itself, by const reference |
 | `m2l_cells_at_depth()` | `:1151-1158` | occupied cell count per depth, **ungated**, by value |
-| `m2l_op_keys_built_count()` | `:435` | cumulative columns ever built; its per-build increment is the cache-retention measure |
+| `m2l_op_keys_built_count()` | `:479` | cumulative columns ever built; its per-build increment is the cache-retention measure |
 | `m2l_effective_op_cap()` | `:368-374` | the column cap in force |
 
 So no new accessor is needed to measure refusals, key duplication, cache
@@ -348,7 +358,8 @@ Also true now:
   `LaplaceKernel` and `CartesianTaylorBasis` (`:994-998`).
 - **`set_root_half_width` clears the whole operator cache** when
   `key_needs_level` is true, and deliberately does not when it is false
-  (`src/Canopy_DownwardSweep.hpp:435-460`). The root half-width is the largest
+  (`src/Canopy_DownwardSweep.hpp:450-460`, rationale block from `:414`), and
+  is a no-op when handed the value it already holds. The root half-width is the largest
   half-extent of the global particle bounding box
   (`src/Canopy_TreeBuilder.hpp:608-635`) and is not quantized.
 - **There is no `FmmConfig` knob for tree balance.**
@@ -427,7 +438,7 @@ refusal.
 - **The upward sweep's coefficient formation.**
   `src/Canopy_UpwardSweep.hpp` was read only far enough to confirm where
   `build_aux_tables` is called. No task here changes coefficient scaling, so it
-  is not on any path; B2 changes only how a key names a width, not what any
+  is not on any path; B2 changes only the root cell's width, not what any
   coefficient means.
 - **`m2l_translate`'s performance.** The fallback's per-pair cost relative to
   the GEMM path is not measured anywhere, so "1.58 % of pairs" is a pair count
@@ -1306,58 +1317,95 @@ bounds are pinned constants loose enough to absorb a real degradation silently
 
 ---
 
-### B2 — Key the table on a stable width exponent — **NOT STARTED**
+### B2 — Quantize the root half-width so the operator cache survives a drifting box — **NOT STARTED**
 
 **Depends on:** B1 **DONE**, V1 **DONE**.
-**Fill in:** `src/Canopy_TreeBuilder.hpp` (the root-width quantization);
-`src/Canopy_Solver.hpp` (the knob, see step 1);
-`src/Canopy_DownwardSweep.hpp` (`set_root_half_width`'s invalidation);
-`tests/tstDownwardSweep.hpp` and `tests/tstCartesianTaylorSolve.hpp` (the
-cases).
-**Reference:** the cache-invalidation rule and the reasoning already recorded on
-it (`src/Canopy_DownwardSweep.hpp:435-460`); the root half-width's derivation
-from the particle bounding box (`src/Canopy_TreeBuilder.hpp:608-635`); the
+**Fill in:** `src/Canopy_TreeBuilder.hpp` (the quantization in `build()`, a
+stored root half-width and its `root_half_width()` accessor, and the knob's
+route in); `src/Canopy_Solver.hpp` (`FmmConfig::quantize_root_half_width`, its
+route to the builder, and `_push_root_half_width`); `tests/tstDownwardSweep.hpp`
+(`TwoScaleFixture`'s root half-width, `:1617-1621`, and the retention case);
+`tests/tstCartesianTaylorSolve.hpp` (the `[ct-cache]` and `[ct-solve]` prints'
+root half-width, `:559-563` and `:642-646`, and the drift cases);
+`tests/tstTreeBuilder.hpp` (the quantization arithmetic case); `README.md`
+(the knob, and the "Future Optimizations" entry of step 7).
+**Reference:** the cache-invalidation rule and the reasoning recorded on it
+(`src/Canopy_DownwardSweep.hpp:450-460`, rationale block from `:414`); the root
+half-width's derivation from the expanded bounding box
+(`src/Canopy_TreeBuilder.hpp:606-635`); its re-derivation in
+`Solver::_push_root_half_width` (`src/Canopy_Solver.hpp:780-791`); the
 per-level `unit_w` array the operator builder indexes by `max_d`
-(`src/Canopy_CartesianTaylorBasis.hpp:1179-1222`).
+(`src/Canopy_CartesianTaylorBasis.hpp:1187-1231`).
 **Do:**
-1. **Put the quantization behind a knob, default off**, exactly as A2 does for
-   balancing, and for the same reason: the root half-width is the tree's own
-   geometry, so snapping it moves the cell set **for every basis**, not only
-   for the one whose key this chain is about. Left unconditional, this task
-   would silently shift every existing result — the bit-for-bit hashes, both
-   direct-sum arms and `MultiSolve`'s trajectory alike — and the exit criterion
-   below could not distinguish that from a relabelling bug. Name it beside
-   A2's knob in `FmmConfig`.
-2. Quantize the root half-width: round it **up** to the next power of two with
-   `std::frexp`/`std::ldexp`. Up, never down — down would shrink the root box
-   and can place a particle outside it, which is the escape condition that
-   forces a full rebuild. Document on the declaration that the box is
-   deliberately up to 2x larger than the particle extent, and what that costs:
-   one extra potentially-empty level at the top of the tree.
-3. With the widths quantized, the set of per-depth half-widths recurs exactly
-   across rebuilds. Change `set_root_half_width`'s invalidation from "clear the
-   whole cache when `key_needs_level`" to **relabelling**: a column cached for
-   depth $d$ at half-width $W$ is reusable at the depth that now carries $W$.
-   Prefer clearing to a wrong reuse — if the exponents cannot be matched
-   exactly, clear, and say so in the log.
-4. Assert the retention directly: drive two builds whose root box differs by a
-   factor inside one power of two, and assert the per-build increment of
-   `m2l_op_keys_built_count()` is **0** on the second — the cache was reused —
-   where today it equals `m2l_n_unique_ops()`.
-5. Assert the arithmetic is exact: a quantized width round-tripped through
-   `frexp`/`ldexp` is bit-identical, and the quantized width is never smaller
-   than the input.
-6. **Add a direct-sum deviation assertion to the drift trajectory.** The two
-   `operatorCacheAcrossDrift*` cases assert no accuracy today
+1. **Put the quantization behind `FmmConfig::quantize_root_half_width`,
+   default `false`.** The root half-width is the tree's own geometry, so
+   snapping it moves the cell set **for every basis**, not only for the one
+   this chain is about. Left unconditional, this task would silently shift
+   every existing result — the bit-for-bit hashes, both direct-sum arms and
+   `MultiSolve`'s trajectory alike.
+2. **Give the root half-width one source.** Today `build()` computes it as a
+   local from the expanded `_root_box` (`src/Canopy_TreeBuilder.hpp:630-635`),
+   and four readers re-derive it from `root_box()` the same way:
+   `Solver::_push_root_half_width` (`src/Canopy_Solver.hpp:780-791`),
+   `TwoScaleFixture` (`tests/tstDownwardSweep.hpp:1617-1621`) and the two
+   `CartesianTaylorSolve` prints (`tests/tstCartesianTaylorSolve.hpp:559-563`,
+   `:642-646`). Store the value `build()` stamps on the root cell and expose it
+   as `TreeBuilder::root_half_width()`; switch all four readers to it. Leave
+   `_root_box` the expanded bounding box: `needs_rebuild`
+   (`src/Canopy_TreeBuilder.hpp:860-890`) and `_init_auto_softening`
+   (`src/Canopy_Solver.hpp:797-815`) read it as a box and must not change.
+   Search for other readers of `root_box()` rather than trusting this list.
+   With the knob off the stored value equals today's local bit for bit, so
+   this step moves nothing on its own.
+3. **Quantize the root half-width**: round it **up** to the next power of two
+   with `std::frexp`/`std::ldexp`, after the tolerance expansion. Up, never
+   down — down would shrink the root cell below the particle extent. The root
+   cell keeps its centre. Document on the declaration that the root cell is
+   deliberately up to 2x wider than the expanded box, and what that costs: one
+   extra potentially-empty level at the top of the tree (**R5**).
+4. **Leave `set_root_half_width`'s invalidation unchanged.** It already returns
+   without clearing when handed the value it holds
+   (`src/Canopy_DownwardSweep.hpp:452-453`), so with quantization a rebuild
+   whose box stays inside one octave keeps the whole cache, and one that
+   crosses an octave clears it exactly as today.
+5. **Assert the retention directly**: on one downward sweep, as `Solver`
+   reuses its own across rebuilds, drive two builds of the **same particles**
+   whose expanded box differs only through a larger symmetric `bb_tolerance_factor`
+   (`TreeBuilder`'s constructor, `src/Canopy_TreeBuilder.hpp:165`; the
+   expansion at `:610-622` keeps the centre), chosen so the expanded half-width
+   stays inside one octave. Knob on, the quantized root half-width and so the
+   tree and its key set are identical, and the per-build increment of
+   `m2l_op_keys_built_count()` must be **0** on the second build while
+   `m2l_n_unique_ops()` is unchanged. Knob off, the same pair changes the width
+   the sweep is told, and the increment must equal `m2l_n_unique_ops()` —
+   today's behavior. Change only the box factor, not `ncrit_tolerance_factor`.
+6. **Assert the arithmetic is exact**: on a sweep of inputs, the quantized
+   width is a power of two, is $\ge$ the input, is $< 2\times$ the input, and
+   is returned unchanged when the input is already a power of two.
+7. **Record cross-octave reuse in `README.md` "Future Optimizations"**:
+   shifting every cached key's `max_d` by the change in the quantized exponent
+   would keep the cache across an octave crossing as well, since the column for
+   depth $d$ at width $W$ is the column for whichever depth now carries $W$. It
+   is not done here, because a wrong shift reuses a column at the wrong width
+   (**R4**).
+8. **Give the drift trajectory an accuracy check, in both knob states.** The
+   two `operatorCacheAcrossDrift*` cases assert no accuracy today
    (`tests/tstCartesianTaylorSolve.hpp:1041-1061`), and they run the trajectory
-   on which this task's relabelling operates — so a column reused at the wrong
+   on which the cache now survives rebuilds — so a column used at the wrong
    width would change only the `keys_built` figure those cases print and would
-   corrupt the field silently (**R4**, **R9**). Give them the same
-   direct-softened-sum comparison the gating arms use, at a tolerance **measured
-   on that trajectory** rather than inherited from the gating arms, whose
-   constants were not measured there.
+   corrupt the field silently (**R4**, **R9**). Parameterize the drift harness
+   on the knob: the existing two cases stay knob-off, and two new cases,
+   `operatorCacheAcrossDriftQuantizedThetaCanopy` and `...ThetaRef`, run it
+   knob-on. Give all four the same direct-softened-sum comparison the gating
+   arms use, each at a tolerance **measured on its own trajectory** rather than
+   inherited from the gating arms, whose constants were not measured there.
+   The knob-on pair also prints its per-build `keys_built` increment, which
+   must read 0 on every step whose quantized root half-width did not change.
+9. Re-calibrate the `default` rows of `scripts/tuolumne/serial_runtimes.tsv`
+   for `TreeBuilder`, `DownwardSweep` and `CartesianTaylorSolve`, the stems
+   this task adds cases to.
 
-**Exit criterion:** five stems, in two states as A2 has.
+**Exit criterion:** five stems.
 
 ```bash
 make -j Canopy_Test_TreeBuilder_MPI_SERIAL Canopy_Test_DownwardSweep_MPI_SERIAL \
@@ -1370,18 +1418,22 @@ ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|DownwardSweep|CartesianT
 ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|DownwardSweep|CartesianTaylorSolve|LaplaceSolve|MultiSolve)_MPI_HIP_np_[1-4]$'
 ```
 
-*Knob off*: all five pass unchanged, `LaplaceSolve`'s bit-for-bit hashes
-included — the task has no runtime surface until something sets the knob.
-*Knob on*: all five pass, the drift cases now carry a direct-sum deviation
-bound, and a new case shows the second of two builds across a sub-octave box
-change rebuilding **0** columns while realizing the same count.
+All five pass on SERIAL at ranks 1-6 and on HIP at ranks 1-4. The knob is set
+only by the cases that need it, so every pre-existing case runs knob-off and
+is unchanged: `LaplaceSolve`'s bit-for-bit hashes pass untouched, and on SERIAL
+every `[ct-solve]`, `[multisolve-dev]`, `[multisolve-probe]` and
+`[fusedm2l-*]` line is bit-identical to `tree-opt-progress-log.md` `## B1`'s
+`f3chRgEQqzd5`. The retention case reads an increment of **0** knob-on and
+`m2l_n_unique_ops()` knob-off; all four drift cases pass their measured
+direct-sum bound; and the knob-on drift pair's `keys_built` increments are
+recorded in the log beside the knob-off pair's.
 
-Failure direction: a box
-change spanning more than one power of two clears the cache rather than reusing
-it wrongly, asserted by the increment equalling `m2l_n_unique_ops()` in that
-case; and the quantized root half-width is asserted to be $\ge$ the unquantized
-one on a sweep of inputs, so a rounding that shrank the box fails here rather
-than as a particle escape later.
+Failure direction: a box change crossing an octave clears the cache rather
+than reusing it, asserted by the increment equalling `m2l_n_unique_ops()` in
+that case, knob on. Temporarily make `_push_root_half_width` re-derive the
+width from `root_box()` again, so the sweep is told the unquantized width while
+the tree is built at the quantized one, and confirm a knob-on drift case fails
+its direct-sum bound; revert, and record the failure message.
 
 ## Known risks
 
@@ -1414,21 +1466,28 @@ measurement: `expectKeyTraitsAgree`'s branch on the trait, which B1 makes
 symmetric, plus B0's per-basis duplicate counts — `LaplaceKernel`'s column count
 must be **unchanged** by B1, and a drop in it is this risk firing.
 
-**R4 — B2's relabelling reuses a column built at a different physical width.**
-Arithmetically identical to R3 and presents identically: a cached column used
-for a key whose width is not the one it was built at. Distinguishing measurement:
-B2 step 4 asserts a rebuild count of 0 on a reuse that *should* happen, and its
-failure direction asserts a full rebuild on a box change that spans more than one
-octave. The two together pin both directions; either alone would be satisfied by
-a cache that always reuses or always clears.
+**R4 — The sweep is told a width other than the one the tree was built at.**
+`build_m2l_operators` builds every column from `unit_w[max_d]`, which comes from
+the root half-width `set_root_half_width` is handed, while the cells come from
+the half-width `TreeBuilder::build` stamped. If the two differ — a reader that
+re-derives the width from the expanded `root_box()` after B2 quantizes it, or a
+cached column kept across a width change — every column is built or reused at
+the wrong scale. Arithmetically identical to R3 and presents identically: a
+plausible field that is wrong, with no diagnostic pointing at the table.
+Distinguishing measurement: B2 step 2 gives the width one source, its failure
+direction shows a re-derived width failing the knob-on drift cases' direct-sum
+bound, and its retention case pins both cache directions — 0 rebuilt on a reuse
+that *should* happen, a full rebuild across an octave. Either cache assertion
+alone would be satisfied by a cache that always reuses or always clears.
 
 **R5 — The power-of-two root snap enlarges the box enough to matter.** Rounding
 up can double the root half-width, which adds a level at the top of the tree and
 shifts every per-depth width. Presentation: `occupied_depths` rising by one and
 every realized key changing, so the whole table turns over once on the change —
-which looks exactly like R4 in the logs. Distinguishing measurement: the
-realized key *count* should be stable across the change while the key *values*
-shift by one level; a change in the count is a tree change, not a relabelling.
+which in the logs looks like a cache that stopped retaining. Distinguishing
+measurement: the realized key *count* should be stable across the change while
+the key *values* shift by one level; a change in the count is a tree change,
+not a cache defect.
 
 **R6 — The fixture is not reproducible, so a single draw is not the number.**
 The tree and partition path is **run-to-run nondeterministic at np $\ge$ 3**:
@@ -1472,9 +1531,9 @@ assert only that the far field was live and that an operator was built
 longer trajectory than the gating arms so the bounding box drifts — which is
 exactly the condition B2 changes the handling of. Presentation: B2 lands, the
 `keys_built` figure improves, every test passes, and the field is wrong wherever
-a relabelled column was reused. Nothing in the suite would say so.
-Distinguishing measurement: B2 step 6 gives those two cases a direct-sum
-deviation bound measured on that trajectory. **Until that exists, a `keys_built`
+a column was used at the wrong width. Nothing in the suite would say so.
+Distinguishing measurement: B2 step 8 gives those cases, and their knob-on
+pair, a direct-sum deviation bound measured on that trajectory. **Until that exists, a `keys_built`
 improvement from B2 is not evidence of correctness**, and the gating arms do not
 cover it — they run a shorter trajectory on which the box barely drifts.
 
