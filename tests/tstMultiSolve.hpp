@@ -1510,9 +1510,12 @@ TEST( SolveFusedM2L, sweepConvergence )
 
 //---------------------------------------------------------------------------//
 // SolveFusedM2L.multipleSolvesIdempotent: three back-to-back solves on
-// the same particle state must produce bit-identical outputs. Confirms
-// the fused kernel does not leave residual state in _locals between
-// solves and that execute()'s zero-init still works correctly.
+// the same particle state must agree. Confirms the fused kernel does not
+// leave residual state in _locals between solves and that execute()'s
+// zero-init still works correctly -- a defect of that kind shows up as an
+// O(1) change. Agreement is to a tolerance, not bit-identity: a device
+// backend accumulates in a run-dependent order, so on HIP the solves differ
+// in round-off (README "Known Issues", HIP bit-reproducibility).
 //---------------------------------------------------------------------------//
 TEST( SolveFusedM2L, multipleSolvesIdempotent )
 {
@@ -1587,16 +1590,53 @@ TEST( SolveFusedM2L, multipleSolvesIdempotent )
 
     ASSERT_EQ( pot1.size(), pot2.size() );
     ASSERT_EQ( pot1.size(), pot3.size() );
-    for ( size_t i = 0; i < pot1.size(); i++ )
+
+    // Field-scale drift of solves 2 and 3 against solve 1, the field_scales
+    // rule of tstLaplaceSolve.hpp: max_i |x_k - x_1| / max_i |x_1| over all
+    // ranks, dimensionless, with |.| the magnitude of the potential or of
+    // the gradient vector.
+    auto drift = [&]( const std::vector<double>& a,
+                      const std::vector<double>& b, int dim ) {
+        double num = 0.0, scale = 0.0;
+        for ( size_t i = 0; i < a.size() / dim; i++ )
+        {
+            double d2 = 0.0, m2 = 0.0;
+            for ( int c = 0; c < dim; c++ )
+            {
+                const double d = b[dim * i + c] - a[dim * i + c];
+                d2 += d * d;
+                m2 += a[dim * i + c] * a[dim * i + c];
+            }
+            num = std::max( num, std::sqrt( d2 ) );
+            scale = std::max( scale, std::sqrt( m2 ) );
+        }
+        double g[2] = { num, scale }, gmax[2];
+        MPI_Allreduce( g, gmax, 2, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD );
+        return ( gmax[1] > 0.0 ) ? gmax[0] / gmax[1] : gmax[0];
+    };
+    const double pot_drift =
+        std::max( drift( pot1, pot2, 1 ), drift( pot1, pot3, 1 ) );
+    const double grad_drift =
+        std::max( drift( grad1, grad2, 3 ), drift( grad1, grad3, 3 ) );
+
+    int nprocs;
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+    if ( rank == 0 )
     {
-        EXPECT_EQ( pot1[i], pot2[i] ) << "potential drift at i=" << i;
-        EXPECT_EQ( pot1[i], pot3[i] ) << "potential drift at i=" << i;
+        std::printf( "[fusedm2l-idem] nprocs %d pot_drift %.17g "
+                     "grad_drift %.17g\n",
+                     nprocs, pot_drift, grad_drift );
+        std::fflush( stdout );
     }
-    for ( size_t i = 0; i < grad1.size(); i++ )
-    {
-        EXPECT_EQ( grad1[i], grad2[i] ) << "gradient drift at i=" << i;
-        EXPECT_EQ( grad1[i], grad3[i] ) << "gradient drift at i=" << i;
-    }
+
+    // Round-off budget. Measured (tree-opt V1, flux jobs f3cb6Hpf9s35 and
+    // f3cb6HwmJRNw, three passes each): SERIAL drift is exactly 0 at np 1-6;
+    // HIP pot_drift <= 1.9e-16 and grad_drift 6.4e-14 to 5.4e-13 at np 1-4,
+    // moving up to 2.8x between passes. 1e-11 is ~20x the worst; the defect
+    // the test exists for is O(1).
+    static constexpr double IDEM_TOL = 1.0e-11;
+    EXPECT_LT( pot_drift, IDEM_TOL ) << "potential changed between solves";
+    EXPECT_LT( grad_drift, IDEM_TOL ) << "gradient changed between solves";
 }
 
 //---------------------------------------------------------------------------//

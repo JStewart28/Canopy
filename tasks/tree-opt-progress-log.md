@@ -865,3 +865,46 @@ citation and its cross-reference fixed, the idempotence entry updated.
   2x its worst; a balanced tree that moves it by more than that fails.
 - **Any task that adds work to `MultiSolve`** — re-calibrate its `default`,
   `probe` and `theta0.7` rows.
+
+## V1 (close)
+
+**`SolveFusedM2L.multipleSolvesIdempotent` now asserts agreement to a
+tolerance, not bit-identity**, which closes V1's HIP arm. V1 is **DONE**.
+
+**Decision.** The case exists to catch residual state in `_locals` between
+solves or a broken zero-init in `execute()`. Either presents as an O(1)
+change, so agreement to a round-off tolerance keeps the test's purpose. Bit
+identity is not a property the HIP backend has: its device reductions
+accumulate in a run-dependent order (README "Known Issues", HIP
+bit-reproducibility). The comparison is field-scale, the `field_scales` rule
+of `tstLaplaceSolve.hpp`: `max_i |x_k - x_1| / max_i |x_1|` over all ranks,
+for the potential and for the gradient vector, solves 2 and 3 against solve 1.
+Rank 0 prints `[fusedm2l-idem] nprocs N pot_drift X grad_drift Y` on every run.
+
+**Measured** (provisional tolerance `1e-10`; flux jobs `f3cb6Hpf9s35` SERIAL,
+`f3cb6HwmJRNw` HIP; three passes each):
+
+| backend | np | pot_drift | grad_drift |
+| --- | --- | --- | --- |
+| SERIAL | 1-6 | 0 | 0 |
+| HIP | 1 | 5.0e-17 | 6.8e-14 – 1.67e-13 |
+| HIP | 2 | 9.3e-17 – 1.86e-16 | 1.90e-13 – 3.80e-13 |
+| HIP | 3 | 7.0e-17 – 1.39e-16 | 3.82e-13 – 5.41e-13 |
+| HIP | 4 | 5.2e-17 – 7.9e-17 | 6.4e-14 – 9.1e-14 |
+
+**`IDEM_TOL = 1e-11`**, about 20x the worst gradient drift. It is set as a
+round-off budget rather than measured x 2: the drift moves up to 2.8x between
+passes at one np, and three samples per np do not pin its tail. SERIAL drift is
+exactly 0, so on SERIAL the check is as strong as bit-identity was.
+
+**Exit criterion — `f3cbCkKDsirK` (SERIAL), `f3cbCkSwbyxT` (HIP)**, on the final
+binary: three successive passes of `CartesianTaylorSolve` and `MultiSolve`.
+SERIAL 36 of 36 entries pass and HIP 24 of 24, with no failure carried, no
+entry over budget and no watchdog cancellation. Worst drift: HIP
+`grad_drift 5.41e-13` at np 3. README's "`multipleSolvesIdempotent` fails on
+HIP" entry is removed.
+
+**Affects:**
+- **B1, A2, B2, A3** — `MultiSolve` and `CartesianTaylorSolve` now pass with
+  nothing carried on both backends, so they gate outright. A HIP failure in
+  either is the change's (R11).

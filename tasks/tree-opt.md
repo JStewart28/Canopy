@@ -546,19 +546,7 @@ counters reading $-1$, not $0$, and the sum identity reported as skipped.
 
 ---
 
-### V1 — Sharpen the checks these chains will be verified against — **BLOCKED**
-
-**Blocked on HIP by one case V1 does not own.** Every step below is done, and
-the exit criterion is met on SERIAL: three successive passes of both stems at
-np 1-6 with no failure. On HIP, `CartesianTaylorSolve` passes at np 1-4 in all
-three passes and every `MultiSolve` case V1 changed passes, but
-`SolveFusedM2L.multipleSolvesIdempotent` fails at np 1-4 (README "Known
-Issues"): it asserts bit-identity across back-to-back solves, which the HIP
-backend's run-dependent accumulation order does not give. It predates V1 and
-no bound governs it. V1 is **DONE** once that case passes on HIP, which needs
-either a deterministic device accumulation or a decision to assert agreement to
-a tolerance; nothing else in V1 remains. Figures and job IDs:
-`tree-opt-progress-log.md` `## V1 (resume)`.
+### V1 — Sharpen the checks these chains will be verified against — **DONE**
 
 **Depends on:** T1 **DONE**, both arms; `fix-hang-rebalance.md` E2 **DONE**.
 **Fill in:** `tests/tstMultiSolve.hpp` (the six `fmm_tolerance` call sites,
@@ -746,6 +734,24 @@ direction: inflate one measured deviation artificially (widen `mac_theta` on one
 arm, say) and confirm the tightened bound **fails**, where the old bound would
 have passed; revert, and record which bound was demonstrated this way. A
 tightened bound that was never shown to fail is a bound nobody has tested.
+
+**Met.** Three successive passes of both stems pass with no failure carried, on
+SERIAL at np 1-6 (36 of 36 entries) and on HIP at np 1-4 (24 of 24), flux
+jobs `f3cbCkKDsirK` and `f3cbCkSwbyxT`. Step 1's stop clause never fired: the
+per-step field-scale error is at most `1.52e-6` at any site, np or backend.
+Every measured trajectory deviation sits under its derived first-order figure,
+so each of the six sites is bounded at its worst measured deviation x 2
+(separate `pos_tol` / `vel_tol`), and `AutoRebalance` also gates every step's
+field error at `1.9e-6`. `matchesPriorReference`'s gradient bound is `5.7e-4`
+(from `1.0e-1`); its potential stays `5.0e-2`. The `theta_canopy` bound is
+confirmed at 2.005x its worst figure. Step 5's assertions ran in both
+branches. Failure direction (θ = 0.7 with `matchesPriorReference` reading it,
+temporarily): its gradient fails `5.7e-4` at every np where `1.0e-1` passes,
+and `AutoRebalance`'s probe gate fails where a gate at the floor passes.
+`SolveFusedM2L.multipleSolvesIdempotent` asserts agreement to `1e-11` at
+field scale rather than bit-identity, which the HIP backend's accumulation
+order cannot give. `FP32_smokeTest` is commented out. See
+`tree-opt-progress-log.md` `## V1 (resume)` and `## V1 (close)`.
 
 ---
 
