@@ -483,6 +483,21 @@ has not been done, so the single-leaf cause is unverified.
 
 ---
 
+### Device-side neighbour search in the tree-balancing pass
+
+With `tree_balance_max_level_delta` set, `TreeBuilder::balance` finds each
+leaf's touching neighbours on the host, every pass. For each leaf it looks at
+the 26 cells beside it at the leaf's depth. Each lookup walks up to `depth`
+ancestors through `_cell_lookup`, so a pass costs `O(leaves · 26 · max_depth)`
+hash lookups. This is the same on every rank, because the cell list is
+replicated. It is negligible on the test fixtures (about 300 cells, 2-3
+passes), but it grows with the global leaf count and runs serially on every
+rank. Options: move the search to the device (a sorted key array with a binary
+search per neighbour), or restrict later passes to the neighbourhoods of the
+leaves the previous pass refined. Only a refined leaf's surroundings can
+become newly unbalanced. Not needed while balancing is off by default;
+revisit if A3 turns it on for large trees.
+
 ## Known Issues
 
 Tracked defects to be addressed in a later session. These are not introduced by
