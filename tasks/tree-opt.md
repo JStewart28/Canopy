@@ -203,10 +203,9 @@ regex. That gives each entry a timeout of 1.75x its measured SERIAL runtime
 instead of 300 s (`fix-hang-rebalance.md` H0b and Conventions, "Time
 budget"). The code blocks below show the bare `ctest`. A task that adds a case
 to a stem, or changes its runtime, re-calibrates that stem's rows in
-`scripts/tuolumne/serial_runtimes.tsv` in the same change. That includes a
-knob turned on in A2's exit criterion, which runs under its own budget
-config. B2's knob is set by the cases that need it, so B2 re-calibrates only
-the `default` rows of the stems it adds cases to. So a task that names
+`scripts/tuolumne/serial_runtimes.tsv` in the same change. B2's and A2's
+knobs are set by the cases that need them, so each re-calibrates only the
+`default` rows of the stems it adds cases to. So a task that names
 stems `DownwardSweep` and `MultiSolve` is run by building exactly four targets
 and matching exactly twenty ctest entries:
 
@@ -1230,28 +1229,48 @@ exit-criterion run line for line. See `tree-opt-progress-log.md` `## B1`.
 ### A2 — 2:1 tree balancing, configurable, default off — **NOT STARTED**
 
 **Depends on:** A1 **DONE**, V1 **DONE**.
-**Fill in:** `src/Canopy_TreeBuilder.hpp` (the balancing pass);
-`src/Canopy_Solver.hpp` (`FmmConfig` member and its route to the builder);
-`tests/tstTreeBuilder.hpp` (the cases). **This task first opens
+**Fill in:** `src/Canopy_TreeBuilder.hpp` (the balancing pass, at the end of
+`build()`, and the knob's route in); `src/Canopy_Solver.hpp` (`FmmConfig`
+member and its route to the builder); `tests/tstDownwardSweep.hpp` (the cases
+on T1's draw, beside `testTwoScaleBalanceCost`: they need
+`DownwardSweepTest::TwoScaleFixture`, its downward sweep, and the
+touching-leaf helpers `balance_coarser_neighbours`, `balance_level_hist` and
+`balance_simulate`, all in that file); `tests/tstTreeBuilder.hpp`
+(builder-only cases: a value below 1 rejected, the pass bound, the
+`max_depth` report); `scripts/tuolumne/serial_runtimes.tsv` (the `default`
+rows of `TreeBuilder` and `DownwardSweep`). **This task first opens
 `src/Canopy_TreePartitioner.hpp`** — see [Not read](#not-read).
-**Reference:** the refinement loop and leaf decision
-(`src/Canopy_TreeBuilder.hpp:657-790`); the existing post-pass that refines
-leaves exceeding `ncrit` after a rebuild (`:1113-1130`) as the model for a pass
-that runs over the finished cell set; `FmmConfig`'s existing knobs and their
-route to the sweep (`src/Canopy_Solver.hpp`) for how a new one is threaded.
+**Reference:** the refinement loop (`src/Canopy_TreeBuilder.hpp:692-812`),
+its leaf decision (`:804`), and its rule that a candidate with no particles is
+not a cell (`:789`), with counts `MPI_Allreduce`d over ranks (`:778`);
+`update()`'s Step 6 (`:1147-1241`) for the shape of a pass that iterates over
+the finished cell set to a fixed point — **only the loop shape**: it refines
+through `refine_leaf` (`:592-630`), which creates all eight children,
+empty ones included, and the balancing pass must not; A1's model of this pass,
+`balance_simulate` (`tests/tstDownwardSweep.hpp:2264`), and its neighbour
+search, `balance_coarser_neighbours` (`:2198`); `FmmConfig`'s existing knobs
+and their route to the builder (`src/Canopy_Solver.hpp:126`, `:204-208`).
 **Do:**
 1. Add `FmmConfig::tree_balance_max_level_delta`, defaulting to the **off**
-   value, and route it to `TreeBuilder`. Reject a value below 1 by throwing, as
-   the sweep's other integer knobs do — a 0 would mean "every leaf at one
-   depth", which is a request to abandon adaptivity and is far more likely a
-   typo.
-2. Implement the balancing pass as a **post-pass over the finished cell set**,
-   not as a change to the refinement loop's leaf test. Repeatedly refine any
-   leaf whose level is more than `max_level_delta` below a spatial neighbour's,
-   until no such leaf remains; the refinement is transitive, so it iterates.
-   Bound the iteration count and throw if the bound is hit rather than looping —
-   a non-terminating balance presents as a hang, which is the most expensive
-   failure to diagnose.
+   value, and route it to `TreeBuilder` as a new last constructor argument, so
+   every existing construction is unchanged. Reject a value below 1 by
+   throwing, as the sweep's other integer knobs do — a 0 would mean "every leaf
+   at one depth", which is a request to abandon adaptivity and is far more
+   likely a typo.
+2. Implement the balancing pass as a **post-pass at the end of `build()`**,
+   not as a change to the refinement loop's leaf test. Neighbours are leaves
+   that **touch**, by a face, an edge or a corner (26 directions) — the
+   definition A1 measured with. Repeatedly refine any leaf more than
+   `max_level_delta` levels shallower than a touching leaf, until none is; the
+   refinement is transitive, so it iterates. Refining a leaf creates **only
+   its occupied children**, from particle counts reduced over all ranks as
+   `build()` reduces them, so the cell list keeps holding occupied cells only
+   and the result is the tree A1's model predicts. Bound the iteration count
+   and throw if the bound is hit rather than looping — a non-terminating
+   balance presents as a hang, which is the most expensive failure to diagnose.
+   `Solver` changes the tree only through `build()`
+   (`src/Canopy_Solver.hpp:340-701`); `update()` does not balance, and its
+   declaration says so.
 3. Do not let the pass refine past `max_depth`. A leaf at `max_depth` that is
    still unbalanced stays unbalanced; **report it loudly** rather than silently
    leaving the invariant broken, because every downstream claim about bounded
@@ -1260,21 +1279,38 @@ route to the sweep (`src/Canopy_Solver.hpp`) for how a new one is threaded.
    minimum the partitioner and the per-depth occupancy the sweep reads; verify
    by searching for consumers of `TreeBuilder`'s cell accessors rather than
    assuming this list is complete.
-5. Add cases asserting: with the knob off, the cell set is **bit-for-bit what it
-   is today** on T1's distribution; with it at 1, no neighbouring leaves differ
-   by more than one level; and the cell-count multiplier matches A1's prediction.
-6. **Do not regenerate the bit-for-bit reference data to make a test pass.**
+5. Add the cases. On T1's draw, at every np: with the knob off, the cell set is
+   **bit-for-bit what it is today**; with it at 1, no two touching leaves differ
+   by more than one level (`balance_level_hist`), and the balanced cell count
+   equals `balance_simulate` at delta 1 on the same unbalanced tree — A1's
+   recorded multipliers, 1.2735, 1.2798, 1.2353, 1.2489, 1.1843 and 1.0957 at
+   np 1-6. Only these cases set the knob; there is no environment override.
+6. **Record, not assert,** `m2l_n_fallback_pairs_range_guard()` knob-off against
+   knob 1 per `(nprocs, rank)` on T1's draw, and state in the log whether
+   balancing removed the refusals. A balance of touching leaves does not bound
+   the depth difference of a pair across **empty space** — the geometry of
+   T1's refusals (`tree-opt-progress-log.md` `## A1`) — so 0 is not a
+   guaranteed outcome, and A3 reads the figure.
+7. Record the partition's per-band imbalance (the depth bands of
+   `fix-hang-rebalance.md` H2's balance constraints) knob-off against knob 1,
+   per `(nprocs, rank)`.
+8. **Do not regenerate the bit-for-bit reference data to make a test pass.**
    `LaplaceSolve.bitForBitArtifacts` compares hashes of internal artifacts
    against `tests/data/laplace_solve_P6.txt`, and
    `CANOPY_LAPLACE_SOLVE_REGENERATE` rewrites them in one step
-   (`tests/tstLaplaceSolve.hpp:55-60`). Those hashes are regression-to-self and
+   (`tests/tstLaplaceSolve.hpp:56-65`). Those hashes are regression-to-self and
    carry no accuracy claim, so a regeneration absorbs a real error exactly as
    readily as a legitimate tree change. With the knob at its default they must
    not move at all; if they move, that is this task failing its own first
-   assertion. Regenerate only under a non-default knob, only after both
-   `CartesianTaylorSolve` direct-sum arms and
-   `SolveFusedM2L.matchesPriorReference` have passed, and record the measured
-   deviations in the log beside the regeneration.
+   assertion.
+9. Re-calibrate the `default` rows of `scripts/tuolumne/serial_runtimes.tsv`
+   for `TreeBuilder` and `DownwardSweep`, the stems this task adds cases to.
+
+The asserted cases run at `max_level_delta = 1`. A1 measured the cost at 1, 2
+and 3 and recommends 1: at θ 0.3 the worst-case centre offset of a pair whose
+depths differ by $k$, $\sqrt{3}\,(2^k + 2)/\theta$ half-widths at the finer
+depth, is 23.1 at $k = 1$ and 34.6 at $k = 2$, against `M2L_KEY_OFFSET_MAX =
+32`.
 
 **Exit criterion:** **two lists, because the knob has two states.** Balancing
 changes the tree for every basis, so unlike B1 this needs both bases and the
@@ -1295,17 +1331,19 @@ ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|TreePartitioner|Communic
 ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|TreePartitioner|CommunicationPlan|DownwardSweep|LaplaceSolve|CartesianTaylorSolve|MultiSolve)_MPI_HIP_np_[1-4]$'
 ```
 
-*Knob at 1* — the new cases, run by the same seven stems, assert the balance
-invariant and the predicted cell-count multiplier.
+Every pre-existing line in the seven stems is unchanged against the jobs of
+the task that last recorded it — on T1's draw, `tree-opt-progress-log.md`
+`## A1` — and `LaplaceSolve.bitForBitArtifacts` passes with `tests/data`
+untouched.
 
-T1's case reports the identical cell set
-and identical refusal counters as before this task — the change has no runtime
-surface until something sets the knob. With the knob at 1 on T1's distribution, a
-new case asserts the maximum neighbouring-leaf level difference is 1 and that
-`m2l_n_fallback_pairs_range_guard()` is **0**. Failure direction:
-`tree_balance_max_level_delta = 0` throws from `FmmConfig`'s route, and a
-distribution that cannot be balanced within `max_depth` produces the loud report
-rather than a silently unbalanced tree.
+*Knob at 1* — the new cases, run by the same seven stems: on T1's draw at every
+np, the largest touching-leaf level difference is at most 1 and the balanced
+cell count equals `balance_simulate`'s at delta 1. The log records the
+knob-off and knob-1 `range_guard` and per-band imbalance per `(nprocs, rank)`.
+Failure direction: `tree_balance_max_level_delta = 0` throws from `FmmConfig`'s
+route; a pass whose iteration bound is set below what a balance needs throws
+rather than returning; and a distribution that cannot be balanced within
+`max_depth` produces the loud report rather than a silently unbalanced tree.
 
 ---
 
