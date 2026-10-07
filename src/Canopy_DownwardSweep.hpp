@@ -420,8 +420,9 @@ class DownwardSweep
     //
     // It is a single scalar because every cell is a cube: TreeBuilder takes
     // the LARGEST of the three half extents of the root bounding box as the
-    // root half-width (Canopy_TreeBuilder.hpp, root_box()), so there is one
-    // length per level rather than three.
+    // root half-width, optionally rounded up to a power of two
+    // (Canopy_TreeBuilder.hpp, root_half_width()), so there is one length per
+    // level rather than three.
     //
     // WHY A SETTER RATHER THAN A setup() ARGUMENT: setup() is handed the
     // upward sweep and a particle count and has no builder to ask. The

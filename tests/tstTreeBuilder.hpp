@@ -19,6 +19,7 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <random>
 #include <set>
 
@@ -201,6 +202,95 @@ void testTreeBuilder( int num_particles_per_rank, int ncrit, int max_depth,
 }
 
 //---------------------------------------------------------------------------//
+// B2 of tasks/tree-opt.md: TreeBuilder::quantized_half_width is exact. Over a
+// sweep of inputs the result is a power of two, >= the input, < 2x the input,
+// and the input itself when that is already a power of two. Then one build per
+// knob state: root_half_width() is what build() stamped on the root cell, it
+// is today's max half extent of root_box() knob off and that value quantized
+// knob on, the centre is unchanged, and every particle is still in a leaf.
+//---------------------------------------------------------------------------//
+void testQuantizedRootHalfWidth()
+{
+    using namespace TreeBuilderTest;
+    using builder_type = TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>;
+
+    const auto is_pow2 = []( double x )
+    {
+        int e = 0;
+        return std::frexp( x, &e ) == 0.5;
+    };
+
+    // Inputs: every power of two in [2^-40, 2^40], its two neighbours, and
+    // random mantissas at each exponent.
+    std::vector<double> inputs;
+    std::mt19937 gen( 4242 );
+    std::uniform_real_distribution<double> mant( 0.5, 1.0 );
+    for ( int e = -40; e <= 40; ++e )
+    {
+        const double p = std::ldexp( 1.0, e );
+        inputs.push_back( p );
+        inputs.push_back( std::nextafter( p, 0.0 ) );
+        inputs.push_back( std::nextafter( p, 2.0 * p ) );
+        for ( int k = 0; k < 16; ++k )
+            inputs.push_back( std::ldexp( mant( gen ), e ) );
+    }
+    for ( const double hw : inputs )
+    {
+        const double q = builder_type::quantized_half_width( hw );
+        EXPECT_TRUE( is_pow2( q ) ) << "hw " << hw << " -> " << q;
+        EXPECT_GE( q, hw ) << "rounded down: hw " << hw << " -> " << q;
+        EXPECT_LT( q, 2.0 * hw ) << "hw " << hw << " -> " << q;
+        if ( is_pow2( hw ) )
+            EXPECT_EQ( q, hw ) << "a power of two moved: " << hw;
+    }
+    EXPECT_EQ( builder_type::quantized_half_width( 0.0 ), 0.0 );
+
+    int rank;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    const int n = 500;
+    AoSoA_t particles( "particles", n );
+    generate_test_particles( particles, n, rank );
+    auto positions = Cabana::slice<Position>( particles );
+    const std::array<double, 6> tol{ 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 };
+
+    for ( const bool quantize : { false, true } )
+    {
+        builder_type builder( MPI_COMM_WORLD, 32, 10, tol, 0.1, quantize );
+        builder.build( positions, n );
+
+        const auto& box = builder.root_box();
+        double box_hw = 0.0;
+        for ( int d = 0; d < 3; ++d )
+            box_hw = std::max( box_hw, 0.5 * ( box.max[d] - box.min[d] ) );
+        const double expect =
+            quantize ? builder_type::quantized_half_width( box_hw ) : box_hw;
+        EXPECT_EQ( builder.root_half_width(), expect )
+            << "quantize " << quantize;
+        if ( quantize )
+            EXPECT_TRUE( is_pow2( builder.root_half_width() ) );
+
+        bool found = false;
+        for ( const auto& c : builder.cells() )
+        {
+            if ( c.key != ROOT_KEY )
+                continue;
+            found = true;
+            EXPECT_EQ( c.half_width, builder.root_half_width() )
+                << "quantize " << quantize;
+            for ( int d = 0; d < 3; ++d )
+                EXPECT_EQ( c.center[d], 0.5 * ( box.min[d] + box.max[d] ) )
+                    << "quantize " << quantize << " axis " << d;
+        }
+        EXPECT_TRUE( found );
+
+        auto h_keys = Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace(), builder.particle_keys() );
+        EXPECT_EQ( count_particles_in_leaves( builder.cells(), h_keys, n ), 0 )
+            << "quantize " << quantize;
+    }
+}
+
+//---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
@@ -210,6 +300,8 @@ TEST( TreeBuilder, testIncrementalUpdates )
 }
 
 TEST( TreeBuilder, testSmallTree ) { testTreeBuilder( 500, 32, 10, std::array<double, 6>{0.1, 0.1, 0.1, 0.1, 0.1, 0.1}, 0.1, 10 ); }
+
+TEST( TreeBuilder, quantizedRootHalfWidth ) { testQuantizedRootHalfWidth(); }
 
 //---------------------------------------------------------------------------//
 

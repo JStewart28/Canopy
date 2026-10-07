@@ -58,6 +58,7 @@ Canopy::Solver<...> solver( MPI_Comm comm, const Canopy::FmmConfig& cfg );
 | `softening` | Plummer softening length; `< 0` selects auto-softening from the inter-particle spacing | `-1.0` |
 | `near_softening_factor` | Near-field softening floor: pairs closer than `factor · softening` use the softened near-field (P2P) instead of the unsoftened multipole far-field (M2L). `0` disables. | `4.0` |
 | `m2l_op_table_byte_budget` | Per-rank memory budget, in bytes, for the hashed M2L operator table. Pairs beyond the cap it implies fall back to the per-pair M2L translation | `2 GB` |
+| `quantize_root_half_width` | Round the root cell's half-width up to the next power of two at every tree build, keeping its centre. A rebuild whose bounding box drifts within one octave then keeps the M2L operator cache of a level-keyed basis (`CartesianTaylorBasis`) instead of rebuilding it. Moves the cell set for every basis: the root cell is up to 2x wider than the bounding box, which can add one level at the top of the tree. | `false` |
 
 The multipole far-field is built from the **unsoftened** `1/r` Laplace kernel, so
 it is only accurate where the Plummer `softening` is negligible (separation
@@ -383,6 +384,17 @@ recompute it replaces rather than assumed faster.
 
 ### The M2L operator cache empties on every build for a level-keyed basis
 
+**Addressed, opt-in, by `FmmConfig::quantize_root_half_width`** (B2 of
+[tasks/tree-opt.md](tasks/tree-opt.md)). With it on, the root half-width is a
+power of two, bit-identical across every rebuild whose box stays inside one
+octave, so `set_root_half_width` does nothing and the cache survives. On the
+`CartesianTaylorSolve` drift trajectory below, summed over np 1-6, builds 2-4
+rebuilt 5.3 % (θ 0.5) and 7.1 % (θ 0.3) of the admitted columns, only the keys
+the moving tree realized for the first time, against 100 % with it off
+([tasks/tree-opt-progress-log.md](tasks/tree-opt-progress-log.md) §B2). It
+stays off by default because it moves the cell set for every basis. The
+measurement that motivated it follows.
+
 `DownwardSweep::set_root_half_width` clears the **entire** persistent M2L
 operator cache whenever the root half-width changes, and does so only for a
 basis declaring `key_needs_level = true`
@@ -425,6 +437,20 @@ are the whole of what is measured. Whoever prices it should read
 `TIMER_ILIST_S4_OP_TABLE_BUILD` in `build-tuolumne-prof/` — the host operator
 build lies outside `run_m2l_all`'s scope, so the `M2L kernel (all depths)` row
 is the wrong number for this.
+
+### Keep the M2L operator cache across an octave crossing of the root width
+
+With `quantize_root_half_width` on, a box that crosses an octave changes the
+quantized root half-width by a factor of two and the cache of a level-keyed
+basis is emptied exactly as before. It need not be: the column for depth $d$
+at root width $W$ is the column for depth $d + 1$ at root width $2W$, so shifting
+every cached key's `max_d` by the change in the quantized exponent, instead of
+clearing, would keep the whole cache across the crossing too. Not done in B2
+of [tasks/tree-opt.md](tasks/tree-opt.md) because a wrong shift reuses every
+column at the wrong width and presents as a plausible but wrong field (risk
+**R4** there). A key shifted past depth 0 or `max_depth` has no counterpart and
+would have to be dropped. Whoever implements it should rerun B2's failure
+direction, which is the check that catches a column used at the wrong width.
 
 ### Partition cost on small trees
 

@@ -71,10 +71,12 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <random>
 #include <sstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -372,6 +374,27 @@ static_assert( CTS_DEV_TOL_THETA_REF <= CTS_REFERENCE_BAR,
                "changes what the test means. Work R1 and R2 in "
                "tasks/cartesian-taylor-basis.md instead." );
 
+// THE DRIFT CASES' BOUNDS (B2 of tasks/tree-opt.md, R9, R10). Relative to
+// the global field scale, worst of potential and gradient, as the gating arms.
+// Measured on each case's OWN trajectory (CTS_DT_SCALE_DRIFT, p = CTS_P = 2
+// at both angles), not inherited from the gating arms. Each is 2x the worst
+// over SERIAL np 1-6 (flux job f3civx1CZ2qD) and HIP np 1-4 (f3civx9mCtEj),
+// rounded up at the third figure; the gradient is the worst field in every
+// case, and every figure agrees across np and backend to 12 figures:
+//
+//   case                  knob  max_grad_dev       max_pot_dev       bound
+//   drift theta 0.5       off   1.8799053015e-02   1.0217956014e-03  3.76e-02
+//   drift theta 0.3       off   9.5675103599e-03   3.3292179793e-04  1.92e-02
+//   drift_q theta 0.5     on    1.8211525767e-02   1.0861234562e-03  3.65e-02
+//   drift_q theta 0.3     on    7.6584280953e-03   2.1453247968e-04  1.54e-02
+//
+// The knob-on figures are a different tree's (root half-width 0.25 against
+// 0.1386), so they are not the knob-off figures with the cache kept.
+static constexpr double CTS_DEV_TOL_DRIFT_THETA_CANOPY = 3.76e-02;
+static constexpr double CTS_DEV_TOL_DRIFT_THETA_REF = 1.92e-02;
+static constexpr double CTS_DEV_TOL_DRIFT_Q_THETA_CANOPY = 3.65e-02;
+static constexpr double CTS_DEV_TOL_DRIFT_Q_THETA_REF = 1.54e-02;
+
 // AoSoA member indices. Velocity and GlobalId exist for the time loop:
 // GlobalId is what pairs a particle back to the global set after migration
 // has scrambled the local ordering.
@@ -414,14 +437,17 @@ struct GatheredState
 
 // ---------------------------------------------------------------------------
 // Drive the configuration above at `mac_theta` for CTS_NUM_STEPS solves and
-// hand the gathered last-step state to `after`.
+// hand the gathered last-step state to `after`. `quantize_root_half_width`
+// sets FmmConfig's knob of that name (B2 of tasks/tree-opt.md); every case
+// that predates it runs with it off.
 //
 // Every rank asserts its own far field was live before anything is compared.
 // ---------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace, int P,
           template <class, int, int> class Basis, class Fn>
 void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
-                                  double dt_scale, Fn&& after )
+                                  double dt_scale, Fn&& after,
+                                  bool quantize_root_half_width = false )
 {
     using Scalar = double;
     using DataTypes = Cabana::MemberTypes<Scalar[3],          // Position
@@ -505,9 +531,17 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
     // the softened kernel itself, so the floor would only narrow the far
     // field for no reason and hide exactly what this test measures.
     cfg.near_softening_factor = 0.0;
+    cfg.quantize_root_half_width = quantize_root_half_width;
 
     Solver_t solver( MPI_COMM_WORLD, cfg );
     solver.template setup<Position, Charge>( particles, n_local_initial );
+
+    // B2's per-build cache check: the keys realized since the sweep's root
+    // half-width last changed (the cache's key set, absent a cap overflow),
+    // and the cumulative build count and width at the previous solve.
+    std::set<std::array<int, 5>> cached_keys;
+    long long prev_keys_built = 0;
+    double prev_sweep_hw = 0.0;
 
     // -----------------------------------------------------------------------
     // The step loop: solve -> migrate -> solve -> rebalance -> solve ->
@@ -556,12 +590,7 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
         // -------------------------------------------------------------------
         {
             const auto& ds_step = solver.downward();
-            const auto& step_box = solver.builder().root_box();
-            double step_root_hw = 0.0;
-            for ( int d = 0; d < 3; d++ )
-                step_root_hw =
-                    std::max( step_root_hw,
-                              0.5 * ( step_box.max[d] - step_box.min[d] ) );
+            const double step_root_hw = solver.builder().root_half_width();
 
             std::printf( "[ct-cache] theta=%.17g p_order=%d half_span=%.17g "
                          "nprocs=%d rank=%d step=%d dt_scale=%.17g dt=%.17g "
@@ -589,6 +618,53 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
             // COLLECTIVE, so one rank leaving early hangs every other rank
             // until the job's walltime and destroys the log these numbers
             // have to be read out of.
+            // THE CACHE RULE, per build (B2). A changed width empties the
+            // cache, so the build makes every admitted column; an unchanged
+            // one keeps it, so the build makes exactly the admitted keys the
+            // cache has not seen since the last change -- 0 when the key set
+            // did not grow. Printed in both knob states; the knob decides
+            // only how often the width changes.
+            {
+                const long long inc =
+                    ds_step.m2l_op_keys_built_count() - prev_keys_built;
+                const bool width_changed =
+                    step == 0 || ds_step.root_half_width() != prev_sweep_hw;
+                if ( width_changed )
+                    cached_keys.clear();
+                long long new_keys = 0;
+                for ( const auto& k : ds_step.m2l_realized_keys() )
+                    new_keys += cached_keys
+                                        .insert( { k.max_d, k.dd, k.ii, k.jj,
+                                                   k.kk } )
+                                        .second
+                                    ? 1
+                                    : 0;
+                std::printf( "[ct-cache-inc] theta=%.17g p_order=%d "
+                             "nprocs=%d rank=%d step=%d dt_scale=%.17g "
+                             "quantize=%d width_changed=%d "
+                             "keys_built_inc=%lld new_keys=%lld "
+                             "n_unique_ops=%d sweep_root_half_width=%.17g\n",
+                             mac_theta, P, nprocs, rank, step, dt_scale,
+                             quantize_root_half_width ? 1 : 0,
+                             width_changed ? 1 : 0, inc, new_keys,
+                             ds_step.m2l_n_unique_ops(),
+                             ds_step.root_half_width() );
+                std::fflush( stdout );
+                if ( width_changed )
+                    EXPECT_EQ( inc, ds_step.m2l_n_unique_ops() )
+                        << "step " << step << ": the width changed, so every "
+                           "admitted column must have been rebuilt (rank "
+                        << rank << ")";
+                else
+                    EXPECT_EQ( inc, new_keys )
+                        << "step " << step << ": the width is unchanged, so "
+                           "only keys the cache had not seen may be built "
+                           "(rank "
+                        << rank << ")";
+                prev_keys_built = ds_step.m2l_op_keys_built_count();
+                prev_sweep_hw = ds_step.root_half_width();
+            }
+
             if ( step == 0 )
                 EXPECT_GT( ds_step.m2l_op_keys_built_count(), 0 )
                     << "m2l_op_keys_built_count() is 0 after the first "
@@ -638,12 +714,7 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
     const int n_unique_ops = ds.m2l_n_unique_ops();
     const long long fallback_pairs = ds.total_fallback_pair_count();
 
-    double root_hw = 0.0;
-    {
-        const auto& box = solver.builder().root_box();
-        for ( int d = 0; d < 3; d++ )
-            root_hw = std::max( root_hw, 0.5 * ( box.max[d] - box.min[d] ) );
-    }
+    const double root_hw = solver.builder().root_half_width();
 
     // Always echo, so a later failure is attributable from a ctest -V log
     // without a rebuild (T4 step 6). A non-zero fallback count is NOT a
@@ -897,7 +968,7 @@ template <class MemorySpace, class ExecutionSpace, int P,
           template <class, int, int> class Basis>
 void runArm( double mac_theta, double tol, const char* arm,
              double pos_half_span = CTS_POS_HALF_SPAN,
-             double dt_scale = 1.0 )
+             double dt_scale = 1.0, bool quantize_root_half_width = false )
 {
     with_cartesian_taylor_solve<MemorySpace, ExecutionSpace, P, Basis>(
         mac_theta, pos_half_span, dt_scale,
@@ -964,7 +1035,8 @@ void runArm( double mac_theta, double tol, const char* arm,
                 << ": the gradient does not match the direct SOFTENED sum at "
                    "the pinned deviation. R1 then R2 in "
                    "tasks/cartesian-taylor-basis.md.";
-        } );
+        },
+        quantize_root_half_width );
 }
 
 } // namespace CartesianTaylorSolveTest
@@ -1022,14 +1094,10 @@ TEST( CartesianTaylorSolve, matchesDirectSumThetaCanopy )
 // invalidate_interaction_list(), i.e. keys_built == cache_size at every rank
 // (tasks/abstract-solver-backend-progress-log.md section T9).
 //
-// THESE BODIES MAKE NO ACCURACY CLAIM AND ASSERT NO DEVIATION, which is why
-// they call the harness directly rather than through runArm. They run a
-// LONGER trajectory than the gating arms (CTS_DT_SCALE_DRIFT) precisely so
-// the box drifts visibly, and neither pinned tolerance was measured on that
-// trajectory. The only assertions they carry are the harness's two non-fatal
-// guards: m2l_n_unique_ops() > 0 (the far field was live) and
-// m2l_op_keys_built_count() > 0 after the first solve (an operator was built,
-// so the per-step increments are not a difference of zeros).
+// SINCE B2 (tasks/tree-opt.md, R9) THESE BODIES ASSERT A DEVIATION: runArm's
+// direct-softened-sum comparison, at a bound measured on this LONGER
+// trajectory (CTS_DT_SCALE_DRIFT), not the gating arms' constants, which were
+// not. The harness also asserts the cache rule per build ([ct-cache-inc]).
 //
 // BOTH ARMS RUN AT CTS_P = 2. The pair brackets both admissibilities at the
 // order the reference treecode itself runs, and — the consequence worth
@@ -1040,24 +1108,53 @@ TEST( CartesianTaylorSolve, matchesDirectSumThetaCanopy )
 //---------------------------------------------------------------------------//
 TEST( CartesianTaylorSolve, operatorCacheAcrossDriftThetaCanopy )
 {
-    CartesianTaylorSolveTest::with_cartesian_taylor_solve<
-        TEST_MEMSPACE, TEST_EXECSPACE, CartesianTaylorSolveTest::CTS_P,
-        Canopy::CartesianTaylorBasis>(
+    CartesianTaylorSolveTest::runArm<TEST_MEMSPACE, TEST_EXECSPACE,
+                                     CartesianTaylorSolveTest::CTS_P,
+                                     Canopy::CartesianTaylorBasis>(
         CartesianTaylorSolveTest::CTS_THETA_CANOPY,
-        CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
-        CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT,
-        []( const CartesianTaylorSolveTest::GatheredState&, int, int ) {} );
+        CartesianTaylorSolveTest::CTS_DEV_TOL_DRIFT_THETA_CANOPY,
+        "drift_theta_canopy", CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
+        CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT, false );
 }
 
 TEST( CartesianTaylorSolve, operatorCacheAcrossDriftThetaRef )
 {
-    CartesianTaylorSolveTest::with_cartesian_taylor_solve<
-        TEST_MEMSPACE, TEST_EXECSPACE, CartesianTaylorSolveTest::CTS_P,
-        Canopy::CartesianTaylorBasis>(
+    CartesianTaylorSolveTest::runArm<TEST_MEMSPACE, TEST_EXECSPACE,
+                                     CartesianTaylorSolveTest::CTS_P,
+                                     Canopy::CartesianTaylorBasis>(
         CartesianTaylorSolveTest::CTS_THETA_REF,
-        CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
-        CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT,
-        []( const CartesianTaylorSolveTest::GatheredState&, int, int ) {} );
+        CartesianTaylorSolveTest::CTS_DEV_TOL_DRIFT_THETA_REF,
+        "drift_theta_ref", CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
+        CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT, false );
+}
+
+//---------------------------------------------------------------------------//
+// The same two trajectories with FmmConfig::quantize_root_half_width on (B2).
+// The quantized root half-width stays in one octave over the whole run, so
+// the cache survives every rebuild and [ct-cache-inc] reports, per build,
+// only the keys the tree realizes for the first time. The direct-sum bound is
+// what says the reused columns are still at the right width (R4, R9).
+//---------------------------------------------------------------------------//
+TEST( CartesianTaylorSolve, operatorCacheAcrossDriftQuantizedThetaCanopy )
+{
+    CartesianTaylorSolveTest::runArm<TEST_MEMSPACE, TEST_EXECSPACE,
+                                     CartesianTaylorSolveTest::CTS_P,
+                                     Canopy::CartesianTaylorBasis>(
+        CartesianTaylorSolveTest::CTS_THETA_CANOPY,
+        CartesianTaylorSolveTest::CTS_DEV_TOL_DRIFT_Q_THETA_CANOPY,
+        "drift_q_theta_canopy", CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
+        CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT, true );
+}
+
+TEST( CartesianTaylorSolve, operatorCacheAcrossDriftQuantizedThetaRef )
+{
+    CartesianTaylorSolveTest::runArm<TEST_MEMSPACE, TEST_EXECSPACE,
+                                     CartesianTaylorSolveTest::CTS_P,
+                                     Canopy::CartesianTaylorBasis>(
+        CartesianTaylorSolveTest::CTS_THETA_REF,
+        CartesianTaylorSolveTest::CTS_DEV_TOL_DRIFT_Q_THETA_REF,
+        "drift_q_theta_ref", CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
+        CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT, true );
 }
 
 //---------------------------------------------------------------------------//

@@ -1569,12 +1569,13 @@ struct TwoScaleFixture
     int num_local = 0;
 
     explicit TwoScaleFixture( TwoScaleDraw draw_in = TwoScaleDraw::TwoScale,
-                              double mac_theta_in = 0.3 )
+                              double mac_theta_in = 0.3,
+                              bool quantize_root_half_width = false )
         : mac_theta( mac_theta_in )
         , draw( draw_in )
         , builder( MPI_COMM_WORLD, ncrit, max_depth,
                    std::array<double, 6>{ tolerance, tolerance, tolerance, tolerance, tolerance, tolerance },
-                   tolerance )
+                   tolerance, quantize_root_half_width )
         , partitioner( MPI_COMM_WORLD, replication_depth )
         , comm_plan( MPI_COMM_WORLD, mac_theta )
         , upward( MPI_COMM_WORLD )
@@ -1594,17 +1595,7 @@ struct TwoScaleFixture
             generate_graded_particles( particles, num_particles, rank );
         else
             generate_two_scale_particles( particles, num_particles, rank );
-
-        auto positions = Cabana::slice<Position>( particles );
-        builder.build( positions, num_particles );
-        partitioner.partition( builder, particles, num_particles );
-        num_local = partitioner.num_local_particles();
-
-        positions = Cabana::slice<Position>( particles );
-        builder.build( positions, num_local );
-
-        comm_plan.build( builder.cells(), partitioner.ownership(),
-                         partitioner.cell_owner_map(), replication_depth );
+        num_local = num_particles;
 
         // Both sweeps get the same parameters, the upward one before setup():
         // it builds the aux tables the downward sweep borrows.
@@ -1613,19 +1604,37 @@ struct TwoScaleFixture
         upward.set_m2l_kernel_params( kernel_params );
         downward.set_m2l_kernel_params( kernel_params );
 
+        rebuild_with( builder );
+    }
+
+    // Build the tree over the current particles with `tree`, partition, and
+    // set both sweeps up on it, keeping the downward sweep and its operator
+    // cache as Solver keeps its own across a rebuild. The constructor runs
+    // this with `builder`; B2's retention case runs it again with a builder
+    // whose bounding-box padding differs.
+    void rebuild_with( TreeBuilder<TEST_MS, TEST_ES>& tree )
+    {
+        auto positions = Cabana::slice<Position>( particles );
+        tree.build( positions, num_local );
+        partitioner.partition( tree, particles, num_local );
+        num_local = partitioner.num_local_particles();
+
+        positions = Cabana::slice<Position>( particles );
+        tree.build( positions, num_local );
+
+        comm_plan.build( tree.cells(), partitioner.ownership(),
+                         partitioner.cell_owner_map(), replication_depth );
+
         // As Solver::_push_root_half_width: a key_needs_level basis builds
         // its operators from the per-depth widths this sets.
-        const auto& box = builder.root_box();
-        double w_root = 0.0;
-        for ( int d = 0; d < 3; d++ )
-            w_root = std::max( w_root, 0.5 * ( box.max[d] - box.min[d] ) );
-        downward.set_root_half_width( w_root );
+        downward.set_root_half_width( tree.root_half_width() );
 
-        upward.setup( builder.cells(), partitioner.cell_owner_map(),
-                      builder.particle_keys(), num_local );
+        upward.setup( tree.cells(), partitioner.cell_owner_map(),
+                      tree.particle_keys(), num_local );
         upward.execute( Cabana::slice<Charge>( particles ),
                         Cabana::slice<Position>( particles ), comm_plan );
 
+        downward.invalidate_interaction_list();
         downward.setup( upward, num_local );
     }
 
@@ -2017,6 +2026,110 @@ void testGradedDdDuplicates()
         }
     }
 }
+
+// B2 of tasks/tree-opt.md: the operator cache survives a rebuild whose box
+// stays inside one octave, knob on, and is rebuilt in full otherwise. One
+// downward sweep, two builds of the SAME particles, the second by a builder
+// whose symmetric bounding-box padding is larger (so the box keeps its centre
+// and only its half-width grows); ncrit_tolerance_factor is unchanged. The
+// per-build increment of m2l_op_keys_built_count() is read on every rank.
+//
+//   in-octave, knob on:   the quantized width and the key set are unchanged,
+//                         so the increment is 0;
+//   in-octave, knob off:  the sweep is told a new width, so the whole cache
+//                         is rebuilt: increment == m2l_n_unique_ops();
+//   cross-octave, knob on: the quantized width doubles, increment as knob off.
+//
+// Either cache assertion alone is satisfied by a cache that always reuses or
+// always clears (R4); the three together are not.
+template <class TEST_MS, class TEST_ES>
+void testRootWidthQuantizationRetainsCache()
+{
+    using CTBasis = CartesianTaylorBasis<double, 3, 1>;
+    static_assert( CTBasis::key_needs_level,
+                   "the retention case needs a basis whose cache a width "
+                   "change clears" );
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    struct Arm
+    {
+        const char* name;
+        bool quantize;
+        // Second build's per-face padding, a fraction of the axis width; the
+        // first build uses the fixture's own (0.1). The expanded half-width
+        // grows by the factor (1 + 2 tol2) / 1.2: 1.17 for the in-octave arms
+        // (that it stays in one octave on this draw is asserted below), 2.08
+        // for the cross-octave one, and a factor >= 2 always crosses one.
+        double tol2;
+        bool expect_retained;
+    };
+    const Arm arms[] = { { "in-octave", true, 0.2, true },
+                         { "in-octave", false, 0.2, false },
+                         { "cross-octave", true, 0.75, false } };
+
+    for ( const Arm& arm : arms )
+    {
+        TwoScaleFixture<TEST_MS, TEST_ES, CTBasis> fix(
+            TwoScaleDraw::TwoScale, 0.3, arm.quantize );
+        fix.solve();
+        const double w1 = fix.downward.root_half_width();
+        const long long built1 = fix.downward.m2l_op_keys_built_count();
+        const int unique1 = fix.downward.m2l_n_unique_ops();
+
+        TreeBuilder<TEST_MS, TEST_ES> wider(
+            MPI_COMM_WORLD, fix.ncrit, fix.max_depth,
+            std::array<double, 6>{ arm.tol2, arm.tol2, arm.tol2, arm.tol2,
+                                   arm.tol2, arm.tol2 },
+            fix.tolerance, arm.quantize );
+        fix.rebuild_with( wider );
+        fix.solve();
+        const double w2 = fix.downward.root_half_width();
+        const long long inc =
+            fix.downward.m2l_op_keys_built_count() - built1;
+        const int unique2 = fix.downward.m2l_n_unique_ops();
+
+        std::printf( "[b2-retain] arm %s quantize %d nprocs %d rank %d "
+                     "w1 %.17g w2 %.17g keys_built_inc %lld unique1 %d "
+                     "unique2 %d\n",
+                     arm.name, arm.quantize ? 1 : 0, nprocs, rank, w1, w2,
+                     inc, unique1, unique2 );
+        std::fflush( stdout );
+
+        // The arm's premise, so a draw whose box sits near an octave edge
+        // fails here rather than as a cache defect.
+        EXPECT_EQ( w1, fix.builder.root_half_width() );
+        EXPECT_EQ( w2, wider.root_half_width() );
+        EXPECT_EQ( w1 == w2, arm.expect_retained )
+            << arm.name << " quantize " << arm.quantize << ": w1 " << w1
+            << " w2 " << w2;
+        // Summed over ranks: a rank can own no admitted pair at all (np 5
+        // rank 2, knob on).
+        int unique1_sum = 0;
+        MPI_Allreduce( &unique1, &unique1_sum, 1, MPI_INT, MPI_SUM,
+                       MPI_COMM_WORLD );
+        EXPECT_GT( unique1_sum, 0 ) << "no column was admitted: vacuous";
+
+        if ( arm.expect_retained )
+        {
+            EXPECT_EQ( inc, 0 )
+                << "knob on, box inside one octave: the cache should have "
+                   "survived the rebuild, rank "
+                << rank;
+            EXPECT_EQ( unique2, unique1 );
+        }
+        else
+        {
+            EXPECT_EQ( inc, unique2 )
+                << arm.name << " quantize " << arm.quantize
+                << ": a width change must rebuild every admitted column, "
+                   "rank "
+                << rank;
+        }
+    }
+}
 } // namespace DownwardSweepTest
 
 TEST( DownwardSweepTwoScale, treeHasShallowAndDeepLeaves )
@@ -2041,6 +2154,12 @@ TEST( DownwardSweepTwoScale, ddDuplicateColumnsGraded )
 {
     DownwardSweepTest::testGradedDdDuplicates<TEST_MEMSPACE,
                                               TEST_EXECSPACE>();
+}
+
+TEST( DownwardSweepTwoScale, rootWidthQuantizationRetainsCache )
+{
+    DownwardSweepTest::testRootWidthQuantizationRetainsCache<
+        TEST_MEMSPACE, TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

@@ -156,19 +156,34 @@ class TreeBuilder
     //! Particle -> leaf key mapping (device view)
     key_view_type _particle_keys;
 
-    //! Global bounding box
+    //! Global bounding box, after the _bb_tf expansion. Not cubic, and not
+    //! the root cell: see _root_half_width.
     BoundingBox _root_box;
+
+    //! Round the root half-width up to a power of two in build(); see
+    //! quantized_half_width(). FmmConfig::quantize_root_half_width.
+    bool _quantize_root_hw;
+
+    //! Half-width of the root cell, domain units: the value build() stamped
+    //! on it, and the one source every reader of the root width uses. The
+    //! largest half extent of _root_box, rounded up to a power of two when
+    //! _quantize_root_hw is set. Quantized, the root cell is deliberately up
+    //! to 2x wider than _root_box (same centre), which can cost one extra,
+    //! possibly empty, level at the top of the tree (tree-opt.md R5).
+    double _root_half_width = 0.0;
 
   public:
     // Constructor
     TreeBuilder( MPI_Comm comm, const int ncrit, const int max_depth,
                  const std::array<double, 6> bb_tolerance_factor,
-                 const double ncrit_tolerance_factor = 0.1 )
+                 const double ncrit_tolerance_factor = 0.1,
+                 const bool quantize_root_half_width = false )
         : _ncrit( ncrit )
         , _max_depth( max_depth )
         , _comm( comm )
         , _bb_tf( bb_tolerance_factor )
         , _ncrit_tf( ncrit_tolerance_factor )
+        , _quantize_root_hw( quantize_root_half_width )
     {
         MPI_Comm_rank( _comm, &_rank );
         MPI_Comm_size( _comm, &_comm_size );
@@ -187,7 +202,23 @@ class TreeBuilder
     const std::vector<CellInfo>& cells() const { return _cells; }
     const key_view_type& particle_keys() const { return _particle_keys; }
     const BoundingBox& root_box() const { return _root_box; }
+    // Half-width of the root cell as built, domain units. Read this, never a
+    // re-derivation from root_box(), which differs once quantized.
+    double root_half_width() const { return _root_half_width; }
     bool tree_valid() const { return _tree_valid; }
+
+    // The smallest power of two >= hw, domain units; hw itself when it is
+    // already a power of two, or is not positive and finite. Exact: frexp
+    // gives hw = m 2^e with m in [0.5, 1), and m == 0.5 only for a power of
+    // two. Up, never down: a smaller root cell would not hold the particles.
+    static double quantized_half_width( const double hw )
+    {
+        if ( !( hw > 0.0 ) || !std::isfinite( hw ) )
+            return hw;
+        int e = 0;
+        const double m = std::frexp( hw, &e );
+        return m == 0.5 ? hw : std::ldexp( 1.0, e );
+    }
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -244,6 +275,7 @@ class TreeBuilder
     //   - particle_keys()   returns a device view mapping particle index
     //                       to the Morton key of its enclosing leaf cell
     //   - root_box()        returns the global bounding box
+    //   - root_half_width() returns the root cell's half-width
     template <class PositionType>
     void build( PositionType positions, int num_local_particles );
 
@@ -634,6 +666,9 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
         if ( hw > root_hw )
             root_hw = hw;
     }
+    if ( _quantize_root_hw )
+        root_hw = quantized_half_width( root_hw );
+    _root_half_width = root_hw;
 
     // Initialize particle-to-cell mapping on device
     _particle_keys = key_view_type( "particle_keys", num_local_particles );

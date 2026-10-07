@@ -1586,3 +1586,256 @@ binaries were built before the failure-direction edits, from the final source.
 - **R3**: the conformance check now runs the `false` branch on a real basis.
   The failure direction shows that an aliased `dd` on Laplace is visible both
   in the counts and in two L2P accuracy cases.
+
+## B2
+
+**Outcome: with `FmmConfig::quantize_root_half_width` on, the root half-width
+is a power of two, and a rebuild inside one octave keeps the
+`CartesianTaylorBasis` operator cache.** With the knob off, nothing moved. On
+the drift trajectory, builds 2-4 rebuild 0.4-11.6 % of admitted columns per np
+knob-on, against 100 % knob-off. A re-derived width fails the knob-on
+direct-sum bound by 50-100x.
+
+Provenance: commit `6de3d19` plus this section's edits, Cray clang 20.0.0, env
+`tuolumne_trilinos`, `build-tuolumne` (`Canopy_ENABLE_PROFILING:BOOL=ON`, read
+from the cache and echoed at each job's head; HIP registered at np 1-4 with
+`--gpus-per-task=1 --cores-per-task=8`). Every run went through `canopy_ctest`
+after a passing watchdog self-test, with the HIP environment in a subshell. The
+watchdog cancelled nothing but the self-test. Script:
+`scripts/tuolumne/run_ctest_b2.flux measure|failure serial|hip`, copied from
+`run_ctest_b1.flux` with the stem list changed to the five B2 stems; `failure`
+runs `CartesianTaylorSolve` only. `-t 20m` (`15m` for `failure`).
+
+| job | what |
+| --- | --- |
+| `f3civx1CZ2qD` | `measure serial`, drift bounds provisional (1.0): 29 of 30 pass; `DownwardSweep` np 5 failed (below) |
+| `f3civx9mCtEj` | `measure hip`, same binary: 20 of 20 pass |
+| `f3civxJ6Wr79` | `run_ctest_h0b.flux calibrate`, `TreeBuilder`, `DownwardSweep`, `CartesianTaylorSolve` SERIAL np 1-6 |
+| `f3cj2wdB5vSb` | failure direction: `_push_root_half_width` re-derives from `root_box()` |
+| `f3cj6QNSmYfy` | exit criterion, SERIAL np 1-6: 30 of 30 `completed`, every stem `rc=0` |
+| `f3cj6QWEwmd9` | exit criterion, HIP np 1-4: 20 of 20 `completed`, every stem `rc=0` |
+
+`f3civxJ6Wr79` ran on its own node, concurrently with the two `measure` jobs,
+and rewrote `serial_runtimes.tsv` near their end. Only the three calibrated
+stems' rows changed, and the exit runs used the new rows.
+
+### Decisions recorded (made before the session, not reopened)
+
+- The knob is `FmmConfig::quantize_root_half_width`, `bool`, default `false`.
+  It reaches `TreeBuilder` as a new last constructor argument (default
+  `false`), so every existing `TreeBuilder` construction is unchanged.
+- The root half-width has one source, `TreeBuilder::root_half_width()`: the
+  value `build()` stamped on the root cell. `_root_box` stays the expanded,
+  non-cubic bounding box.
+- No relabelling of cached keys. `set_root_half_width`'s logic is unchanged
+  (only its comment now points at `root_half_width()`). Cross-octave
+  relabelling is in README "Future Optimizations", not implemented.
+- No environment-variable override. Only the new cases set the knob. Only the
+  `default` rows of the stems with added cases were re-calibrated.
+- The drift harness is parameterized on the knob. The two existing
+  `operatorCacheAcrossDrift*` cases stay knob-off, two new
+  `operatorCacheAcrossDriftQuantized*` cases run knob-on, and all four assert a
+  direct-sum bound measured on their own trajectory.
+
+### What changed
+
+- `TreeBuilder`: `_quantize_root_hw`, `_root_half_width` (domain units; its
+  declaration states the up-to-2x width and the extra-level cost, R5),
+  `root_half_width()`, and `static quantized_half_width(hw)`: `frexp`
+  mantissa 0.5 returns `hw`, otherwise `ldexp(1.0, e)`. It returns
+  non-positive and non-finite input unchanged. `build()` quantizes after the
+  tolerance expansion and before stamping the root cell. The centre is the
+  box centre, as before.
+- `Solver`: the `FmmConfig` field, passed to the builder.
+  `_push_root_half_width` is now one line,
+  `_downward.set_root_half_width( _builder.root_half_width() )`.
+- `TwoScaleFixture` takes a third constructor argument (the knob). Its build
+  sequence moved into `rebuild_with( TreeBuilder& )`, which the constructor
+  calls with `builder`. The sweeps' kernel parameters are now set before the
+  first build rather than after `comm_plan.build`. They do not change between
+  the two points, and every pre-existing `DownwardSweep` case passed unchanged.
+- New cases: `TreeBuilder.quantizedRootHalfWidth` (step 6),
+  `DownwardSweepTwoScale.rootWidthQuantizationRetainsCache` (step 5),
+  `CartesianTaylorSolve.operatorCacheAcrossDriftQuantizedThetaCanopy` /
+  `...ThetaRef` (step 8). The two existing drift cases now go through
+  `runArm` with their own bounds.
+- `with_cartesian_taylor_solve` prints `[ct-cache-inc]` after every solve in
+  every arm and asserts the cache rule per build. On a changed sweep width the
+  increment must equal `m2l_n_unique_ops()`. On an unchanged width it must
+  equal the number of realized keys not seen since the last change. The test
+  computes that count itself from `m2l_realized_keys()`. Pre-existing print
+  formats are unchanged.
+
+### Readers of the root width, by search
+
+`grep -rn "root_box()" src tests examples`:
+
+| site | reads | action |
+| --- | --- | --- |
+| `src/Canopy_Solver.hpp` `_push_root_half_width` | root width | **switched** |
+| `src/Canopy_Solver.hpp` `_init_auto_softening` | box volume | kept: a box quantity |
+| `src/Canopy_DownwardSweep.hpp` `set_root_half_width` comment | — | comment points at `root_half_width()` |
+| `tests/tstDownwardSweep.hpp` `TwoScaleFixture` | root width | **switched** |
+| `tests/tstCartesianTaylorSolve.hpp` `[ct-cache]` print | root width | **switched** |
+| `tests/tstCartesianTaylorSolve.hpp` `[ct-solve]` print | root width | **switched** |
+| `tests/tstRebalanceDiag.hpp:410` | longest box edge | kept: a box diagnostic |
+| `tests/tstUpwardSweep.hpp:209`, `:715` | root centre only | kept: the centre does not move. `:715` reads the width from the root cell already |
+
+`TreeBuilder::needs_rebuild` reads `_root_box` directly and is unchanged.
+Every other width in `src/` is a cell's own `half_width`, which descends from
+the stamped root.
+
+### Knob off: nothing moved
+
+A script compared the SERIAL `[ct-solve]`, `[multisolve-dev]`,
+`[multisolve-probe]`, `[fusedm2l-dev]` and `[fusedm2l-idem]` lines
+of `f3cj6QNSmYfy` (and of `f3civx1CZ2qD`) with `f3chRgEQqzd5`, as multisets per
+stem and np. It excluded only the new lines: `arm=drift*` deviation lines and the knob-on cases'
+configuration lines (root half-width a power of two). That is 198 lines
+(96 / 36 / 54 / 6 / 6). There were **0 mismatches**. The pre-existing drift
+cases' `[ct-cache]` increments are B1's, exactly (np 1 θ 0.5: 5388, 5464,
+5560, 5726). `LaplaceSolve.bitForBitArtifacts` ran on 3 SERIAL entries and
+skipped on the other 36 and on HIP, as in B1. `tests/data` was not touched.
+
+### Retention case (`[b2-retain]`)
+
+Two-scale draw, θ 0.3, `CartesianTaylorBasis<double, 3, 1>`, one downward
+sweep. The second build's padding is 0.2 (in-octave) or 0.75 (cross-octave),
+against the fixture's 0.1. Same on both backends, at every `(nprocs, rank)`:
+
+| arm | knob | width 1 → 2 | increment |
+| --- | --- | --- | --- |
+| in-octave | on | 1 → 1 | **0** on 31 of 31 ranks; `n_unique_ops` unchanged |
+| in-octave | off | 0.5972 → 0.6967 (np 1) | `== m2l_n_unique_ops()` (np 1: 164) |
+| cross-octave | on | 1 → 2 | `== m2l_n_unique_ops()` (np 1: 54) |
+
+### Drift cases: bounds and increments
+
+Bounds are 2x the worst over SERIAL np 1-6 and HIP np 1-4, rounded up at the
+third figure. The gradient is the worst field in all four. Every figure agrees
+across np and backend to 12 significant figures, and the exit runs reproduced
+the measure runs.
+
+| case | knob | worst `max_grad_dev` | worst `max_pot_dev` | bound | ratio |
+| --- | --- | --- | --- | --- | --- |
+| `operatorCacheAcrossDriftThetaCanopy` | off | 1.8799053015e-02 | 1.0217956014e-03 | 3.76e-02 | 2.000 |
+| `operatorCacheAcrossDriftThetaRef` | off | 9.5675103599e-03 | 3.3292179793e-04 | 1.92e-02 | 2.007 |
+| `operatorCacheAcrossDriftQuantizedThetaCanopy` | on | 1.8211525767e-02 | 1.0861234562e-03 | 3.65e-02 | 2.004 |
+| `operatorCacheAcrossDriftQuantizedThetaRef` | on | 7.6584280953e-03 | 2.1453247968e-04 | 1.54e-02 | 2.011 |
+
+Both drift arms run at p = 2, so the θ 0.3 figures are not comparable to the
+p = 3 gating arm's.
+
+`keys_built` increments per build, summed over ranks, SERIAL (`f3cj6QNSmYfy`).
+HIP's np 1-4 sums are identical. Builds 1-4 are the four solves:
+
+| np | θ | knob off | knob on | knob-on share of builds 2-4 |
+| --- | --- | --- | --- | --- |
+| 1 | 0.5 | 5388, 5464, 5560, 5726 | 4108, 12, 14, 52 | 0.6 % |
+| 2 | 0.5 | 8951, 9045, 9176, 9386 | 7492, 17, 17, 55 | 0.4 % |
+| 3 | 0.5 | 12281, 12385, 12536, 12757 | 10725, 716, 154, 186 | 3.2 % |
+| 4 | 0.5 | 15359, 15453, 15614, 15839 | 13341, 798, 1054, 86 | 4.7 % |
+| 5 | 0.5 | 18368, 18438, 18498, 18737 | 15915, 1898, 827, 590 | 6.6 % |
+| 6 | 0.5 | 21225, 21329, 21530, 21700 | 17188, 2059, 2306, 749 | 8.6 % |
+| 1 | 0.3 | 17824, 17926, 18128, 18588 | 12662, 138, 154, 290 | 1.5 % |
+| 2 | 0.3 | 28859, 28971, 29254, 29890 | 21926, 414, 335, 354 | 1.6 % |
+| 3 | 0.3 | 39189, 39338, 39662, 40440 | 30989, 1255, 837, 1124 | 3.3 % |
+| 4 | 0.3 | 48096, 48222, 48595, 49394 | 37061, 5167, 2058, 1271 | 7.1 % |
+| 5 | 0.3 | 56613, 56557, 57021, 56610 | 43832, 7687, 3402, 1583 | 8.9 % |
+| 6 | 0.3 | 63518, 63629, 64074, 66080 | 46448, 8150, 6408, 4203 | 11.6 % |
+
+Knob off, every build's increment equals its admitted count. Knob on, the sweep
+width reads 0.25 on every build, so no build after the first changes it.
+Summed over np 1-6, builds 2-4 rebuild 5.3 % (θ 0.5) and 7.1 % (θ 0.3) of
+admitted columns.
+
+### What only running revealed
+
+1. **The knob-on drift increment is not 0.** Step 8 says it "must read 0 on
+   every step whose quantized root half-width did not change". The width never
+   changed, yet every build made some columns. They were exactly the keys the
+   moved tree realized for the first time on that rank. The root centre drifts
+   with the box, and the rebalance and migrate flows move cells between ranks.
+   The share grows with np (0.4-0.6 % at np 1-2, 8.6-11.6 % at np 6), which
+   points at ownership moves more than geometry. The harness asserts that
+   sharper rule: the increment equals the first-seen count. It held on 336 of
+   336 builds per backend. The design's literal 0 holds in the retention case,
+   where the particles are identical.
+2. **Quantizing changes the tree a lot, not just by one level (R5).** On
+   `CartesianTaylorSolve`'s fixture the root goes from 0.1386 to 0.25 (1.80x).
+   `max_depth = 6` then caps the deepest cells at 1.80x their knob-off width,
+   and the first build admits 4108 columns against 5388 at np 1 θ 0.5 (12 662
+   against 17 824 at θ 0.3). On the two-scale draw the root goes from 0.597 to
+   1.0 and np 1 admits 54 columns against 162. R5 predicted a stable key count
+   with shifted values. Under a binding `max_depth` the count falls instead, and
+   the accuracy figures move (drift θ 0.5 gradient 1.880e-2 → 1.821e-2). The
+   knob-on figures belong to a different tree. They are not the knob-off
+   figures with the cache kept.
+3. **A per-rank vacuity guard is wrong on the knob-on two-scale tree.** At np 5
+   rank 2 owns no admitted pair at all, in either build. The first `measure`
+   job failed `DownwardSweep` np 5 on `EXPECT_GT( unique1, 0 )` alone. Every
+   cache assertion passed. The guard is now on the all-rank sum, as T1's
+   `range_guard` assertion is.
+4. **In the failure direction the cache counters look healthy.** With the width
+   re-derived, the sweep is handed a changed width every build. So the cache
+   clears and rebuilds in full, and `[ct-cache-inc]` satisfies the cache rule.
+   Only the direct-sum bound catches it, which is R4's and R9's point.
+
+### Failure direction — `f3cj2wdB5vSb`
+
+`_push_root_half_width` was made to re-derive the width from `root_box()`
+again. Only `Canopy_Test_CartesianTaylorSolve_MPI_SERIAL` was rebuilt, and it
+was run alone. All six entries failed, each on exactly the two knob-on drift
+cases. The knob-off drift cases and both gating arms passed. Every np printed
+the same figures:
+
+```
+[ct-solve] theta=0.5 ... arm=drift_q_theta_canopy direct_softened_sum max_pot_dev=0.71170570742428541 max_grad_dev=1.9328138902251875 tol=0.036499999999999998
+tests/tstCartesianTaylorSolve.hpp:1025: Failure
+Expected: (max_pot_dev) < (tol), actual: 0.71170570742428541 vs 0.0365
+tests/tstCartesianTaylorSolve.hpp:1033: Failure
+Expected: (max_grad_dev) < (tol), actual: 1.9328138902251875 vs 0.0365
+[ct-solve] theta=0.3 ... arm=drift_q_theta_ref ... max_pot_dev=0.57436289851158484 max_grad_dev=1.5977382783903646 tol=0.0154
+```
+
+The sweep was told 0.1386-0.1356 while the tree was built at 0.25. The
+octave-crossing half of the failure direction is the retention case's
+cross-octave arm, which passes in every run.
+`src/Canopy_Solver.hpp` was then restored from a copy with its mtime, so no
+other target went stale. The CT SERIAL object was deleted and rebuilt. A
+`make` of all ten targets then rebuilt only that object. The exit runs used
+those binaries.
+
+### Budget rows re-calibrated
+
+`f3civxJ6Wr79`, `default` rows, max of three passes (s, np 1-6):
+
+| stem | before | after |
+| --- | --- | --- |
+| `TreeBuilder` | 3.53, 4.17, 5.2, 6.12, 6.9, 7.86 | 3.26, 3.98, 5.01, 5.89, 6.73, 7.62 |
+| `DownwardSweep` | 9.1, 6.12, 7.26, 8.04, 8.92, 9.9 | 5.58, 6.15, 7.57, 8.33, 9.27, 10.2 |
+| `CartesianTaylorSolve` | 18.86, 12.4, 11.65, 11.2, 11.53, 11.88 | 25.34, 16.14, 14.72, 14.24, 14.47, 14.95 |
+
+`DownwardSweep` np 1's old 9.1 s was a cold first entry. In the calibration
+it is not first. The exit runs' tightest entry was `TreeBuilder` np 1, the cold
+first entry of each job: 9.68 s of 12 s on SERIAL and 10.18 s of 12 s on HIP.
+
+**Affects:**
+- **A2**: balancing must read the root cell's width from
+  `TreeBuilder::root_half_width()` (or the cells' `half_width`), never from
+  `root_box()`. That is the expanded, non-cubic box. The root cell is the cube
+  of half-width `root_half_width()` about its centre: it equals the box's
+  largest half extent with the knob off, and is up to 2x wider with it on.
+  `needs_rebuild` deliberately stays on the box.
+- **A1, C1**: their occupied-depth and fallback figures are knob-off. With the
+  knob on, every per-depth width scales by the quantized/unquantized ratio
+  (1.67x on the two-scale draw, 1.80x on `CartesianTaylorSolve`'s fixture). The
+  deepest occupied depth can then rise by one on an uncapped tree, or
+  the leaves can fill up at `max_depth` on a capped one, as measured here. Their
+  numbers must be re-measured knob-on, not translated by one level.
+- **R5**: under a binding `max_depth` the realized key count is not stable
+  across the snap (np 1: 162 → 54, 5388 → 4108). Read a count change on a
+  knob change as a tree change, not as a cache defect.
+- **A3 / the default**: the knob stays off. Before anything turns it on by
+  default, `MultiSolve`'s and both gating arms' figures must be re-pinned on the
+  knob-on tree. Its accuracy is different, not worse by construction.

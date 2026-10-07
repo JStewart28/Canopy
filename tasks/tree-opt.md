@@ -1317,7 +1317,7 @@ bounds are pinned constants loose enough to absorb a real degradation silently
 
 ---
 
-### B2 — Quantize the root half-width so the operator cache survives a drifting box — **NOT STARTED**
+### B2 — Quantize the root half-width so the operator cache survives a drifting box — **DONE**
 
 **Depends on:** B1 **DONE**, V1 **DONE**.
 **Fill in:** `src/Canopy_TreeBuilder.hpp` (the quantization in `build()`, a
@@ -1434,6 +1434,28 @@ that case, knob on. Temporarily make `_push_root_half_width` re-derive the
 width from `root_box()` again, so the sweep is told the unquantized width while
 the tree is built at the quantized one, and confirm a knob-on drift case fails
 its direct-sum bound; revert, and record the failure message.
+
+**Met.** Flux jobs `f3cj6QNSmYfy` (SERIAL) and `f3cj6QWEwmd9` (HIP), on the
+final binaries, profiling ON: all five stems pass, 30 of 30 entries at SERIAL
+np 1-6 and 20 of 20 at HIP np 1-4. No entry went over budget and the watchdog
+cancelled nothing. `LaplaceSolve.bitForBitArtifacts` passed with
+`tests/data` untouched. A script compared the SERIAL `[ct-solve]`,
+`[multisolve-dev]`, `[multisolve-probe]` and `[fusedm2l-*]` lines with
+`f3chRgEQqzd5`. All 198 are identical, excluding only the new drift-arm
+deviation lines and the knob-on configuration lines. `rootWidthQuantizationRetainsCache` read an
+increment of **0** knob-on on all 31 `(nprocs, rank)` across both backends,
+`m2l_n_unique_ops()` knob-off, and `m2l_n_unique_ops()` across an octave
+(width 1 → 2) knob-on. The four drift cases pass bounds set at 2x their own
+worst over both backends (3.76e-2, 1.92e-2, 3.65e-2, 1.54e-2). Knob on, builds
+2-4 of the drift trajectory rebuilt 5.3 % (θ 0.5) and 7.1 % (θ 0.3) of
+admitted columns, summed over SERIAL np 1-6; knob off, 100 %. **Not 0**, as
+step 8 predicted: each build realizes some keys for the first time. The harness
+instead asserts that the increment equals that first-seen count on every
+unchanged-width build, and it held on all 336 builds per backend. Failure
+direction `f3cj2wdB5vSb`: with `_push_root_half_width` re-deriving from
+`root_box()`, both knob-on drift cases failed at every np (gradient 1.93 and
+1.60 against 3.65e-2 and 1.54e-2) and nothing else failed. That was reverted and
+rebuilt before the exit runs. See `tree-opt-progress-log.md` `## B2`.
 
 ## Known risks
 

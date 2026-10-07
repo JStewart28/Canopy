@@ -114,6 +114,16 @@ struct FmmConfig
     // 0 is legal and builds no column at all; a negative value is rejected
     // by DownwardSweep::set_m2l_op_count_cap() rather than clamped.
     int m2l_op_count_cap = 32768;
+
+    // Round the root cell's half-width UP to the next power of two at every
+    // tree build (TreeBuilder::quantized_half_width), keeping its centre.
+    // A rebuild whose bounding box drifts within one octave then hands the
+    // downward sweep a bit-identical width, so a key_needs_level basis
+    // (CartesianTaylorBasis) keeps its whole M2L operator cache instead of
+    // rebuilding it. Off by default because it moves the cell set for EVERY
+    // basis: the root cell becomes up to 2x wider than the bounding box,
+    // which can add one level at the top of the tree.
+    bool quantize_root_half_width = false;
 };
 
 // ============================================================================
@@ -195,7 +205,7 @@ class Solver
                     std::array<double, 6>{ cfg.xmin_tol, cfg.xmax_tol,
                                            cfg.ymin_tol, cfg.ymax_tol,
                                            cfg.zmin_tol, cfg.zmax_tol },
-                    cfg.ncrit_tol )
+                    cfg.ncrit_tol, cfg.quantize_root_half_width )
         , _partitioner( comm, cfg.replication_depth, cfg.imbalance_tolerance )
         , _comm_plan( comm, cfg.mac_theta )
         , _upward( comm )
@@ -766,28 +776,21 @@ class Solver
     // into the per-level unit lengths its operator builder is given
     // (unit_w[d] = w_root / 2^d).
     //
-    // The HALF-WIDTH, and the LARGEST of the three half extents of the root
-    // bounding box — the same reduction TreeBuilder performs when it stamps
-    // the root cell, which is what makes every cell a cube and w_root a single
-    // scalar.
+    // The width the root cell was BUILT at, read from the builder and never
+    // re-derived from root_box(): with quantize_root_half_width the root cell
+    // is wider than the box, and a sweep told the box's width would build
+    // every column at the wrong scale (tree-opt.md R4).
     //
-    // Called immediately before each _downward.setup(), because the box is
+    // Called immediately before each _downward.setup(), because the width is
     // recomputed by every _builder.build() and so can move on any of the three
     // setup flows. The setter is a no-op on an unchanged value and empties the
     // operator cache only for a basis that declares key_needs_level, so a
     // drifting box does not defeat the cache for a basis whose operators are
-    // scale-normalized.
+    // scale-normalized, and a quantized width that stays in one octave does
+    // not defeat it for any basis.
     void _push_root_half_width()
     {
-        const auto& box = _builder.root_box();
-        double w_root = 0.0;
-        for ( int d = 0; d < 3; d++ )
-        {
-            const double hw = 0.5 * ( box.max[d] - box.min[d] );
-            if ( hw > w_root )
-                w_root = hw;
-        }
-        _downward.set_root_half_width( w_root );
+        _downward.set_root_half_width( _builder.root_half_width() );
     }
 
     // Derive and apply the auto-softening length from the current global
