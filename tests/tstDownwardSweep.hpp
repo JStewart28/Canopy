@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
 
+#include "Canopy_CartesianTaylorBasis.hpp"
 #include "Canopy_CommunicationPlan.hpp"
 #include "Canopy_DownwardSweep.hpp"
 #include "Canopy_LaplaceKernel.hpp"
@@ -24,10 +25,13 @@
 
 #include <mpi.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1478,6 +1482,11 @@ struct TwoScaleFixture
     // admitted pairs at the deep end of the tree where an offset can exceed
     // M2L_KEY_OFFSET_MAX = 32 half-widths at that depth.
     double mac_theta = 0.3;
+    // Plummer softening LENGTH eps, domain units; the kernel's b is eps^2.
+    // Positive because CartesianTaylorBasis aborts on b <= 0. It moves no
+    // integer key and no interaction-list entry, and nothing here asserts
+    // accuracy, so its value is otherwise arbitrary.
+    double softening = 1.0e-3;
 
     AoSoA_t particles{ "particles", 0 };
     TreeBuilder<TEST_MS, TEST_ES> builder;
@@ -1518,6 +1527,21 @@ struct TwoScaleFixture
 
         comm_plan.build( builder.cells(), partitioner.ownership(),
                          partitioner.cell_owner_map(), replication_depth );
+
+        // Both sweeps get the same parameters, the upward one before setup():
+        // it builds the aux tables the downward sweep borrows.
+        M2LKernelParams kernel_params;
+        kernel_params.softening = softening;
+        upward.set_m2l_kernel_params( kernel_params );
+        downward.set_m2l_kernel_params( kernel_params );
+
+        // As Solver::_push_root_half_width: a key_needs_level basis builds
+        // its operators from the per-depth widths this sets.
+        const auto& box = builder.root_box();
+        double w_root = 0.0;
+        for ( int d = 0; d < 3; d++ )
+            w_root = std::max( w_root, 0.5 * ( box.max[d] - box.min[d] ) );
+        downward.set_root_half_width( w_root );
 
         upward.setup( builder.cells(), partitioner.cell_owner_map(),
                       builder.particle_keys(), num_local );
@@ -1721,6 +1745,66 @@ void testTwoScaleRefusalsAreRangeGuard()
     std::fflush( stdout );
 #endif
 }
+
+// B0 of tasks/tree-opt.md: how many admitted operator columns differ from
+// another only in dd. CartesianTaylorBasis's operator ignores dd
+// (Canopy_CartesianTaylorBasis.hpp, m2l_operator_block), so for it
+// admitted / distinct-ignoring-dd is the factor a dd-free key would remove.
+// LaplaceKernel's operator does depend on dd, so its figure is the control,
+// not a saving. A measurement: the only assertion on the counts is the
+// by-construction distinct <= admitted.
+template <class FarField, class Fixture>
+void reportTwoScaleDdDuplicates( const char* basis, const Fixture& fix,
+                                 int nprocs, int rank )
+{
+    const auto& keys = fix.downward.m2l_realized_keys();
+    std::set<std::array<int, 4>> distinct;
+    for ( const auto& k : keys )
+        distinct.insert( { k.max_d, k.ii, k.jj, k.kk } );
+
+    const long long admitted = static_cast<long long>( keys.size() );
+    const long long n_distinct = static_cast<long long>( distinct.size() );
+    const long long bytes_per_key =
+        static_cast<long long>( FarField::bytes_per_key );
+
+    std::printf( "[b0-dd] basis %s nprocs %d rank %d admitted %lld "
+                 "distinct_no_dd %lld factor %.4f demanded_ops %d "
+                 "bytes_per_key %lld admitted_bytes %lld "
+                 "distinct_bytes %lld\n",
+                 basis, nprocs, rank, admitted, n_distinct,
+                 n_distinct > 0 ? double( admitted ) / double( n_distinct )
+                                : 1.0,
+                 fix.downward.m2l_n_demanded_ops(), bytes_per_key,
+                 admitted * bytes_per_key, n_distinct * bytes_per_key );
+    std::fflush( stdout );
+
+    EXPECT_LE( n_distinct, admitted )
+        << basis << ": more distinct (max_d, ii, jj, kk) tuples than "
+                    "admitted keys, so the count itself is wrong";
+}
+
+template <class TEST_MS, class TEST_ES>
+void testTwoScaleDdDuplicates()
+{
+    using CTBasis = CartesianTaylorBasis<double, 3, 1>;
+
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    TwoScaleFixture<TEST_MS, TEST_ES, CTBasis> ct;
+    ct.solve();
+    reportTwoScaleDdDuplicates<CTBasis>( "CartesianTaylor", ct, nprocs,
+                                         rank );
+
+    TwoScaleFixture<TEST_MS, TEST_ES, Kernel> laplace;
+    laplace.solve();
+    reportTwoScaleDdDuplicates<Kernel>( "Laplace", laplace, nprocs, rank );
+
+    // The control means something only on the same tree.
+    EXPECT_EQ( ct.downward.m2l_cells_at_depth(),
+               laplace.downward.m2l_cells_at_depth() );
+}
 } // namespace DownwardSweepTest
 
 TEST( DownwardSweepTwoScale, treeHasShallowAndDeepLeaves )
@@ -1733,6 +1817,12 @@ TEST( DownwardSweepTwoScale, refusalsAreRangeGuard )
 {
     DownwardSweepTest::testTwoScaleRefusalsAreRangeGuard<TEST_MEMSPACE,
                                                          TEST_EXECSPACE>();
+}
+
+TEST( DownwardSweepTwoScale, ddDuplicateColumns )
+{
+    DownwardSweepTest::testTwoScaleDdDuplicates<TEST_MEMSPACE,
+                                                TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

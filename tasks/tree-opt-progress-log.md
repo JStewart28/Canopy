@@ -908,3 +908,139 @@ HIP" entry is removed.
 - **B1, A2, B2, A3** — `MultiSolve` and `CartesianTaylorSolve` now pass with
   nothing carried on both backends, so they gate outright. A HIP failure in
   either is the change's (R11).
+
+## B0
+
+**Outcome: the duplicate factor is exactly 1.0 for both bases, at every
+`(nprocs, rank)`, on both backends.** On T1's two-scale fixture no two admitted
+keys share $(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$, so a
+`dd`-free key would remove nothing here. That is the null result the design
+says to record before B1 starts.
+
+Provenance: commit `b516a17` plus this section's edits to
+`tests/tstDownwardSweep.hpp`, Cray clang 20.0.0, env `tuolumne_trilinos`,
+`build-tuolumne` (`Canopy_ENABLE_PROFILING:BOOL=ON`) and `build-tuolumne-noprof`
+(`OFF`). Both were read from the cache and echoed at each job's head. Every run
+went through `canopy_ctest` after a passing watchdog self-test. No entry went
+over budget, and the watchdog cancelled nothing but the self-test. Script:
+`scripts/tuolumne/run_ctest_b0.flux measure|noprof serial|hip`, copied from
+`run_ctest_t1_hip.flux` without the `MultiSolve` pass.
+
+| job | build | what |
+| --- | --- | --- |
+| `f3cbxZUkYRWf` | ON | SERIAL np 1-6, two passes: the step-0 check, before the B0 case existed |
+| `f3cc36Kv7B4j` | ON | `run_ctest_h0b.flux calibrate`, `DownwardSweep` SERIAL np 1-6 |
+| `f3cc4m4y111Z` | ON | SERIAL np 1-6, two passes |
+| `f3cc4mDrvh5Z` | ON | HIP np 1-4, two passes |
+| `f3cc4mNnLNRu` | OFF | SERIAL np 1-6, one pass |
+| `f3cc4mXSvAxo` | OFF | HIP np 1-4, one pass |
+
+### Decisions recorded (made before the session, not reopened)
+
+- **`CartesianTaylorBasis<double, 3, 1>`**, matching the downstream
+  configuration's 3200 B per column. `LaplaceKernel` stays at the file's
+  `P_ORDER = 6`, which is 21 952 B per column. Both byte figures come from the
+  basis's own `bytes_per_key`.
+- **One fixed positive softening for both bases**, `1.0e-3` domain units. It
+  exists only to satisfy `CartesianTaylorBasis`'s guards. It moves no key and no
+  interaction-list entry, and nothing here asserts accuracy.
+
+### Step 0 — the fixture change
+
+`TwoScaleFixture` gained a `softening` member. Its constructor now hands
+`M2LKernelParams{softening}` to both sweeps, the upward one before `setup()`,
+and sets the downward root half-width from `builder.root_box()` exactly as
+`Solver::_push_root_half_width` does. Without this, a `CartesianTaylorBasis`
+solve aborts in `build_m2l_operators`. Before the B0 case was written,
+`f3cbxZUkYRWf` printed `[two-scale]` lines identical to the `## T1 (HIP arm)`
+table, field for field at all 21 `(nprocs, rank)`, and identical across its two
+passes. The change moved nothing T1 measured.
+
+### The case
+
+`DownwardSweepTwoScale.ddDuplicateColumns` (`testTwoScaleDdDuplicates`) builds
+the fixture once per basis and solves. It counts `m2l_realized_keys()` and the
+distinct `(max_d, ii, jj, kk)` tuples, and prints one `[b0-dd]` line per basis
+per rank. It asserts `distinct <= admitted` and nothing about the ratio. It also
+asserts the two fixtures' `m2l_cells_at_depth()` are equal, because the control
+means something only on the same tree.
+
+### Measured
+
+Both passes print identical `[b0-dd]` lines on each backend, and HIP equals
+SERIAL line for line at np 1-4. The factor is 1.0000 on every line, so only the
+admitted count is listed. `distinct == admitted` and
+`demanded_ops == admitted` everywhere, so the column cap (32768) never bound.
+
+| nprocs | rank | CT admitted | CT bytes | Laplace admitted | Laplace bytes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 162 | 518 400 | 162 | 3 556 224 |
+| 2 | 0 | 57 | 182 400 | 57 | 1 251 264 |
+| 2 | 1 | 37 | 118 400 | 37 | 812 224 |
+| 3 | 0 | **85** | 272 000 | **80** | 1 756 160 |
+| 3 | 1 | 35 | 112 000 | 35 | 768 320 |
+| 3 | 2 | **57** | 182 400 | **53** | 1 163 456 |
+| 4 | 0 | 9 | 28 800 | 9 | 197 568 |
+| 4 | 1 | 28 | 89 600 | 28 | 614 656 |
+| 4 | 2 | **19** | 60 800 | **18** | 395 136 |
+| 4 | 3 | **51** | 163 200 | **50** | 1 097 600 |
+| 5 | 0 | 49 | 156 800 | 49 | 1 075 648 |
+| 5 | 1 | 18 | 57 600 | 18 | 395 136 |
+| 5 | 2 | 11 | 35 200 | 11 | 241 472 |
+| 5 | 3 | 37 | 118 400 | 37 | 812 224 |
+| 5 | 4 | 33 | 105 600 | 33 | 724 416 |
+| 6 | 0 | 42 | 134 400 | 42 | 921 984 |
+| 6 | 1 | 52 | 166 400 | 52 | 1 141 504 |
+| 6 | 2 | 34 | 108 800 | 34 | 746 368 |
+| 6 | 3 | 22 | 70 400 | 22 | 482 944 |
+| 6 | 4 | **43** | 137 600 | **37** | 812 224 |
+| 6 | 5 | **115** | 368 000 | **109** | 2 392 768 |
+
+`LaplaceKernel` equals T1's `unique_ops` at every rank. Where the bases differ
+(bold), `CartesianTaylorBasis` has more columns. That is its retained `max_d`:
+`LaplaceKernel` zeroes it, so same-offset keys at different levels collapse
+there. It has nothing to do with `dd`.
+
+### Why 1.0 — partly structural, partly this draw
+
+The classify pass (`src/Canopy_DownwardSweep.hpp:1671-1697`) computes each
+offset component as `(2i_s+1-2^{d_s})·2^{max_d-d_s} - (2i_t+1-2^{d_t})·2^{max_d-d_t}`.
+At `dd == 0` both terms are odd, so every component is **even**. At `dd != 0`
+the deeper cell's term is odd and the coarser one's is even, so every component
+is **odd**. A `dd == 0` key therefore can never collide with a `dd != 0` key on
+any tree. The proof stops there: keys with different non-zero `dd` (including
+`+k` against `-k`) are not separated by parity. They did not collide on this
+fixture. One plausible reason, **not measured**, is that the MAC puts each
+`|dd|` in its own offset-magnitude shell. A pair is emitted only after its
+parent failed, and the range guard's 32 half-widths admits only small `|dd|`.
+So a tree with many admitted `|dd| >= 1` keys is the only kind on which B1
+could pay.
+
+### Failure direction
+
+Profiling OFF, both backends: the case passes. `admitted`, `distinct` and the
+byte figures equal the profiling-ON lines exactly. Only `demanded_ops` reads
+`-1`, because it is profiling-gated. `m2l_realized_keys()` is ungated, as the
+exit criterion states.
+
+### Budget rows re-calibrated
+
+`DownwardSweep` SERIAL `default` rows from `f3cc36Kv7B4j`: 7.45, 5.41, 6.68,
+7.49, 8.45, 9.61 s at np 1-6 (previously 3.84-9.16 s). np 1 is the cold first
+entry of the job. The exit-criterion runs used these budgets (np 1 timeout
+25 s, np 6 22 s) and took at most 9.52 s.
+
+**Affects:**
+- **B1** — B0 measured no saving on T1's fixture, so B1's payoff is unproven.
+  Its exit criterion's "column count reduced by B0's measured factor"
+  degenerates to "unchanged" here, so it cannot tell a working B1 from a
+  no-op. Only `expectKeyTraitsAgree`'s failure direction would. Before B1
+  starts, decide whether to measure the factor on a tree with many admitted
+  `|dd| >= 1` keys (the downstream configuration, or a variant of this
+  fixture) or to drop B1. `LaplaceKernel`'s counts above are the "unchanged"
+  baseline B1 must reproduce (R3).
+- **B2** — `TwoScaleFixture` now sets a root half-width, so a
+  `key_needs_level` basis can be driven on it. B2's cache-retention cases can
+  reuse it.
+- **A1, C1** — `TwoScaleFixture` takes a `FarField` and now runs
+  `CartesianTaylorBasis`. Their T1 baseline is unchanged.

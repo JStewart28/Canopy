@@ -755,7 +755,7 @@ order cannot give. `FP32_smokeTest` is commented out. See
 
 ---
 
-### B0 — Measure how many admitted columns are `dd` duplicates — **NOT STARTED**
+### B0 — Measure how many admitted columns are `dd` duplicates — **DONE**
 
 **Depends on:** T1 **DONE**.
 **Fill in:** `tests/tstDownwardSweep.hpp` — `TwoScaleFixture`'s constructor
@@ -829,6 +829,20 @@ with the absolute column counts and byte figures. The stem's rows in
 ([Test naming](#test-naming-and-how-to-run-only-what-a-task-needs)). Failure direction: the `-DCanopy_ENABLE_PROFILING=OFF`
 build passes the same case, since `m2l_realized_keys()` is ungated — a $-1$
 anywhere in this case's output would be this case reading the wrong accessor.
+
+**Met.** The duplicate factor is **exactly 1.0** for both bases at every
+`(nprocs, rank)`: every admitted key already has a distinct
+$(\texttt{max\_d}, \texttt{ii}, \texttt{jj}, \texttt{kk})$. So B1 removes no
+column on this fixture. `CartesianTaylorBasis` at order 3 admits 9-162 columns
+per rank (28.8 KB-518 KB at 3200 B), and `LaplaceKernel` 9-162 (21 952 B each).
+`DownwardSweepTwoScale.ddDuplicateColumns` passes on SERIAL np 1-6 and HIP
+np 1-4 in two passes each, flux jobs `f3cc4m4y111Z` and `f3cc4mDrvh5Z`. The two
+passes print identical lines, and HIP matches SERIAL line for line. Step 0's
+fixture change left T1's `[two-scale]` lines identical to the baseline. The
+failure direction passes in `build-tuolumne-noprof/` on both backends
+(`f3cc4mNnLNRu`, `f3cc4mXSvAxo`), with the same admitted and distinct counts;
+only the gated `demanded_ops` reads $-1$. See `tree-opt-progress-log.md`
+`## B0`.
 
 ---
 
