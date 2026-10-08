@@ -1024,7 +1024,7 @@ collective is skipped on the empty rank.
 
 ---
 
-### C11 — Analytic far-field gradient in place of the finite difference — **NOT STARTED**
+### C11 — Analytic far-field gradient in place of the finite difference — **DONE**
 
 **Depends on:** none. Worth doing **before** C1 step 1's scan is interpreted, so
 that scan has two error sources to separate rather than three.
@@ -1102,6 +1102,23 @@ No existing tolerance in these tests is loosened. `LaplaceSolve` against the
 *old* reference data fails after the change — confirming the regeneration was
 required rather than incidental. The progress log records the measured gradient
 error floor before and after, so C1's scan can be read against it.
+
+**Met.** At `775a397`, flux jobs `f3cvrmBCmKd1` (SERIAL) and `f3cvrmKe1Eco`
+(HIP), every entry `outcome=completed`: `Canopy_Test_LaplaceKernel_SERIAL`
+(11/11); `LaplaceSolve`, `MultiSolve` and `DownwardSweep` at SERIAL np 1–6 and
+HIP np 1–4, `LaplaceSolve` against the regenerated data with both tolerances
+unchanged; `SingleSolve` at SERIAL np 1,2,3,5,6. The new
+`testL2PGradientAnalyticVsFD` holds the analytic gradient to `2.1e-11`
+relative of a fourth-order FD, and to `3.43e-8` of the replaced scheme — that
+scheme's own error, measured in the same test as its distance from the
+fourth-order one. That is a departure from step 3's single comparison; the
+progress log, section C11, says why. `testL2PGradient` is at `1e-11` (was
+`1e-7`); its error, `8.751e-12`, is exactly the $P = 6$ truncation, checked
+against an independent 40-digit computation. Against the old data
+`bitForBitArtifacts` failed on the `locals()` hash at np 1–2 (job
+`f3cvdZuu4zbH`), while `crossRankAgreement` still passed. No tolerance was
+loosened. Gradient floor before and after, with qualifications: progress log,
+section C11.
 
 ## Known risks
 
