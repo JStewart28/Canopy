@@ -24,6 +24,7 @@ FarFieldContract	3	default	5.34	f3cLieUe4u2F
 FarFieldContract	4	default	6.09	f3cLieUe4u2F
 FarFieldContract	5	default	6.78	f3cLieUe4u2F
 FarFieldContract	6	default	7.91	f3cLieUe4u2F
+LaplaceKernel	1	default	5.87	f3cvZzMaek2b
 LaplaceSolve	1	default	9.96	f3cLieUe4u2F
 LaplaceSolve	2	default	8.29	f3cLieUe4u2F
 LaplaceSolve	3	default	8.26	f3cLieUe4u2F
@@ -50,6 +51,11 @@ MultiSolve	5	theta0.7	13.06	f3caoGecUY71
 MultiSolve	6	default	16.25	f3cajB3pSQ1m
 MultiSolve	6	probe	14.88	f3camEXYMR7u
 MultiSolve	6	theta0.7	14.58	f3caoGecUY71
+SingleSolve	1	default	6.18	f3cvZzMaek2b
+SingleSolve	2	default	5.96	f3cvZzMaek2b
+SingleSolve	3	default	7.49	f3cvZzMaek2b
+SingleSolve	5	default	9.66	f3cvZzMaek2b
+SingleSolve	6	default	10.83	f3cvZzMaek2b
 TreeBuilder	1	default	6.31	f3ctt2j3drQf
 TreeBuilder	2	default	6	f3ctt2j3drQf
 TreeBuilder	3	default	6.38	f3ctt2j3drQf

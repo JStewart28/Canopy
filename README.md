@@ -585,31 +585,25 @@ bit-exact by `TreePartitioner.testCoalescedMigrateIntegrity`. To be triaged in a
 separate session: determine whether the fix is a corrected FP32 accumulation or
 a re-justified error budget for the multi-rank FP32 case.
 
-### Two `unit` test targets do not compile
+### The `P2P` `unit` test target does not compile
 
-A `make -k` over the whole tree fails exactly two targets, at every backend:
+A `make -k` over the whole tree fails one target, at every backend:
+**`Canopy_Test_P2P_*`** — 3 errors; `tests/tstP2P.hpp:449` constructs a
+`TreeBuilder` with a `std::array<double,3>` bounding-box tolerance where the
+constructor (`src/Canopy_TreeBuilder.hpp:164-166`) takes
+`std::array<double,6>`. The signature drift traces to commit `8b0298e`
+"Refactor Solver constructor".
 
-- **`Canopy_Test_LaplaceKernel_*`** — 35 errors, all "no matching function" for
-  `p2m_contribution`, `m2m_translate`, `m2l_translate`, `l2l_translate` and
-  `l2p_evaluate`. `tests/tstLaplaceKernel.hpp` calls these operators with
-  argument lists that no longer match their declarations in
-  `src/Canopy_LaplaceKernel.hpp`.
-- **`Canopy_Test_P2P_*`** — 3 errors; `tests/tstP2P.hpp:449` constructs a
-  `TreeBuilder` with a `std::array<double,3>` bounding-box tolerance where the
-  constructor (`src/Canopy_TreeBuilder.hpp:164-166`) takes
-  `std::array<double,6>`. The signature drift traces to commit `8b0298e`
-  "Refactor Solver constructor".
-
-Both are **pre-existing** — verified by rebuilding
-`Canopy_Test_LaplaceKernel_SERIAL` at `64d1648` with unrelated in-flight changes
-stashed, which produces the same errors. Both are test-side drift behind a
-`src/` signature change, not a defect in the library.
+It is **pre-existing** — test-side drift behind a `src/` signature change, not a
+defect in the library. (This entry used to list `Canopy_Test_LaplaceKernel_*`
+too; canopy0 C11 updated `tests/tstLaplaceKernel.hpp` to the current operator
+signatures.)
 
 The consequence is that `ctest -L unit` cannot be run as the diagnostic layer
-described under [Run with CTest](#run-with-ctest) until they are fixed. Build
+described under [Run with CTest](#run-with-ctest) until it is fixed. Build
 and run the individually-compiling component tests by name in the meantime. To
-be fixed in a separate session: update both test files to the current
-signatures.
+be fixed in a separate session: update `tests/tstP2P.hpp` to the current
+signature.
 
 ### `SingleSolve` fails at np=4 and deadlocks the suite when run with other solves
 

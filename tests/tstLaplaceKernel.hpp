@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
 #include <random>
 #include <vector>
 
@@ -37,6 +38,19 @@ using CoeffView2D = Kokkos::View<complex**, TEST_MEMSPACE>;
 using CoeffView3D = Kokkos::View<complex***, TEST_MEMSPACE>;
 using ScalarView1D = Kokkos::View<double*, TEST_MEMSPACE>;
 using ScalarView2D = Kokkos::View<double**, TEST_MEMSPACE>;
+using AuxTables = Kernel::aux_tables_type<TEST_MEMSPACE>;
+
+// Every operator here takes cell half-widths. A width of 1 makes the
+// scale-normalized coefficients (M/w^{n+1}, L w^n) equal the physical ones,
+// so the closed-form expectations below hold as written.
+static constexpr double UNIT_W = 1.0;
+
+inline AuxTables make_aux( int a_order )
+{
+    AuxTables aux;
+    aux.A_table = build_A_coefficients<double, TEST_MEMSPACE>( a_order );
+    return aux;
+}
 
 } // namespace LaplaceTest
 
@@ -160,7 +174,7 @@ void testP2MSingleParticleOnAxis()
         KOKKOS_LAMBDA( int ) {
             double charges[1] = { q };
             auto M_out = Kokkos::subview( M_dev, 0, Kokkos::ALL, Kokkos::ALL );
-            Kernel::p2m_contribution( charges, 0.0, 0.0, dz, M_out );
+            Kernel::p2m_contribution( charges, 0.0, 0.0, dz, UNIT_W, M_out );
         } );
     Kokkos::fence();
 
@@ -251,7 +265,7 @@ void testP2MRefComparison()
             double charges[1] = { d_q( p ) };
             auto M_out = Kokkos::subview( M_dev, 0, Kokkos::ALL, Kokkos::ALL );
             Kernel::p2m_contribution( charges, d_px( p ), d_py( p ), d_pz( p ),
-                                      M_out );
+                                      UNIT_W, M_out );
         } );
     Kokkos::fence();
 
@@ -389,12 +403,12 @@ void testM2MTranslationVsDirectP2M()
             auto M_out =
                 Kokkos::subview( M_child, 0, Kokkos::ALL, Kokkos::ALL );
             Kernel::p2m_contribution( charges, d_lx( p ), d_ly( p ), d_lz( p ),
-                                      M_out );
+                                      UNIT_W, M_out );
         } );
     Kokkos::fence();
 
     // A-coefficient table
-    auto A = build_A_coefficients<double, TEST_MEMSPACE>( P_ORDER );
+    auto aux = make_aux( P_ORDER );
 
     // M2M translate child (cell 0) into parent (2D output: num_coeffs x 1)
     CoeffView2D M_parent( "M_parent", Kernel::num_coeffs_per_cell, 1 );
@@ -404,7 +418,8 @@ void testM2MTranslationVsDirectP2M()
     Kokkos::parallel_for(
         "M2M_translate", team_policy( 1, Kokkos::AUTO ),
         KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
-            Kernel::m2m_translate( team, M_child, 0, tx, ty, tz, A, M_parent );
+            Kernel::m2m_translate( team, M_child, 0, tx, ty, tz, UNIT_W,
+                                   UNIT_W, aux, M_parent );
         } );
     Kokkos::fence();
 
@@ -551,12 +566,12 @@ void testM2LThenL2P()
             double charges[1] = { d_sq( p ) };
             auto M_out = Kokkos::subview( M, 0, Kokkos::ALL, Kokkos::ALL );
             Kernel::p2m_contribution( charges, d_sx( p ), d_sy( p ), d_sz( p ),
-                                      M_out );
+                                      UNIT_W, M_out );
         } );
     Kokkos::fence();
 
     // A table must cover orders up to 2*P for M2L (accesses A_{n+j, m-k})
-    auto A = build_A_coefficients<double, TEST_MEMSPACE>( 2 * P_ORDER );
+    auto aux = make_aux( 2 * P_ORDER );
 
     // M2L: translation vector = source_center - target_center =
     // (0,0,0)-(sep,0,0)
@@ -568,7 +583,8 @@ void testM2LThenL2P()
         "M2L", team_policy( 1, Kokkos::AUTO ),
         KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
             auto L_out = Kokkos::subview( L, 0, Kokkos::ALL, Kokkos::ALL );
-            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, A, L_out );
+            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, UNIT_W, UNIT_W,
+                                   aux, L_out );
         } );
     Kokkos::fence();
 
@@ -579,8 +595,8 @@ void testM2LThenL2P()
         "L2P", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, 1 ),
         KOKKOS_LAMBDA( int ) {
             double phi_out[1];
-            Kernel::l2p_evaluate( L, 0, test_dx, test_dy, test_dz, phi_out,
-                                  grad_dev, false );
+            Kernel::l2p_evaluate( L, 0, test_dx, test_dy, test_dz, UNIT_W,
+                                  phi_out, grad_dev, false );
             phi_dev( 0 ) = phi_out[0];
         } );
     Kokkos::fence();
@@ -675,11 +691,11 @@ void testL2LTranslation()
             double charges[1] = { d_sq( p ) };
             auto M_out = Kokkos::subview( M, 0, Kokkos::ALL, Kokkos::ALL );
             Kernel::p2m_contribution( charges, d_sx( p ), d_sy( p ), d_sz( p ),
-                                      M_out );
+                                      UNIT_W, M_out );
         } );
     Kokkos::fence();
 
-    auto A = build_A_coefficients<double, TEST_MEMSPACE>( 2 * P_ORDER );
+    auto aux = make_aux( 2 * P_ORDER );
 
     // M2L into parent local (cell 0)
     CoeffView3D L_parent( "L_parent", 1, Kernel::num_coeffs_per_cell, 1 );
@@ -691,7 +707,8 @@ void testL2LTranslation()
         KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
             auto L_out =
                 Kokkos::subview( L_parent, 0, Kokkos::ALL, Kokkos::ALL );
-            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, A, L_out );
+            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, UNIT_W, UNIT_W,
+                                   aux, L_out );
         } );
     Kokkos::fence();
 
@@ -706,8 +723,8 @@ void testL2LTranslation()
         KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
             auto L_out =
                 Kokkos::subview( L_child, 0, Kokkos::ALL, Kokkos::ALL );
-            Kernel::l2l_translate( team, L_parent, 0, child_off_x, 0.0, 0.0, A,
-                                   L_out );
+            Kernel::l2l_translate( team, L_parent, 0, child_off_x, 0.0, 0.0,
+                                   UNIT_W, UNIT_W, aux, L_out );
         } );
     Kokkos::fence();
 
@@ -719,7 +736,7 @@ void testL2LTranslation()
         KOKKOS_LAMBDA( int ) {
             double phi_out[1];
             Kernel::l2p_evaluate( L_child, 0, test_dx, test_dy, test_dz,
-                                  phi_out, grad_dev, false );
+                                  UNIT_W, phi_out, grad_dev, false );
             phi_dev( 0 ) = phi_out[0];
         } );
     Kokkos::fence();
@@ -766,11 +783,11 @@ void testL2PGradient()
         KOKKOS_LAMBDA( int ) {
             double charges[1] = { q_charge };
             auto M_out = Kokkos::subview( M, 0, Kokkos::ALL, Kokkos::ALL );
-            Kernel::p2m_contribution( charges, 0.0, 0.0, 0.0, M_out );
+            Kernel::p2m_contribution( charges, 0.0, 0.0, 0.0, UNIT_W, M_out );
         } );
     Kokkos::fence();
 
-    auto A = build_A_coefficients<double, TEST_MEMSPACE>( 2 * P_ORDER );
+    auto aux = make_aux( 2 * P_ORDER );
 
     // M2L
     CoeffView3D L( "L", 1, Kernel::num_coeffs_per_cell, 1 );
@@ -781,7 +798,8 @@ void testL2PGradient()
         "M2L", team_policy( 1, Kokkos::AUTO ),
         KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
             auto L_out = Kokkos::subview( L, 0, Kokkos::ALL, Kokkos::ALL );
-            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, A, L_out );
+            Kernel::m2l_translate( team, M, 0, -sep, 0.0, 0.0, UNIT_W, UNIT_W,
+                                   aux, L_out );
         } );
     Kokkos::fence();
 
@@ -792,8 +810,8 @@ void testL2PGradient()
         "L2P_grad", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, 1 ),
         KOKKOS_LAMBDA( int ) {
             double phi_out[1];
-            Kernel::l2p_evaluate( L, 0, test_dx, test_dy, test_dz, phi_out,
-                                  grad_dev, true );
+            Kernel::l2p_evaluate( L, 0, test_dx, test_dy, test_dz, UNIT_W,
+                                  phi_out, grad_dev, true );
             phi_dev( 0 ) = phi_out[0];
         } );
     Kokkos::fence();
@@ -819,11 +837,18 @@ void testL2PGradient()
     // Gradient tolerance: FD step h=1e-5 contributes O(h^2 phi''') ~ 1e-12;
     // FMM/FD combined error budget is 1e-7.
     const char* dim_name[3] = { "x", "y", "z" };
+    double max_abs_err = 0.0, grad_mag2 = 0.0;
     for ( int d = 0; d < 3; d++ )
     {
         EXPECT_NEAR( h_grad( 0, d ), grad_analytic[d], 1e-7 )
             << "L2P gradient mismatch in " << dim_name[d];
+        max_abs_err = std::fmax( max_abs_err,
+                                 std::abs( h_grad( 0, d ) - grad_analytic[d] ) );
+        grad_mag2 += grad_analytic[d] * grad_analytic[d];
     }
+    std::printf( "[laplace-kernel] testL2PGradient max|grad - exact| = %.6e "
+                 "rel = %.6e\n",
+                 max_abs_err, max_abs_err / std::sqrt( grad_mag2 ) );
 }
 TEST( LaplaceKernel, testL2PGradient ) { testL2PGradient(); }
 
