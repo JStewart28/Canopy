@@ -14,7 +14,7 @@ pairs collide on one key.
 On a **deeply non-uniform tree it stops paying**, in three separate ways that
 all trace to the same cause. The tree is built purely by density — a cell
 becomes a leaf as soon as it holds at most `ncrit` particles
-(`src/Canopy_TreeBuilder.hpp:804`), with no reference to its neighbours' depths
+(`src/Canopy_TreeBuilder.hpp:918`), with no reference to its neighbours' depths
 — so a sparse region produces a **shallow leaf** that can sit adjacent to a
 deeply refined region. The dual-tree traversal cannot split a leaf, so when one
 side is a shallow leaf it splits the other side instead
@@ -333,10 +333,10 @@ Also true now:
 
 - **No balancing of any kind exists.** `TreeBuilder` refines a cell iff its
   global particle count exceeds `ncrit` and its depth is below `max_depth`
-  (`src/Canopy_TreeBuilder.hpp:804`), and nothing anywhere consults a
+  (`src/Canopy_TreeBuilder.hpp:918`), and nothing anywhere consults a
   neighbour's depth. There is no post-pass, no flag and no partial form of it.
 - **`max_depth` is capped at 19 by Morton-key storage**, which `TreeBuilder`'s
-  constructor enforces by throwing (`src/Canopy_TreeBuilder.hpp:192`). Any
+  constructor enforces by throwing (`src/Canopy_TreeBuilder.hpp:252`). Any
   smaller limit a caller runs at is that caller's choice, not a library limit.
 - **`CartesianTaylorBasis` declares `key_needs_level = true` and
   `key_needs_dd = false`** (`:486`, `:492`). Its `canonicalize_key` keeps
@@ -1038,30 +1038,57 @@ are byte-identical to B2's `f3cj6QNSmYfy` / `f3cj6QWEwmd9` (210 SERIAL and
 ### C1 — Depth and fallback-cost headroom against problem size — **NOT STARTED**
 
 **Depends on:** T1 **DONE**.
-**Fill in:** `tests/tstTreeBuilder.hpp` (the depth-scaling case);
-`tests/tstCartesianTaylorSolve.hpp` (the path-equivalence and timing case, which
-needs a solve and so belongs beside `with_cartesian_taylor_solve` rather than in
-the tree builder's tests). No `src/` change.
-**Reference:** the Morton depth limit (`src/Canopy_TreeBuilder.hpp:192`);
-`m2l_cells_at_depth()`.
+**Fill in:** `tests/tstTreeBuilder.hpp` (the depth-scaling case, on that
+file's own copy of T1's skirted draw, `TreeBuilderTest::generate_two_scale_positions`
+(`:126`), which is fixed at 1200 global particles and gains a count
+parameter); `tests/tstCartesianTaylorSolve.hpp` (the path-equivalence and
+timing case, which needs a solve and so belongs beside
+`with_cartesian_taylor_solve` (`:448`) rather than in the tree builder's
+tests); `src/Canopy_TreeBuilder.hpp` (step 5's warning, at the leaf decision).
+**Reference:** the Morton depth limit (`src/Canopy_TreeBuilder.hpp:252`);
+the leaf decision (`:918`); A2's balance warning (`:1083-1084`), the style
+step 5 follows; `m2l_cells_at_depth()`; `set_m2l_op_count_cap`
+(`src/Canopy_DownwardSweep.hpp:350-358`), where 0 is legal and means no column
+is built, so every pair takes the overflow path; the profiling timer registry
+(`src/Canopy_Profiling.hpp:134-148`, `timer_registry()` / `reset_timers()`).
 **Do:**
 1. Build T1's two-scale distribution at a geometric sweep of particle counts and
    record, at each: the deepest occupied depth, the **count of occupied depths**,
    and whether any cell hit `max_depth` and so was made a leaf by the depth
-   limit rather than by `ncrit` (`src/Canopy_TreeBuilder.hpp:804`). The second
+   limit rather than by `ncrit` (`src/Canopy_TreeBuilder.hpp:918`). The second
    case is a silent accuracy change, not an error, and nothing currently reports
-   it.
+   it. Build the sweep at `max_depth = 19`: T1's tree at its own `max_depth = 8`
+   already reaches depth 8 on every rank (`tree-opt-progress-log.md` `## A1`),
+   so a capped sweep measures the cap, not the depth the draw needs. Report the
+   `max_depth`-leaf count at the fixture's own `max_depth = 8` as well. Count
+   such leaves from `builder.cells()` — a leaf at depth `max_depth` with
+   `global_count > ncrit` — with no new accessor.
 2. Fit the growth of occupied-depth count against particle count, and state the
    particle count at which the deepest occupied depth reaches **19**, the Morton
    limit. For points distributed on a 2-D manifold the leaf count at depth $d$
    grows as $4^{d}$ rather than $8^{d}$, so the required depth is
    $\approx \log_4(N/\texttt{ncrit})$ — state the measured exponent rather than
    assuming that one.
-3. Measure the **per-pair cost of the fallback path relative to the GEMM path**
-   on T1's fixture, as a time ratio: drive one solve at a column cap of 0 so
-   every pair takes `m2l_translate`, and one at the default cap, and report the
-   M2L phase time of each. Without this ratio a pair-count fraction cannot be
-   turned into a cost and chain A's value cannot be judged.
+3. Measure the **per-pair cost of the fallback path relative to the GEMM path**,
+   as a time ratio, on `with_cartesian_taylor_solve`'s fixture with
+   `CartesianTaylorBasis` at order 3, the downstream configuration's order. The
+   ratio is a property of the basis, order and backend, not of the draw. Drive
+   the solve once at `FmmConfig::m2l_op_count_cap = 0`, so every pair takes
+   `m2l_translate`, and once at the default cap. The time is the profiling
+   registry's `m2l_kernel` (level 1), which covers both the fused GEMM kernel
+   (`run_m2l_all`, `src/Canopy_DownwardSweep.hpp:2590-2602`) and the per-pair
+   fallback (`run_m2l_fallback_at_depth`, called inside `run_m2l_at_depth`,
+   `:2611-2627`). The ratio is per pair: `m2l_kernel` divided by the pairs that
+   path evaluated, at cap 0 over at the default cap, taken on a warm second
+   solve of an unchanged tree with the timers reset before it. Report beside it
+   `ilist_s4_op_table_build` (level 2) from the cold first solve, the GEMM
+   path's table cost. Record SERIAL and HIP side by side: production runs on
+   HIP, and one team per pair against a fused GEMM can cost very differently on
+   the two backends. Both timers are profiling-gated, so with
+   `CANOPY_ENABLE_PROFILING` undefined the case prints the $-1$ sentinel and
+   skips the ratio, as T1 skips its sum identity. Without this ratio a
+   pair-count fraction cannot be turned into a cost and chain A's value cannot
+   be judged.
 4. **Assert that the two M2L paths agree.** The pair of solves in step 3 —
    one at a column cap of 0 so every pair takes `m2l_translate`, one at the
    default cap so almost none does — differ only in which path evaluates the
@@ -1077,7 +1104,12 @@ the tree builder's tests). No `src/` change.
    same mathematics and should agree far more tightly than either agrees with
    the direct sum.
 5. Add a loud report — not an assertion — when a cell is made a leaf by
-   `max_depth` rather than by `ncrit`.
+   `max_depth` rather than by `ncrit`. It lives in `TreeBuilder::build()` at
+   the leaf decision (`src/Canopy_TreeBuilder.hpp:918`), so downstream runs see
+   it: one rank-0 `[Canopy] WARNING` line per build, in the style of A2's
+   balance warning (`:1083-1084`), stating how many leaves at `max_depth` hold
+   more than `ncrit` particles. No accessor is added; tests count these leaves
+   from `builder.cells()`.
 
 **Exit criterion:** stems `TreeBuilder`, `CartesianTaylorSolve` pass on SERIAL
 at ranks 1-6 and on HIP at ranks 1-4 —
@@ -1091,8 +1123,11 @@ ctest --output-on-failure -R '^Canopy_Test_(TreeBuilder|CartesianTaylorSolve)_MP
 
 — the new case asserts the cap-0 and default-cap fields agree at the deviation
 measured here, and the log records the occupied-depth growth against particle
-count, the extrapolated particle count at which depth 19 is reached, and the
-fallback-to-GEMM M2L phase-time ratio.
+count, the extrapolated particle count at which depth 19 is reached, the
+per-pair fallback-to-GEMM `m2l_kernel` ratio on SERIAL and on HIP, and the
+cold-solve `ilist_s4_op_table_build` time beside it. The `default` rows of
+`TreeBuilder` and `CartesianTaylorSolve` in
+`scripts/tuolumne/serial_runtimes.tsv` are re-calibrated for the added cases.
 Failure direction: the case asserts that a tree built at `max_depth = 19` throws
 nothing and that a tree requested at `max_depth = 20` **does** throw
 `std::runtime_error` from `TreeBuilder`'s constructor, so the limit is pinned by
