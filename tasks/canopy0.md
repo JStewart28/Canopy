@@ -55,7 +55,7 @@ set and C11 come from a later read-only pass that opened
 `src/Canopy_LaplaceKernel.hpp` in full (all 887 lines) alongside a reference
 Barnes–Hut treecode (`~/research-bridges/zmodel-steve/zmodel3d-amr/zmodel3d/treecode.py`,
 all 138 lines) to answer the question C1 had left open — whether a *softened* far
-field is reachable in the existing expansion basis. See [`treecode.md`](treecode.md)
+field is reachable in the existing expansion basis. See `~/spack_envs/tuolumne_beatnik/beatnik/tasks/treecode.md`
 for the reference treecode itself. That pass built nothing and ran nothing
 either; every accuracy number in this document is still an estimate or a carried
 figure, never a measurement.
@@ -74,15 +74,15 @@ far-field path (P2M → M2M → M2L → L2L → L2P) is built entirely from the
 **unsoftened** $1/r$ Laplace kernel; softening exists only in the near-field
 P2P kernel (`src/Canopy_P2P.hpp:799-803`, `883-896`) and is kept relevant by a
 floor that pushes close pairs out of M2L and into P2P
-(`src/Canopy_Solver.hpp:69-77`, `src/Canopy_CommunicationPlan.hpp:347-361`).
+(`src/Canopy_Solver.hpp:71-78`, `src/Canopy_CommunicationPlan.hpp:353-367`).
 Everything a consumer wants to say about far-field accuracy has to account for
 that. See **F1** and **C1**.
 
 **"So the far-field operators must be missing or incomplete."** They are not.
 All five are implemented in the solid-harmonic basis with Greengard theorem
-citations on each — `p2m_contribution` (`src/Canopy_LaplaceKernel.hpp:230`),
-`m2m_translate` (`:273`, Thm 5.22), `m2l_translate` (`:373`, Thm 5.23),
-`l2l_translate` (`:688`, Thm 5.26), `l2p_evaluate` (`:800`), plus a
+citations on each — `p2m_contribution` (`src/Canopy_LaplaceKernel.hpp:403`),
+`m2m_translate` (`:446`, Thm 5.22), `m2l_translate` (`:551`, Thm 5.23),
+`l2l_translate` (`:1220`, Thm 5.26), `l2p_evaluate` (`:1337`), plus a
 precomputed-operator M2L path (`m2l_build_operator`, `:516`). What is missing is
 **softening inside them**, and that is a change of expansion basis rather than a
 patch to these routines. See **F6**.
@@ -91,7 +91,7 @@ patch to these routines. See **F6**.
 onto `setup`/`auto_maintain` plus `solve`, and the split is not where a caller
 would put it. `solve()` reads current positions but uses the leaf membership,
 communication plan and P2P neighbour lists cached by the *last* setup or
-maintenance call (`src/Canopy_UpwardSweep.hpp:657-669` iterates
+maintenance call (`src/Canopy_UpwardSweep.hpp:700-705` iterates
 `_leaves_at_depth_local`; `src/Canopy_P2P.hpp:819`, `:834` use cached
 `_leaf_particle_offsets` / `_particle_to_league`). Calling `solve()` after moving
 particles, without a maintenance call, does not fail — it silently evaluates a
@@ -101,7 +101,7 @@ wrong near/far partition. See **F3** and **C3**.
 evaluates at *its own* particles: `setup()` and every maintenance path migrate
 particles across ranks and permute the local array, and
 `TreePartitioner::migrate_particles` states outright that "the within-AoSoA order
-after migration is unspecified" (`src/Canopy_TreePartitioner.hpp:576-580`). There
+after migration is unspecified" (`src/Canopy_TreePartitioner.hpp:854-858`). There
 is no identity, global-ID, or inverse-permutation facility anywhere in `src/`.
 See **F3** and **C2**.
 
@@ -118,9 +118,9 @@ kernel abstraction to specialize. `LaplaceKernel` is the only kernel in the tree
 **What it can express instead is a fixed *set* of Laplace solves.** `NComps` is
 the number of simultaneous independent charge components, and the header already
 names this consumer's use case: "3 for Biot-Savart via three parallel Laplace
-solves" (`src/Canopy_LaplaceKernel.hpp:133-135`). With `NComps = 3` and
+solves" (`src/Canopy_LaplaceKernel.hpp:136-138`). With `NComps = 3` and
 `compute_gradient = true`, one traversal produces a $3\times3$ tensor per
-target (`src/Canopy_DownwardSweep.hpp:120-126`, gradient shaped
+target (`src/Canopy_DownwardSweep.hpp:174-180`, gradient shaped
 `(num_particles, NComps, 3)`).
 
 **The softening is the same functional form the consumer needs, not merely an
@@ -139,7 +139,7 @@ $K = \delta/(b+r^2)^{3/2}$ with $\varepsilon^2 = b$, up to an overall
 sign. A consumer therefore sets `FmmConfig::softening = sqrt(b)` — an explicit
 non-negative value, which also suppresses the distribution-based auto-softening
 that would otherwise be derived once at first setup and frozen
-(`src/Canopy_Solver.hpp:166-178`, `680-713`). No functional-form conversion is
+(`src/Canopy_Solver.hpp:196-209`, `806-847`). No functional-form conversion is
 needed and no reinterpretation of $b$ is needed.
 
 **But only the near field is softened.** This is the single most consequential
@@ -147,9 +147,9 @@ finding in this document. The multipole far field expands $1/r$ unsoftened;
 accuracy in the far field is bought by *excluding* every pair where softening
 matters, via a floor in the acceptance criterion: an M2L pair is rejected
 whenever the cell-centre separation $R \le \texttt{near\_softening\_factor} \cdot \varepsilon$
-(`src/Canopy_CommunicationPlan.hpp:347-361`). A rejected
+(`src/Canopy_CommunicationPlan.hpp:353-367`). A rejected
 pair falls through the dual-tree traversal to a leaf-leaf P2P pair
-(`src/Canopy_CommunicationPlan.hpp:623-634`), so the near/far partition stays a
+(`src/Canopy_CommunicationPlan.hpp:629-640`), so the near/far partition stays a
 partition and the close pairs do get the softened kernel.
 
 For pairs that *are* taken by M2L, the evaluated kernel is not the consumer's
@@ -161,7 +161,7 @@ expansion order**. Per pair, at separation $R$:
 | potential $1/\sqrt{R^2+\varepsilon^2}$ | $\approx \tfrac12 \varepsilon^2/R^2$ |
 | gradient $\delta/(R^2+\varepsilon^2)^{3/2}$ | $\approx \tfrac32 \varepsilon^2/R^2$ |
 
-The bound quoted in `README.md:52-63` — "far-field relative softening error
+The bound quoted in `README.md:64-74` — "far-field relative softening error
 `~ 1/(2·factor²)`, ≈3% at the default `4`" — is the **potential's**. A consumer
 that uses the gradient (as this one does; both of its contractions are gradient
 contractions) sees three times that: $\tfrac32/\text{factor}^2 \approx 9.4\%$
@@ -201,7 +201,7 @@ Two smaller notes on the kernel:
 **It cannot be folded into the kernel, and it does not need three separate
 solves.** There is no hook in `LaplaceKernel` for a caller-supplied contraction
 — its static methods (`p2m_contribution`, `m2m_translate`, `m2l_translate`,
-`l2l_translate`, `l2p_evaluate`, `src/Canopy_LaplaceKernel.hpp:142-147`) are
+`l2l_translate`, `l2p_evaluate`, `src/Canopy_LaplaceKernel.hpp:145-150`) are
 fixed. But `NComps = 3` with `compute_gradient = true` yields, per target
 $i$, the full tensor
 
@@ -211,7 +211,7 @@ $$
 $$
 
 from **one** tree traversal and **one** ghost exchange
-(`src/Canopy_Solver.hpp:202-239`; `src/Canopy_DownwardSweep.hpp:120-126`). Load
+(`src/Canopy_Solver.hpp:277-318`; `src/Canopy_DownwardSweep.hpp:174-180`). Load
 the three charge components with the three components of the vector source, and
 both contractions the consumer needs are purely local post-processing of that
 $3\times3$ tensor:
@@ -227,9 +227,9 @@ strength and the scalar contraction is against a different vector field. That is
 **two `solve()` calls with different charges over the same tree**, not one, and
 both want the gradient and neither wants the potential. Canopy supports two
 `solve()` calls over one tree directly (`solve()` re-reads the charge slice each
-call and zeroes its outputs first, `src/Canopy_Solver.hpp:208-218`) — but it
+call and zeroes its outputs first, `src/Canopy_Solver.hpp:284-301`) — but it
 always allocates, zeroes and accumulates the potential even when only the
-gradient is wanted (`src/Canopy_Solver.hpp:209-211`; P2P accumulates
+gradient is wanted (`src/Canopy_Solver.hpp:288-290`; P2P accumulates
 `phi[c]` unconditionally, `src/Canopy_P2P.hpp:891`). See **C8**.
 
 Keeping the contraction *out* of the kernel is also the right design and not
@@ -241,7 +241,7 @@ operator (F6, C1) should produce the $3\times3$ tensor and let the caller
 contract, exactly as this finding prescribes.
 
 `NComps` is a **compile-time** template parameter, as is `P_ORDER`
-(`src/Canopy_Solver.hpp:104-105`). A consumer whose expansion order is a runtime
+(`src/Canopy_Solver.hpp:165-167`). A consumer whose expansion order is a runtime
 configuration value cannot pass it through. See **C7**.
 
 ### F3 — Tree reuse across integrator stages
@@ -251,10 +251,10 @@ problems, in increasing severity.
 
 **(a) `solve()` after motion, with no maintenance, is silently wrong.** The
 upward sweep runs P2M over the leaf lists cached at setup
-(`src/Canopy_UpwardSweep.hpp:657-669`) and P2P uses the cached particle→leaf
+(`src/Canopy_UpwardSweep.hpp:700-705`) and P2P uses the cached particle→leaf
 mapping (`src/Canopy_P2P.hpp:819`, `:834`); the M2L interaction list is likewise
 cached and only invalidated on a topology change
-(`src/Canopy_Solver.hpp:564-565`, `609-610`). So a particle that has moved out of
+(`src/Canopy_Solver.hpp:641-643`, `688-689`). So a particle that has moved out of
 its leaf still contributes to its old leaf's multipole and still gets its old
 leaf's near-field list. No error is raised. The failure mode is a plausible,
 slightly wrong field — the worst kind for a consumer whose only check is a
@@ -262,21 +262,21 @@ tolerance.
 
 **(b) The cheapest maintenance path is not cheap.** `migrate()` — documented as
 "cheapest maintenance … tree topology assumed unchanged"
-(`src/Canopy_Solver.hpp:241-253`) — performs, per call:
+(`src/Canopy_Solver.hpp:320-332`) — performs, per call:
 
 - a full `TreeBuilder::build()` from current positions
-  (`src/Canopy_Solver.hpp:269-271`), which is two `MPI_Allreduce` for the
-  bounding box (`src/Canopy_TreeBuilder.hpp:345-346`) plus **one
+  (`src/Canopy_Solver.hpp:347-350`), which is two `MPI_Allreduce` for the
+  bounding box (`src/Canopy_TreeBuilder.hpp:491-492`) plus **one
   `MPI_Allreduce` per octree level** over the candidate-cell counts
-  (`src/Canopy_TreeBuilder.hpp:743-744`), with the per-level candidate marshalling
+  (`src/Canopy_TreeBuilder.hpp:896-897`), with the per-level candidate marshalling
   and the resulting globally-replicated cell list assembled on the host
-  (`src/Canopy_TreeBuilder.hpp:659-780`);
+  (`src/Canopy_TreeBuilder.hpp:812-935`);
 - a host-side `std::unordered_set` over every cell key, twice, to detect
-  topology change (`src/Canopy_Solver.hpp:262-286`);
-- a particle redistribution (`src/Canopy_Solver.hpp:295-298`);
+  topology change (`src/Canopy_Solver.hpp:341-365`);
+- a particle redistribution (`src/Canopy_Solver.hpp:374-377`);
 - then `_finish_topology_stable`, which builds the tree **again**, re-sorts the
   array by leaf, and re-runs all three sweep setups
-  (`src/Canopy_Solver.hpp:625-645`).
+  (`src/Canopy_Solver.hpp:700-726`).
 
 There is no API for "the positions moved by less than a cell width; refresh only
 the leaf membership and the P2P offsets". For a consumer paying this three times
@@ -286,12 +286,12 @@ See **C3**.
 **(c) On a deforming surface, `auto_maintain` will pick `Rebalance`, not
 `Migrate`, almost every time.** The decision is: rebuild on bounding-box escape,
 else `Rebalance` if *any* cell key differs from the previous tree, else
-`Migrate` (`src/Canopy_Solver.hpp:362-466`). A rolling-up sheet changes its
+`Migrate` (`src/Canopy_Solver.hpp:426-545`). A rolling-up sheet changes its
 occupancy pattern continuously, so the cell-key set changes essentially every
 stage. `Rebalance` adds a Zoltan2 repartition and a full communication-plan
 rebuild — and the communication-plan rebuild is a **serial host-side dual-tree
 traversal over the globally replicated cell tree, executed on every rank**
-(`src/Canopy_CommunicationPlan.hpp:549-665`). So the expensive path is the
+(`src/Canopy_CommunicationPlan.hpp:555-671`). So the expensive path is the
 common path, three times per step.
 
 That path also makes the result **non-reproducible**. Zoltan2's `multijagged`
@@ -309,11 +309,11 @@ platform (`src/Canopy_TreePartitioner.hpp:417-419`). See **C4**.
 **(d) Every maintenance path re-decomposes and permutes.** `partition`,
 `repartition` and `redistribute` all migrate particles between ranks and reorder
 the local array, and the order after migration is explicitly unspecified
-(`src/Canopy_TreePartitioner.hpp:576-580`). Nothing in `src/` carries a
+(`src/Canopy_TreePartitioner.hpp:854-858`). Nothing in `src/` carries a
 caller-supplied identity through that: the only `global_ids` in the tree are
 leaf indices for the Zoltan2 adapter
 (`src/Canopy_TreePartitioner.hpp:378-392`). Migration packs whole AoSoA tuples
-(`src/Canopy_TreePartitioner.hpp:667-772`), so a caller-added identity member
+(`src/Canopy_TreePartitioner.hpp:945-1050`), so a caller-added identity member
 *would* travel with its particle — but the caller must then run its own reverse
 exchange to get results home, once per stage, in addition to Canopy's. For a
 consumer whose decomposition is fixed by a mesh, this is the interface's
@@ -323,15 +323,15 @@ central mismatch. See **C2**.
 
 | knob | in Canopy | notes for a consumer |
 | --- | --- | --- |
-| `ncrit` | `FmmConfig::ncrit` (`src/Canopy_Solver.hpp:54`), runtime. A cell becomes a leaf when its **global** count $\le$ `ncrit` or it hits `max_depth` (`src/Canopy_TreeBuilder.hpp:769`). | Same meaning as in any Barnes–Hut/FMM code; a value of 64 transfers directly. Note the refinement test is on the *global* count, so leaves are balanced in total occupancy, not per-rank occupancy. |
-| `mac_theta` | `FmmConfig::mac_theta` (`:67`), runtime, default 0.5. The predicate is the exafmm spherical MAC: accept M2L iff $R\theta > \sqrt3\,(h_A + h_B)$ (`src/Canopy_CommunicationPlan.hpp:338-352`). | A **different predicate** from a Barnes–Hut opening angle, so an inherited numeric value does not carry its meaning across. It does carry its *direction*: smaller is more conservative, more M2L pairs, more accurate at fixed order. A value of 0.3 is conservative under Canopy's predicate too, and is exercised by one existing test (`tests/tstMultiSolve.hpp:692-697`). |
-| `max_depth` | `FmmConfig::max_depth` (`:55`), runtime, **hard maximum 19**, enforced by a throw in the `TreeBuilder` constructor because the Morton key is a `uint64_t` (`src/Canopy_TreeBuilder.hpp:46`, `176-181`). | Has **no counterpart** in a treecode-derived parameter set; a consumer must choose it. It is coupled to the bounding box: the finest cell width is (root box width) / $2^{\text{max\_depth}}$. |
+| `ncrit` | `FmmConfig::ncrit` (`src/Canopy_Solver.hpp:55`), runtime. A cell becomes a leaf when its **global** count $\le$ `ncrit` or it hits `max_depth` (`src/Canopy_TreeBuilder.hpp:922`). | Same meaning as in any Barnes–Hut/FMM code; a value of 64 transfers directly. Note the refinement test is on the *global* count, so leaves are balanced in total occupancy, not per-rank occupancy. |
+| `mac_theta` | `FmmConfig::mac_theta` (`src/Canopy_Solver.hpp:68`), runtime, default 0.5. The predicate is the exafmm spherical MAC: accept M2L iff $R\theta > \sqrt3\,(h_A + h_B)$ (`src/Canopy_CommunicationPlan.hpp:338-353`). | A **different predicate** from a Barnes–Hut opening angle, so an inherited numeric value does not carry its meaning across. It does carry its *direction*: smaller is more conservative, more M2L pairs, more accurate at fixed order. A value of 0.3 is conservative under Canopy's predicate too, and is exercised by one existing test (`tests/tstMultiSolve.hpp:1197-1212`). |
+| `max_depth` | `FmmConfig::max_depth` (`src/Canopy_Solver.hpp:56`), runtime, **hard maximum 19**, enforced by a throw in the `TreeBuilder` constructor because the Morton key is a `uint64_t` (`src/Canopy_TreeBuilder.hpp:50`, `251-256`). | Has **no counterpart** in a treecode-derived parameter set; a consumer must choose it. It is coupled to the bounding box: the finest cell width is (root box width) / $2^{\text{max\_depth}}$. |
 
 **Do the structured-workload values carry over to a sheet?** Partly, and the
 part that does not is untested. The tree is *count*-adaptive, so a
 two-dimensional source support in a three-dimensional box is handled without
 special-casing: empty cells are dropped outright
-(`src/Canopy_TreeBuilder.hpp:754-755`), and reaching $N/\texttt{ncrit}$
+(`src/Canopy_TreeBuilder.hpp:907-908`), and reaching $N/\texttt{ncrit}$
 leaves on a surface costs roughly $\log_4(N/\texttt{ncrit})$ levels rather
 than $\log_8$, i.e. a *deeper* tree than a volumetric distribution of the
 same count — which is what makes the depth-19 ceiling worth checking rather than
@@ -344,22 +344,22 @@ assuming. Three sheet-specific effects have no coverage:
   test measures it. **There is a cheap, kernel-independent improvement here.**
   The reference treecode uses the *exact* node radius $\max_j |y_j - c|$
   (`treecode.py:31`) where Canopy uses the geometric
-  $\sqrt3\,(h_A+h_B)$ (`src/Canopy_CommunicationPlan.hpp:346`). The exact radius
+  $\sqrt3\,(h_A+h_B)$ (`src/Canopy_CommunicationPlan.hpp:345`). The exact radius
   is tighter on a sheet by construction, is computable per cell in the upward
   sweep at negligible cost, and would reduce the number of pairs demoted to P2P
   at fixed accuracy — a win that is independent of every kernel question in F1
   and F6. It interacts with the near-softening floor, so it must be **measured**
   as part of **C5** rather than assumed.
 - **Self-approach at roll-up.** Two along-surface-distant parts of the sheet come
-  within $\sqrt b$ geometrically. `README.md:52-63` already names exactly
+  within $\sqrt b$ geometrically. `README.md:64-74` already names exactly
   this case — "a clustering system whose cells shrink below the softening length
   (e.g. a vortex sheet at full roll-up) gets a spurious, far too large far-field
   and blows up" — and the near-softening floor is the mitigation. So the
   mechanism is anticipated; what is unmeasured is the *cost*, since the floor
   converts a growing fraction of pairs to P2P as the sheet tightens.
 - **Bounding-box sensitivity.** `TreeBuilder::compute_global_bounding_box` takes
-  a raw global min/max (`src/Canopy_TreeBuilder.hpp:345-346`), and
-  `README.md:296-307` records that a single outlier inflates the root box until
+  a raw global min/max (`src/Canopy_TreeBuilder.hpp:491-492`), and
+  `README.md:321-332` records that a single outlier inflates the root box until
   a dense cluster collapses into one max-depth leaf, making the
   $O(N_{\text{leaf}}^2)$ P2P effectively hang. A surface that develops a
   single spurious vertex hits this.
@@ -372,8 +372,8 @@ returns only unrelated prose). The validated envelope is:
 
 | test | configuration | tolerance met |
 | --- | --- | --- |
-| `SingleSolve.PotentialAndGradientNComps3` | $P=8$, `ncrit` 16, `max_depth` 6, softening 0, 500 particles/rank, volumetric random; all nine gradient components vs. brute force (`tests/tstSingleSolve.hpp:79-87`, `365-375`, `424-431`) | $10^{-3}$ — but **fails at exactly 4 ranks**, see F5 |
-| `MultiSolve` suite | $P=8$ (`tests/tstMultiSolve.hpp:52`), `mac_theta` 0.3–0.5, `ncrit` 8–16, `max_depth` 6–8, `softening = 0` (`:332`, `:781`) | $10^{-2}$–$3\times10^{-2}$ (`tests/tstMultiSolve.hpp:565-697`) |
+| `SingleSolve.PotentialAndGradientNComps3` | $P=8$, `ncrit` 16, `max_depth` 6, softening 0, 500 particles/rank, volumetric random; all nine gradient components vs. brute force (`tests/tstSingleSolve.hpp:79-87`, `365-375`, `413-432`) | $10^{-3}$ — but **fails at exactly 4 ranks**, see F5 |
+| `MultiSolve` suite | $P=8$ (`tests/tstMultiSolve.hpp:88`), `mac_theta` 0.3–0.5, `ncrit` 8–16, `max_depth` 6–8, `softening = 0` (`:432`, `:1301`, `:1561`) | $10^{-2}$–$3\times10^{-2}$ (`tests/tstMultiSolve.hpp:565-697`) |
 
 There is therefore **no measured parameter set for a sheet, and no measured
 accuracy figure with softening enabled at all**. Producing one requires
@@ -388,9 +388,9 @@ it is the task that decides whether the consumer's whole approach is viable.
 subviews of **one** persistent registered send region and posts one
 `MPI_Isend` per peer, with matching receives in one persistent recv region, so
 peak concurrent registrations are $O(1)$ per direction regardless of peer
-count (`src/Canopy_TreePartitioner.hpp:547-580`,
+count (`src/Canopy_TreePartitioner.hpp:825-858`,
 `src/Canopy_RegisteredBufferPool.hpp:24-56`). The same pooling already covers the
-M2L/L2L `coalesced_view_exchange` and the P2P ghost gather. `README.md:235-257`
+M2L/L2L `coalesced_view_exchange` and the P2P ghost gather. `README.md:260-282`
 records this as fixing the `dreg_evict NO_SPACE` deadlock on many-way
 migrations, and as removing the need for a patched Cabana fork (the MPI element
 type is one whole tuple, so a single peer's payload may exceed 2 GiB without
@@ -400,7 +400,7 @@ This mattered acutely for this consumer, because per F3(c) `Rebalance` is its
 *common* path rather than a rare one. As fixed, the defect does not affect it.
 One residual remains, and it is a scaling concern rather than a defect: peer
 discovery in migration is a single `MPI_Alltoall` of `comm_size` ints on every
-`Rebalance` (`README.md:315-333`), which for a three-stage integrator is three
+`Rebalance` (`README.md:341-357`), which for a three-stage integrator is three
 $O(\text{comm\_size})$ collectives per timestep on top of everything else.
 That is folded into **C3** as motivation, not raised as its own task.
 
@@ -409,14 +409,14 @@ That is folded into **C3** as motivation, not raised as its own task.
 - **The exact code path this consumer needs is out of the regression gate.**
   `SingleSolve.PotentialNComps3` and `SingleSolve.PotentialAndGradientNComps3`
   — three components, gradient, versus brute force — fail at exactly 4 ranks
-  (`max_pot_rel_err = 0.00207` vs. a $10^{-3}$ budget), pass at 1, 2, 3, 5
+  (`max_pot_rel_err = 0.00196` vs. a $10^{-3}$ budget), pass at 1, 2, 3, 5
   and 6, and the whole `SingleSolve` binary additionally leaks state that
   deadlocks a later test in the same `ctest` process; it is consequently labelled
-  `unit`, not `regression` (`README.md:363-392`). So the multi-component
+  `unit`, not `regression` (`README.md:614-642`). So the multi-component
   gradient path — the one thing this consumer's correctness rests on — is
   neither gated nor correct at one of the rank counts it will be run at. This is
   **C6**.
-- The FP32 fused-M2L failure at $\ge 2$ ranks (`README.md:340-361`) does
+- The FP32 fused-M2L failure at $\ge 2$ ranks (`README.md:562-586`) does
   **not** affect a consumer running in double precision, and no task is raised
   for it here.
 
@@ -437,7 +437,7 @@ than "add $b$ to a few denominators".
 
 **(a) Harmonicity is why no substitution exists.** Canopy's M2M/M2L/L2L are the
 solid-harmonic addition theorems (Greengard Thms 5.22, 5.23, 5.26, cited at
-`src/Canopy_LaplaceKernel.hpp:273`, `:373`, `:688`). Those theorems hold
+`src/Canopy_LaplaceKernel.hpp:446`, `:551`, `:1220`). Those theorems hold
 *because* $1/r$ is harmonic. The softened potential is not:
 
 $$
@@ -454,7 +454,7 @@ patch to it.
 **(b) A second basis is a wide, mechanical change through both sweeps.** The
 sweeps *are* templated on `KernelType`
 (`UpwardSweep<MemorySpace, ExecutionSpace, KernelType>`,
-`src/Canopy_Solver.hpp:116-119`), so a new kernel struct is pluggable in
+`src/Canopy_Solver.hpp:178-181`), so a new kernel struct is pluggable in
 principle — but they hard-assume this kernel's storage: `complex_type***` views
 (`src/Canopy_UpwardSweep.hpp:63,73`; `src/Canopy_DownwardSweep.hpp:108,118`),
 `num_coeffs_per_cell = (P+1)(P+2)/2` (`:66`, `:111`), and the shared
@@ -469,10 +469,10 @@ template parameter (F1).
 This is the obstruction most likely to be underestimated. Canopy's numerical
 conditioning strategy rests on $1/r$ being **homogeneous of degree $-1$**.
 Every operator is scale-normalized against cell half-width on that basis: P2M
-produces $\bar M = M/w^{n+1}$ (`src/Canopy_LaplaceKernel.hpp:226-229`), M2M
-applies $(w_c/w_p)^{j+1}$ (`:267-272`), M2L expands $\rho^{-(n+j+1)}$ as
-$(w_s/\rho)^{n+1}(w_t/\rho)^j$ (`:369-372`), L2L applies $(w_c/w_p)^j$
-(`:685-687`), L2P consumes $\bar L = L\,w^n$ (`:795-799`) — all for FP32
+produces $\bar M = M/w^{n+1}$ (`src/Canopy_LaplaceKernel.hpp:399-402`), M2M
+applies $(w_c/w_p)^{j+1}$ (`:440-445`), M2L expands $\rho^{-(n+j+1)}$ as
+$(w_s/\rho)^{n+1}(w_t/\rho)^j$ (`:547-550`), L2L applies $(w_c/w_p)^j$
+(`:1217-1219`), L2P consumes $\bar L = L\,w^n$ (`:1332-1336`) — all for FP32
 conditioning at depth.
 
 The sharper consequence is the **precomputed M2L operator cache**. Operators are
@@ -544,12 +544,12 @@ is independent of every kernel question above and is task **C11**.
 `grep -i "barnes\|treecode\|m2p"` over `canopy/src/` returns nothing. There is
 no opening-angle mode, no monopole mode, and no evaluate-a-multipole-at-a-point
 operator anywhere; `mac_theta` is a spherical MAC used to *build M2L pairs*
-(`src/Canopy_CommunicationPlan.hpp:338-352`), not a Barnes–Hut opening angle. So
+(`src/Canopy_CommunicationPlan.hpp:338-353`), not a Barnes–Hut opening angle. So
 a treecode is **not** a configuration of Canopy today.
 
 It could become one, and that is the cheapest route to a far field that carries
 the softening. The dual-tree traversal already produces accepted
-**(target cell, source cell)** pairs (`src/Canopy_CommunicationPlan.hpp:549-665`)
+**(target cell, source cell)** pairs (`src/Canopy_CommunicationPlan.hpp:555-671`)
 and already has a working softened P2P for the rejected ones. A "treecode mode"
 needs no new traversal, tree, partitioner or communication plan — it replaces
 *one step*: where the downward sweep currently does M2L into a local expansion
@@ -577,7 +577,7 @@ $\theta$/order/`ncrit` knobs.
 What it costs, and neither number is measured:
 
 - **Accuracy ceiling $\sim\!10^{-3}$** at $\theta=0.3$, order 2
-  (carried from [`treecode.md`](treecode.md) §1), with the error a plateau in
+  (carried from `treecode.md` §1), with the error a plateau in
   $N$. Higher order is available but pays F6(d)'s $O(p^3)$.
 - **Complexity goes $O(N)\to O(N\log N)$**, and per-target work rises:
   every particle in a target cell re-evaluates every accepted source multipole
@@ -594,7 +594,7 @@ instead of a fixed bias, plus analytic gradients and reference-faithful knobs".
 
 It also bears on where a treecode for this consumer should live: an M2P mode
 inherits Canopy's distributed tree, whereas a standalone port
-([`treecode.md`](treecode.md) §3) must re-decide its own distribution strategy.
+(`treecode.md` §3) must re-decide its own distribution strategy.
 
 ## Approach
 
@@ -612,9 +612,9 @@ time, though C11 is worth doing *before* C1's scan is interpreted.
 | --- | --- |
 | Library style | header-only under `src/`, `Canopy_` prefix, `namespace Canopy` (`detail` for internals, as `src/Canopy_RegisteredBufferPool.hpp:21-23`) |
 | Parallelism | Kokkos + Cabana + MPI; no serial-only signatures |
-| Configuration | one new knob goes in `FmmConfig` (`src/Canopy_Solver.hpp:52-78`) with a defaulted member and a comment stating units and the meaning of the default; never a new constructor parameter |
+| Configuration | one new knob goes in `FmmConfig` (`src/Canopy_Solver.hpp:53-136`) with a defaulted member and a comment stating units and the meaning of the default; never a new constructor parameter |
 | New parameters | prefer an enum or tag type over a bool or magic number; a mode selector is an enum |
-| Failure behavior | a violated precondition throws (`std::runtime_error`, as `src/Canopy_TreeBuilder.hpp:176-181`); never return a truncated or best-effort field |
+| Failure behavior | a violated precondition throws (`std::runtime_error`, as `src/Canopy_TreeBuilder.hpp:251-256`); never return a truncated or best-effort field |
 | Comments | state units, sign convention, and which side of a difference is which, on the declaration; the sign of the gradient output is the single most misread thing in this API |
 | Provenance | cite the paper, section or upstream code any new operator is derived from, on the routine |
 | Test tier | new correctness tests are `regression` and must pass at ranks 1–6; a test that cannot yet pass at all six is `unit` **and** its exclusion is recorded in `README.md` "Known Issues" with the rank counts that fail |
@@ -683,7 +683,7 @@ below additionally touches `src/Canopy_UpwardSweep.hpp` and
 
 **Reference:** the softened near-field kernel
 (`src/Canopy_P2P.hpp:799-803`, `883-896`); the floor that keeps the unsoftened
-far field usable (`src/Canopy_CommunicationPlan.hpp:347-361`); the error bound
+far field usable (`src/Canopy_CommunicationPlan.hpp:353-367`); the error bound
 and its potential-vs-gradient factor of three, tabulated in **F1**; what a
 softened far field costs, in **F6**; the M2P option and its unmeasured cost, in
 **F8**; the finite-difference gradient, in **F7**.
@@ -724,7 +724,7 @@ softened far field costs, in **F6**; the M2P option and its unmeasured cost, in
    worth doing only after (d) has measured whether a softening-consistent far
    field actually buys the accuracy the consumer needs.
    (c) **Do nothing in Canopy** and port a standalone treecode into the consumer
-   ([`treecode.md`](treecode.md) §3). Does not close this task; recorded so the
+   (`treecode.md` §3). Does not close this task; recorded so the
    option is not rediscovered.
    The measurement that decides between (a)/(d) and (b) is the per-target cost of
    M2P against the per-cell cost of M2L+L2L+L2P on this problem and platform. It
@@ -762,11 +762,11 @@ rather than merely small.
 `src/Canopy_TreePartitioner.hpp` (retain the forward map already computed by
 `migrate_particles` and `sort_particles_by_leaf`), `README.md`.
 
-**Reference:** `src/Canopy_TreePartitioner.hpp:547-580` (migration semantics and
-the explicit "order after migration is unspecified"); `:667-772` (the pack/unpack
+**Reference:** `src/Canopy_TreePartitioner.hpp:825-858` (migration semantics and
+the explicit "order after migration is unspecified"); `:945-1050` (the pack/unpack
 that already knows every particle's destination); `:378-392` (the only existing
 `global_ids`, which are leaf indices, not particle identities);
-`src/Canopy_Solver.hpp:519-525` (`sort_particles_by_leaf`, the second reordering).
+`src/Canopy_Solver.hpp:598-604` (`sort_particles_by_leaf`, the second reordering).
 
 **Do:**
 1. Decide and record which of two shapes to expose: **(i)** an inverse map —
@@ -808,13 +808,13 @@ needs), `src/Canopy_TreeBuilder.hpp` (a keys-only recompute against the existing
 cell list), `src/Canopy_P2P.hpp` / `src/Canopy_UpwardSweep.hpp` (refresh cached
 per-leaf offsets without a full `setup`), `README.md`.
 
-**Reference:** `src/Canopy_Solver.hpp:241-305` (`migrate`, and what it actually
-costs); `:625-645` (`_finish_topology_stable`, the second full build);
-`src/Canopy_TreeBuilder.hpp:659-780` (per-level `MPI_Allreduce` and host-side
-cell-list assembly); `src/Canopy_CommunicationPlan.hpp:549-665` (the serial
+**Reference:** `src/Canopy_Solver.hpp:320-384` (`migrate`, and what it actually
+costs); `:700-726` (`_finish_topology_stable`, the second full build);
+`src/Canopy_TreeBuilder.hpp:812-935` (per-level `MPI_Allreduce` and host-side
+cell-list assembly); `src/Canopy_CommunicationPlan.hpp:555-671` (the serial
 host-side dual-tree traversal run on every rank per plan rebuild);
-`src/Canopy_TreeBuilder.hpp:258-264` (`apply_particle_permutation`, precedent for
-updating keys without a rebuild); `README.md:315-333` (the
+`src/Canopy_TreeBuilder.hpp:404-410` (`apply_particle_permutation`, precedent for
+updating keys without a rebuild); `README.md:341-357` (the
 $O(\text{comm\_size})$ `MPI_Alltoall` per `Rebalance`).
 
 **Do:**
@@ -884,15 +884,15 @@ at fixed distribution; C5 varies the distribution.
 `README.md` (a validated-parameters table). Step 5 additionally touches
 `src/Canopy_UpwardSweep.hpp` and `src/Canopy_CommunicationPlan.hpp`.
 
-**Reference:** `tests/tstSingleSolve.hpp:79-87` (the brute-force comparison
+**Reference:** `tests/tstSingleSolve.hpp:79-87`, `252-376` (the brute-force comparison
 harness to reuse, including its rank-0 gather), `:365-375` (how the tolerance is
 asserted), `:389-431` (the existing parameter choices);
-`tests/tstMultiSolve.hpp:52` (`P_ORDER = 8`), `:332` and `:781`
+`tests/tstMultiSolve.hpp:88` (`P_ORDER = 8`), `:432`, `:1301` and `:1561`
 (`softening = 0`), `:565-697` (the tolerances currently met);
-`src/Canopy_TreeBuilder.hpp:176-181` (the depth-19 ceiling this task must check
-against a deeper, surface-driven tree); `README.md:296-307` (the
+`src/Canopy_TreeBuilder.hpp:251-256` (the depth-19 ceiling this task must check
+against a deeper, surface-driven tree); `README.md:321-332` (the
 bounding-box outlier limitation, which a surface with one stray source hits);
-`src/Canopy_CommunicationPlan.hpp:346` (the geometric $\sqrt3(h_A+h_B)$
+`src/Canopy_CommunicationPlan.hpp:345` (the geometric $\sqrt3(h_A+h_B)$
 source-extent bound) and `treecode.py:31` (the exact $\max_j|y_j - c|$
 alternative), per **F4**.
 
@@ -941,10 +941,10 @@ decision either way.
 teardown path exercised by `tests/tstSingleSolve.hpp`; plus
 `tests/CMakeLists.txt` (label change) and `README.md` (removing the Known Issue).
 
-**Reference:** `README.md:363-392` (both symptoms: a $2\times$-over-budget
+**Reference:** `README.md:614-642` (both symptoms: a $2\times$-over-budget
 accuracy failure at exactly 4 ranks, and a state leak that deadlocks a later
 test in the same `ctest` process); `tests/tstSingleSolve.hpp:365-375` (the
-assertion and its $10^{-3}$ budget); `:424-431` (the two failing cases).
+assertion and its $10^{-3}$ budget); `:413-432` (the two failing cases).
 
 **Do:**
 1. Fix the np=4 accuracy failure. The rank-count-specific signature points at a
@@ -996,7 +996,7 @@ an unsupported order.
 **Fill in:** `src/Canopy_Solver.hpp` (`solve`), `src/Canopy_P2P.hpp`,
 `src/Canopy_DownwardSweep.hpp`, `README.md`.
 
-**Reference:** `src/Canopy_Solver.hpp:202-239` (`solve` always allocates and
+**Reference:** `src/Canopy_Solver.hpp:277-318` (`solve` always allocates and
 zeroes the potential, and `compute_gradient` is the only selector);
 `src/Canopy_P2P.hpp:891` (`phi[c]` is accumulated unconditionally inside the
 innermost pair loop).
@@ -1027,11 +1027,11 @@ enum, a `Gradient`-only solve leaves `potential()` zero-extent, and the full
 
 **Fill in:** `src/Canopy_Solver.hpp` (`FmmConfig`), `README.md`.
 
-**Reference:** `src/Canopy_Solver.hpp:52-56` — every other member of
+**Reference:** `src/Canopy_Solver.hpp:53-57` — every other member of
 `FmmConfig` has a default initializer; `ncrit` and `max_depth` do not, so
 `FmmConfig cfg;` followed by setting only some fields reads uninitialized
 memory and builds an arbitrary tree. The README's parameter table lists their
-defaults as "—" (`README.md:39-40`), which documents the hazard rather than
+defaults as "—" (`README.md:49-50`), which documents the hazard rather than
 removing it.
 
 **Do:** give both members either a defensible default initializer or a value
@@ -1055,8 +1055,8 @@ implicates.
 **Reference:** every test in `tests/` gives every rank the same non-zero
 `num_particles_per_rank` (e.g. `tests/tstSingleSolve.hpp:389-431`), so the
 zero-particle rank is uncovered. The paths it must survive are the per-level
-`MPI_Allreduce` over candidate counts (`src/Canopy_TreeBuilder.hpp:743-744`),
-the bounding-box reduction (`:345-346`), the rank-0 Zoltan2 solve and broadcast
+`MPI_Allreduce` over candidate counts (`src/Canopy_TreeBuilder.hpp:896-897`),
+the bounding-box reduction (`:491-492`), the rank-0 Zoltan2 solve and broadcast
 (`src/Canopy_TreePartitioner.hpp:416-425`), and the P2P and ghost-gather loops
 over a zero-length local set (`src/Canopy_P2P.hpp:834-838`).
 

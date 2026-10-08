@@ -1,6 +1,6 @@
 # Canopy as the far-field engine for a distributed vortex-sheet solver — progress log
 
-Session record for canopy. Companion to `canopy.md`, which holds the design, the
+Session record for canopy. Companion to `canopy0.md`, which holds the design, the
 task sequence and the risks; this file holds what actually happened, in order.
 
 **Read this when** you need the reasoning behind a decision the design states
@@ -10,7 +10,7 @@ that way and what was tried on the route*.
 
 **Append to it** at the end of any task that makes a decision, changes a
 signature, measures something, or finds a bug. Add a new `## <task ID>` section
-at the bottom, named for the task it records, so `canopy.md` can cite it by ID.
+at the bottom, named for the task it records, so `canopy0.md` can cite it by ID.
 No dates: the order of the sections is the chronology. If a session covers more
 than one task, name them all; if it belongs to no task, name the topic.
 
@@ -40,10 +40,10 @@ Barnes–Hut treecode (`~/research-bridges/zmodel-steve/zmodel3d-amr/zmodel3d/tr
 138 lines) to answer the question **C1** had left open under *Additional
 information needed*: whether a softened far field is reachable without replacing
 the expansion basis. The findings were written up separately first
-(`tasks/treecode-vs-canopy.md`) and have now been merged into `canopy.md` as
+(`~/spack_envs/tuolumne_beatnik/beatnik/tasks/treecode-vs-canopy.md`) and have now been merged into `canopy0.md` as
 **F6**, **F7**, **F8**, F4's exact-node-radius note, C1's revised four-option
-step 3, **C11**, **R7** and **R8**. `tasks/treecode-vs-canopy.md` is retained as
-the provenance record of that pass; `canopy.md` is now the authoritative
+step 3, **C11**, **R7** and **R8**. `~/spack_envs/tuolumne_beatnik/beatnik/tasks/treecode-vs-canopy.md` is retained as
+the provenance record of that pass; `canopy0.md` is now the authoritative
 statement.
 
 What the pass changed in the design's substance, as opposed to adding to it:
@@ -51,7 +51,7 @@ What the pass changed in the design's substance, as opposed to adding to it:
 - **A premise in the original framing was wrong.** M2M/M2L/L2L/L2P are *not*
   missing from Canopy's kernel — all five operators are implemented in the
   solid-harmonic basis with Greengard theorem citations
-  (`src/Canopy_LaplaceKernel.hpp:230`, `:273`, `:373`, `:688`, `:800`, plus the
+  (`src/Canopy_LaplaceKernel.hpp:403`, `:446`, `:551`, `:1220`, `:1337`, plus the
   precomputed-operator path at `:516`). What is missing is softening *inside*
   them. F1's conclusion is unchanged; only the diagnosis of why is.
 - **C1's open question is answered: no.** The solid-harmonic addition theorems
@@ -80,17 +80,17 @@ What the pass changed in the design's substance, as opposed to adding to it:
   need" the cheapest open question on the list (R8).
 - **Canopy's far-field gradient is a finite difference**, not analytic:
   six extra potential evaluations at $h = 10^{-5}w_{\rm self}$ with an in-code
-  `TODO` (`src/Canopy_LaplaceKernel.hpp:851-879`). It contributes a third,
+  `TODO` (`src/Canopy_LaplaceKernel.hpp:1388-1416`). It contributes a third,
   $\sim\!10^{-10}$ plateau to the `P_ORDER` scan C1 step 1 and R1 are built
   around. F7, task C11.
 
-Also: every `\f$`/`\f[` in `canopy.md` was converted to KaTeX `$`/`$$` per the
+Also: every `\f$`/`\f[` in `canopy0.md` was converted to KaTeX `$`/`$$` per the
 repository's *Math in markdown* rule. The Doxygen delimiters had been rendering
 as prose in a plain markdown reader, with CommonMark stripping the backslash from
 every escaped punctuation character inside them.
 
 Nothing here is a measurement. Every accuracy figure in F6/F8 is an estimate or
-a number carried from `tasks/treecode.md`; the qualification list the conventions
+a number carried from `~/spack_envs/tuolumne_beatnik/beatnik/tasks/treecode.md`; the qualification list the conventions
 table requires cannot be supplied for any of them, and no tolerance should be set
 from them.
 
