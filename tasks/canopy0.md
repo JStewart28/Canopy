@@ -519,7 +519,7 @@ named as the check C1 must run, not as verified results.
 
 ### F7 — Canopy's L2P gradient is a finite difference, not analytic
 
-`src/Canopy_LaplaceKernel.hpp:851-879` evaluates the far-field gradient by a
+`src/Canopy_LaplaceKernel.hpp:1388-1418` evaluates the far-field gradient by a
 central difference: six extra potential evaluations at
 $h = 10^{-5} w_{\rm self}$, with an in-code `TODO: replace with analytical
 derivatives` and a comment recording that a previously *fixed* step size was the
@@ -1080,28 +1080,79 @@ collective is skipped on the empty rank.
 **Depends on:** none. Worth doing **before** C1 step 1's scan is interpreted, so
 that scan has two error sources to separate rather than three.
 
-**Fill in:** `src/Canopy_LaplaceKernel.hpp` (`l2p_evaluate`), plus whichever
-existing tolerance in `tests/` moves; `README.md` if a stated accuracy changes.
+**Fill in:** `src/Canopy_LaplaceKernel.hpp` (`l2p_evaluate`, `:1339`, and its
+header comment `:1313-1337`); `tests/tstLaplaceKernel.hpp`;
+`tests/data/laplace_solve_P6.txt`; the cross-reference comment at
+`src/Canopy_CartesianTaylorBasis.hpp:1463-1466`, which cites the
+finite difference by line; `README.md` (Known Issues, and any stated accuracy
+that changes).
 
-**Reference:** `src/Canopy_LaplaceKernel.hpp:851-879` — the six-point central
+**Reference:** `src/Canopy_LaplaceKernel.hpp:1388-1418` — the six-point central
 difference at $h = 10^{-5} w_{\rm self}$, its in-code
 `TODO: replace with analytical derivatives`, and the comment recording that a
-previously fixed step size caused a premature full-rollup NaN; `:795-799` (the
+previously fixed step size caused a premature full-rollup NaN; `:1333-1337` (the
 $\bar L = L\,w^n$ normalization the analytic form must respect); **F7**.
+`CartesianTaylorBasis::l2p_evaluate`
+(`src/Canopy_CartesianTaylorBasis.hpp:1453-1490`) already returns an analytic
+gradient and is the precedent for how the declaration states it.
 
-**Do:** differentiate the local expansion analytically in the solid-harmonic
-basis and evaluate the gradient directly, citing the identity used on the routine
-per the conventions table. Keep the width normalization consistent with
-`l2p_evaluate`'s existing $\bar L$ convention. Remove the step-size heuristic
-and the TODO. State on the declaration the sign convention of the returned
-gradient, since F2 records that as the most misread thing in the API.
+`tests/tstLaplaceKernel.hpp` does not compile: it calls `p2m_contribution`,
+`m2m_translate`, `m2l_translate`, `l2l_translate` and `l2p_evaluate` with
+argument lists that no longer match their declarations — e.g. `testL2PGradient`
+(`:795`) omits `w_self` — 35 errors, recorded in `README.md` Known Issues under
+"Two `unit` test targets do not compile".
 
-**Exit criterion:** the existing gradient tests pass at ranks 1–6 with tolerances
-no looser than today's; a `unit` test shows the analytic gradient agreeing with
-the current finite difference to the finite difference's own accuracy
-($\sim\!10^{-8}$ relative or better) on a case where both are computable; and
-the progress log records the measured error floor before and after, so C1's scan
-can be read against it.
+`tests/tstLaplaceSolve.hpp` drives a frozen configuration for 12 timesteps whose
+gradient feeds the velocity update, then gates the final state bit-for-bit
+(`bitForBitArtifacts`, np 1–2, Kokkos::Serial only) and against the committed
+np=1 field (`crossRankAgreement`, np 2–6), both from
+`tests/data/laplace_solve_P6.txt`. Nothing in the default test path rewrites that
+file (`tstLaplaceSolve.hpp:56-65`), so any change to the gradient's bits fails
+both gates by construction. Regeneration is
+`scripts/tuolumne/run_laplace_solve_regenerate.flux`.
+
+**Do:**
+1. Update `tests/tstLaplaceKernel.hpp` to the current operator signatures —
+   signature changes only, no change to what any test asserts — so
+   `Canopy_Test_LaplaceKernel_SERIAL` builds and passes against the finite
+   difference. Remove the `LaplaceKernel` half of the README Known Issue; the
+   `P2P` half stays.
+2. Differentiate the local expansion analytically in the solid-harmonic basis
+   and evaluate the gradient directly, citing the identity used on the routine
+   per the conventions table. Keep the width normalization consistent with
+   `l2p_evaluate`'s existing $\bar L$ convention. Remove the step-size heuristic
+   and the TODO. State on the declaration the sign convention of the returned
+   gradient, since F2 records that as the most misread thing in the API. Update
+   the `CartesianTaylorBasis` cross-reference comment to match.
+3. Add a `unit` test in `tests/tstLaplaceKernel.hpp` comparing the analytic
+   gradient with the finite difference, and tighten `testL2PGradient`'s
+   tolerance (`1e-7`, set for the finite difference) to what the analytic form
+   achieves.
+4. Only after step 3 passes, regenerate `tests/data/laplace_solve_P6.txt` with
+   `run_laplace_solve_regenerate.flux` so the committed reference data matches
+   the new code. `LS_CROSS_RANK_TOL` and `LS_DIRECT_SUM_TOL` stay unchanged.
+
+**Out of scope:** FP32. `SolveFusedM2L.FP32_smokeTest` stays commented out and
+disabled (`tests/tstMultiSolve.hpp:1643-1700`); FP32 is not a production
+configuration.
+
+**Exit criterion:** all of the following pass, run with anchored regexes:
+- `ctest --output-on-failure -R '^Canopy_Test_LaplaceKernel_SERIAL$'`, including
+  a test showing the analytic gradient agreeing with the finite difference to the
+  finite difference's own accuracy ($\sim\!10^{-8}$ relative or better), and
+  `testL2PGradient` at a tolerance tighter than `1e-7`;
+- `ctest --output-on-failure -R '^Canopy_Test_(LaplaceSolve|MultiSolve|DownwardSweep)_MPI_SERIAL_np_[1-6]$'`
+  and `-R '^Canopy_Test_(LaplaceSolve|MultiSolve|DownwardSweep)_MPI_HIP_np_[1-4]$'`
+  (flux cannot place HIP at np 5–6, `systems/tuolumne/claude.md` §5), with
+  `LaplaceSolve` against the regenerated reference data and its tolerances
+  unchanged;
+- `ctest --output-on-failure -R '^Canopy_Test_SingleSolve_MPI_SERIAL_np_[12356]$'`
+  — np=4 is C6's known failure and is not part of this gate.
+
+No existing tolerance in these tests is loosened. `LaplaceSolve` against the
+*old* reference data fails after the change — confirming the regeneration was
+required rather than incidental. The progress log records the measured gradient
+error floor before and after, so C1's scan can be read against it.
 
 ## Known risks
 
