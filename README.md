@@ -561,7 +561,7 @@ applied to `DownwardSweep`. Found by reading, not by a run.
 
 ### `SolveFusedM2L.FP32_smokeTest` is disabled: it fails at ≥ 2 ranks
 
-**The case is commented out** (`tests/tstMultiSolve.hpp:1603-1656`), not filtered,
+**The case is commented out** (`tests/tstMultiSolve.hpp:1643-1700`), not filtered,
 so it is absent from the `Canopy_Test_MultiSolve_MPI_SERIAL` binary, pending
 the investigation below. Re-enable it as written once the defect is fixed — do
 **not** re-enable it by widening its `5e-2` budget, which would retire the only

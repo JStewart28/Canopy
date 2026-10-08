@@ -50,15 +50,13 @@ This document records a **read-only survey** of Canopy answering five specific
 questions from that consumer, and then one task per gap the survey found. The
 survey opened no other dependency and changed no Canopy code.
 
-**Second reading pass.** F6, F7, F8, F4's exact-radius note, C1's revised option
-set and C11 come from a later read-only pass that opened
-`src/Canopy_LaplaceKernel.hpp` in full (all 887 lines) alongside a reference
-Barnes–Hut treecode (`~/research-bridges/zmodel-steve/zmodel3d-amr/zmodel3d/treecode.py`,
-all 138 lines) to answer the question C1 had left open — whether a *softened* far
-field is reachable in the existing expansion basis. See `~/spack_envs/tuolumne_beatnik/beatnik/tasks/treecode.md`
-for the reference treecode itself. That pass built nothing and ran nothing
-either; every accuracy number in this document is still an estimate or a carried
-figure, never a measurement.
+The consumer's reference algorithm is a Barnes–Hut treecode
+(`~/research-bridges/zmodel-steve/zmodel3d-amr/zmodel3d/treecode.py`), described
+in `~/spack_envs/tuolumne_beatnik/beatnik/tasks/treecode.md`. Canopy's softened
+far field, `CartesianTaylorBasis`, was built and measured under its own design,
+`tasks/cartesian-taylor-basis.md`; the accuracy figures this document quotes for
+it are that design's measurements. Every figure quoted for `LaplaceKernel` with
+softening enabled is an estimate — C1 is the task that measures it.
 
 **Out of scope:** the consumer's own adapter layer; any change to the consumer's
 configuration surface; performance work not implied by one of the tasks below;
@@ -69,23 +67,27 @@ and the choice between Canopy and any other far-field method.
 Four assumptions a reader coming to Canopy from that consumer's side is likely
 to hold, and what is actually true.
 
-**"The multipole far field expands the softened kernel."** It does not. The
-far-field path (P2M → M2M → M2L → L2L → L2P) is built entirely from the
-**unsoftened** $1/r$ Laplace kernel; softening exists only in the near-field
-P2P kernel (`src/Canopy_P2P.hpp:799-803`, `883-896`) and is kept relevant by a
-floor that pushes close pairs out of M2L and into P2P
-(`src/Canopy_Solver.hpp:71-78`, `src/Canopy_CommunicationPlan.hpp:353-367`).
-Everything a consumer wants to say about far-field accuracy has to account for
-that. See **F1** and **C1**.
+**"The multipole far field expands the softened kernel."** Only if the caller
+selects the basis that does. The far-field basis is the `FarField` template
+parameter of `Solver` (`src/Canopy_Solver.hpp:165-174`), and its default,
+`LaplaceKernel`, expands the **unsoftened** $1/r$ kernel. With that default,
+softening exists only in the near-field P2P kernel
+(`src/Canopy_P2P.hpp:799-803`, `883-896`) and is kept relevant by a floor that
+pushes close pairs out of M2L and into P2P (`src/Canopy_Solver.hpp:71-78`,
+`src/Canopy_CommunicationPlan.hpp:353-367`). The second basis,
+`CartesianTaylorBasis` (`src/Canopy_CartesianTaylorBasis.hpp:355-356`), expands
+the softened kernel $(r^2+b)^{-1/2}$ itself, and runs at
+`near_softening_factor = 0`. See **F1**, **F6** and **C1**.
 
-**"So the far-field operators must be missing or incomplete."** They are not.
-All five are implemented in the solid-harmonic basis with Greengard theorem
-citations on each — `p2m_contribution` (`src/Canopy_LaplaceKernel.hpp:403`),
-`m2m_translate` (`:446`, Thm 5.22), `m2l_translate` (`:551`, Thm 5.23),
-`l2l_translate` (`:1220`, Thm 5.26), `l2p_evaluate` (`:1337`), plus a
-precomputed-operator M2L path (`m2l_build_operator`, `:516`). What is missing is
-**softening inside them**, and that is a change of expansion basis rather than a
-patch to these routines. See **F6**.
+**"So a softened far field means a patch to the existing operators."** It does
+not. `LaplaceKernel` implements all five operators in the solid-harmonic basis
+with Greengard theorem citations on each — `p2m_contribution`
+(`src/Canopy_LaplaceKernel.hpp:403`), `m2m_translate` (`:446`, Thm 5.22),
+`m2l_translate` (`:551`, Thm 5.23), `l2l_translate` (`:1220`, Thm 5.26),
+`l2p_evaluate` (`:1337`), plus a precomputed-operator M2L path
+(`build_m2l_operators`, `:887`). Those theorems cannot carry softening, which is
+why the softened far field is a separate basis rather than a change to these
+routines. See **F6**.
 
 **"`setSources` then `solve` maps onto Canopy's `setup` then `solve`."** It maps
 onto `setup`/`auto_maintain` plus `solve`, and the split is not where a caller
@@ -109,11 +111,22 @@ See **F3** and **C2**.
 
 ### F1 — Kernel generality and the form of the softening
 
-**Canopy exposes one fixed kernel: the $1/r$ Laplace kernel.** There is no
-kernel abstraction to specialize. `LaplaceKernel` is the only kernel in the tree
-(`src/Canopy_LaplaceKernel.hpp:150-152`) and `Solver` hard-wires it —
-`kernel_type` is a typedef, not a template parameter
-(`src/Canopy_Solver.hpp:104-112`). A consumer cannot supply its own kernel.
+**Canopy exposes two far-field bases, chosen at compile time.** `Solver` takes
+`template <class, int, int> class FarField = LaplaceKernel` and sets
+`kernel_type = FarField<Scalar, P_ORDER, NComps>`
+(`src/Canopy_Solver.hpp:165-174`). A `FarField` type is a basis-plus-kernel
+composition that supplies every far-field operator (`README.md:15-33`); the
+contract is checked by `src/Canopy_FarFieldContract.hpp`. Two exist:
+
+- `LaplaceKernel` (`src/Canopy_LaplaceKernel.hpp:153-155`), the default — a
+  complex solid-harmonic expansion of the unsoftened $1/r$ kernel, any
+  `Scalar`, any `P_ORDER`.
+- `CartesianTaylorBasis` (`src/Canopy_CartesianTaylorBasis.hpp:355-356`) — a
+  real Cartesian-Taylor expansion of the softened $(r^2+b)^{-1/2}$, `double`
+  only (`:360`), with `P_ORDER` read as the Taylor order $p$.
+
+The kernel is not otherwise pluggable: a consumer selects one of these two, not
+an arbitrary kernel.
 
 **What it can express instead is a fixed *set* of Laplace solves.** `NComps` is
 the number of simultaneous independent charge components, and the header already
@@ -142,8 +155,9 @@ that would otherwise be derived once at first setup and frozen
 (`src/Canopy_Solver.hpp:196-209`, `806-847`). No functional-form conversion is
 needed and no reinterpretation of $b$ is needed.
 
-**But only the near field is softened.** This is the single most consequential
-finding in this document. The multipole far field expands $1/r$ unsoftened;
+**With `LaplaceKernel`, only the near field is softened.** This is the single
+most consequential property of the default configuration. Its multipole far
+field expands $1/r$ unsoftened;
 accuracy in the far field is bought by *excluding* every pair where softening
 matters, via a floor in the acceptance criterion: an M2L pair is rejected
 whenever the cell-centre separation $R \le \texttt{near\_softening\_factor} \cdot \varepsilon$
@@ -179,10 +193,10 @@ On a domain of extent $O(1)$ the $10^{-3}$ row already makes the near
 field the entire domain — i.e. $O(N^2)$ — and the $10^{-6}$ row is
 unreachable at any cost. **There is no setting of `near_softening_factor` that
 delivers a $10^{-6}$-accurate softened-kernel evaluation with a bare-kernel
-far field.** Either the far-field operator must carry the softening, or the
-consumer's accuracy claim must be stated at the $10^{-2}$–$10^{-3}$
-level and justified. This is task **C1**; what "carry the softening" would
-actually cost is **F6**.
+far field.** With `LaplaceKernel`, the consumer's accuracy claim is bounded at
+the $10^{-2}$–$10^{-3}$ level; measuring and documenting that bound is task
+**C1**. A far field that carries the softening is `CartesianTaylorBasis`, and
+what it achieves and costs is **F6**.
 
 Two smaller notes on the kernel:
 
@@ -192,17 +206,20 @@ Two smaller notes on the kernel:
   zero ($\delta = 0$), so skipping it is correct rather than merely
   tolerable. It also silently drops genuinely coincident distinct sources, which
   for this kernel likewise contribute zero to the gradient.
-- The far field carries no softening anywhere else either: `grep` for
-  `softening` over `src/Canopy_DownwardSweep.hpp` and
-  `src/Canopy_UpwardSweep.hpp` returns nothing.
+- The sweeps are kernel-blind. The effective softening length reaches them only
+  as `M2LKernelParams` (`src/Canopy_FarFieldContract.hpp:114`), pushed by
+  `Solver::_push_m2l_kernel_params` (`src/Canopy_Solver.hpp:777-783`) into
+  `set_m2l_kernel_params` on each sweep (`src/Canopy_UpwardSweep.hpp:195-198`,
+  `src/Canopy_DownwardSweep.hpp:399-406`). `LaplaceKernel` ignores it
+  (`src/Canopy_LaplaceKernel.hpp:319`, `:898`); `CartesianTaylorBasis` uses it
+  as $b = \varepsilon^2$.
 
 ### F2 — The cross-product contraction
 
 **It cannot be folded into the kernel, and it does not need three separate
-solves.** There is no hook in `LaplaceKernel` for a caller-supplied contraction
-— its static methods (`p2m_contribution`, `m2m_translate`, `m2l_translate`,
-`l2l_translate`, `l2p_evaluate`, `src/Canopy_LaplaceKernel.hpp:145-150`) are
-fixed. But `NComps = 3` with `compute_gradient = true` yields, per target
+solves.** Neither basis has a hook for a caller-supplied contraction — the
+`FarField` operators (listed for `LaplaceKernel` at
+`src/Canopy_LaplaceKernel.hpp:145-150`) are fixed. But `NComps = 3` with `compute_gradient = true` yields, per target
 $i$, the full tensor
 
 $$
@@ -236,12 +253,13 @@ Keeping the contraction *out* of the kernel is also the right design and not
 merely the available one: the cross product is linear in the source strength, so
 it commutes with any expansion of the kernel. The reference treecode bakes the
 cross product into its own kernel evaluation
-(`treecode.py:56-81`) and thereby loses that separation; a Canopy-side softened
-operator (F6, C1) should produce the $3\times3$ tensor and let the caller
-contract, exactly as this finding prescribes.
+(`treecode.py:56-81`) and thereby loses that separation. `CartesianTaylorBasis`
+keeps it: it delivers $\varphi$ and $\nabla\varphi$ per component and nothing
+inside Canopy recombines them (`tasks/cartesian-taylor-basis.md`, "The far field
+is three scalar passes, not a vector kernel").
 
-`NComps` is a **compile-time** template parameter, as is `P_ORDER`
-(`src/Canopy_Solver.hpp:165-167`). A consumer whose expansion order is a runtime
+`NComps` is a **compile-time** template parameter, as are `P_ORDER` and
+`FarField` (`src/Canopy_Solver.hpp:165-167`). A consumer whose expansion order is a runtime
 configuration value cannot pass it through. See **C7**.
 
 ### F3 — Tree reuse across integrator stages
@@ -288,31 +306,34 @@ See **C3**.
 else `Rebalance` if *any* cell key differs from the previous tree, else
 `Migrate` (`src/Canopy_Solver.hpp:426-545`). A rolling-up sheet changes its
 occupancy pattern continuously, so the cell-key set changes essentially every
-stage. `Rebalance` adds a Zoltan2 repartition and a full communication-plan
+stage. `Rebalance` adds a ParMETIS repartition and a full communication-plan
 rebuild — and the communication-plan rebuild is a **serial host-side dual-tree
 traversal over the globally replicated cell tree, executed on every rank**
 (`src/Canopy_CommunicationPlan.hpp:555-671`). So the expensive path is the
-common path, three times per step.
+common path, three times per step. With `CartesianTaylorBasis` it is more
+expensive still: a rebalance that moves the root box empties that basis's whole
+M2L operator cache, so every operator is rebuilt (**F6**).
 
-That path also makes the result **non-reproducible**. Zoltan2's `multijagged`
-algorithm is non-deterministic, which Canopy handles by solving on rank 0 and
-broadcasting (`src/Canopy_TreePartitioner.hpp:349-357`, `416-425`) — this makes
-the assignment *consistent across ranks*, not *reproducible across runs*. Two
-runs of the same problem on the same rank count can therefore get different
-decompositions, hence different summation orders, hence different last bits. A
-consumer whose direct-sum baseline is reproducible to $10^{-15}$ cannot make
-any bitwise claim about the far-field path, and cannot distinguish a real
-regression from a repartition reshuffle without a run-to-run noise measurement.
-The `rcb` alternative is deterministic but is recorded as broken on the target
-platform (`src/Canopy_TreePartitioner.hpp:417-419`). See **C4**.
+**The decomposition is reproducible run to run; a HIP solve is not.**
+`TreePartitioner::partition_cells` runs a distributed
+`ParMETIS_V3_PartKway` / `ParMETIS_V3_AdaptiveRepart` with a fixed seed
+(`src/Canopy_TreePartitioner.hpp:582-603`) and shares the result with
+`MPI_Allgatherv` (`:614-625`). `README.md:529-547` records the consequence: two
+`MultiSolve` passes at SERIAL np 2–6 and HIP np 2–4 give the identical ownership
+map on every partition and refresh, and on SERIAL the solve output is identical
+between passes at every rank count. On a HIP `ExecutionSpace` it is not — device
+reductions accumulate in a run-dependent order, giving relative differences of
+6e-12 to 2e-4 between passes at np 2–4, and differences even at np 1. So a SERIAL
+run supports a bitwise claim at fixed rank count; a HIP run supports none, and
+needs a measured noise floor before any tolerance is set against it. See **C4**.
 
 **(d) Every maintenance path re-decomposes and permutes.** `partition`,
 `repartition` and `redistribute` all migrate particles between ranks and reorder
 the local array, and the order after migration is explicitly unspecified
 (`src/Canopy_TreePartitioner.hpp:854-858`). Nothing in `src/` carries a
-caller-supplied identity through that: the only `global_ids` in the tree are
-leaf indices for the Zoltan2 adapter
-(`src/Canopy_TreePartitioner.hpp:378-392`). Migration packs whole AoSoA tuples
+caller-supplied identity through that: the only global IDs in the tree are
+ParMETIS vertex numbers for cells, assigned by supplier rank and Morton position
+(`src/Canopy_TreePartitioner.hpp:480-496`). Migration packs whole AoSoA tuples
 (`src/Canopy_TreePartitioner.hpp:945-1050`), so a caller-added identity member
 *would* travel with its particle — but the caller must then run its own reverse
 exchange to get results home, once per stage, in addition to Canopy's. For a
@@ -324,7 +345,7 @@ central mismatch. See **C2**.
 | knob | in Canopy | notes for a consumer |
 | --- | --- | --- |
 | `ncrit` | `FmmConfig::ncrit` (`src/Canopy_Solver.hpp:55`), runtime. A cell becomes a leaf when its **global** count $\le$ `ncrit` or it hits `max_depth` (`src/Canopy_TreeBuilder.hpp:922`). | Same meaning as in any Barnes–Hut/FMM code; a value of 64 transfers directly. Note the refinement test is on the *global* count, so leaves are balanced in total occupancy, not per-rank occupancy. |
-| `mac_theta` | `FmmConfig::mac_theta` (`src/Canopy_Solver.hpp:68`), runtime, default 0.5. The predicate is the exafmm spherical MAC: accept M2L iff $R\theta > \sqrt3\,(h_A + h_B)$ (`src/Canopy_CommunicationPlan.hpp:338-353`). | A **different predicate** from a Barnes–Hut opening angle, so an inherited numeric value does not carry its meaning across. It does carry its *direction*: smaller is more conservative, more M2L pairs, more accurate at fixed order. A value of 0.3 is conservative under Canopy's predicate too, and is exercised by one existing test (`tests/tstMultiSolve.hpp:1197-1212`). |
+| `mac_theta` | `FmmConfig::mac_theta` (`src/Canopy_Solver.hpp:68`), runtime, default 0.5. The predicate is the exafmm spherical MAC: accept M2L iff $R\theta > \sqrt3\,(h_A + h_B)$, with exact ties rejected by a $10^{-10}$ relative margin (`src/Canopy_CommunicationPlan.hpp:338-353`). | A **different predicate** from a Barnes–Hut opening angle, so an inherited numeric value does not carry its meaning across. It does carry its *direction*: smaller is more conservative, more M2L pairs, more accurate at fixed order. A value of 0.3 is conservative under Canopy's predicate too, and is exercised by one existing test (`tests/tstMultiSolve.hpp:1197-1212`). |
 | `max_depth` | `FmmConfig::max_depth` (`src/Canopy_Solver.hpp:56`), runtime, **hard maximum 19**, enforced by a throw in the `TreeBuilder` constructor because the Morton key is a `uint64_t` (`src/Canopy_TreeBuilder.hpp:50`, `251-256`). | Has **no counterpart** in a treecode-derived parameter set; a consumer must choose it. It is coupled to the bounding box: the finest cell width is (root box width) / $2^{\text{max\_depth}}$. |
 
 **Do the structured-workload values carry over to a sheet?** Partly, and the
@@ -354,9 +375,12 @@ assuming. Three sheet-specific effects have no coverage:
   within $\sqrt b$ geometrically. `README.md:64-74` already names exactly
   this case — "a clustering system whose cells shrink below the softening length
   (e.g. a vortex sheet at full roll-up) gets a spurious, far too large far-field
-  and blows up" — and the near-softening floor is the mitigation. So the
-  mechanism is anticipated; what is unmeasured is the *cost*, since the floor
-  converts a growing fraction of pairs to P2P as the sheet tightens.
+  and blows up" — and with `LaplaceKernel` the near-softening floor is the
+  mitigation. So the mechanism is anticipated; what is unmeasured is the
+  *cost*, since the floor converts a growing fraction of pairs to P2P as the
+  sheet tightens. `CartesianTaylorBasis` needs no floor, so on that basis the
+  self-approach costs nothing extra in P2P; what is unmeasured there is the
+  accuracy once the softening dominates the cell width.
 - **Bounding-box sensitivity.** `TreeBuilder::compute_global_bounding_box` takes
   a raw global min/max (`src/Canopy_TreeBuilder.hpp:491-492`), and
   `README.md:321-332` records that a single outlier inflates the root box until
@@ -365,24 +389,26 @@ assuming. Three sheet-specific effects have no coverage:
   single spurious vertex hits this.
 
 **Every accuracy figure Canopy currently carries was measured on a uniform or
-clustered *volumetric* random distribution, unsoftened.** `tests/tstSingleSolve.hpp`
-and `tests/tstMultiSolve.hpp` place particles randomly in a box; neither has a
-surface, sheet or manifold case (`grep -i "surface\|sheet\|manifold" tests/`
-returns only unrelated prose). The validated envelope is:
+clustered *volumetric* random distribution.** `tests/tstSingleSolve.hpp`,
+`tests/tstMultiSolve.hpp` and `tests/tstCartesianTaylorSolve.hpp` place
+particles randomly in a box; none has a surface, sheet or manifold case
+(`grep -i "surface\|sheet\|manifold" tests/` returns only unrelated prose).
+Only the `CartesianTaylorBasis` figures are softened. The validated envelope is:
 
 | test | configuration | tolerance met |
 | --- | --- | --- |
 | `SingleSolve.PotentialAndGradientNComps3` | $P=8$, `ncrit` 16, `max_depth` 6, softening 0, 500 particles/rank, volumetric random; all nine gradient components vs. brute force (`tests/tstSingleSolve.hpp:79-87`, `365-375`, `413-432`) | $10^{-3}$ — but **fails at exactly 4 ranks**, see F5 |
-| `MultiSolve` suite | $P=8$ (`tests/tstMultiSolve.hpp:88`), `mac_theta` 0.3–0.5, `ncrit` 8–16, `max_depth` 6–8, `softening = 0` (`:432`, `:1301`, `:1561`) | $10^{-2}$–$3\times10^{-2}$ (`tests/tstMultiSolve.hpp:565-697`) |
+| `MultiSolve` suite | `LaplaceKernel`, $P=8$ (`tests/tstMultiSolve.hpp:88`), `mac_theta` 0.3–0.5, `ncrit` 8–16, `max_depth` 6–8, `softening = 0` (`:432`, `:1301`, `:1561`); end-of-run position and velocity against a brute-force shadow trajectory, per test (`tests/tstMultiSolve.hpp:1041-1229`) | position $3.5\times10^{-9}$–$6.4\times10^{-3}$, velocity $3.4\times10^{-6}$–$3.5\times10^{-2}$, by test |
+| `CartesianTaylorSolve` | `CartesianTaylorBasis`, `NComps` 3, 8640 particles on a cube of half-span 0.1155, `ncrit` 8, `max_depth` 6, `softening` 0.025, `near_softening_factor` 0, 4 solves with migrate/rebalance between, np 1–6; vs. a direct **softened** sum (`tests/tstCartesianTaylorSolve.hpp:135-155`, `:326-368`) | $p=3$, `mac_theta` 0.3: potential $1.9\times10^{-5}$, gradient $7.1\times10^{-4}$ (bar $10^{-3}$; at $p=2$ the gradient is $9.0\times10^{-3}$); $p=2$, `mac_theta` 0.5: potential $1.0\times10^{-3}$, gradient $1.87\times10^{-2}$. Global-scale-normalized; SERIAL np 1–6 and HIP np 1–4 |
 
 There is therefore **no measured parameter set for a sheet, and no measured
-accuracy figure with softening enabled at all**. Producing one requires
+accuracy figure for `LaplaceKernel` with softening enabled**. Producing one requires
 compiling and running; it cannot be settled by reading. This is task **C5**, and
 it is the task that decides whether the consumer's whole approach is viable.
 
 ### F5 — Open defects on this path
 
-**The `Rebalance` NIC-registration-cache defect is fixed in the tree surveyed.**
+**The `Rebalance` NIC-registration-cache defect is fixed.**
 `TreePartitioner::migrate_particles` no longer routes through
 `Cabana::Distributor`/`Cabana::migrate`; it packs outgoing tuples into per-peer
 subviews of **one** persistent registered send region and posts one
@@ -425,17 +451,17 @@ rank the same non-zero particle count. A consumer distributing an unstructured
 mesh can have a rank that owns **zero** sources, and must still enter every
 collective. Nothing in `src/` obviously mishandles it — the per-level
 `MPI_Allreduce` sums zero local counts, the replicated cell list is identical on
-every rank, and the Zoltan2 solve runs on rank 0 over the global leaf set — but
+every rank, and the ParMETIS solve runs on a communicator split to exclude
+ranks that supply no vertices (`src/Canopy_TreePartitioner.hpp:559-567`) — but
 "reads as though it should work" is not coverage. This is **C10**.
 
-### F6 — What a softened far field would actually require
+### F6 — The softened far field, and what it costs
 
-F1 says the far field expands the bare $1/r$. This finding answers the
-question C1 originally left open: **can the softening be carried into the
-existing operators?** No. It is a change of expansion basis, and it costs more
-than "add $b$ to a few denominators".
+`CartesianTaylorBasis` is Canopy's softened far field. Its design, derivations
+and measurements are `tasks/cartesian-taylor-basis.md` and its progress log;
+this finding records only what a consumer choosing between the two bases needs.
 
-**(a) Harmonicity is why no substitution exists.** Canopy's M2M/M2L/L2L are the
+**(a) Why it is a separate basis.** `LaplaceKernel`'s M2M/M2L/L2L are the
 solid-harmonic addition theorems (Greengard Thms 5.22, 5.23, 5.26, cited at
 `src/Canopy_LaplaceKernel.hpp:446`, `:551`, `:1220`). Those theorems hold
 *because* $1/r$ is harmonic. The softened potential is not:
@@ -444,80 +470,59 @@ $$
 \nabla^2 (r^2+b)^{-1/2} \;=\; -\,\frac{3b}{(r^2+b)^{5/2}} \;\ne\; 0 .
 $$
 
-So there is no softened coefficient one can feed to `m2l_translate` to make it
-evaluate the softened kernel. A Cartesian Taylor basis needs only *smoothness*
-of the kernel, never harmonicity, which is why treecodes soften trivially — they
-do not solve this problem, they sidestep it. Any softened far field in Canopy
-therefore means a **second expansion basis alongside the existing one**, not a
-patch to it.
+So no softened coefficient fed to `m2l_translate` evaluates the softened kernel.
+A Cartesian Taylor basis needs only *smoothness* of the kernel, never
+harmonicity, and carries $b$ inside $w = r^2 + b$ at every derivative order
+(`src/Canopy_CartesianTaylorBasis.hpp:26-36`). Only its M2L knows the kernel;
+P2M, M2M, L2L and L2P are kernel-blind Taylor shifts.
 
-**(b) A second basis is a wide, mechanical change through both sweeps.** The
-sweeps *are* templated on `KernelType`
-(`UpwardSweep<MemorySpace, ExecutionSpace, KernelType>`,
-`src/Canopy_Solver.hpp:178-181`), so a new kernel struct is pluggable in
-principle — but they hard-assume this kernel's storage: `complex_type***` views
-(`src/Canopy_UpwardSweep.hpp:63,73`; `src/Canopy_DownwardSweep.hpp:108,118`),
-`num_coeffs_per_cell = (P+1)(P+2)/2` (`:66`, `:111`), and the shared
-$A_{n,m}$ table built to $2P$ (`src/Canopy_UpwardSweep.hpp:235`). A
-Cartesian-Taylor kernel wants **real** symmetric-tensor storage of size
-$(p{+}1)(p{+}2)(p{+}3)/6$ and no A-table. It fits only by generalizing a
-`coeff_type` typedef through both sweeps, or by wasting every imaginary half.
-`src/Canopy_Solver.hpp:112` also fixes `kernel_type` as a typedef rather than a
-template parameter (F1).
+**(b) Storage.** The sweeps take their coefficient type from the basis —
+`coeff_type = KernelType::coeff_type` and `View<coeff_type***>`
+(`src/Canopy_UpwardSweep.hpp:70`, `:102-103`;
+`src/Canopy_DownwardSweep.hpp:122`, `:171-172`), with the per-cell count from
+`KernelType::num_coeffs_per_cell` (`src/Canopy_UpwardSweep.hpp:96`,
+`src/Canopy_DownwardSweep.hpp:147`) and auxiliary tables from the opaque
+`KernelType::build_aux_tables` (`src/Canopy_UpwardSweep.hpp:302-306`).
+`LaplaceKernel` stores complex coefficients, $(P+1)(P+2)/2$ per cell, plus the
+$A_{n,m}$ table to $2P$; `CartesianTaylorBasis` stores real ones,
+$(p+1)(p+2)(p+3)/6$ per cell (`src/Canopy_CartesianTaylorBasis.hpp:379`).
 
-**(c) Softening destroys scale invariance, and that is the expensive part.**
-This is the obstruction most likely to be underestimated. Canopy's numerical
-conditioning strategy rests on $1/r$ being **homogeneous of degree $-1$**.
-Every operator is scale-normalized against cell half-width on that basis: P2M
-produces $\bar M = M/w^{n+1}$ (`src/Canopy_LaplaceKernel.hpp:399-402`), M2M
-applies $(w_c/w_p)^{j+1}$ (`:440-445`), M2L expands $\rho^{-(n+j+1)}$ as
-$(w_s/\rho)^{n+1}(w_t/\rho)^j$ (`:547-550`), L2L applies $(w_c/w_p)^j$
-(`:1217-1219`), L2P consumes $\bar L = L\,w^n$ (`:1332-1336`) — all for FP32
-conditioning at depth.
+**(c) Softening destroys scale invariance, and the operator cache pays for it.**
+`LaplaceKernel` scale-normalizes every operator against cell half-width because
+$1/r$ is homogeneous of degree $-1$: P2M produces $\bar M = M/w^{n+1}$
+(`src/Canopy_LaplaceKernel.hpp:399-402`), M2M applies $(w_c/w_p)^{j+1}$
+(`:440-445`), M2L expands $\rho^{-(n+j+1)}$ as $(w_s/\rho)^{n+1}(w_t/\rho)^j$
+(`:547-550`), L2L applies $(w_c/w_p)^j$ (`:1217-1219`), L2P consumes
+$\bar L = L\,w^n$ (`:1332-1336`). Its precomputed M2L operators therefore depend
+only on the key $(dd, ii, jj, kk)$, with no physical length entering
+(`:874-884`, `:892-895`), declared by `key_needs_level = false` (`:721`).
 
-The sharper consequence is the **precomputed M2L operator cache**. Operators are
-keyed on $(dd, ii, jj, kk)$ — a depth difference and an integer offset in
-half-widths — and `src/Canopy_DownwardSweep.hpp:1075` states the property
-outright: the operator *"depends only on (dd, ii, jj, kk); no physical width
-enters"*. That is true precisely because the kernel has no absolute length
-scale. A softened kernel has one, $\sqrt b$, so:
+A softened kernel has a length scale, $\sqrt b$. `CartesianTaylorBasis` keeps
+physical, un-normalized coefficients, is `double` only
+(`src/Canopy_CartesianTaylorBasis.hpp:360`), and declares
+`key_needs_level = true` (`:486`): its operator key carries the level, the sweep
+hands its builder per-level physical half-widths (`set_root_half_width`,
+`src/Canopy_DownwardSweep.hpp:413-450`), and a change of root half-width or of
+softening empties the whole cache (`:376-406`). A rebalance on a moving
+distribution moves the root box, so on this basis **no operator survives a
+rebalance** — measured as zero keys retained across 336 builds
+(`tasks/cartesian-taylor-basis.md`, Current state and **R6**). Per F3(c),
+rebalance is this consumer's common path.
 
-- the cache key must additionally carry the physical cell width (or
-  $w/\sqrt b$), multiplying the distinct-key count by the number of occupied
-  depths and degrading the reuse the path exists to buy;
-- all five width-normalization conventions above must be re-derived, because
-  they are no longer mere rescalings.
+**(d) The basis that admits softening does not scale to high accuracy.** A
+Taylor expansion truncated at order $p$ has relative error
+$\sim (c\,W/R)^{p+1}$ with $W$ the source box width and $c \in [1, \sqrt3]$,
+while its coefficient count grows as $\binom{p+3}{3} \sim p^3/6$ against
+$O(p^2)$ for solid harmonics. Measured (F4's table): $7.1\times10^{-4}$ on the
+gradient at $p = 3$, `mac_theta` 0.3; $1.87\times10^{-2}$ at $p = 2$, `mac_theta`
+0.5. The gradient of a degree-$p$ local is degree $p-1$, so the gradient
+truncates one order before the potential. $10^{-6}$ needs $p \approx 11$–$24$
+(364 to 2925 coefficients per cell; `tasks/cartesian-taylor-basis.md`, "The
+target is the regularization unblock"). So a softened far field lives in the
+$10^{-3}$ regime, and $10^{-6}$ is out of reach at any order this basis is
+practical at.
 
-**(d) A softened Cartesian FMM is only attractive at low order.** For a
-Cartesian Taylor FMM truncated at multipole order $p_M$ and local order
-$p_L$, M2L needs $\partial^\alpha\phi_b$ for
-$|\alpha| \le p_M+p_L+1$. The reference treecode supplies closed-form
-derivatives of the Plummer potential only to $|\alpha| \le 3$
-(`treecode.py:56-81`) — genuinely the hard-to-get-wrong physics, and exactly the
-seed of a Cartesian M2L, since a Cartesian M2L *is*
-$\partial^{\alpha+\beta}K(R)$ — but that is order 2, not a ladder. Matching
-Canopy's default $P=8$ needs derivatives to 17th order and
-$\sim\!(19)(20)(21)/6 \approx 1330$ tensor slots per pair: the
-$O(p^3)$-vs-$O(p^2)$ growth that is the standard reason solid harmonics
-win at high order. **The basis that admits softening is the basis that does not
-scale to high accuracy** — so a softened far field lives in the
-$10^{-3}$ regime, not the $10^{-6}$ regime F1 wants.
-
-**(e) Only one operator family is kernel-dependent, which bounds the work.** In
-a Cartesian Taylor method, M2L (equivalently M2P) is the *only* operator that
-knows what the kernel is; P2M, M2M, L2L and L2P are combinatorics on moments and
-derivative coefficients (binomial and Taylor shifts) and need no
-softening-specific derivation at all. So the derivation burden of a softened far
-field is concentrated entirely in the M2L/M2P derivative tensors.
-
-**(f) Literature to check before committing.** The precedent for a low-order
-Cartesian-Taylor FMM with softening is **Dehnen's `falcON`** (W. Dehnen, *ApJ*
-**536**, L39, 2000; *JCP* **179**, 27, 2002), a Cartesian Taylor-expansion FMM
-built for softened gravity with a full M2L; Warren & Salmon's hashed oct-tree
-work is the Cartesian-multipole precedent. **Neither has been read.** They are
-named as the check C1 must run, not as verified results.
-
-### F7 — Canopy's L2P gradient is a finite difference, not analytic
+### F7 — `LaplaceKernel`'s L2P gradient is a finite difference, not analytic
 
 `src/Canopy_LaplaceKernel.hpp:1388-1418` evaluates the far-field gradient by a
 central difference: six extra potential evaluations at
@@ -532,75 +537,19 @@ root cause of a premature full-rollup NaN. Two consequences:
   budget — but it is a **third** plateau in the `P_ORDER` scan that C1 step 1
   and risk **R1** are built around, and R1's "truncation falls, bias plateaus"
   discriminator has to account for it.
-- A softened Cartesian far field (F6) would produce analytic gradients as a side
-  effect, since its expanded quantity *is* $\nabla\phi_b$ and the derivative
-  tensors are what it evaluates directly.
+- `CartesianTaylorBasis::l2p_evaluate` already returns an analytic gradient
+  (`src/Canopy_CartesianTaylorBasis.hpp:1453-1490`). The finite difference is
+  `LaplaceKernel`'s alone.
 
-Replacing the FD with analytic solid-harmonic derivatives in the existing basis
-is independent of every kernel question above and is task **C11**.
-
-### F8 — There is no treecode / M2P mode, and adding one is the cheap option
-
-`grep -i "barnes\|treecode\|m2p"` over `canopy/src/` returns nothing. There is
-no opening-angle mode, no monopole mode, and no evaluate-a-multipole-at-a-point
-operator anywhere; `mac_theta` is a spherical MAC used to *build M2L pairs*
-(`src/Canopy_CommunicationPlan.hpp:338-353`), not a Barnes–Hut opening angle. So
-a treecode is **not** a configuration of Canopy today.
-
-It could become one, and that is the cheapest route to a far field that carries
-the softening. The dual-tree traversal already produces accepted
-**(target cell, source cell)** pairs (`src/Canopy_CommunicationPlan.hpp:555-671`)
-and already has a working softened P2P for the rejected ones. A "treecode mode"
-needs no new traversal, tree, partitioner or communication plan — it replaces
-*one step*: where the downward sweep currently does M2L into a local expansion
-and then L2L/L2P down to particles, evaluate the source cell's multipole
-**directly at each particle in the target cell** (M2P) and skip L2L and L2P
-entirely.
-
-| piece | lift |
-| --- | --- |
-| Cartesian moments in the upward sweep (P2M) | Small. Kernel-independent; `treecode.py:33-35` is the formula. |
-| M2M for those moments | Small. Binomial shift, kernel-independent — the one operator the reference Python skips (it recomputes moments per level) and a real implementation should have. |
-| Softened M2P | **Small, and transcribable.** `treecode.py:56-81`, $\sim\!80$ lines of explicit index loops. |
-| M2L / L2L / L2P | **Deleted from the path.** Not implemented, not needed. |
-| Storage | Real, $(p{+}1)(p{+}2)(p{+}3)/6 \times$ `NComps` per cell. Needs F6(b)'s `coeff_type` generalization, but *only* in the upward sweep and the new M2P driver. |
-| Operator cache | **Not applicable.** M2P has no per-offset operator to cache, so F6(c)'s loss of scale invariance costs nothing here. |
-
-What it buys is exactly what F1 says is missing: the far field carries the
-softening, `near_softening_factor` becomes unnecessary rather than load-bearing,
-and F1's systematic $\tfrac32\varepsilon^2/R^2$ gradient bias — the one that
-does not shrink with order — **disappears**, leaving ordinary truncation error
-that *does* respond to `mac_theta` and order. It also yields analytic gradients
-(F7) and is faithful to the consumer's reference algorithm and its
-$\theta$/order/`ncrit` knobs.
-
-What it costs, and neither number is measured:
-
-- **Accuracy ceiling $\sim\!10^{-3}$** at $\theta=0.3$, order 2
-  (carried from `treecode.md` §1), with the error a plateau in
-  $N$. Higher order is available but pays F6(d)'s $O(p^3)$.
-- **Complexity goes $O(N)\to O(N\log N)$**, and per-target work rises:
-  every particle in a target cell re-evaluates every accepted source multipole
-  instead of the cell paying M2L once and amortizing through L2L/L2P. On a leaf
-  of `ncrit` particles that is an `ncrit`-fold increase in far-field arithmetic.
-  **This is the real cost of the option and it is a measurement, not an
-  estimate** — see C1 step 3 and risk **R7**.
-
-Note the collision that reframes the whole choice: the honest accuracy claim for
-the *status quo* (F1, $10^{-2}$–$10^{-3}$) and the ceiling of an M2P
-mode are **the same number**. So M2P is not "trade accuracy for fidelity" — it
-is "reach the same accuracy with an error controllable by `mac_theta` and order
-instead of a fixed bias, plus analytic gradients and reference-faithful knobs".
-
-It also bears on where a treecode for this consumer should live: an M2P mode
-inherits Canopy's distributed tree, whereas a standalone port
-(`treecode.md` §3) must re-decide its own distribution strategy.
+Replacing the FD with analytic solid-harmonic derivatives in `LaplaceKernel` is
+independent of every kernel question above and is task **C11**.
 
 ## Approach
 
 Each finding above that blocks or degrades the consumer becomes one task below.
 The tasks are independent except where stated: **C1** and **C5** together decide
-whether the approach is viable at all and should be done first; **C2** and
+which basis the consumer should run and whether the approach is viable at all,
+and should be done first; **C2** and
 **C3** are the interface changes that make a three-stage integrator affordable;
 **C4**, **C6** and **C10** are correctness and confidence work; **C7**, **C8**,
 **C9** and **C11** are small API and quality items that can be taken at any
@@ -622,16 +571,15 @@ time, though C11 is worth doing *before* C1's scan is interpreted.
 
 ### Deliberate deviations
 
-- **No task proposes a general kernel abstraction.** The consumer's kernel is
-  reachable as a set of Laplace gradient solves (F2), so templating the whole
-  pipeline on a kernel concept would be a large refactor bought for nothing. C1
-  extends the *existing* pipeline to carry softening in the far field rather
-  than making the kernel pluggable — and per F6(b) even that needs only a
-  `coeff_type` generalization of the two sweeps, not a kernel concept.
-- **No task proposes making the partitioner's non-determinism disappear by
-  reverting to `rcb`.** It is recorded as broken on the target platform
-  (`src/Canopy_TreePartitioner.hpp:417-419`); C4 addresses reproducibility
-  without that assumption.
+- **No task adds a third far-field basis or a treecode (M2P) mode.** The
+  consumer's kernel is reachable as a set of gradient solves (F2) on either
+  existing basis, and `CartesianTaylorBasis` already carries the softening with
+  analytic gradients at the reference treecode's accuracy (F4, F6). A treecode
+  mode would reach the same $\sim\!10^{-3}$ at $O(N\log N)$ instead of $O(N)$.
+- **No task makes HIP solves bitwise reproducible.** The partition is already
+  deterministic (F3(c)); the remaining HIP spread comes from device reduction
+  order, which is recorded in `README.md` Known Issues and is not specific to
+  this consumer. C4 states the guarantee per backend instead.
 - **The consumer's configuration surface is fixed and cannot absorb these
   gaps.** No task below may be closed by asking the consumer to add a knob.
 
@@ -640,16 +588,18 @@ time, though C11 is worth doing *before* C1's scan is interpreted.
 Everything described in **Findings** is the state of the library as surveyed.
 Concretely, and stated as what is *not* true:
 
-- The far-field operators do not carry softening, and no diagnostic reports the
-  resulting bias. A consumer gets a wrong-by-a-known-formula answer with no
-  indication. All five far-field operators *are* implemented — in the
-  solid-harmonic basis, which cannot carry softening at all (F6).
-- There is no accuracy measurement for any softened configuration, and none for
-  any non-volumetric source distribution.
-- There is no M2P / treecode / opening-angle mode (F8), so there is no existing
-  path whose far field is softening-consistent.
-- The far-field gradient is a finite difference of the potential, not an analytic
-  derivative (F7).
+- The default basis, `LaplaceKernel`, does not carry softening in the far
+  field, and nothing reports the resulting bias. A consumer that leaves
+  `FarField` at its default gets a wrong-by-a-known-formula answer with no
+  indication, and `README.md:64-74` understates the gradient's share of it by a
+  factor of three (F1).
+- `CartesianTaylorBasis` does carry it, measured at $7.1\times10^{-4}$ on the
+  gradient (F4), but only on a volumetric distribution, and its operator cache
+  is emptied by every rebalance that moves the root box (F6(c)).
+- There is no accuracy measurement for `LaplaceKernel` with softening enabled,
+  and none for either basis on a non-volumetric source distribution.
+- `LaplaceKernel`'s far-field gradient is a finite difference of the potential,
+  not an analytic derivative (F7).
 - There is no way to get results back in the caller's particle order or on the
   caller's ranks.
 - There is no maintenance path cheaper than a full global tree build.
@@ -670,86 +620,62 @@ estimate here.
 
 ## Task sequence
 
-### C1 — Make the far field consistent with the softened kernel, or bound the bias — **NOT STARTED**
+### C1 — Measure and document `LaplaceKernel`'s softening bias — **NOT STARTED**
 
 **Depends on:** none. (Interacts with C11: C11 removes one of the three error
 plateaus step 1 will see, so doing C11 first makes the scan easier to read.)
 
-**Fill in:** `src/Canopy_LaplaceKernel.hpp` (`m2l_translate`, `l2p_evaluate`),
-`src/Canopy_CommunicationPlan.hpp` (`mac_satisfied`, `set_near_softening`),
-`src/Canopy_Solver.hpp` (`FmmConfig`), `README.md`, plus one new test. Option (d)
-below additionally touches `src/Canopy_UpwardSweep.hpp` and
-`src/Canopy_DownwardSweep.hpp`.
+**Fill in:** one new test in `tests/` plus its registration in
+`tests/CMakeLists.txt` under `REGRESSION_MPI_TESTS`; `README.md` (the
+`near_softening_factor` paragraph, `:64-74`). No `src/` change.
 
 **Reference:** the softened near-field kernel
 (`src/Canopy_P2P.hpp:799-803`, `883-896`); the floor that keeps the unsoftened
 far field usable (`src/Canopy_CommunicationPlan.hpp:353-367`); the error bound
-and its potential-vs-gradient factor of three, tabulated in **F1**; what a
-softened far field costs, in **F6**; the M2P option and its unmeasured cost, in
-**F8**; the finite-difference gradient, in **F7**.
+and its potential-vs-gradient factor of three, tabulated in **F1**; the softened
+basis, its measured accuracy and its cost, in **F4** and **F6**; the
+finite-difference gradient, in **F7**. `tests/tstCartesianTaylorSolve.hpp` is
+the pattern for a softened direct-sum comparison: its explicit positive
+`softening` (`:44-47`), its global-scale normalization, and its
+measured-then-pinned tolerance comment (`:326-368`). Its harness is
+parameterized on the order and the basis precisely so a `LaplaceKernel` arm is
+an added `TEST` body (`:408-420`), and its comment at `:194-204` records that
+arm already: at `near_softening_factor = 0` and closest admissible pairs at
+$R/\varepsilon$ = 2–8, `LaplaceKernel` at $P = 2$ misses the softened potential
+by $4.7\times10^{-3}$ to $6.9\times10^{-2}$.
 
 **Do:**
-1. **Measure first.** Build a test that evaluates a softened configuration
-   (`softening = 2.5e-2`, domain extent $O(1)$) against a brute-force sum of
-   the *same softened* kernel, reporting max relative error on **both** the
-   potential and all `NComps × 3` gradient components, as a function of
-   `near_softening_factor` over at least {4, 8, 16, 32} and of `P_ORDER`. The
-   point is to show the gradient error plateauing with `P_ORDER` — that plateau
-   is the softening bias, and its independence from `P_ORDER` is what
-   distinguishes it from truncation error. Read the scan against F7: the
-   finite-difference L2P contributes a *second*, much lower plateau
-   ($\sim\!10^{-10}$), so "a plateau" is not by itself the softening bias.
-2. Record the measured plateau and the P2P pair-count growth in the progress
-   log, and put the achievable tolerance in `README.md` next to
-   `near_softening_factor`, correcting the quoted bound to state that it is the
-   **potential's** and that the gradient's is three times larger.
-3. **Then decide, with the numbers in hand,** between four options — noting that
-   (a) and (d) land on the *same* accuracy, $\sim\!10^{-3}$, so the choice
-   between them is about the *kind* of error, not its size:
-   (a) **Status quo.** Accept the bias, document it as the floor on far-field
-   fidelity, and add a diagnostic that reports the predicted bias for the
-   configured `softening` / `near_softening_factor`.
-   (d) **A softened M2P mode over the existing interaction list** (F8). Cartesian
-   moments in the upward sweep, kernel-independent M2M, a softened M2P
-   transcribed from `treecode.py:56-81`, and M2L/L2L/L2P dropped from the path.
-   Reuses the tree, partition, communication plan and P2P unchanged; removes the
-   bias entirely; yields analytic gradients. Costs $O(N)\to O(N\log N)$ and
-   an `ncrit`-fold rise in per-target far-field arithmetic, and caps accuracy at
-   $\sim\!10^{-3}$.
-   (b) **A full softened Cartesian-Taylor FMM.** Everything in F6(b)(c)(d): a
-   second expansion basis, real storage through both sweeps, M2L derivative
-   tensors to $p_M+p_L+1$, and a re-keyed M2L operator cache. Retains
-   $O(N)$ and the L2L/L2P amortization; still capped at low order by F6(d).
-   **Substantially larger than this task's original framing suggested**, and
-   worth doing only after (d) has measured whether a softening-consistent far
-   field actually buys the accuracy the consumer needs.
-   (c) **Do nothing in Canopy** and port a standalone treecode into the consumer
-   (`treecode.md` §3). Does not close this task; recorded so the
-   option is not rediscovered.
-   The measurement that decides between (a)/(d) and (b) is the per-target cost of
-   M2P against the per-cell cost of M2L+L2L+L2P on this problem and platform. It
-   needs a build and a run, nobody has it, and it should be taken as part of this
-   step. Record the decision and its reasoning in the log **before** implementing
-   anything.
+1. **Measure first.** With `FarField = LaplaceKernel`, evaluate a softened
+   configuration (`softening = 2.5e-2`, domain extent $O(1)$) against a
+   brute-force sum of the *same softened* kernel, reporting max relative error
+   on **both** the potential and all `NComps × 3` gradient components, as a
+   function of `near_softening_factor` over at least {4, 8, 16, 32} and of
+   `P_ORDER`. The point is to show the gradient error plateauing with `P_ORDER`
+   — that plateau is the softening bias, and its independence from `P_ORDER` is
+   what distinguishes it from truncation error. Read the scan against F7: unless
+   C11 has landed, the finite-difference L2P contributes a *second*, much lower
+   plateau ($\sim\!10^{-10}$), so "a plateau" is not by itself the softening
+   bias. Record the P2P pair count at each factor beside the error.
+2. Run the same configuration once through `CartesianTaylorBasis` at
+   `near_softening_factor = 0`, at $p = 2$ and $p = 3$, as the comparison: the
+   error there falls with $p$ and shows no bias plateau.
+3. Record both scans in the progress log. In `README.md` next to
+   `near_softening_factor`, correct the quoted bound to state that it is the
+   **potential's** and that the gradient's is three times larger, state the
+   measured achievable gradient fidelity at each factor, and state that the
+   far field that carries the softening is `FarField = CartesianTaylorBasis`
+   at `near_softening_factor = 0`, with its measured accuracy and the cost F6
+   records (double only; operator cache emptied by a rebalance that moves the
+   root box).
 
-**Additional information needed — partly answered.** The original question was
-"whether option (b) is achievable without replacing the expansion basis". **F6
-answers that: no.** The solid-harmonic addition theorems require harmonicity,
-which the Plummer potential lacks, so any softened far field is a second basis
-alongside the existing one — plus a loss of scale invariance that re-keys the M2L
-operator cache and re-derives five width normalizations. What remains open is the
-literature check: **whether Dehnen 2000/2002 in fact gives a usable softened
-Cartesian M2L, and to what order** (F6(f)). Those papers are named from memory
-and have not been read; doing so belongs to this task.
-
-**Exit criterion:** a new test in the `regression` tier passes at ranks 1–6 and
+**Exit criterion:** the new test passes under
+`ctest --output-on-failure -R '^Canopy_Test_<Stem>_MPI_SERIAL_np_[1-6]$'` and
 asserts a **stated, measured** relative-error bound on all gradient components
-for a softened configuration; and it fails, for the softening-bias reason
-specifically, when `near_softening_factor` is set to 1 — demonstrating the test
-is sensitive to the effect it exists to bound, rather than passing on slack.
-`README.md` states the achievable far-field fidelity for the gradient. If option
-(d) or (b) is taken, the same test must additionally show the bias plateau *gone*
-rather than merely small.
+for `LaplaceKernel` in a softened configuration; and it fails, for the
+softening-bias reason specifically, when `near_softening_factor` is set to 1 —
+demonstrating the test is sensitive to the effect it exists to bound, rather
+than passing on slack. `README.md` states the achievable far-field gradient
+fidelity for both bases.
 
 ---
 
@@ -764,8 +690,8 @@ rather than merely small.
 
 **Reference:** `src/Canopy_TreePartitioner.hpp:825-858` (migration semantics and
 the explicit "order after migration is unspecified"); `:945-1050` (the pack/unpack
-that already knows every particle's destination); `:378-392` (the only existing
-`global_ids`, which are leaf indices, not particle identities);
+that already knows every particle's destination); `:480-496` (the only existing
+global IDs, which number cells for ParMETIS, not particles);
 `src/Canopy_Solver.hpp:598-604` (`sort_particles_by_leaf`, the second reordering).
 
 **Do:**
@@ -840,45 +766,53 @@ the assertion is that the path *declines* and reports the fallback it took.
 
 ---
 
-### C4 — Reproducible results across runs at fixed rank count — **NOT STARTED**
+### C4 — State and gate the reproducibility guarantee per backend — **NOT STARTED**
 
 **Depends on:** none.
 
-**Fill in:** `src/Canopy_TreePartitioner.hpp` (`partition_leaves` and the
-assignment broadcast), `src/Canopy_Solver.hpp` (`FmmConfig`), `README.md`.
+**Fill in:** a new test in `tests/` plus its registration in
+`tests/CMakeLists.txt` under `REGRESSION_MPI_TESTS`; `README.md` (the
+partitioner's description and the Known Issue "HIP solves are not
+bit-reproducible run to run; the cell partition is", `:529-547`). No `src/`
+change.
 
-**Reference:** `src/Canopy_TreePartitioner.hpp:349-357` and `:416-425` (rank 0
-solves the non-deterministic `multijagged` problem and broadcasts; `rcb` is
-deterministic but recorded as broken on the target platform); `:190-195`
-(`_cached_leaf_owners`, which already exists to avoid a second, differing
-Zoltan2 call).
+**Reference:** **F3(c)**; `src/Canopy_TreePartitioner.hpp:582-603` (the
+fixed-seed distributed ParMETIS solve) and `:614-625` (the `MPI_Allgatherv`
+that shares it); `README.md:529-547` (two `MultiSolve` passes give identical
+ownership maps at SERIAL np 2–6 and HIP np 2–4, identical SERIAL output at every
+np, and HIP output differing by relative 6e-12 to 2e-4);
+`tests/tstLaplaceSolve.hpp:1-65` (the bitwise-comparison pattern, by bit
+pattern rather than by tolerance).
 
 **Do:**
-1. Measure and record the actual run-to-run spread first: run the same problem
-   twice at the same rank count and report the max relative difference in
-   `gradient()`. If it is at rounding level the task may reduce to documenting
-   that; if it is not, continue.
-2. Add a documented reproducible mode — a deterministic assignment derived from
-   the (globally identical) leaf list, e.g. a Morton-order or
-   space-filling-curve split with the same imbalance tolerance, selected by an
-   enum in `FmmConfig` rather than a bool. Keep `multijagged` as the default if
-   it load-balances better; the point is that a consumer validating against a
-   reference can *opt into* determinism.
-3. Document, next to the new knob, that determinism of the assignment does not
-   by itself give bitwise reproducibility across *rank counts* — reduction order
-   still differs — and say which of the two the mode guarantees.
+1. Add a `regression` test that runs the same configuration twice in one
+   process at a fixed rank count on `Kokkos::Serial`, with at least one
+   `rebalance()` between solves so the ParMETIS repartition is exercised, and
+   asserts the two `gradient()` results are **bitwise** identical — compared by
+   bit pattern, since NaN ≠ NaN. Skip it on every non-Serial backend, stating why
+   in the skip message.
+2. In `README.md`, next to the partitioner's description, state the guarantee:
+   bitwise-identical results run to run at a fixed rank count on SERIAL; the
+   same partition but not the same bits on HIP; and no bitwise agreement across
+   *rank counts* on either, since reduction order changes with the
+   decomposition.
 
-**Exit criterion:** a `regression` test at ranks 1–6 that runs the same
-configuration twice in the reproducible mode and asserts the two `gradient()`
-results are **bitwise** identical; and that asserts the default mode is *not*
-required to be, so the test does not silently start gating `multijagged`.
+**Exit criterion:**
+`ctest --output-on-failure -R '^Canopy_Test_<Stem>_MPI_SERIAL_np_[1-6]$'` passes
+with the bitwise assertion live at every rank count; the same test fails when one
+run is perturbed by a single ulp in one particle's position — showing the
+comparison is bitwise rather than tolerant; and `README.md` states the per-backend
+guarantee.
 
 ---
 
 ### C5 — Accuracy on a two-dimensional source distribution, and a validated parameter set — **NOT STARTED**
 
 **Depends on:** none. Should be read together with C1 — C1 varies the softening
-at fixed distribution; C5 varies the distribution.
+at fixed distribution; C5 varies the distribution. The primary configuration is
+`FarField = CartesianTaylorBasis` at `near_softening_factor = 0`, the far field
+that carries the softening (F6); `LaplaceKernel` with its floor is the
+comparison.
 
 **Fill in:** a new test in `tests/` plus its `tests/CMakeLists.txt` registration;
 `README.md` (a validated-parameters table). Step 5 additionally touches
@@ -887,8 +821,11 @@ at fixed distribution; C5 varies the distribution.
 **Reference:** `tests/tstSingleSolve.hpp:79-87`, `252-376` (the brute-force comparison
 harness to reuse, including its rank-0 gather), `:365-375` (how the tolerance is
 asserted), `:389-431` (the existing parameter choices);
-`tests/tstMultiSolve.hpp:88` (`P_ORDER = 8`), `:432`, `:1301` and `:1561`
-(`softening = 0`), `:565-697` (the tolerances currently met);
+`tests/tstCartesianTaylorSolve.hpp` (the softened direct-sum harness,
+parameterized on order and basis, `:408-420`; its configuration and pinned
+figures, `:135-155`, `:326-368`); `tests/tstMultiSolve.hpp:88` (`P_ORDER = 8`),
+`:432`, `:1301` and `:1561` (`softening = 0`), `:1041-1229` (the per-test
+trajectory tolerances currently met);
 `src/Canopy_TreeBuilder.hpp:251-256` (the depth-19 ceiling this task must check
 against a deeper, surface-driven tree); `README.md:321-332` (the
 bounding-box outlier limitation, which a surface with one stray source hits);
@@ -901,15 +838,18 @@ alternative), per **F4**.
    dimensions** — a sphere is sufficient and is trivially generated — with
    sources on the surface only, `NComps = 3`, `compute_gradient = true`, softening
    set to a physically-motivated non-zero value, compared against a brute-force
-   sum of the softened kernel.
-2. Sweep `ncrit`, `mac_theta`, `max_depth` and `P_ORDER` and record the achieved
+   sum of the softened kernel. Run it on `CartesianTaylorBasis` at
+   `near_softening_factor = 0`, and on `LaplaceKernel` at its default floor.
+2. Sweep `ncrit`, `mac_theta`, `max_depth` and `P_ORDER` (the Taylor order $p$
+   on `CartesianTaylorBasis`) and record the achieved
    max relative gradient error for each combination in the progress log. Include
    at least one case where the required depth for the target `ncrit` approaches
    the ceiling, and report the depth actually reached.
 3. Add a self-approaching case: two surface patches brought to within a few
-   times the softening length, so the near-softening floor engages. Report both
-   the error and the P2P pair count, since the cost is the thing that decides
-   viability here.
+   times the softening length. On `LaplaceKernel` the near-softening floor
+   engages; on `CartesianTaylorBasis` it is off and the softening dominates the
+   cell width. Report both the error and the P2P pair count on each basis, since
+   the cost is the thing that decides viability here.
 4. Publish the resulting validated parameter set in `README.md`, with the full
    qualification list the conventions table requires.
 5. **Measure the exact-node-radius alternative** (F4). Compute
@@ -922,9 +862,10 @@ alternative), per **F4**.
    change of predicate.
 
 **Exit criterion:** a `regression` test passes at ranks 1–6 asserting a stated
-max relative gradient error for a surface distribution with non-zero softening;
-`README.md` carries the validated `(ncrit, mac_theta, max_depth, P_ORDER,
-softening, near_softening_factor)` set and the error it achieves; the test
+max relative gradient error for a surface distribution with non-zero softening
+on `CartesianTaylorBasis`; `README.md` carries the validated `(FarField, ncrit,
+mac_theta, max_depth, P_ORDER, softening, near_softening_factor)` set and the
+error it achieves; the test
 fails when `mac_theta` is loosened by 2× — showing it is measuring the
 approximation rather than passing on a slack budget; and the progress log carries
 the exact-radius-vs-geometric-radius comparison from step 5, with a recorded
@@ -971,14 +912,18 @@ carries the `SingleSolve` Known Issue.
 **Fill in:** `src/Canopy_Solver.hpp` (`createSolver`, or a new dispatch),
 `README.md`.
 
-**Reference:** `src/Canopy_Solver.hpp:104-112` (`P_ORDER` and `NComps` are
-template parameters and `kernel_type` is fixed); `:719-727` (`createSolver`, the
+**Reference:** `src/Canopy_Solver.hpp:165-174` (`P_ORDER`, `NComps` and the
+`FarField` basis are template parameters); `:853-862` (`createSolver`, the
 existing factory, which inherits the same template parameters).
+`CartesianTaylorBasis` is `double` only (`src/Canopy_CartesianTaylorBasis.hpp:360`)
+and reads `P_ORDER` as the Taylor order $p$, so the supported set of orders is
+per basis.
 
 **Do:** provide a factory that accepts an expansion order — and optionally a
 component count — as **runtime** values and dispatches to a documented,
-explicitly enumerated set of instantiations, throwing for a value outside that
-set. Do not template the entire consumer-visible API on a value the consumer
+explicitly enumerated set of instantiations for a given `FarField`, throwing for
+a value outside that set. `FarField` stays a compile-time choice: it is a type,
+and selecting it changes what the result means, not just how accurate it is. Do not template the entire consumer-visible API on a value the consumer
 holds at runtime, and do not silently round an unsupported order to a supported
 one. Document the supported set and the compile-time cost of extending it.
 
@@ -1008,11 +953,12 @@ update all callers of `solve()`, `DownwardSweep::execute` and `P2P::execute` —
 including every test in `tests/` and every example in `examples/` — rather than
 adding an overload alongside the bool.
 
-Note the interaction with **F7**: today the far-field gradient is computed *from*
-potential evaluations, so a `Gradient`-only far-field path cannot skip the
-potential internally until C11 lands. Skipping the potential's *output*
-allocation, zeroing and P2P accumulation is still valid and is what this task
-asks for.
+Note the interaction with **F7**: `LaplaceKernel`'s far-field gradient is
+computed *from* potential evaluations, so on that basis a `Gradient`-only
+far-field path cannot skip the potential internally until C11 lands.
+`CartesianTaylorBasis`'s gradient is analytic and has no such dependency.
+Skipping the potential's *output* allocation, zeroing and P2P accumulation is
+valid on both and is what this task asks for.
 
 **Exit criterion:** an existing gradient test passes unchanged through the new
 enum, a `Gradient`-only solve leaves `potential()` zero-extent, and the full
@@ -1056,12 +1002,15 @@ implicates.
 `num_particles_per_rank` (e.g. `tests/tstSingleSolve.hpp:389-431`), so the
 zero-particle rank is uncovered. The paths it must survive are the per-level
 `MPI_Allreduce` over candidate counts (`src/Canopy_TreeBuilder.hpp:896-897`),
-the bounding-box reduction (`:491-492`), the rank-0 Zoltan2 solve and broadcast
-(`src/Canopy_TreePartitioner.hpp:416-425`), and the P2P and ghost-gather loops
+the bounding-box reduction (`:491-492`), the distributed ParMETIS solve on a
+communicator split to exclude ranks that supply no vertices, and the
+`MPI_Allgatherv` that shares its result
+(`src/Canopy_TreePartitioner.hpp:559-625`; vertices are supplied by a block rule,
+`:453-478`), and the P2P and ghost-gather loops
 over a zero-length local set (`src/Canopy_P2P.hpp:834-838`).
 
 **Do:** add a case where at least one rank — including, in one variant, rank 0
-itself, since it carries the partitioning solve — starts with zero local
+itself, the root of any rank-0 gather or print — starts with zero local
 particles, and one where a rank is left with zero after migration. Assert
 completion and correctness, not merely absence of a hang. If the bounding-box
 reduction over an empty local set is what breaks, fix it there rather than
@@ -1173,12 +1122,14 @@ is understood: an error that appears at exactly one rank count is a
 decomposition bug signature, not a budget signature. C6 requires the evidence
 either way.
 
-**R3 — The partitioner's non-determinism masquerades as a regression.** Once a
-consumer compares against a reference, a re-partitioned run differs in the last
-bits for a legitimate reason. Without C4's measured run-to-run spread there is
-no way to tell that apart from a real change, and the likely outcome is a
-tolerance loosened until the noise fits — which then hides real regressions of
-the same magnitude. Measure the spread before setting any tolerance.
+**R3 — HIP run-to-run noise masquerades as a regression.** The partition is
+deterministic, but a HIP solve differs between runs by relative 6e-12 to 2e-4
+(F3(c)) because device reductions accumulate in a run-dependent order. Once a
+consumer compares a HIP run against a reference, that spread is
+indistinguishable from a real change, and the likely outcome is a tolerance
+loosened until the noise fits — which then hides real regressions of the same
+magnitude. Set bitwise gates on SERIAL only (C4), and measure the HIP spread on
+the configuration in question before setting any HIP tolerance.
 
 **R4 — C3's cheap path is implemented as an optimistic one.** The dangerous
 version of C3 assumes its precondition and returns a wrong field when it is
@@ -1200,18 +1151,19 @@ the price of a wrong answer, a duplicated exchange, or a tripled cost per
 timestep. Those are not closures. Each task above is either done in this library
 or accepted by name, with the accepted consequence written down.
 
-**R7 — C1's option (d) is chosen or rejected on an estimate rather than the
-measurement.** M2P's whole viability rests on one unmeasured number: the
-per-target cost of evaluating every accepted source multipole against the
-per-cell cost of M2L+L2L+L2P amortized through the leaf. F8 states the direction
-(an `ncrit`-fold rise in far-field arithmetic, $O(N)\to O(N\log N)$) but no
-magnitude, and the magnitude is what decides. Equally, "M2P is obviously too
-slow" is an estimate too. Build it small and measure before deciding either way.
+**R7 — `CartesianTaylorBasis` is chosen on accuracy alone and its maintenance
+cost surfaces later.** Every rebalance that moves the root box empties that
+basis's M2L operator cache (F6(c)), and per F3(c) rebalance is this consumer's
+common path, three times per step. An accuracy sweep (C5) does not show that
+cost. `DownwardSweep::m2l_op_keys_built_count()`
+(`src/Canopy_DownwardSweep.hpp:469-480`) counts cache misses; record it beside
+every accuracy figure C3 and C5 take on this basis, so the per-stage rebuild is
+measured rather than discovered.
 
-**R8 — The $10^{-6}$ target survives unexamined.** Every option in C1 lands
-at $\sim\!10^{-3}$ except (b) at moderate order, and F6(d) shows that even a
-*softened* far field is out of reach of $10^{-6}$ at low order. If
-$10^{-6}$ is a hard consumer requirement rather than an aspiration, the only
-remaining path is (b) at an order high enough to pay F6(d)'s $O(p^3)$, and
-that should be costed before anything here is built. Establish what the consumer
+**R8 — The $10^{-6}$ target survives unexamined.** `LaplaceKernel` with a
+floor is bounded at $10^{-2}$–$10^{-3}$ on the gradient (F1), and
+`CartesianTaylorBasis` measures $7.1\times10^{-4}$ at $p = 3$ (F4); F6(d) puts
+$10^{-6}$ at $p \approx 11$–$24$ on that basis, which pays $O(p^3)$ coefficients
+per cell. If $10^{-6}$ is a hard consumer requirement rather than an
+aspiration, that cost should be established before anything here is built. Establish what the consumer
 actually needs first; it is the cheapest question on this list to answer.
