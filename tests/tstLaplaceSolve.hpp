@@ -167,21 +167,30 @@ enum FieldIdx
 // total_fallback_pair_count() 0 throughout.
 //
 // LS_CROSS_RANK_TOL was set at 100x the worst cross-rank deviation measured
-// then, 5.5987399483706545e-12 (np=4, gradient). With ties rejected the worst
-// SERIAL deviation is 6.1748535032248251e-12 (np=5, gradient), a 91x margin;
-// the potential deviations run 2.8e-13 to 1.2e-12 and the gradient deviations
-// 1.5e-12 to 6.2e-12 across np 2-6, HIP within the same range — reassociation
-// level, three orders of magnitude below the 1.0e-9 threshold above which a
-// deviation would no longer be attributable to summation order (see risk R8).
-// Do not raise this to accommodate a failure: re-measure at LS_NUM_STEPS = 1
-// and report.
+// then, 5.5987399483706545e-12 (np=4, gradient), when L2P took its gradient by
+// central finite difference. That difference divided reassociation-level
+// noise in the potential by its step h, and the velocity update carried it
+// into the positions; the last FD-era measurement (canopy0 C11, flux job
+// f3cvvFhTd4Fh) put the worst SERIAL deviation at 3.1698852757250945e-12
+// (np=5, gradient).
+//
+// Since L2P's gradient became analytic (canopy0 C11) the deviations are at
+// reassociation level proper: across np 2-6 on SERIAL (flux job f3cvrmBCmKd1)
+// the potential deviations run 9.6e-16 to 1.5e-15 and the gradient deviations
+// 3.1e-18 to 1.9e-16, worst 1.4936928404867131e-15 (np=2, potential); HIP at
+// np 2-4 (f3cvrmKe1Eco) is within the same range. The tolerance was left
+// where it was, a ~4e5x margin, and still sits below the 1.0e-9 threshold
+// above which a deviation would no longer be attributable to summation order
+// (see risk R8). Do not raise this to accommodate a failure: re-measure at
+// LS_NUM_STEPS = 1 and report.
 //
 // LS_DIRECT_SUM_TOL was set at 3x the worst direct-sum deviation measured
-// then, 3.2093610363952985e-07 (np=2, potential). With ties rejected the worst
-// is 3.3063265504587434e-07 (np=2, potential), a 2.9x margin. The gradient
-// deviations are 4.33e-08 at every rank count and the potential deviations
-// agree to nine digits across all six, as they should: the direct-sum error
-// is truncation, not partitioning.
+// then, 3.2093610363952985e-07 (np=2, potential). With the analytic gradient
+// the worst is 3.306326554717661e-07 (np 2-3, potential), a 2.9x margin. The
+// gradient deviations are 4.3324813e-08 at every rank count, identical to
+// eleven digits, and the potential deviations agree to nine digits across all
+// six, as they should: the direct-sum error is truncation, not partitioning,
+// and C11 did not move it (4.33248e-08 under the finite difference too).
 //
 // The direct-sum check is a truncation bound in any case: the solid-harmonic
 // far-field error goes as theta^(P+1) = 0.5^7 ~ 8e-3 at this configuration,

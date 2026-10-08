@@ -205,10 +205,12 @@ in the *cross-rank* comparison: dividing a reassociation-level potential
 difference by $h$ inflated it about four orders of magnitude, and through the
 velocity update the positions, and hence the potential, diverged with it. With
 the analytic gradient both cross-rank figures are at reassociation level
-(~1e-16 to 1e-15). `LS_CROSS_RANK_TOL` (5.6e-10) is unchanged; its margin is
-now ~3e6×. The FD-era figures in `tests/tstLaplaceSolve.hpp`'s header comment
-(potential 2.8e-13–1.2e-12, gradient 1.5e-12–6.2e-12) are now historical; that
-file was not edited here.
+(~1e-16 to 1e-15). `LS_CROSS_RANK_TOL` (5.6e-10) is unchanged; it gates
+potential and gradient separately, and against the worse of the two (potential,
+`1.4936928404867131e-15`, np=2) its margin is now ~4e5×. The FD-era figures in
+`tests/tstLaplaceSolve.hpp`'s header comment (potential 2.8e-13–1.2e-12,
+gradient 1.5e-12–6.2e-12) were replaced by these measurements in a follow-up
+commit; only the comment changed, not the tolerances.
 
 **`LaplaceSolve` against the old data** (job `f3cvdZuu4zbH`, the `6c80b2f`
 code uncommitted on `93a254d`): `bitForBitArtifacts` fails at np=1 (rank 0)
