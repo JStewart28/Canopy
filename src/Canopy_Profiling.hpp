@@ -142,9 +142,25 @@ inline void reset_timers()
     timer_registry().clear();
 }
 
+// Totals that reset_timers() leaves alone. The sweeps' and P2P's execute()
+// each reset the registry on entry, so after a whole Solver::solve() the
+// registry holds only P2P's keys; to time a phase across solve(), call
+// reset_timer_totals() before it and read timer_totals() after.
+inline std::unordered_map<std::string, double>& timer_totals()
+{
+    static std::unordered_map<std::string, double> s_totals;
+    return s_totals;
+}
+
+inline void reset_timer_totals()
+{
+    timer_totals().clear();
+}
+
 inline void accumulate( const char* key, double elapsed )
 {
     timer_registry()[key] += elapsed;
+    timer_totals()[key] += elapsed;
 }
 
 // ---------------------------------------------------------------------------

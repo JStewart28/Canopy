@@ -47,7 +47,7 @@ Canopy::Solver<...> solver( MPI_Comm comm, const Canopy::FmmConfig& cfg );
 | Field | Description | Default |
 |---|---|---|
 | `ncrit` | Max particles per leaf cell | — |
-| `max_depth` | Maximum octree depth | — |
+| `max_depth` | Maximum octree depth, at most 19 (the Morton key's limit; 20 or more throws). Each `build()` whose depth limit, rather than `ncrit`, ended a leaf prints one rank-0 `[Canopy] WARNING` line with the count of `max_depth` leaves holding more than `ncrit` particles | — |
 | `xmin_tol`, `xmax_tol` | Padding fractions on the low / high `x` face of the root bounding box | `0.0` |
 | `ymin_tol`, `ymax_tol` | Padding fractions on the low / high `y` face | `0.0` |
 | `zmin_tol`, `zmax_tol` | Padding fractions on the low / high `z` face | `0.0` |
@@ -324,7 +324,8 @@ intra-leaf phase and is preserved in the git history for reference.
 particle positions. If a handful of particles escape far from the bulk (e.g.
 close encounters under very small softening, or many integration steps), the
 root box inflates and the finest octree cell (`width / 2^max_depth`) can become
-large enough that a dense cluster collapses into a single max-depth leaf. Because
+large enough that a dense cluster collapses into a single max-depth leaf (each
+such build prints a `[Canopy] WARNING` line counting those leaves). Because
 the near-field P2P kernel is O(N_leaf²) per particle, one oversized leaf makes a
 solve effectively hang. This is not currently triggered at the tested parameters
 (softening `0.001`), but a more robust / outlier-resistant bounding box (or
@@ -497,6 +498,28 @@ search per neighbour), or restrict later passes to the neighbourhoods of the
 leaves the previous pass refined. Only a refined leaf's surroundings can
 become newly unbalanced. Not needed while balancing is off by default;
 revisit if A3 turns it on for large trees.
+
+### Batch the per-pair M2L fallback on the device
+
+Pairs refused an operator column (range guard or column cap) go through
+`DownwardSweep::run_m2l_fallback_at_depth`, which launches one team per pair
+running `m2l_translate`. Per pair, `CartesianTaylorBasis<double, 3>` at θ 0.3
+measured (tree-opt C1, `[c1-m2l]`):
+
+- HIP: 52-109x the fused GEMM path (about 6.3e-7 s against 5.8e-9 to 1.2e-8 s).
+  The ratio is largest at np 1, where the GEMM batch is biggest.
+- SERIAL: 10.4-12.2x.
+
+So every refused pair costs about 55 GEMM pairs at HIP np 4. Two options:
+
+- Group fallback pairs that share a canonical key, or a depth difference, and
+  build their operators into a transient table evaluated by the fused kernel.
+- Have one team process many pairs of a target, accumulating into the
+  target's local once.
+
+Either would shrink the cost of every refusal that chain A of
+`tasks/tree-opt.md` does not remove. A2 measured that balancing raises the
+number of refusals.
 
 ## Known Issues
 

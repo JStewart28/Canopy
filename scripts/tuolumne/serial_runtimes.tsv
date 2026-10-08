@@ -1,11 +1,11 @@
 stem	np	config	t_ref_s	jobid	extra_s	extra_reason
 CartesianTaylor	1	default	5.49	f3cLieUe4u2F
-CartesianTaylorSolve	1	default	25.34	f3civxJ6Wr79
-CartesianTaylorSolve	2	default	16.14	f3civxJ6Wr79
-CartesianTaylorSolve	3	default	14.72	f3civxJ6Wr79
-CartesianTaylorSolve	4	default	14.24	f3civxJ6Wr79
-CartesianTaylorSolve	5	default	14.47	f3civxJ6Wr79
-CartesianTaylorSolve	6	default	14.95	f3civxJ6Wr79
+CartesianTaylorSolve	1	default	107.82	f3ctt2j3drQf
+CartesianTaylorSolve	2	default	60.01	f3ctt2j3drQf
+CartesianTaylorSolve	3	default	44.87	f3ctt2j3drQf
+CartesianTaylorSolve	4	default	37.24	f3ctt2j3drQf
+CartesianTaylorSolve	5	default	34.51	f3ctt2j3drQf
+CartesianTaylorSolve	6	default	30.22	f3ctt2j3drQf
 CommunicationPlan	1	default	3.45	f3cLieUe4u2F
 CommunicationPlan	2	default	4.25	f3cLieUe4u2F
 CommunicationPlan	3	default	5.38	f3cLieUe4u2F
@@ -50,12 +50,12 @@ MultiSolve	5	theta0.7	13.06	f3caoGecUY71
 MultiSolve	6	default	16.25	f3cajB3pSQ1m
 MultiSolve	6	probe	14.88	f3camEXYMR7u
 MultiSolve	6	theta0.7	14.58	f3caoGecUY71
-TreeBuilder	1	default	3.34	f3cmrmX2JYWT
-TreeBuilder	2	default	3.9	f3cmrmX2JYWT
-TreeBuilder	3	default	5.09	f3cmrmX2JYWT
-TreeBuilder	4	default	5.87	f3cmrmX2JYWT
-TreeBuilder	5	default	6.69	f3cmrmX2JYWT
-TreeBuilder	6	default	7.56	f3cmrmX2JYWT
+TreeBuilder	1	default	6.31	f3ctt2j3drQf
+TreeBuilder	2	default	6	f3ctt2j3drQf
+TreeBuilder	3	default	6.38	f3ctt2j3drQf
+TreeBuilder	4	default	7.15	f3ctt2j3drQf
+TreeBuilder	5	default	7.85	f3ctt2j3drQf
+TreeBuilder	6	default	8.72	f3ctt2j3drQf
 TreePartitioner	1	default	6.74	f3cY3QHjeejZ
 TreePartitioner	2	default	4.16	f3cY3QHjeejZ
 TreePartitioner	3	default	5.5	f3cY3QHjeejZ

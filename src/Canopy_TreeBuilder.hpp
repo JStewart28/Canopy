@@ -803,6 +803,10 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
     cells_to_refine.push_back(
         { ROOT_KEY, { root_cx, root_cy, root_cz }, root_hw } );
 
+    // Leaves at _max_depth holding more than _ncrit particles: made leaves
+    // by the depth limit, not by ncrit.
+    long long n_depth_limited = 0;
+
     // Iteratively refine the root box until all cells have less than ncrit
     // particles
     for ( int depth = 0; depth <= _max_depth; depth++ )
@@ -917,6 +921,8 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
             // the list of cells.
             if ( global_counts[c] <= _ncrit || depth == _max_depth )
             {
+                if ( global_counts[c] > _ncrit )
+                    ++n_depth_limited;
                 ci.is_leaf = true;
                 _cells.push_back( ci );
             }
@@ -979,6 +985,19 @@ void TreeBuilder<MemorySpace, ExecutionSpace>::build( PositionType positions,
         cells_to_refine = std::move( next_cells_to_refine );
 
     } // end tree build loop
+
+    // Not an error, but a silent accuracy change: those leaves' P2P and
+    // multipoles cover more particles than ncrit promises.
+    if ( n_depth_limited > 0 && _rank == 0 )
+    {
+        std::fprintf( stderr,
+                      "[Canopy] WARNING: TreeBuilder::build: %lld leaves at "
+                      "max_depth %d hold more than ncrit = %d particles; "
+                      "refinement stopped at the depth limit, not at "
+                      "ncrit\n",
+                      n_depth_limited, _max_depth, _ncrit );
+        std::fflush( stderr );
+    }
 
     // Build the host-side lookup map
     rebuild_cell_lookup();

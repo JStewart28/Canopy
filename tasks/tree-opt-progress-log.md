@@ -2357,3 +2357,372 @@ SERIAL.
   `[multisolve-*]`, `[fusedm2l-*]` and `[ct-solve]` say nothing about a
   balanced tree yet.
 - **C1**: unaffected. Its inputs are knob-off and unchanged byte for byte.
+
+## C1
+
+**Outcome: the per-pair `m2l_kernel` cost of the fallback path is 10.4-12.2x
+the GEMM path's on SERIAL and 52-109x on HIP. The two paths agree to
+3.3e-15 of the field. Morton depth 19 is 7 levels past T1's draw at 1.2 M
+particles, and the fit extrapolates to $10^{10}$-$10^{11}$ particles.** On
+HIP the ratio falls with np, because the GEMM's per-pair cost doubles from np
+1 to np 4 while the fallback's stays flat. Cold op-table build is 0.07-0.13 s
+per rank. T1's own fixture (`max_depth = 8`, 1200 particles) has 53-64 leaves
+made by the depth limit rather than by `ncrit`. `build()` now reports such
+leaves.
+
+Provenance: commit `214b93d` plus this section's changes to
+`src/Canopy_TreeBuilder.hpp`, `src/Canopy_Profiling.hpp`,
+`tests/tstTreeBuilder.hpp`, `tests/tstCartesianTaylorSolve.hpp`, `README.md`,
+`scripts/tuolumne/serial_runtimes.tsv` and the new
+`scripts/tuolumne/run_ctest_c1.flux`. Cray clang 20.0.0, env
+`tuolumne_trilinos`, `build-tuolumne` (`Canopy_ENABLE_PROFILING:BOOL=ON`,
+`Canopy_PROFILING_LEVEL:STRING=2`; HIP registered at np 1-4 with
+`--gpus-per-task=1 --cores-per-task=8`; the np 5-6 abort check passed in every
+job). Every run went through `canopy_ctest` after a passing watchdog
+self-test, with the HIP environment in a subshell. The watchdog cancelled
+nothing but the self-test. Script: `run_ctest_c1.flux
+baseline|measure|noprof|exit serial|hip`, copied from `run_ctest_a2.flux`.
+`measure` and `noprof` run under a scratch budget table at 4x
+`serial_runtimes.tsv`, because those rows predate the added cases; `exit` uses
+the real rows. Every job ran `-t 20m`. The longest took about 7 min.
+
+| job | what |
+| --- | --- |
+| `f3ctdiJnUAyd` | baseline, SERIAL, binaries built at `214b93d` before any edit: 12 of 12 `completed` |
+| `f3cthX8moa3R` / `f3cthZYvbgC7` | first `measure`, SERIAL / HIP: all `completed`; timers read 0 (bug 1 below), path deviations measured |
+| `f3ctiFxPpRaF` | first `noprof`, SERIAL: 6 of 6 `completed` |
+| `f3ctpMWAamVZ` / `f3ctpMeC6syq` | `measure` after the fix, SERIAL / HIP: 12 of 12 and 8 of 8 `completed` (run 1) |
+| `f3ctpMkv1d6X` | `noprof`, SERIAL, after the fix: 6 of 6 `completed` (failure direction) |
+| `f3ctt2j3drQf` | `run_ctest_h0b.flux calibrate`, `CANOPY_CAL_REGEX` = `TreeBuilder`/`CartesianTaylorSolve` SERIAL np 1-6: 36 of 36 |
+| `f3cu4ZEjzFkb` | exit criterion, SERIAL np 1-6: 12 of 12 `completed`, both `rc=0` (run 2) |
+| `f3cu4ZNk2NxX` | exit criterion, HIP np 1-4: 8 of 8 `completed`, both `rc=0` (run 2) |
+
+Between `f3ctt2j3drQf` and the exit runs, one comment in
+`tstCartesianTaylorSolve.hpp` changed (the HIP figure beside the bound), and the
+four targets were rebuilt. The exit jobs' `stat` lines show those binaries.
+
+### Decisions recorded (made before the session, not reopened)
+
+- **Steps 3-4 use `with_cartesian_taylor_solve`'s fixture, not T1's
+  `TwoScaleFixture`.** The basis is `CartesianTaylorBasis` at order 3, the
+  downstream order. The cap is set through `FmmConfig::m2l_op_count_cap`. The
+  per-pair ratio depends on basis, order and backend, not on the draw, and this
+  keeps the work inside the exit criterion's two stems.
+- **The ratio A3 consumes.** It is per pair: `m2l_kernel` divided by the
+  pairs that path evaluated, at cap 0 over the same at the default cap. It is
+  taken on a warm second solve of an unchanged tree. `ilist_s4_op_table_build`
+  from the cold first solve is reported beside it as the GEMM path's table
+  cost. SERIAL and HIP are recorded side by side, and A3 chooses which to use.
+  With profiling off, both timers read -1 and the ratio is skipped.
+- **Step 5's report is a `src/` change**: one rank-0 `[Canopy] WARNING` line
+  per `build()`, and no accessor. Tests count the leaves from
+  `builder.cells()`.
+- **The depth sweep builds at `max_depth = 19`.** The `max_depth`-leaf count
+  is also reported at `max_depth = 8`.
+- **Step 4's bound is 2x the worst measured deviation** over SERIAL np 1-6 and
+  HIP np 1-4, B2's precedent.
+
+Decisions made in this session:
+
+- **The C1 arms run at `dt_scale = 0`.** The particles never move, so the
+  cap-0 and default-cap runs share their trees at every step and differ only in
+  which path evaluated the far field. Positions agree exactly
+  (`max_pos_dev=0`, asserted). At `dt_scale = 1` the trajectories would differ
+  at round-off and could change a partition, so the comparison would also
+  measure truncation error. The warm re-solve is one more `solve()` after the
+  harness's four. Asserted: `interaction_list_build_count()` and
+  `m2l_op_keys_built_count()` do not move across it.
+- **The GEMM denominator is `pairs - fallback_pairs`** of the default-cap run,
+  and the fallback denominator is the cap-0 run's `fallback_pairs`, which
+  equals its `pairs` (asserted). `pairs` is `total_m2l_pair_count()`, and the
+  two runs' counts are equal on every rank (asserted).
+- **Profiling-only change: `timer_totals()`** (bug 1). This departs from the
+  decision's "after `reset_timers()`". `reset_timers()` cannot deliver it,
+  because `solve()` calls it twice internally.
+
+### What changed
+
+- `TreeBuilder::build()` counts, at the leaf decision, the cells made leaves at
+  `depth == _max_depth` with `global_counts[c] > _ncrit`. After the build loop,
+  if the count is non-zero, rank 0 prints one line:
+  `[Canopy] WARNING: TreeBuilder::build: <n> leaves at max_depth <d> hold more
+  than ncrit = <k> particles; refinement stopped at the depth limit, not at
+  ncrit`. The balancing pass never creates such a leaf: it refines only leaves
+  holding `ncrit` or fewer, and never at `max_depth`. `update()` is unchanged.
+- `Canopy::Profiling::timer_totals()` / `reset_timer_totals()`: a second map
+  that `accumulate()` also adds to and that `reset_timers()` leaves alone.
+  Nothing else reads it, so no printed table changed.
+- `TreeBuilder.depthHeadroom` (`testDepthHeadroom`) and
+  `TreeBuilder.mortonDepthLimit` (`testMortonDepthLimit`).
+- `CartesianTaylorSolve.m2lPathsAgreeAndCost` (`runPathAgreement`), with
+  `CTS_PATH_DEV_TOL = 6.55e-15`.
+- `README.md`: the `max_depth` row states the limit of 19 and the warning. The
+  bounding-box known limitation names the warning.
+
+### Signatures changed, and their callers
+
+- `TreeBuilderTest::generate_two_scale_positions( particles, rank, nprocs,
+  int num_global = 1200 )`. Callers: `testBalancePassBoundAndDepthReport`
+  (unchanged, default), `testDepthHeadroom` (the sweep) and
+  `testMortonDepthLimit` (default). A2's case prints the same figures: its 84
+  `[a2-fail]` lines are identical to the baseline's, including
+  `added 67/68/56/58/47/27`.
+- `with_cartesian_taylor_solve( mac_theta, pos_half_span, dt_scale, after,
+  bool quantize_root_half_width = false, int m2l_op_count_cap = -1,
+  M2LPathTiming* timing = nullptr )`. A cap >= 0 sets `FmmConfig`'s; a
+  negative cap leaves the default. A non-null `timing` resets the totals
+  before step 0, reads the cold table build after it, and runs the warm
+  re-solve. Callers, by `grep -rn with_cartesian_taylor_solve src tests
+  examples benchmarks`: `runArm`, the only pre-existing one, which serves all
+  six pre-existing `TEST`s (two gating arms, four drift arms) and passes
+  neither new argument; and the new `runPathAgreement`.
+- In the harness, at cap 0, the two vacuity guards now assert the cap-0
+  outcome instead: `EXPECT_GT( keys_built, 0 )` after step 0 becomes
+  `EXPECT_EQ( keys_built, 0 )`; `EXPECT_GT( n_unique_ops, 0 )` after the loop
+  becomes `n_unique_ops == 0` plus `fallback_pairs > 0`. B2's per-build cache
+  rule runs unchanged and holds: at every step of the cap-0 arm,
+  `keys_built_inc=0 new_keys=0 n_unique_ops=0` (21 ranks × 4 steps).
+
+### Bugs only running revealed
+
+1. **The registry is empty of downward timers when `solve()` returns.**
+   `DownwardSweep::execute()` (`src/Canopy_DownwardSweep.hpp:3034`) and
+   `P2P::execute()` (`src/Canopy_P2P.hpp:795`) each call
+   `CANOPY_RESET_TIMERS()` on entry, so a registry read after `solve()` holds
+   P2P's keys only. The first `measure` pair (`f3cthX8moa3R`,
+   `f3cthZYvbgC7`) printed `warm_m2l_kernel_s=0` and
+   `cold_op_table_build_s=0` on every rank. `Solver::downward()` is const, so a
+   test cannot call `execute()` itself. Fixed with `timer_totals()`.
+2. **The default cap does not route every pair to the GEMM.** 23-246 pairs per
+   rank (at most 0.012 %) take the fallback at the default cap. The
+   default-cap `m2l_kernel` includes them. At the measured per-pair costs this
+   inflates the GEMM figure, and so lowers the ratio, by at most 0.14 % on
+   SERIAL (np 1: 246 × 7.24e-6 s of 1.238 s) and 1.3 % on HIP (246 × 6.25e-7 s
+   of 1.19e-2 s). Not corrected. The reason (range guard or count cap) was not
+   read; with 17 824 of 32 768 columns admitted at np 1, the count cap is not
+   what binds.
+3. **At cap 0 the cold `ilist_s4_op_table_build` reads exactly 0.** With no
+   missing column, the timed scope is never entered. So the table cost is
+   wholly the default-cap run's figure.
+4. **T1's fixture is depth-limited at its own `max_depth = 8`.** At 1200
+   particles the uncapped tree reaches depth 9 at every np, and 53-64 leaves at
+   depth 8 hold more than `ncrit`. So the new warning fires on every
+   two-scale build in `DownwardSweep` and on A2's `TreeBuilder` cases. A1's
+   "reaches depth 8 on every rank" was the cap.
+5. **An octave-spaced sweep to 153 600 (8 points) fit poorly**: a base of
+   5.28-5.54 per level from integer depths 9-12. The builds cost under 0.05 s,
+   so the sweep became 21 half-octave points to 1 228 800. That costs about 3 s
+   at np 1.
+
+### Measured: the depth sweep, `[c1-depth]` / `[c1-depth-fit]`
+
+T1's skirted draw (blob 87.5 %, skirt 5 %, halo; per-rank seeds, so each np
+draws a different set), `ncrit = 8`, padding 0.1, at
+$N = \mathrm{round}(1200 \cdot 2^{k/2})$ for $k = 0..20$. Every rank of an np prints
+the same tree (the deepest depth is asserted equal across ranks). SERIAL runs
+1 and 2, and HIP at np 1-4, are identical line for line, apart from
+the `build_s` wall-clock fields. On every build:
+
+- `occupied_depths == deepest + 1`. The depth range is contiguous, so the two
+  step-1 quantities are one;
+- no leaf is depth-limited at 19;
+- the capped tree's depth-limited count equals the uncapped tree's internal
+  depth-8 cells with more than `ncrit` particles.
+
+Each cell reads *deepest occupied depth at `max_depth = 19` / leaves
+depth-limited at `max_depth = 8`*:
+
+| N | np 1 | np 2 | np 3 | np 4 | np 5 | np 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1200 | 9 / 64 | 9 / 61 | 9 / 53 | 9 / 58 | 9 / 60 | 9 / 59 |
+| 1697 | 10 / 82 | 10 / 72 | 9 / 81 | 10 / 85 | 9 / 65 | 9 / 79 |
+| 2400 | 10 / 87 | 10 / 81 | 10 / 105 | 10 / 70 | 10 / 96 | 10 / 82 |
+| 3394 | 10 / 94 | 10 / 88 | 10 / 115 | 10 / 90 | 10 / 114 | 10 / 118 |
+| 4800 | 10 / 120 | 10 / 113 | 10 / 112 | 10 / 120 | 10 / 110 | 10 / 107 |
+| 6788 | 10 / 124 | 10 / 124 | 10 / 117 | 11 / 121 | 10 / 119 | 10 / 123 |
+| 9600 | 10 / 125 | 10 / 123 | 10 / 124 | 11 / 137 | 10 / 123 | 11 / 124 |
+| 13576 | 11 / 135 | 11 / 125 | 11 / 131 | 11 / 125 | 11 / 134 | 11 / 124 |
+| 19200 | 11 / 125 | 11 / 125 | 11 / 125 | 11 / 125 | 11 / 124 | 11 / 125 |
+| 27153 | 11 / 145 | 11 / 125 | 11 / 125 | 11 / 125 | 11 / 125 | 11 / 125 |
+| 38400 | 11 / 125 | 11 / 125 | 11 / 125 | 11 / 125 | 11 / 125 | 11 / 125 |
+| 54306 | 11 / 125 | 11 / 125 | 11 / 125 | 11 / 125 | 12 / 125 | 12 / 125 |
+| 76800 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 |
+| 108612 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 |
+| 153600 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 | 12 / 125 |
+| 217223 | 12 / 126 | 12 / 127 | 12 / 127 | 12 / 127 | 12 / 127 | 12 / 128 |
+| 307200 | 12 / 148 | 12 / 144 | 12 / 141 | 12 / 135 | 13 / 141 | 12 / 150 |
+| 434446 | 12 / 291 | 12 / 280 | 13 / 275 | 13 / 296 | 13 / 270 | 13 / 265 |
+| 614400 | 13 / 875 | 13 / 856 | 13 / 873 | 13 / 873 | 13 / 908 | 13 / 911 |
+| 868893 | 13 / 2441 | 13 / 2431 | 13 / 2406 | 13 / 2425 | 13 / 2410 | 13 / 2405 |
+| 1228800 | 13 / 4176 | 13 / 4172 | 13 / 4154 | 13 / 4180 | 13 / 4157 | 13 / 4199 |
+
+The depth-limited count plateaus at 125 from about $10^4$ particles. The blob
+(half-width 0.01) covers about 5 depth-8 cells per axis, and every one of
+them is then overfull. Past about $3 \cdot 10^5$ the skirt and halo cells at
+depth 8 overfill too.
+
+**The fit**: least squares of occupied depths on $\log_2 N$, 21 points per np.
+$N$ grows by `base` per added level, $\texttt{base} = 2^{1/b}$:
+
+| np | occupied depths | base per level | $\log_2 N$ at depth 19 | $N$ at depth 19 |
+| --- | --- | --- | --- | --- |
+| 1 | $6.6527 + 0.3636 \log_2 N$ | 6.727 | 36.71 | 1.12e11 |
+| 2 | $6.6527 + 0.3636 \log_2 N$ | 6.727 | 36.71 | 1.12e11 |
+| 3 | $6.0199 + 0.4052 \log_2 N$ | 5.533 | 34.50 | 2.43e10 |
+| 4 | $6.8747 + 0.3584 \log_2 N$ | 6.916 | 36.62 | 1.05e11 |
+| 5 | $5.8382 + 0.4234 \log_2 N$ | 5.141 | 33.45 | 1.17e10 |
+| 6 | $6.2338 + 0.3974 \log_2 N$ | 5.721 | 34.64 | 2.68e10 |
+
+The measured base is **5.1-6.9 per level**: neither the 2-D manifold's 4 nor
+a volumetric blob's 8. The draw is three nested uniform cubes, so the deepest
+cells change from blob to skirt to halo across the sweep. Each cube is
+volumetric (base 8), but the integer depth steps fall at draw-dependent $N$.
+The spread between np (1.2e10 to 1.1e11) is that discreteness, not R6. Each np
+draws a different set, and each np repeats exactly. Read the extrapolation as
+"depth 19 is about $10^{10}$-$10^{11}$ particles away on this geometry".
+At 1.2 M particles the tree is 13 deep, 6 levels short of the limit. The
+largest build (1.23 M, np 1) took 0.62 s at `max_depth = 19`.
+
+### Measured: the fallback-to-GEMM ratio, `[c1-m2l]`
+
+`CartesianTaylorBasis<double, 3>` at θ 0.3, `with_cartesian_taylor_solve`'s
+8640-particle cube, `dt_scale = 0`, cap 0 against the default cap (32768).
+Each cell gives run 1, run 2: SERIAL `f3ctpMWAamVZ`, `f3cu4ZEjzFkb`; HIP
+`f3ctpMeC6syq`, `f3cu4ZNk2NxX`. `pairs` and the default-cap fallback count
+are identical in all four runs on every rank. Per-pair costs are run 1's. The
+cold table build is the default-cap run's, since at cap 0 it reads 0.
+
+| np | rank | pairs | default-cap fallback | SERIAL ratio | HIP ratio | SERIAL fallback / GEMM s per pair | HIP fallback / GEMM s per pair | cold `ilist_s4_op_table_build` s, SERIAL | HIP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 2038192 | 246 | 11.92, 11.98 | 107.42, 108.90 | 7.24e-06 / 6.08e-07 | 6.25e-07 / 5.82e-09 | 0.1231, 0.1246 | 0.1241, 0.1318 |
+| 2 | 0 | 983595 | 112 | 11.89, 12.17 | 84.51, 85.97 | 7.24e-06 / 6.09e-07 | 6.25e-07 / 7.39e-09 | 0.1018, 0.1013 | 0.1019, 0.1123 |
+| 2 | 1 | 1054597 | 134 | 12.00, 11.74 | 86.86, 83.19 | 7.24e-06 / 6.03e-07 | 6.41e-07 / 7.38e-09 | 0.0991, 0.0997 | 0.1102, 0.1035 |
+| 3 | 0 | 695061 | 31 | 11.83, 12.20 | 68.97, 72.22 | 7.24e-06 / 6.12e-07 | 6.18e-07 / 8.96e-09 | 0.0922, 0.0927 | 0.0921, 0.0970 |
+| 3 | 1 | 688535 | 108 | 11.81, 11.68 | 68.89, 71.64 | 7.24e-06 / 6.13e-07 | 6.48e-07 / 9.4e-09 | 0.0861, 0.0861 | 0.0968, 0.0902 |
+| 3 | 2 | 654596 | 107 | 11.84, 12.05 | 66.81, 64.96 | 7.24e-06 / 6.11e-07 | 6.43e-07 / 9.63e-09 | 0.0935, 0.0934 | 0.0934, 0.1062 |
+| 4 | 0 | 547411 | 55 | 11.59, 12.18 | 52.82, 54.05 | 7.24e-06 / 6.25e-07 | 6.3e-07 / 1.19e-08 | 0.0871, 0.0871 | 0.0872, 0.0991 |
+| 4 | 1 | 485647 | 56 | 11.66, 11.50 | 55.73, 55.24 | 7.25e-06 / 6.21e-07 | 6.4e-07 / 1.15e-08 | 0.0863, 0.0824 | 0.0830, 0.0865 |
+| 4 | 2 | 484522 | 60 | 11.68, 11.57 | 56.04, 56.48 | 7.24e-06 / 6.2e-07 | 6.31e-07 / 1.13e-08 | 0.0822, 0.0825 | 0.0940, 0.0980 |
+| 4 | 3 | 520612 | 75 | 12.07, 12.16 | 52.21, 52.98 | 7.24e-06 / 6e-07 | 6.32e-07 / 1.21e-08 | 0.0815, 0.0812 | 0.0850, 0.0858 |
+| 5 | 0 | 372705 | 24 | 11.48, 11.57 | — | 7.24e-06 / 6.3e-07 | — | 0.0745, 0.0748 | — |
+| 5 | 1 | 451415 | 73 | 11.67, 11.75 | — | 7.25e-06 / 6.21e-07 | — | 0.0842, 0.0828 | — |
+| 5 | 2 | 405548 | 26 | 11.72, 11.33 | — | 7.25e-06 / 6.18e-07 | — | 0.0815, 0.0798 | — |
+| 5 | 3 | 411500 | 82 | 11.63, 11.56 | — | 7.24e-06 / 6.22e-07 | — | 0.0800, 0.0784 | — |
+| 5 | 4 | 397024 | 41 | 11.95, 11.90 | — | 7.24e-06 / 6.06e-07 | — | 0.0766, 0.0759 | — |
+| 6 | 0 | 337372 | 23 | 11.56, 11.91 | — | 7.24e-06 / 6.27e-07 | — | 0.0733, 0.0732 | — |
+| 6 | 1 | 351656 | 40 | 11.58, 11.60 | — | 7.24e-06 / 6.25e-07 | — | 0.0734, 0.0733 | — |
+| 6 | 2 | 316425 | 41 | 11.63, 11.55 | — | 7.24e-06 / 6.23e-07 | — | 0.0707, 0.0706 | — |
+| 6 | 3 | 350445 | 30 | 11.66, 11.73 | — | 7.24e-06 / 6.21e-07 | — | 0.0789, 0.0788 | — |
+| 6 | 4 | 358121 | 62 | 10.44, 11.21 | — | 7.24e-06 / 6.94e-07 | — | 0.0705, 0.0708 | — |
+| 6 | 5 | 324173 | 50 | 12.20, 11.24 | — | 7.24e-06 / 5.93e-07 | — | 0.0728, 0.0731 | — |
+
+Reading it:
+
+- **SERIAL: 10.4-12.2, flat in np.** Both per-pair costs are flat: the
+  fallback 7.24e-6 s to 0.2 % and the GEMM 5.9-6.9e-7 s. The run-to-run
+  spread on one rank is up to 0.8 (np 6 rank 4: 10.44, 11.21), all of it in
+  the GEMM's warm time, which is 0.2-1.2 s.
+- **HIP: 52-109, falling with np.** The fallback is 6.2-6.7e-7 s per pair at
+  every np, about the SERIAL GEMM's cost. The GEMM's per-pair cost doubles from
+  5.8e-9 s at np 1 to 1.2e-8 s at np 4. Each rank's batch shrinks with np, so
+  its fixed launch cost is spread over fewer pairs. HIP's warm GEMM `m2l_kernel`
+  is 5.5-12 ms per rank, so launch overhead is a large share of it.
+- **Cold table build: 0.07-0.13 s per rank on both backends**, falling with
+  the per-rank column count (17 824 at np 1, about 10 200-11 400 at np 6). On
+  SERIAL that is 1/10 of one warm GEMM `m2l_kernel` at np 1; on HIP, about 10x
+  one.
+
+### Measured: the two paths' agreement, `[c1-paths]`
+
+Rank 0, last-step fields, as a fraction of the default-cap field's global max
+(the scales `runArm` uses). `max_pos_dev` is 0 in every run.
+
+| np | SERIAL pot | SERIAL grad | HIP pot (run 1, run 2) | HIP grad (run 1, run 2) |
+| --- | --- | --- | --- | --- |
+| 1 | 3.1130e-15 | 3.2686e-15 | 2.9400e-15, 2.2483e-15 | 2.7372e-15, 2.5112e-15 |
+| 2 | 2.7671e-15 | 3.2709e-15 | 2.5941e-15, 2.5941e-15 | 2.1927e-15, 2.6372e-15 |
+| 3 | 3.1130e-15 | 3.2707e-15 | 2.4212e-15, 2.7671e-15 | 2.5986e-15, 2.6401e-15 |
+| 4 | 3.1130e-15 | 3.2709e-15 | 2.5941e-15, 2.4212e-15 | 2.4641e-15, 2.6576e-15 |
+| 5 | 2.7671e-15 | 3.2709e-15 | — | — |
+| 6 | 3.1130e-15 | 3.2686e-15 | — | — |
+
+SERIAL is identical in all three of its runs (`f3cthX8moa3R`,
+`f3ctpMWAamVZ`, `f3cu4ZEjzFkb`), and in `noprof`. HIP moves run to run in the
+last digits, which is README "Known Issues"' HIP nondeterminism (**R11**).
+Before the timer fix, `f3cthZYvbgC7` read 2.2548e-15 to 2.9177e-15. The worst
+over everything is SERIAL np 2's gradient, **3.2709134320e-15**, so
+**`CTS_PATH_DEV_TOL = 6.55e-15`** (2x, rounded up at the third figure). At
+`dt_scale = 0` the two paths agree at round-off: about 15 ulp of the field
+maximum. That is five orders below `theta_ref`'s 1e-3 direct-sum bar.
+
+### Failure directions
+
+- **Morton limit** (`TreeBuilder.mortonDepthLimit`, every np, both backends):
+  `max_depth = 19` constructs and builds T1's draw without throwing. 21 sweep
+  builds per np at 19 also passed `EXPECT_NO_THROW`. `max_depth = 20` throws
+  `std::runtime_error` from the constructor:
+  `[c1-fail] max_depth 20: Canopy::TreeBuilder only supports depths up to 20!`
+  The message still says 20 while the limit is 19. It is left as is: the test
+  pins the behaviour.
+- **Profiling off** (`build-tuolumne-noprof/`, whose cache reads
+  `Canopy_ENABLE_PROFILING:BOOL=OFF` and registers HIP at np 1-4; job
+  `f3ctpMkv1d6X`): 6 of 6 pass. All 21 `[c1-m2l]` lines read
+  `warm_m2l_kernel_s=-1` and `cold_op_table_build_s=-1` for both arms, and
+  print `ratio SKIPPED (profiling off: timers read -1)`. The pair counts are
+  ungated, are printed, and equal the profiling-on run's. `[c1-paths]` equals
+  the profiling-on SERIAL figures exactly.
+
+### Pre-existing lines: compared by script
+
+`compare_tagged_lines.py canopy-c1.f3ctdiJnUAyd.log <run>`: **1170 of 1170
+baseline lines matched byte for byte**, for both `f3ctpMWAamVZ` and the exit
+`f3cu4ZEjzFkb`. They are 504 `[ct-cache]`, 504 `[ct-cache-inc]` and 162
+`[ct-solve]` lines; there were 0 `ONLY-BASELINE`. The run has 378 more
+lines, and every one is the new case's: 168 `[ct-cache]` and 168
+`[ct-cache-inc]` (21 ranks × 4 steps × 2 arms, all `dt_scale=0`) and 42
+`[ct-solve]` echoes (21 ranks × 2 arms; the cap-0 arm's carries `op_cap=0`).
+The baseline itself matches A2's exit `f3cmue2op151` on the same tags. A2's
+84 `[a2-fail]` lines are identical too.
+
+### Runtime and budget rows
+
+The cap-0 arm is the cost on SERIAL. It runs five full-fallback solves of
+about 2 M pairs at np 1, at 14.8 s of `m2l_kernel` each. `CartesianTaylorSolve`
+SERIAL np 1 went from 20.7 s to 104 s. On HIP it is unchanged (20.3 → 20.5 s).
+`TreeBuilder` gained about 3 s at np 1.
+
+`f3ctt2j3drQf`, `default` rows, max of three passes (s, np 1-6):
+
+| stem | before | after |
+| --- | --- | --- |
+| `TreeBuilder` | 3.34, 3.9, 5.09, 5.87, 6.69, 7.56 | 6.31, 6, 6.38, 7.15, 7.85, 8.72 |
+| `CartesianTaylorSolve` | 25.34, 16.14, 14.72, 14.24, 14.47, 14.95 | 107.82, 60.01, 44.87, 37.24, 34.51, 30.22 |
+
+In the exit runs the highest runtime/budget ratio was 0.571 on SERIAL
+(`CartesianTaylorSolve` np 6, 30.27 of 53 s) and 0.53 on HIP (`TreeBuilder`
+np 4, 6.94 of 13 s).
+
+**Affects:**
+- **A3**: use the per-pair fallback-to-GEMM `m2l_kernel` ratio **≈ 12 on
+  SERIAL** (10.4-12.2, flat in np) and **52-109 on HIP**. On HIP it depends on
+  np: 107-109 at np 1, 83-86 at np 2, 65-72 at np 3, 52-56 at np 4. Use the
+  HIP figure at the production rank count per node: **≈ 55 at np 4**, one APU
+  per rank. The GEMM path's table cost is a cold `ilist_s4_op_table_build` of
+  **0.07-0.13 s per rank** (0.12-0.13 s at np 1 on both backends, about
+  0.08-0.10 s at np 4). It is paid only on a build that misses the cache. All
+  of these are for `CartesianTaylorBasis<double, 3>` at θ 0.3. The default-cap
+  figure includes 23-246 fallback pairs per rank, so the HIP ratio is low by
+  at most 1.3 %. A pair moved to the fallback therefore costs about 12 GEMM
+  pairs on SERIAL and about 55 on HIP. A2's 1.6-3.5x rise in `range_guard` at
+  knob 1 should be costed at those weights.
+- **R8**: closed. The ratio is measured directly, per backend and per
+  `(nprocs, rank)`.
+- **R10**: the new bound is 2x a measured round-off figure (3.27e-15). A
+  change that moves either path by more than about 15 ulp of the field fails
+  it. That is far tighter than the direct-sum bounds R10 worries about.
+- **R11**: `[c1-paths]` on HIP is not bit-reproducible run to run (up to
+  2.94e-15 against SERIAL's fixed 3.27e-15). It passes, under the same bound.
+- **Every later task whose fixture builds T1's draw at `max_depth = 8`**: that
+  tree is depth-limited (53-64 overfull depth-8 leaves at 1200 particles), and
+  `build()` now says so on stderr every build. That is expected, not a
+  regression.

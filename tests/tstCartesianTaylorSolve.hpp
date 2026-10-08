@@ -436,10 +436,61 @@ struct GatheredState
 };
 
 // ---------------------------------------------------------------------------
+// C1 of tasks/tree-opt.md: one rank's M2L figures from a run of
+// with_cartesian_taylor_solve. Times in s, from the profiling timer totals
+// (the registry itself is reset inside solve()): 0 if the timer did not run,
+// the -1 sentinel if its level is not compiled in.
+// ---------------------------------------------------------------------------
+struct M2LPathTiming
+{
+    // ilist_s4_op_table_build (level 2) over the cold first solve.
+    double cold_op_table_build_s = -1.0;
+    // m2l_kernel (level 1) over a warm re-solve of the unchanged last tree.
+    double warm_m2l_kernel_s = -1.0;
+    // At the warm re-solve: total_m2l_pair_count(), the fallback-path share
+    // of it, and the columns admitted.
+    long long pairs = 0;
+    long long fallback_pairs = 0;
+    int n_unique_ops = 0;
+};
+
+inline void cts_reset_timer_totals()
+{
+#ifdef CANOPY_ENABLE_PROFILING
+    Canopy::Profiling::reset_timer_totals();
+#endif
+}
+
+inline double cts_m2l_kernel_s()
+{
+#ifdef CANOPY_ENABLE_PROFILING
+    const auto& reg = Canopy::Profiling::timer_totals();
+    auto it = reg.find( Canopy::Profiling::TIMER_M2L_KERNEL );
+    return it == reg.end() ? 0.0 : it->second;
+#else
+    return -1.0;
+#endif
+}
+
+inline double cts_op_table_build_s()
+{
+#if defined( CANOPY_ENABLE_PROFILING ) && CANOPY_PROFILING_LEVEL >= 2
+    const auto& reg = Canopy::Profiling::timer_totals();
+    auto it = reg.find( Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_BUILD );
+    return it == reg.end() ? 0.0 : it->second;
+#else
+    return -1.0;
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // Drive the configuration above at `mac_theta` for CTS_NUM_STEPS solves and
 // hand the gathered last-step state to `after`. `quantize_root_half_width`
 // sets FmmConfig's knob of that name (B2 of tasks/tree-opt.md); every case
-// that predates it runs with it off.
+// that predates it runs with it off. `m2l_op_count_cap` >= 0 sets
+// FmmConfig::m2l_op_count_cap (C1); negative leaves its default. A non-null
+// `timing` resets the profiling timers before the first solve, re-solves the
+// last tree once more after the loop, and fills `timing` (C1).
 //
 // Every rank asserts its own far field was live before anything is compared.
 // ---------------------------------------------------------------------------
@@ -447,7 +498,9 @@ template <class MemorySpace, class ExecutionSpace, int P,
           template <class, int, int> class Basis, class Fn>
 void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
                                   double dt_scale, Fn&& after,
-                                  bool quantize_root_half_width = false )
+                                  bool quantize_root_half_width = false,
+                                  int m2l_op_count_cap = -1,
+                                  M2LPathTiming* timing = nullptr )
 {
     using Scalar = double;
     using DataTypes = Cabana::MemberTypes<Scalar[3],          // Position
@@ -532,6 +585,10 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
     // field for no reason and hide exactly what this test measures.
     cfg.near_softening_factor = 0.0;
     cfg.quantize_root_half_width = quantize_root_half_width;
+    if ( m2l_op_count_cap >= 0 )
+        cfg.m2l_op_count_cap = m2l_op_count_cap;
+    // At cap 0 no column is built and every pair takes m2l_translate.
+    const bool no_columns = m2l_op_count_cap == 0;
 
     Solver_t solver( MPI_COMM_WORLD, cfg );
     solver.template setup<Position, Charge>( particles, n_local_initial );
@@ -553,8 +610,12 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
     // -----------------------------------------------------------------------
     for ( int step = 0; step < CTS_NUM_STEPS; step++ )
     {
+        if ( timing && step == 0 )
+            cts_reset_timer_totals();
         solver.template solve<Position, Charge>( particles,
                                                  /*compute_gradient=*/true );
+        if ( timing && step == 0 )
+            timing->cold_op_table_build_s = cts_op_table_build_s();
 
         // -------------------------------------------------------------------
         // THE PER-STEP OPERATOR-CACHE MEASUREMENT (T5, risk R6).
@@ -665,7 +726,10 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
                 prev_sweep_hw = ds_step.root_half_width();
             }
 
-            if ( step == 0 )
+            if ( step == 0 && no_columns )
+                EXPECT_EQ( ds_step.m2l_op_keys_built_count(), 0 )
+                    << "a column was built at cap 0 (rank " << rank << ")";
+            else if ( step == 0 )
                 EXPECT_GT( ds_step.m2l_op_keys_built_count(), 0 )
                     << "m2l_op_keys_built_count() is 0 after the first "
                        "solve: no M2L operator was ever built, so the "
@@ -710,6 +774,27 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
             solver.template migrate<Position>( particles );
     }
 
+    // The warm re-solve: nothing moved, so the interaction list and the
+    // operator table must be reused as they stand.
+    if ( timing )
+    {
+        const auto& dw = solver.downward();
+        const int builds = dw.interaction_list_build_count();
+        const long long built = dw.m2l_op_keys_built_count();
+        cts_reset_timer_totals();
+        solver.template solve<Position, Charge>( particles,
+                                                 /*compute_gradient=*/true );
+        timing->warm_m2l_kernel_s = cts_m2l_kernel_s();
+        timing->pairs = dw.total_m2l_pair_count();
+        timing->fallback_pairs = dw.total_fallback_pair_count();
+        timing->n_unique_ops = dw.m2l_n_unique_ops();
+        EXPECT_EQ( dw.interaction_list_build_count(), builds )
+            << "the warm re-solve rebuilt the interaction list (rank " << rank
+            << ")";
+        EXPECT_EQ( dw.m2l_op_keys_built_count(), built )
+            << "the warm re-solve built a column (rank " << rank << ")";
+    }
+
     const auto& ds = solver.downward();
     const int n_unique_ops = ds.m2l_n_unique_ops();
     const long long fallback_pairs = ds.total_fallback_pair_count();
@@ -750,11 +835,20 @@ void with_cartesian_taylor_solve( double mac_theta, double pos_half_span,
     // leaving early would hang every other rank until the job's walltime,
     // which destroys the very log the failure has to be read out of. The
     // non-fatal form fails the test and still lets the gather complete.
-    EXPECT_GT( n_unique_ops, 0 )
-        << "m2l_n_unique_ops() is 0: no pair is MAC-admissible, so the far "
-           "field this test exists to measure was never evaluated and the "
-           "direct-sum comparison below would pass vacuously "
-        << tag;
+    if ( no_columns )
+    {
+        EXPECT_EQ( n_unique_ops, 0 ) << "a column was admitted at cap 0 " << tag;
+        EXPECT_GT( fallback_pairs, 0 )
+            << "no pair reached the fallback at cap 0, so the far field was "
+               "never evaluated "
+            << tag;
+    }
+    else
+        EXPECT_GT( n_unique_ops, 0 )
+            << "m2l_n_unique_ops() is 0: no pair is MAC-admissible, so the far "
+               "field this test exists to measure was never evaluated and the "
+               "direct-sum comparison below would pass vacuously "
+            << tag;
 
     // -----------------------------------------------------------------------
     // Gather the last-step state to rank 0 in GlobalId order. Particles pair
@@ -1039,6 +1133,125 @@ void runArm( double mac_theta, double tol, const char* arm,
         quantize_root_half_width );
 }
 
+// C1 of tasks/tree-opt.md: the two M2L paths' agreement, as a fraction of
+// the default-cap field's global max (the scales runArm uses), 2x the worst
+// over SERIAL np 1-6 (flux job f3cthX8moa3R) and HIP np 1-4 (f3cthZYvbgC7),
+// rounded up at the third figure. Worst max_grad_dev 3.2709134320e-15
+// (SERIAL np 2), worst max_pot_dev 3.1129740174e-15 (SERIAL np 1). HIP's
+// figures move between runs (device reduction order); its worst over two
+// runs (f3cthZYvbgC7, f3ctpMeC6syq) is 2.9400310164e-15 (potential, np 1).
+static constexpr double CTS_PATH_DEV_TOL = 6.55e-15;
+
+// ---------------------------------------------------------------------------
+// C1: the same solve at column cap 0 (every pair through m2l_translate) and
+// at FmmConfig's default cap (the fused GEMM), at theta 0.3 and order 3, the
+// downstream configuration. dt_scale 0 keeps every particle in place, so the
+// two runs differ only in which path evaluated the far field. Prints each
+// rank's per-pair m2l_kernel ratio, and asserts the two fields agree.
+// ---------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace>
+void runPathAgreement()
+{
+    constexpr int P = CTS_P_THETA_REF;
+    const int default_cap = Canopy::FmmConfig{}.m2l_op_count_cap;
+
+    GatheredState gs_fb, gs_gemm;
+    M2LPathTiming t_fb, t_gemm;
+    auto keep = []( GatheredState& dst )
+    { return [&dst]( const GatheredState& gs, int, int ) { dst = gs; }; };
+    with_cartesian_taylor_solve<MemorySpace, ExecutionSpace, P,
+                                Canopy::CartesianTaylorBasis>(
+        CTS_THETA_REF, CTS_POS_HALF_SPAN, 0.0, keep( gs_fb ), false, 0,
+        &t_fb );
+    with_cartesian_taylor_solve<MemorySpace, ExecutionSpace, P,
+                                Canopy::CartesianTaylorBasis>(
+        CTS_THETA_REF, CTS_POS_HALF_SPAN, 0.0, keep( gs_gemm ), false,
+        default_cap, &t_gemm );
+
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    // Per pair, in s: the cap-0 run evaluates every pair by m2l_translate;
+    // the default-cap run evaluates pairs - fallback_pairs by the GEMM.
+    const long long gemm_pairs = t_gemm.pairs - t_gemm.fallback_pairs;
+    std::printf( "[c1-m2l] nprocs=%d rank=%d p_order=%d theta=%.17g "
+                 "cap0: pairs=%lld fallback_pairs=%lld n_unique_ops=%d "
+                 "warm_m2l_kernel_s=%.6e cold_op_table_build_s=%.6e "
+                 "cap%d: pairs=%lld fallback_pairs=%lld n_unique_ops=%d "
+                 "warm_m2l_kernel_s=%.6e cold_op_table_build_s=%.6e",
+                 nprocs, rank, P, CTS_THETA_REF, t_fb.pairs,
+                 t_fb.fallback_pairs, t_fb.n_unique_ops,
+                 t_fb.warm_m2l_kernel_s, t_fb.cold_op_table_build_s,
+                 default_cap, t_gemm.pairs, t_gemm.fallback_pairs,
+                 t_gemm.n_unique_ops, t_gemm.warm_m2l_kernel_s,
+                 t_gemm.cold_op_table_build_s );
+    if ( t_fb.warm_m2l_kernel_s < 0.0 || t_gemm.warm_m2l_kernel_s < 0.0 )
+        std::printf( " ratio SKIPPED (profiling off: timers read -1)\n" );
+    else if ( t_fb.fallback_pairs > 0 && gemm_pairs > 0 &&
+              t_gemm.warm_m2l_kernel_s > 0.0 )
+    {
+        const double per_fb = t_fb.warm_m2l_kernel_s / t_fb.fallback_pairs;
+        const double per_gemm = t_gemm.warm_m2l_kernel_s / gemm_pairs;
+        std::printf( " per_pair_fallback_s=%.6e per_pair_gemm_s=%.6e "
+                     "ratio=%.4f\n",
+                     per_fb, per_gemm, per_fb / per_gemm );
+    }
+    else
+        std::printf( " ratio SKIPPED (no pairs on a path)\n" );
+    std::fflush( stdout );
+
+    EXPECT_EQ( t_fb.n_unique_ops, 0 );
+    EXPECT_EQ( t_fb.fallback_pairs, t_fb.pairs )
+        << "a pair escaped the fallback at cap 0 (rank " << rank << ")";
+    EXPECT_EQ( t_fb.pairs, t_gemm.pairs )
+        << "the two runs' trees carry different pairs (rank " << rank << ")";
+    EXPECT_GT( t_gemm.n_unique_ops, 0 );
+
+    if ( rank != 0 )
+        return;
+    ASSERT_TRUE( gs_fb.valid ) << gs_fb.err;
+    ASSERT_TRUE( gs_gemm.valid ) << gs_gemm.err;
+    ASSERT_EQ( gs_fb.n, gs_gemm.n );
+    const int n = gs_gemm.n;
+    double pos_dev = 0.0, pot_scale = 0.0, grad_scale = 0.0;
+    for ( int i = 0; i < 3 * n; i++ )
+        pos_dev = std::max( pos_dev, std::abs( gs_fb.pos[i] - gs_gemm.pos[i] ) );
+    for ( int i = 0; i < CTS_NCOMPS * n; i++ )
+    {
+        pot_scale = std::max( pot_scale, std::abs( gs_gemm.pot[i] ) );
+        const double* g = &gs_gemm.grad[3 * i];
+        grad_scale = std::max(
+            grad_scale, std::sqrt( g[0] * g[0] + g[1] * g[1] + g[2] * g[2] ) );
+    }
+    ASSERT_GT( pot_scale, 0.0 );
+    ASSERT_GT( grad_scale, 0.0 );
+    double pot_dev = 0.0, grad_dev = 0.0;
+    for ( int i = 0; i < CTS_NCOMPS * n; i++ )
+    {
+        pot_dev = std::max( pot_dev, std::abs( gs_fb.pot[i] - gs_gemm.pot[i] ) /
+                                         pot_scale );
+        const double dx = gs_fb.grad[3 * i + 0] - gs_gemm.grad[3 * i + 0];
+        const double dy = gs_fb.grad[3 * i + 1] - gs_gemm.grad[3 * i + 1];
+        const double dz = gs_fb.grad[3 * i + 2] - gs_gemm.grad[3 * i + 2];
+        grad_dev = std::max( grad_dev, std::sqrt( dx * dx + dy * dy + dz * dz ) /
+                                           grad_scale );
+    }
+    std::printf( "[c1-paths] nprocs=%d p_order=%d theta=%.17g "
+                 "max_pos_dev=%.17g max_pot_dev=%.17g max_grad_dev=%.17g "
+                 "tol=%.17g\n",
+                 nprocs, P, CTS_THETA_REF, pos_dev, pot_dev, grad_dev,
+                 CTS_PATH_DEV_TOL );
+    std::fflush( stdout );
+    EXPECT_EQ( pos_dev, 0.0 ) << "dt_scale 0 moved a particle";
+    EXPECT_LE( pot_dev, CTS_PATH_DEV_TOL )
+        << "np=" << nprocs << ": the cap-0 (m2l_translate) and default-cap "
+           "(GEMM) potentials disagree beyond the measured deviation";
+    EXPECT_LE( grad_dev, CTS_PATH_DEV_TOL )
+        << "np=" << nprocs << ": the cap-0 (m2l_translate) and default-cap "
+           "(GEMM) gradients disagree beyond the measured deviation";
+}
+
 } // namespace CartesianTaylorSolveTest
 
 //---------------------------------------------------------------------------//
@@ -1155,6 +1368,16 @@ TEST( CartesianTaylorSolve, operatorCacheAcrossDriftQuantizedThetaRef )
         CartesianTaylorSolveTest::CTS_DEV_TOL_DRIFT_Q_THETA_REF,
         "drift_q_theta_ref", CartesianTaylorSolveTest::CTS_POS_HALF_SPAN,
         CartesianTaylorSolveTest::CTS_DT_SCALE_DRIFT, true );
+}
+
+//---------------------------------------------------------------------------//
+// C1 of tasks/tree-opt.md: the fallback and GEMM M2L paths agree, and the
+// per-pair cost of each.
+//---------------------------------------------------------------------------//
+TEST( CartesianTaylorSolve, m2lPathsAgreeAndCost )
+{
+    CartesianTaylorSolveTest::runPathAgreement<TEST_MEMSPACE,
+                                               TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

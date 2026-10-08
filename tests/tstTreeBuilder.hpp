@@ -20,11 +20,14 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdio>
 #include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace Test
 {
@@ -119,13 +122,13 @@ int count_particles_in_leaves(
 }
 
 // T1's two-scale draw (tests/tstDownwardSweep.hpp,
-// generate_two_scale_particles), positions only, over 1200 particles in
-// total: the same stream, so the same tree, which A1 measured to have
-// touching leaves 3-4 levels apart at every np. The charge draw is kept so
-// the stream matches.
-int generate_two_scale_positions( AoSoA_t& particles, int rank, int nprocs )
+// generate_two_scale_particles), positions only, over num_global particles
+// in total. At the default 1200 it is the same stream, so the same tree,
+// which A1 measured to have touching leaves 3-4 levels apart at every np.
+// The charge draw is kept so the stream matches.
+int generate_two_scale_positions( AoSoA_t& particles, int rank, int nprocs,
+                                  int num_global = 1200 )
 {
-    const int num_global = 1200;
     const int n = num_global / nprocs + ( rank < num_global % nprocs );
     AoSoA_ht particles_h( "particles_h", n );
     auto h_pos = Cabana::slice<Position>( particles_h );
@@ -444,6 +447,171 @@ void testBalancePassBoundAndDepthReport()
 }
 
 //---------------------------------------------------------------------------//
+// C1 of tasks/tree-opt.md: depth headroom against problem size, and the
+// Morton depth limit.
+//---------------------------------------------------------------------------//
+
+// Global particle counts of the sweep: 1200 * 2^(k/2), k in
+// [0, C1_SWEEP_STEPS], half an octave apart (1200 to 1228800).
+constexpr int C1_SWEEP_STEPS = 20;
+// The Morton key's depth limit, in levels; TreeBuilder throws above it.
+constexpr int C1_MORTON_MAX_DEPTH = 19;
+// T1's own max_depth, in levels.
+constexpr int C1_FIXTURE_MAX_DEPTH = 8;
+
+// T1's draw at each sweep count, built at max_depth 19 (so the depth is the
+// draw's, not a cap's) and at T1's max_depth 8. Reports the deepest occupied
+// depth, the occupied-depth count, and the leaves the depth limit made (at
+// max_depth, global count > ncrit), then fits occupied depths against
+// log2(N) and extrapolates to depth 19.
+void testDepthHeadroom()
+{
+    using namespace TreeBuilderTest;
+    using builder_type = TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>;
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    const std::array<double, 6> tol{ 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 };
+    const int ncrit = 8;
+
+    auto limited_leaves = [ncrit]( const builder_type& b, int depth )
+    {
+        long long n = 0;
+        for ( const auto& c : b.cells() )
+            n += c.is_leaf && c.depth == depth && c.global_count > ncrit;
+        return n;
+    };
+
+    std::vector<double> x, y; // log2(N), occupied depths
+    long long limited8_last = 0;
+    for ( int k = 0; k <= C1_SWEEP_STEPS; ++k )
+    {
+        const int num_global =
+            static_cast<int>( std::lround( 1200.0 * std::pow( 2.0, 0.5 * k ) ) );
+        AoSoA_t particles( "particles", 0 );
+        const int n =
+            generate_two_scale_positions( particles, rank, nprocs, num_global );
+        auto positions = Cabana::slice<Position>( particles );
+
+        builder_type deep( MPI_COMM_WORLD, ncrit, C1_MORTON_MAX_DEPTH, tol,
+                           0.1 );
+        double t0 = MPI_Wtime();
+        EXPECT_NO_THROW( deep.build( positions, n ) );
+        const double t_deep = MPI_Wtime() - t0; // s
+
+        int deepest = 0;
+        long long leaves = 0, predicted8 = 0;
+        std::set<int> occupied;
+        for ( const auto& c : deep.cells() )
+        {
+            deepest = std::max( deepest, c.depth );
+            occupied.insert( c.depth );
+            leaves += c.is_leaf;
+            // Refinement to depth 8 does not depend on max_depth, so these
+            // are exactly the capped tree's depth-limited leaves.
+            predicted8 += !c.is_leaf && c.depth == C1_FIXTURE_MAX_DEPTH &&
+                          c.global_count > ncrit;
+        }
+        const int n_occupied = static_cast<int>( occupied.size() );
+        const long long limited19 =
+            limited_leaves( deep, C1_MORTON_MAX_DEPTH );
+
+        builder_type capped( MPI_COMM_WORLD, ncrit, C1_FIXTURE_MAX_DEPTH, tol,
+                             0.1 );
+        t0 = MPI_Wtime();
+        capped.build( positions, n );
+        const double t_capped = MPI_Wtime() - t0; // s
+        const long long limited8 =
+            limited_leaves( capped, C1_FIXTURE_MAX_DEPTH );
+        limited8_last = limited8;
+
+        std::printf( "[c1-depth] nprocs %d rank %d n_global %d n_local %d "
+                     "cells %zu leaves %lld deepest %d occupied_depths %d "
+                     "limited_at_19 %lld limited_at_8 %lld "
+                     "build_s_19 %.3f build_s_8 %.3f\n",
+                     nprocs, rank, num_global, n, deep.cells().size(), leaves,
+                     deepest, n_occupied, limited19, limited8, t_deep,
+                     t_capped );
+        std::fflush( stdout );
+
+        // The cell list is global, so every rank must read the same tree.
+        int mm[2] = { deepest, -deepest };
+        MPI_Allreduce( MPI_IN_PLACE, mm, 2, MPI_INT, MPI_MAX, MPI_COMM_WORLD );
+        EXPECT_EQ( mm[0], -mm[1] ) << "deepest depth differs across ranks";
+        // A parent is occupied wherever a child is, so depths are contiguous.
+        EXPECT_EQ( n_occupied, deepest + 1 );
+        EXPECT_LT( deepest, C1_MORTON_MAX_DEPTH )
+            << "the sweep reached the Morton limit at N = " << num_global;
+        EXPECT_EQ( limited19, 0 );
+        EXPECT_EQ( limited8, predicted8 ) << "N = " << num_global;
+
+        x.push_back( std::log2( static_cast<double>( num_global ) ) );
+        y.push_back( n_occupied );
+    }
+    EXPECT_GT( limited8_last, 0 )
+        << "no leaf was depth-limited at max_depth 8, so that count is vacuous";
+
+    // Least squares: occupied = a + b log2(N), so N grows as base^depth with
+    // base = 2^(1/b), and depth 19 (20 occupied depths) is reached at
+    // log2(N) = (20 - a) / b.
+    const double m = static_cast<double>( x.size() );
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for ( std::size_t i = 0; i < x.size(); ++i )
+    {
+        sx += x[i];
+        sy += y[i];
+        sxx += x[i] * x[i];
+        sxy += x[i] * y[i];
+    }
+    const double b = ( m * sxy - sx * sy ) / ( m * sxx - sx * sx );
+    const double a = ( sy - b * sx ) / m;
+    ASSERT_GT( b, 0.0 ) << "occupied depths did not grow with N";
+    const double log2_n19 = ( C1_MORTON_MAX_DEPTH + 1 - a ) / b;
+    std::printf( "[c1-depth-fit] nprocs %d rank %d points %d "
+                 "occupied_depths = %.4f + %.4f log2(N) "
+                 "base_per_level %.3f log2_N_at_depth_19 %.2f "
+                 "N_at_depth_19 %.4e\n",
+                 nprocs, rank, static_cast<int>( m ), a, b,
+                 std::pow( 2.0, 1.0 / b ), log2_n19,
+                 std::pow( 2.0, log2_n19 ) );
+    std::fflush( stdout );
+}
+
+// The Morton limit: max_depth 19 constructs and builds; 20 throws from the
+// constructor.
+void testMortonDepthLimit()
+{
+    using namespace TreeBuilderTest;
+    using builder_type = TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE>;
+    int rank, nprocs;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+    const std::array<double, 6> tol{ 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 };
+
+    AoSoA_t particles( "particles", 0 );
+    const int n = generate_two_scale_positions( particles, rank, nprocs );
+    auto positions = Cabana::slice<Position>( particles );
+    EXPECT_NO_THROW( {
+        builder_type b( MPI_COMM_WORLD, 8, C1_MORTON_MAX_DEPTH, tol, 0.1 );
+        b.build( positions, n );
+    } );
+
+    try
+    {
+        builder_type b( MPI_COMM_WORLD, 8, C1_MORTON_MAX_DEPTH + 1, tol, 0.1 );
+        ADD_FAILURE() << "max_depth " << C1_MORTON_MAX_DEPTH + 1
+                      << " did not throw";
+    }
+    catch ( const std::runtime_error& e )
+    {
+        std::printf( "[c1-fail] max_depth %d: %s\n", C1_MORTON_MAX_DEPTH + 1,
+                     e.what() );
+        std::fflush( stdout );
+    }
+}
+
+//---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
@@ -459,6 +627,10 @@ TEST( TreeBuilder, quantizedRootHalfWidth ) { testQuantizedRootHalfWidth(); }
 TEST( TreeBuilder, balanceKnobRejectsBelowOne ) { testBalanceKnobRejectsBelowOne(); }
 
 TEST( TreeBuilder, balancePassBoundAndDepthReport ) { testBalancePassBoundAndDepthReport(); }
+
+TEST( TreeBuilder, depthHeadroom ) { testDepthHeadroom(); }
+
+TEST( TreeBuilder, mortonDepthLimit ) { testMortonDepthLimit(); }
 
 //---------------------------------------------------------------------------//
 

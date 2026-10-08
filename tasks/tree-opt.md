@@ -1035,7 +1035,7 @@ are byte-identical to B2's `f3cj6QNSmYfy` / `f3cj6QWEwmd9` (210 SERIAL and
 
 ---
 
-### C1 — Depth and fallback-cost headroom against problem size — **NOT STARTED**
+### C1 — Depth and fallback-cost headroom against problem size — **DONE**
 
 **Depends on:** T1 **DONE**.
 **Fill in:** `tests/tstTreeBuilder.hpp` (the depth-scaling case, on that
@@ -1132,6 +1132,38 @@ Failure direction: the case asserts that a tree built at `max_depth = 19` throws
 nothing and that a tree requested at `max_depth = 20` **does** throw
 `std::runtime_error` from `TreeBuilder`'s constructor, so the limit is pinned by
 a test rather than by a comment.
+
+**Met.** Flux jobs `f3cu4ZEjzFkb` (SERIAL np 1-6) and `f3cu4ZNk2NxX` (HIP np
+1-4) ran both stems through `canopy_ctest` against the re-calibrated rows.
+Every entry finished `completed` (12 of 12 and 8 of 8), both stems `rc=0`, and
+the watchdog cancelled nothing. The new
+`CartesianTaylorSolve.m2lPathsAgreeAndCost` asserts that the cap-0 and
+default-cap fields agree within `CTS_PATH_DEV_TOL = 6.55e-15`. That is 2x the
+worst measured deviation, 3.27e-15 (SERIAL np 2 gradient). HIP's worst over two
+runs is 2.94e-15. The new `TreeBuilder.mortonDepthLimit` asserts that
+`max_depth = 19` builds without throwing and that 20 throws
+`std::runtime_error` from the constructor. Every pre-existing SERIAL
+`[ct-solve]`/`[ct-cache*]` line (1170 of 1170) is byte-identical to the
+baseline `f3ctdiJnUAyd`, taken on unmodified binaries. The log
+(`tree-opt-progress-log.md` `## C1`) records the following, per `(nprocs,
+rank)` and from two runs per backend:
+- the occupied depth against $N$ from 1200 to 1.23 M particles: 9 to 13 levels
+  deep;
+- the fit: base 5.1-6.9 per level, with depth 19 at about $10^{10}$-$10^{11}$
+  particles;
+- the per-pair fallback-to-GEMM `m2l_kernel` ratio: 10.4-12.2 on SERIAL
+  (`f3ctpMWAamVZ`, `f3cu4ZEjzFkb`) and 52-109 on HIP (`f3ctpMeC6syq`,
+  `f3cu4ZNk2NxX`), falling with np on HIP;
+- the cold `ilist_s4_op_table_build`: 0.07-0.13 s.
+
+The profiling-off direction (`f3ctpMkv1d6X`, `build-tuolumne-noprof/`) prints
+-1 and `ratio SKIPPED` on every rank. `TreeBuilder::build()` prints the step-5
+warning; T1's tree at its own `max_depth = 8` has 53-64 such leaves.
+`serial_runtimes.tsv`'s `default` rows were re-calibrated in `f3ctt2j3drQf`.
+**Deviation:** `solve()` resets the profiling registry internally, so the case
+reads a new `Canopy::Profiling::timer_totals()`, which `reset_timers()` leaves
+alone, instead of the registry after `reset_timers()`. It also runs at
+`dt_scale = 0`, so the two runs share every tree.
 
 ---
 
