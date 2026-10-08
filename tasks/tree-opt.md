@@ -331,10 +331,11 @@ that carries a large *depth* difference is a separate two-scale distribution in
 
 Also true now:
 
-- **No balancing of any kind exists.** `TreeBuilder` refines a cell iff its
-  global particle count exceeds `ncrit` and its depth is below `max_depth`
-  (`src/Canopy_TreeBuilder.hpp:918`), and nothing anywhere consults a
-  neighbour's depth. There is no post-pass, no flag and no partial form of it.
+- **Tree balancing exists behind `FmmConfig::tree_balance_max_level_delta`**
+  (`src/Canopy_Solver.hpp:135`), default `TREE_BALANCE_OFF`. When set, the
+  pass runs at the end of `TreeBuilder::build()` (not `update()`). A3
+  measured that it does not pay at 1 on the only draw with recorded
+  refusals, so the default stays off.
 - **`max_depth` is capped at 19 by Morton-key storage**, which `TreeBuilder`'s
   constructor enforces by throwing (`src/Canopy_TreeBuilder.hpp:252`). Any
   smaller limit a caller runs at is that caller's choice, not a library limit.
@@ -361,7 +362,6 @@ Also true now:
   is a no-op when handed the value it already holds. The root half-width is the largest
   half-extent of the global particle bounding box
   (`src/Canopy_TreeBuilder.hpp:608-635`) and is not quantized.
-- **There is no `FmmConfig` knob for tree balance.**
 - **The `regression`-labeled stem exercises `LaplaceKernel` only.**
   `REGRESSION_MPI_TESTS` is the single stem `MultiSolve`
   (`tests/CMakeLists.txt:61-63`), and `tstMultiSolve.hpp` instantiates
@@ -440,9 +440,8 @@ refusal.
   is not on any path; B2 changes only the root cell's width, not what any
   coefficient means.
 - **`m2l_translate`'s performance.** The fallback's per-pair cost relative to
-  the GEMM path is not measured anywhere, so "1.58 % of pairs" is a pair count
-  and not a time share. **C1 measures it**, because whether chain A is worth its
-  cell-count cost depends on it.
+  the GEMM path is measured in `tree-opt-progress-log.md` `## C1` (≈12 on
+  SERIAL, 52-109 on HIP), so "1.58 % of pairs" can now be read as a time share.
 
 ## Progress log
 
@@ -1438,11 +1437,13 @@ messages are under `## A2` in the log.
 
 ---
 
-### A3 — Make balancing the default — **NOT STARTED**
+### A3 — Make balancing the default — **DONE**
 
 **Depends on:** A2 **DONE**, C1 **DONE**.
-**Fill in:** `src/Canopy_Solver.hpp` (the default value); `README.md`
-(the knob and its default).
+**Fill in:** `src/Canopy_Solver.hpp` (the default value, only if it changes);
+`README.md`, whose knob row (`README.md:62`, from A2) already documents the
+knob and its default: update the row if the default changes; otherwise add
+the measured reason it stays off.
 **Reference:** A2's measured cell-count multiplier and C1's
 fallback-to-GEMM time ratio, both in the log.
 **Do:**
@@ -1474,6 +1475,23 @@ direction: if the default changes to 1, the **measured deviations** of both
 change reported — a balanced tree is a different tree, and all three of those
 bounds are pinned constants loose enough to absorb a real degradation silently
 (**R10**). An unchanged pass is a claim to verify, not evidence.
+
+**Met.** The default stays `TREE_BALANCE_OFF` and `src/` is unchanged. The
+arithmetic (log `## A3`) uses A2's multipliers (1.0957-1.2798) and
+`range_guard` (off → knob 1: +362 to +556 per np) and C1's ratio (≈ 12
+SERIAL, 52-109 HIP). Knob 1 costs 3 400-6 200 GEMM-pair equivalents of extra
+fallback work per np on SERIAL and 22 000-48 000 on HIP, plus 27-68 cells, and
+saves nothing. That holds for any per-cell cost. `README.md`'s knob row keeps
+the off default and states that reason. The seven stems passed on HEAD
+binaries (10 of 14 rebuilt; C1 had left them stale): SERIAL np 1-6
+`f3cvDghiBLZu`, 48 of 48 `completed`; HIP np 1-4 `f3cvDgqQRcPh`, 32 of 32.
+Every `rc=0`, and the watchdog cancelled nothing. By
+`compare_tagged_lines.py`, all 2622 of A2's SERIAL tagged lines matched byte
+for byte, and the 378 extra were exactly C1's. HIP's structural tags all
+match; its accuracy lines sit in R11's spread (86/137 of 152 at 12/4 figures,
+vs 85/135 between A2's two unmodified runs). Runtimes are unchanged, so there
+was no re-calibration. Because the default did not change, the R10
+before/after comparison does not apply.
 
 ---
 
@@ -1700,11 +1718,11 @@ into an assertion.
 
 **R8 — The fallback's cost is assumed rather than measured, and chain A is sized
 from the wrong number.** "1.58 % of pairs" is a pair count; the time share
-depends on the per-pair cost of `m2l_translate` relative to the GEMM path, which
-is measured nowhere today. Presentation: A3 computes its arithmetic from a pair
-fraction and reaches a confident wrong default. Distinguishing measurement: C1
-step 3 measures the ratio directly by driving one solve at a column cap of 0, and
-A3 is blocked on C1 for exactly that reason.
+depends on the per-pair cost of `m2l_translate` relative to the GEMM path. C1
+measured it (log `## C1`), and A3 used it, so **R8 is closed**. Presentation
+was: A3 computes its arithmetic from a pair fraction and reaches a confident
+wrong default. Distinguishing measurement: C1 step 3 measured the ratio
+directly by driving one solve at a column cap of 0.
 
 **R9 — The one trajectory that exercises cache reuse has no correctness check.**
 `CartesianTaylorSolve.operatorCacheAcrossDriftThetaCanopy` and `...ThetaRef`

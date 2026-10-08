@@ -2726,3 +2726,188 @@ np 4, 6.94 of 13 s).
   tree is depth-limited (53-64 overfull depth-8 leaves at 1200 particles), and
   `build()` now says so on stderr every build. That is expected, not a
   regression.
+
+## A3
+
+**Outcome: the default stays `TREE_BALANCE_OFF`. `src/` is unchanged.** At
+knob 1, balancing adds 27-68 cells *and* 362-556 refused M2L pairs per np on
+the only draw whose refusals are measured. Valued at C1's fallback-to-GEMM
+ratio, the extra refusals alone cost about 3 400-6 200 GEMM-pair equivalents
+per np on SERIAL and 22 000-48 000 on HIP. The term balancing was supposed to
+win, M2L time saved on refused pairs, is negative. The added cells are a
+second cost, not an offset. So the answer is off whatever a cell costs.
+
+Provenance: commit `c553b97` plus this section's edits to `README.md`,
+`tasks/tree-opt.md`, this log and the new `scripts/tuolumne/run_ctest_a3.flux`
+(copied from `run_ctest_a2.flux`). Its one mode is `exit`, the old `measure`
+pass list unchanged, and it now exits 1 if any `canopy_ctest` call fails.
+Cray clang 20.0.0, env `tuolumne_trilinos`, `build-tuolumne`
+(`Canopy_ENABLE_PROFILING:BOOL=ON`, `Canopy_PROFILING_LEVEL:STRING=2`; HIP
+registered at np 1-4 with `--gpus-per-task=1 --cores-per-task=8`; the np 5-6
+abort check passed). Both jobs ran through `canopy_ctest` after a passing
+watchdog self-test, with the HIP environment in a subshell. The watchdog
+cancelled nothing but the self-test. Submitted with `-t 30m`.
+
+| job | what |
+| --- | --- |
+| `f3cvDghiBLZu` | exit criterion, SERIAL np 1-6: 48 of 48 `completed`, every `rc=0`, job rc 0, 12.9 min |
+| `f3cvDgqQRcPh` | exit criterion, HIP np 1-4: 32 of 32 `completed`, every `rc=0`, job rc 0, 6.2 min |
+
+### The arithmetic
+
+Balancing pays iff the M2L time it saves on refused pairs exceeds the cost of
+the cells it adds. In GEMM-pair equivalents, moving one pair from the table to
+the fallback costs $r - 1$, where $r$ is the per-pair fallback-to-GEMM cost
+ratio. So the refusal term of knob 1 is
+$\Delta\text{rg} \times (r - 1)$, with $\Delta\text{rg}$ = `range_guard` at
+knob 1 minus knob off. Balancing saves time on refusals only if
+$\Delta\text{rg} < 0$.
+
+**Inputs**, each as recorded:
+
+- *Cell multiplier and cells added*: `## A2`, "Measured: `[a2-balance]`",
+  first table (*added*, *mult*): the same as `## A1`, "Measured:
+  `[a1-balance]`", two-scale rows, delta-1 column. Basis-independent: a tree
+  property of T1's two-scale draw.
+- *`range_guard` off → knob 1*: `## A2`, "Measured: `[a2-balance]`", second
+  table, *sum* column. `LaplaceKernel` on T1's two-scale draw at θ 0.3.
+- *$r$*: `## C1`, "Measured: the fallback-to-GEMM ratio, `[c1-m2l]`", the
+  *SERIAL ratio* and *HIP ratio* columns, and its **Affects:** A3 bullet:
+  10.4-12.2 on SERIAL, flat in np (≈ 12); on HIP 107-109 at np 1, 83-87 at
+  np 2, 65-72 at np 3, 52-56 at np 4 (≈ 55 at production np 4).
+  `CartesianTaylorBasis<double, 3>` on `with_cartesian_taylor_solve`'s
+  8640-particle cube at θ 0.3.
+
+| np | cells added (mult) | `range_guard` off → 1 | $\Delta\text{rg}$ | SERIAL $\Delta\text{rg}(r-1)$, $r$ 10.4-12.2 | at $r$ = 12 | HIP $r$ | HIP $\Delta\text{rg}(r-1)$ |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 67 (1.2735) | 214 → 590 | +376 | 3 534-4 211 | 4 136 | 107.42-108.90 | 40 014-40 570 |
+| 2 | 68 (1.2798) | 286 → 842 | +556 | 5 226-6 227 | 6 116 | 83.19-86.86 | 45 698-47 738 |
+| 3 | 56 (1.2353) | 200 → 708 | +508 | 4 775-5 690 | 5 588 | 64.96-72.22 | 32 492-36 180 |
+| 4 | 58 (1.2489) | 318 → 756 | +438 | 4 117-4 906 | 4 818 | 52.21-56.48 | 22 430-24 300 |
+| 5 | 47 (1.1843) | 534 → 936 | +402 | 3 779-4 502 | 4 422 | — | — |
+| 6 | 27 (1.0957) | 580 → 942 | +362 | 3 403-4 054 | 3 982 | — | — |
+
+The HIP $r$ range is the min-max over that np's ranks and both C1 runs. The
+products use the per-np *sum* of `range_guard` over ranks. The per-rank split
+(A2's second table) moves the other way on 3 of 21 ranks (np 3 rank 2, np 4
+rank 0, np 6 rank 5), but M2L ends at a barrier, so the slowest rank sets the
+time. On every np the rank with the most knob-1 refusals has more than any
+rank had at knob off (np 1 590 vs 214, …, np 6 389 vs 338).
+
+So on every np and both backends, **knob 1 costs**:
+
+- **SERIAL**: 3 400-6 200 GEMM-pair equivalents of extra M2L work per solve;
+- **HIP**: 22 000-48 000 (≈ 24 000 at np 4);
+- **plus** 27-68 more cells (×1.10-1.28), in every phase.
+
+Saved: nothing. The refusal term has the wrong sign, so no value of $r > 1$
+can turn it into a saving. C1 measured $r \ge 10.4$ on both backends.
+
+**The time cost per added cell is unmeasured** (R1's other half), and so is
+the change in admitted (GEMM) pair count on the balanced tree. **Neither is
+needed.** The cell term can only add cost, since a balanced tree is a strict
+refinement. So off holds for any non-negative per-cell cost. A per-cell figure
+would be the missing input only if the refusal term had come out negative.
+
+### Is combining the two bases sound?
+
+The refusal counts are `LaplaceKernel`'s, and $r$ is `CartesianTaylorBasis`'s.
+The combination holds for the refusal *count*. Refusal is a property of the
+tree, not of the basis. Both bases set `m2l_key_dd_max = 6` (`LaplaceKernel`
+for `double`), and the offset bound `M2L_KEY_OFFSET_MAX = 32` is the classify
+pass's own, the same for every basis. At one θ, the same tree therefore
+refuses the same pairs under either basis. A2's counts are at θ 0.3, as is
+C1's ratio.
+
+It does not carry over the *value* of $r$: `LaplaceKernel`'s fallback and GEMM
+paths have not been timed. That does not change the answer, because the sign
+argument needs only $r > 1$, i.e. a refused pair costs more than a table pair.
+That holds by a factor of 10 on SERIAL and 50 on HIP for the one basis
+measured, and it is the reason the operator table exists. The magnitudes above
+are `CartesianTaylorBasis` magnitudes on a `LaplaceKernel` count. They are
+used to size the loss, not to decide it.
+
+What would reopen this: a draw on which balancing *lowers* `range_guard`. T1's
+two-scale draw is the only fixture with offset refusals and a deep depth gap.
+A1's graded draw has a delta-1 multiplier of 1.32-1.47 (`## A1` table), but
+its `range_guard` at knob 1 was never measured. A2's per-pair breakdown of
+refused pairs would say whether any geometry does better. It is out of scope
+here.
+
+### Default chosen
+
+`TREE_BALANCE_OFF`, unchanged (`src/Canopy_Solver.hpp:135`). README's knob row
+keeps its default and gains the measured reason. Since the default did not
+move, R10's before/after deviation comparison has nothing to compare. The
+exit runs instead confirm, by script, that nothing moved (below).
+
+### Signatures changed
+
+None.
+
+### Bugs only running revealed
+
+- **10 of the 14 binaries were stale against HEAD.** `make -n` on the 14
+  targets showed `TreePartitioner`, `CommunicationPlan`, `DownwardSweep`,
+  `LaplaceSolve` and `MultiSolve` (both backends) would relink. C1 edited
+  `src/Canopy_TreeBuilder.hpp` and `src/Canopy_Profiling.hpp` but rebuilt only
+  its own two stems (`TreeBuilder`, `CartesianTaylorSolve`). I rebuilt the 14
+  named targets, nothing else, and `make -n` then reported nothing to do. The
+  exit jobs' `stat` lines show the 09:10-09:26 binaries. Their tagged lines
+  still match A2's byte for byte (below), so C1's `src/` change did not move
+  these stems.
+- **A2's log says `LaplaceSolve.bitForBitArtifacts` is `OK` at np 1-2 on
+  HIP.** It is `SKIPPED` at every np on HIP, in both of A2's HIP logs
+  (`f3cmTeofYejH`, `f3cmueBubbPm`) and in A3's. The `OK` at np 1-2 is
+  SERIAL's. Not a change. The HIP skip predates A2.
+
+### Exit runs: compared by script
+
+`compare_tagged_lines.py canopy-a2.f3cmue2op151.log canopy-a3.f3cvDghiBLZu.log`
+(SERIAL): **2622 of 2622 baseline lines matched byte for byte**, every tag,
+including `[multisolve-dev]` 36/36, `[multisolve-probe]` 54/54,
+`[fusedm2l-dev]` 6/6 and `[ct-solve]` 162/162. There are 0 `ONLY-BASELINE`.
+The 378 `ONLY-RUN` lines are exactly C1's additions: 336 `[ct-cache]` /
+`[ct-cache-inc]` lines at `dt_scale=0` and 42 `[ct-solve]` echoes. Against
+C1's exit `f3cu4ZEjzFkb`, 1548 of 1548 matched. The `[a2-balance]`,
+`[a2-band]` and `[a2-fail]` lines, which carry this task's inputs, are
+identical to A2's on both backends. So the inputs reproduce on the rebuilt
+binaries.
+
+HIP, against A2's exit `f3cmueBubbPm`: every structural tag matches
+(`two-scale*`, `b0*`, `dd-hist`, `a1-balance`, `b2-retain`, and the 240
+`ct-cache` / `ct-cache-inc` lines each). The accuracy tags differ by R11's
+spread. Rounding every float to *n* significant figures, A2's two unmodified
+HIP runs (`f3cmTeofYejH` vs `f3cmueBubbPm`) agree on 85 of 152 accuracy lines
+at 12 figures and 135 at 4, reproducing A2's figures. A3 against A2's exit
+agrees on 86 and 137 of those 152. That is the same spread: all 84 old
+`[ct-solve]` lines match at 4 figures and 83 at 12, `[fusedm2l-dev]` 4/4 at 4.
+
+For reference, the SERIAL R10 figures at this default (unchanged from A2):
+`SolveFusedM2L.matchesPriorReference` `pot_err` / `grad_err`
+8.93e-4 / 7.26e-5 (np 1), 2.82e-3 / 1.42e-4 (2), 2.21e-2 / 2.85e-4 (3),
+8.29e-4 / 2.29e-4 (4), 4.32e-2 / 1.76e-4 (5), 1.80e-2 / 2.46e-4 (6).
+`CartesianTaylorSolve` np 1 `theta_ref` 1.93e-5 / 7.07e-4 (tol 1e-3),
+`theta_canopy` 9.97e-4 / 1.87e-2 (tol 3.74e-2).
+
+### Runtime
+
+Every stem's per-np runtime is within noise of its previous exit run: A2's
+`f3cmue2op151` / `f3cmueBubbPm`, or C1's for `TreeBuilder` and
+`CartesianTaylorSolve`. For example SERIAL `CartesianTaylorSolve` is 103.3 s
+against 104.0 s at np 1, and HIP `MultiSolve` 11.4 s against 11.4 s at np 4.
+The largest move is SERIAL `MultiSolve` np 6, at 14.9 s against 16.0 s.
+Highest runtime/budget ratio: 0.60 on SERIAL (`CommunicationPlan` np 6).
+`serial_runtimes.tsv` is not re-calibrated.
+
+**Affects:**
+- **R1, R2, R10**: the balanced tree does not reach production, so R1's
+  unmeasured per-phase slowdown and R2's accuracy shift stay unexercised. They
+  bear only on a caller that sets the knob. R10's A3 before/after comparison
+  is moot.
+- **R8**: closed by C1, and consumed here.
+- **A2's proposed per-pair refusal breakdown**: the one measurement that could
+  reopen the default. If some geometry's knob-1 `range_guard` falls,
+  re-run this arithmetic with that $\Delta\text{rg}$. It is out of this
+  document's task list.
+- **README**: the knob row now carries the measured reason it stays off.
