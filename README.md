@@ -521,6 +521,27 @@ Either would shrink the cost of every refusal that chain A of
 `tasks/tree-opt.md` does not remove. A2 measured that balancing raises the
 number of refusals.
 
+### Evaluate all spherical harmonics of a point in one recurrence
+
+`Canopy::Ynm` (`src/Canopy_LaplaceKernel.hpp`) evaluates one $Y_{n,m}$ per
+call: two `tgamma` calls for the normalization, `cos`/`sin` of $m\phi$, and an
+upward Legendre recurrence from $P_m^m$ to $P_n^m$. A caller that needs every
+$(n, m)$ at one point therefore repeats the same recurrence once per entry,
+which is $O(P^3)$ work and $(P+1)(P+2)/2$ `tgamma` pairs where $O(P^2)$
+arithmetic would do. The per-particle callers pay this for every particle:
+`p2m_contribution` and `l2p_evaluate`, which canopy0 C11 already reduced to one
+table per particle (28 calls at $P = 6$, from 196 under the finite-difference
+gradient). The per-pair translation operators (`m2m_translate`,
+`m2l_translate`, `l2l_translate` and the operator-table build) also call it
+per entry.
+
+Replace it with a routine that fills a whole table at once: the
+$P_n^m(\cos\theta)$ by the standard two-term recurrence in $n$ for each $m$,
+the normalization folded into the recurrence (or read from a table in
+`aux_tables_type`), and $e^{im\phi}$ by repeated multiplication. The values
+change only in the last bits, so `tests/data/laplace_solve_P6.txt` would need
+regenerating. Not measured.
+
 ## Known Issues
 
 Tracked defects to be addressed in a later session. These are not introduced by
