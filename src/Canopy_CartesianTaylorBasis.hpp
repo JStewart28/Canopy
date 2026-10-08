@@ -1462,10 +1462,10 @@ struct CartesianTaylorBasis
     // being evaluated -- the same shift table read at slot(p - e_i) -- so it
     // costs one extra table lookup per term and carries no step size, no
     // cancellation and no truncation of its own. The solid-harmonic basis
-    // takes a central finite difference there
-    // (src/Canopy_LaplaceKernel.hpp:1378-1407); this basis does not need one,
-    // and nothing here touches that file. Note |p - e_i| <= P_ORDER - 1, so
-    // the same order-P_ORDER shift table serves both.
+    // is analytic too, by the solid-harmonic ladder relations
+    // (LaplaceKernel::l2p_evaluate); both return +grad(phi), the same sign.
+    // Note |p - e_i| <= P_ORDER - 1, so the same order-P_ORDER shift table
+    // serves both.
     //
     //   dx, dy, dz  PARTICLE POSITION MINUS CELL CENTER (a), length units
     //               (src/Canopy_DownwardSweep.hpp:2650-2672)

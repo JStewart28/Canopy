@@ -1311,29 +1311,36 @@ struct LaplaceKernel
     }
 
     // =======================================================================
-    // L2P: evaluate local expansion at a particle position.
+    // L2P: evaluate the local expansion, and its gradient, at a particle.
     //
-    // Potential (using m >= 0 symmetry; m=0 direct, m>0 doubled real part):
-    //   phi_c(r) = sum_{n=0}^{P} Re{ L_{n,0,c} rho^n Y_{n,0} }
-    //              + 2 sum_{m=1}^{n} Re{ L_{n,m,c} rho^n Y_{n,m} }
+    // Scale-normalized: consumes L̄_{n,m} = L_{n,m} · w_self^n and evaluates,
+    // with N_n^m = (rho / w_self)^n · Y_{n,m}(theta, phi) and m >= 0 symmetry,
+    //   phi_c = sum_{n=0}^{P} Re{ L̄_{n,0,c} N_n^0 }
+    //                         + 2 sum_{m=1}^{n} Re{ L̄_{n,m,c} N_n^m }.
+    // rho / w_self is O(1) for any particle inside its leaf, so the physical
+    // rho^n is never formed (the FP32-safe form).
     //
-    // Gradient: currently via central finite differences (correctness-first;
-    //           analytical derivatives can be substituted later).
+    // THE GRADIENT IS ANALYTIC: the exact derivative of the truncated
+    // expansion, with no step size. It uses the ladder relations of the
+    // regular solid harmonics R_n^m = rho^n Y_{n,m} (Dehnen 2014, Comput.
+    // Astrophys. Cosmol. 1:1, eq. 51, with his Upsilon_n^m =
+    // (-1)^m R_n^m / sqrt((n-m)!(n+m)!) in this file's Ynm convention):
+    //   d_z           R_n^m =  sqrt((n-m)(n+m))    R_{n-1}^m
+    //   (d_x + i d_y) R_n^m =  sqrt((n-m)(n-m-1))  R_{n-1}^{m+1}
+    //   (d_x - i d_y) R_n^m = -sqrt((n+m)(n+m-1))  R_{n-1}^{m-1}   (m >= 1)
+    //   (d_x - i d_y) R_n^0 =  conj( (d_x + i d_y) R_n^0 )         (R_n^0 real)
+    // In N_n^m each derivative brings one factor 1 / w_self. Checked against
+    // a central difference by LaplaceKernel.testL2PGradientAnalyticVsFD.
     //
-    // Parameters:
-    //   L_full         - 3D local view
-    //   leaf_cell      - cell index of this particle's leaf
-    //   dx, dy, dz     - particle_position - leaf_center
-    //   phi_out        - Scalar[NComps] output potentials
-    //   grad_out       - 2D accessor: grad_out(c, d) for component c, dim d.
-    //                    Must be valid if compute_gradient is true.
-    //   compute_gradient - true to populate grad_out; false to skip.
+    //   dx, dy, dz  PARTICLE POSITION MINUS LEAF CENTER, length units
+    //   w_self      the leaf's half-width, length units (the L̄ scale)
+    //   phi_out     Scalar[NComps], written with =
+    //   grad_out    grad_out(c, d) = d phi_c / d x_d, written with = and only
+    //               when compute_gradient. This is +grad(phi), NOT the field
+    //               -grad(phi): for one source q, phi = q/r and
+    //               grad_out = -q r_vec / r^3, r_vec = target - source.
+    //               Units of phi per length.
     // =======================================================================
-    // Scale-normalized L2P: consumes L̄_{n,m} = L_{n,m} · w_self^{n} and
-    // evaluates phi += L̄_{n,m} · (rho_p / w_self)^n · Y_{n,m}. Fused
-    // form so we never materialize the physical (rho_p)^n separately —
-    // (rho_p / w_self) is O(1) for any particle inside its leaf, which
-    // is the FP32-safe form.
     template <class LView, class GradAccess>
     KOKKOS_INLINE_FUNCTION static void
     l2p_evaluate( const LView& L_full, int leaf_cell, Scalar dx, Scalar dy,
@@ -1342,78 +1349,108 @@ struct LaplaceKernel
     {
         const Scalar inv_w = static_cast<Scalar>( 1 ) / w_self;
 
-        // Inline evaluator for potential at an arbitrary offset
-        auto eval_phi =
-            [&]( Scalar ex, Scalar ey, Scalar ez, Scalar( &phi )[NComps] )
+        Scalar rho, theta, phi_ang;
+        cartesian_to_spherical( dx, dy, dz, rho, theta, phi_ang );
+
+        const Scalar rho_norm = rho * inv_w;
+        Scalar rho_pow[P + 1];
+        complex_type Y_tbl[num_coeffs_per_cell];
+        rho_pow[0] = 1.0;
+        for ( int n = 0; n <= P; n++ )
         {
-            for ( int c = 0; c < NComps; c++ )
-                phi[c] = 0.0;
+            if ( n > 0 )
+                rho_pow[n] = rho_pow[n - 1] * rho_norm;
+            for ( int m = 0; m <= n; m++ )
+                Y_tbl[coeff_index( n, m )] =
+                    Ynm<Scalar>( n, m, theta, phi_ang );
+        }
 
-            Scalar rho, theta, phi_ang;
-            cartesian_to_spherical( ex, ey, ez, rho, theta, phi_ang );
+        for ( int c = 0; c < NComps; c++ )
+            phi_out[c] = 0.0;
 
-            const Scalar rho_norm = rho * inv_w;
-            Scalar rho_pow_n = 1.0;
-            for ( int n = 0; n <= P; n++ )
-            {
-                // m = 0: count once
-                {
-                    const complex_type Y0 = Ynm<Scalar>( n, 0, theta, phi_ang );
-                    for ( int c = 0; c < NComps; c++ )
-                    {
-                        const complex_type L_n0 =
-                            get_coeff_3d( L_full, leaf_cell, n, 0, c );
-                        const complex_type term = L_n0 * rho_pow_n * Y0;
-                        phi[c] += term.real();
-                    }
-                }
-                // m = 1..n: count twice via symmetry
-                for ( int m = 1; m <= n; m++ )
-                {
-                    const complex_type Y = Ynm<Scalar>( n, m, theta, phi_ang );
-                    for ( int c = 0; c < NComps; c++ )
-                    {
-                        const complex_type L_nm =
-                            get_coeff_3d( L_full, leaf_cell, n, m, c );
-                        const complex_type term = L_nm * rho_pow_n * Y;
-                        phi[c] += 2.0 * term.real();
-                    }
-                }
-                rho_pow_n *= rho_norm;
-            }
-        };
-
-        eval_phi( dx, dy, dz, phi_out );
-
-        if ( compute_gradient )
+        for ( int n = 0; n <= P; n++ )
         {
-            // Central finite difference. The step MUST scale with the cell
-            // size: phi varies on the scale of w_self, so its third derivative
-            // ~ phi/w_self^3 and the FD truncation error ~ h^2/w_self^3 blows up
-            // for deep (tiny) cells if h is fixed. Use h ~ eps^(1/3) * w_self
-            // (the roundoff/truncation optimum) so the relative error is
-            // depth-independent. (Was a fixed 1e-5 — the premature full-rollup
-            // NaN root cause: at w_self~3e-3 the fixed step gave O(1e5) spurious
-            // gradients. TODO: replace with analytical derivatives.)
-            const Scalar h = static_cast<Scalar>( 1.0e-5 ) * w_self;
-            Scalar phi_px[NComps], phi_mx[NComps];
-            Scalar phi_py[NComps], phi_my[NComps];
-            Scalar phi_pz[NComps], phi_mz[NComps];
-
-            eval_phi( dx + h, dy, dz, phi_px );
-            eval_phi( dx - h, dy, dz, phi_mx );
-            eval_phi( dx, dy + h, dz, phi_py );
-            eval_phi( dx, dy - h, dz, phi_my );
-            eval_phi( dx, dy, dz + h, phi_pz );
-            eval_phi( dx, dy, dz - h, phi_mz );
-
-            const Scalar inv_2h = 1.0 / ( 2.0 * h );
+            // m = 0: count once
             for ( int c = 0; c < NComps; c++ )
             {
-                grad_out( c, 0 ) = ( phi_px[c] - phi_mx[c] ) * inv_2h;
-                grad_out( c, 1 ) = ( phi_py[c] - phi_my[c] ) * inv_2h;
-                grad_out( c, 2 ) = ( phi_pz[c] - phi_mz[c] ) * inv_2h;
+                const complex_type L_n0 =
+                    get_coeff_3d( L_full, leaf_cell, n, 0, c );
+                const complex_type term =
+                    L_n0 * rho_pow[n] * Y_tbl[coeff_index( n, 0 )];
+                phi_out[c] += term.real();
             }
+            // m = 1..n: count twice via symmetry
+            for ( int m = 1; m <= n; m++ )
+            {
+                const complex_type Y = Y_tbl[coeff_index( n, m )];
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    const complex_type L_nm =
+                        get_coeff_3d( L_full, leaf_cell, n, m, c );
+                    const complex_type term = L_nm * rho_pow[n] * Y;
+                    phi_out[c] += 2.0 * term.real();
+                }
+            }
+        }
+
+        if ( !compute_gradient )
+            return;
+
+        Scalar gx[NComps], gy[NComps], gz[NComps];
+        for ( int c = 0; c < NComps; c++ )
+            gx[c] = gy[c] = gz[c] = static_cast<Scalar>( 0 );
+
+        const complex_type zero( 0.0, 0.0 );
+        for ( int n = 1; n <= P; n++ )
+        {
+            // N_{n-1}^{m'} = rho_pow[n-1] Y_{n-1,m'}; zero for m' > n-1.
+            const Scalar r_nm1 = rho_pow[n - 1];
+            for ( int m = 0; m <= n; m++ )
+            {
+                const Scalar k_z =
+                    Kokkos::sqrt( static_cast<Scalar>( ( n - m ) * ( n + m ) ) );
+                const Scalar k_p = Kokkos::sqrt(
+                    static_cast<Scalar>( ( n - m ) * ( n - m - 1 ) ) );
+                const Scalar k_m = Kokkos::sqrt(
+                    static_cast<Scalar>( ( n + m ) * ( n + m - 1 ) ) );
+
+                // D_z = d_z N_n^m, D_p = (d_x + i d_y) N_n^m,
+                // D_m = (d_x - i d_y) N_n^m, all times w_self.
+                const complex_type D_z =
+                    ( m <= n - 1 )
+                        ? k_z * r_nm1 * Y_tbl[coeff_index( n - 1, m )]
+                        : zero;
+                const complex_type D_p =
+                    ( m + 1 <= n - 1 )
+                        ? k_p * r_nm1 * Y_tbl[coeff_index( n - 1, m + 1 )]
+                        : zero;
+                const complex_type D_m =
+                    ( m == 0 )
+                        ? Kokkos::conj( D_p )
+                        : -k_m * r_nm1 * Y_tbl[coeff_index( n - 1, m - 1 )];
+
+                const Scalar sym = ( m == 0 ) ? static_cast<Scalar>( 1 )
+                                              : static_cast<Scalar>( 2 );
+                const Scalar half_sym = static_cast<Scalar>( 0.5 ) * sym;
+                for ( int c = 0; c < NComps; c++ )
+                {
+                    const complex_type L_nm =
+                        get_coeff_3d( L_full, leaf_cell, n, m, c );
+                    const complex_type LD_p = L_nm * D_p;
+                    const complex_type LD_m = L_nm * D_m;
+                    // d_x = (D_p + D_m) / 2, d_y = (D_p - D_m) / (2i).
+                    gx[c] += half_sym * ( LD_p + LD_m ).real();
+                    gy[c] += half_sym * ( LD_p - LD_m ).imag();
+                    gz[c] += sym * ( L_nm * D_z ).real();
+                }
+            }
+        }
+
+        for ( int c = 0; c < NComps; c++ )
+        {
+            grad_out( c, 0 ) = gx[c] * inv_w;
+            grad_out( c, 1 ) = gy[c] * inv_w;
+            grad_out( c, 2 ) = gz[c] * inv_w;
         }
     }
 };

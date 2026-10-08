@@ -761,9 +761,8 @@ TEST( LaplaceKernel, testL2LTranslation ) { testL2LTranslation(); }
  *
  * A single particle at the source cell center contributes only M_{0,0}=q
  * (all higher multipoles vanish because rho=0). After M2L the local expansion
- * at the target cell represents the exact Coulomb field, so the gradient
- * computed by L2P via central finite differences must match -q*r/r^3 to
- * the accuracy of the FD step (h=1e-5 gives ~1e-10 FD error here).
+ * at the target cell represents the Coulomb field up to P-truncation, so the
+ * L2P gradient must match -q*r/r^3 to that truncation.
  */
 void testL2PGradient()
 {
@@ -834,13 +833,15 @@ void testL2PGradient()
     // 1e-8.
     EXPECT_NEAR( h_phi( 0 ), phi_analytic, 1e-8 ) << "L2P potential mismatch";
 
-    // Gradient tolerance: FD step h=1e-5 contributes O(h^2 phi''') ~ 1e-12;
-    // FMM/FD combined error budget is 1e-7.
+    // Gradient tolerance: the gradient is analytic (canopy0 C11), so its error
+    // is the P = 6 truncation of the local expansion's derivative,
+    // 8.7512e-12 in x at this geometry (computed independently at 40 digits),
+    // plus roundoff. It was 1e-7 while L2P took a finite difference.
     const char* dim_name[3] = { "x", "y", "z" };
     double max_abs_err = 0.0, grad_mag2 = 0.0;
     for ( int d = 0; d < 3; d++ )
     {
-        EXPECT_NEAR( h_grad( 0, d ), grad_analytic[d], 1e-7 )
+        EXPECT_NEAR( h_grad( 0, d ), grad_analytic[d], 1e-11 )
             << "L2P gradient mismatch in " << dim_name[d];
         max_abs_err = std::fmax( max_abs_err,
                                  std::abs( h_grad( 0, d ) - grad_analytic[d] ) );
@@ -851,6 +852,209 @@ void testL2PGradient()
                  max_abs_err, max_abs_err / std::sqrt( grad_mag2 ) );
 }
 TEST( LaplaceKernel, testL2PGradient ) { testL2PGradient(); }
+
+//---------------------------------------------------------------------------//
+/**
+ * The analytic L2P gradient agrees with central finite differences of the
+ * L2P potential, to the finite differences' own accuracy.
+ *
+ *   fd2  the scheme l2p_evaluate used before canopy0 C11: second order,
+ *        h = 1e-5 * w_self. Roundoff-dominated at this step (~eps S / h, S
+ *        the scale of the summed terms), reaching ~3e-8 relative where the
+ *        gradient is small against the potential. Reported, not asserted.
+ *   fd4  fourth order, h = 1e-3 * w_self: truncation ~h^4 and roundoff
+ *        ~eps S / h both far below fd2's error. Asserted at 1e-8.
+ *
+ * fd2's own error is measured as |fd2 - fd4|; the analytic gradient's
+ * distance from fd2 must be no larger than that plus fd4's bound.
+ *
+ * Unlike the tests above this one uses real, unequal half-widths (source
+ * 0.4, target 0.25) and an off-axis translation, so the L̄ = L w^n scaling
+ * and every m of the ladder relations are exercised. The evaluation points
+ * are the leaf center, a point on the leaf's z-axis (the theta = 0 pole) and
+ * random points filling the leaf.
+ */
+void testL2PGradientAnalyticVsFD()
+{
+    using namespace LaplaceTest;
+
+    const int N_SOURCES = 50;
+    const double w_src = 0.4;
+    const double w_tgt = 0.25;
+    const double tx = 2.5, ty = 1.2, tz = -0.9; // target leaf center
+
+    std::mt19937 gen( 4567 );
+    std::uniform_real_distribution<double> src_dist( -w_src, w_src );
+    std::uniform_real_distribution<double> q_dist( -1.0, 1.0 );
+    std::uniform_real_distribution<double> tgt_dist( -w_tgt, w_tgt );
+
+    std::vector<double> sx( N_SOURCES ), sy( N_SOURCES ), sz( N_SOURCES ),
+        sq( N_SOURCES );
+    for ( int i = 0; i < N_SOURCES; i++ )
+    {
+        sx[i] = src_dist( gen );
+        sy[i] = src_dist( gen );
+        sz[i] = src_dist( gen );
+        sq[i] = q_dist( gen );
+    }
+
+    const int N_EVAL = 66;
+    Kokkos::View<double* [3], TEST_MEMSPACE> d_x( "x_eval", N_EVAL );
+    auto h_x = Kokkos::create_mirror_view( d_x );
+    for ( int d = 0; d < 3; d++ )
+        h_x( 0, d ) = 0.0;
+    h_x( 1, 0 ) = 0.0;
+    h_x( 1, 1 ) = 0.0;
+    h_x( 1, 2 ) = 0.6 * w_tgt;
+    for ( int i = 2; i < N_EVAL; i++ )
+        for ( int d = 0; d < 3; d++ )
+            h_x( i, d ) = tgt_dist( gen );
+    Kokkos::deep_copy( d_x, h_x );
+
+    Kokkos::View<double*, TEST_MEMSPACE> d_sx( "sx", N_SOURCES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sy( "sy", N_SOURCES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sz( "sz", N_SOURCES );
+    Kokkos::View<double*, TEST_MEMSPACE> d_sq( "sq", N_SOURCES );
+    {
+        auto h_sx = Kokkos::create_mirror_view( d_sx );
+        auto h_sy = Kokkos::create_mirror_view( d_sy );
+        auto h_sz = Kokkos::create_mirror_view( d_sz );
+        auto h_sq = Kokkos::create_mirror_view( d_sq );
+        for ( int i = 0; i < N_SOURCES; i++ )
+        {
+            h_sx( i ) = sx[i];
+            h_sy( i ) = sy[i];
+            h_sz( i ) = sz[i];
+            h_sq( i ) = sq[i];
+        }
+        Kokkos::deep_copy( d_sx, h_sx );
+        Kokkos::deep_copy( d_sy, h_sy );
+        Kokkos::deep_copy( d_sz, h_sz );
+        Kokkos::deep_copy( d_sq, h_sq );
+    }
+
+    CoeffView3D M( "M", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( M, complex( 0.0, 0.0 ) );
+    Kokkos::parallel_for(
+        "P2M", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, N_SOURCES ),
+        KOKKOS_LAMBDA( int p ) {
+            double charges[1] = { d_sq( p ) };
+            auto M_out = Kokkos::subview( M, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::p2m_contribution( charges, d_sx( p ), d_sy( p ), d_sz( p ),
+                                      w_src, M_out );
+        } );
+    Kokkos::fence();
+
+    auto aux = make_aux( 2 * P_ORDER );
+    CoeffView3D L( "L", 1, Kernel::num_coeffs_per_cell, 1 );
+    Kokkos::deep_copy( L, complex( 0.0, 0.0 ) );
+    using team_policy = Kokkos::TeamPolicy<TEST_EXECSPACE>;
+    Kokkos::parallel_for(
+        "M2L", team_policy( 1, Kokkos::AUTO ),
+        KOKKOS_LAMBDA( const typename team_policy::member_type& team ) {
+            auto L_out = Kokkos::subview( L, 0, Kokkos::ALL, Kokkos::ALL );
+            Kernel::m2l_translate( team, M, 0, -tx, -ty, -tz, w_src, w_tgt,
+                                   aux, L_out );
+        } );
+    Kokkos::fence();
+
+    Kokkos::View<double** [3], TEST_MEMSPACE> d_grad( "grad", N_EVAL, 1 );
+    Kokkos::View<double* [3], TEST_MEMSPACE> d_grad_fd( "grad_fd", N_EVAL );
+    Kokkos::View<double* [3], TEST_MEMSPACE> d_grad_fd4( "grad_fd4", N_EVAL );
+    Kokkos::parallel_for(
+        "L2P_grad", Kokkos::RangePolicy<TEST_EXECSPACE>( 0, N_EVAL ),
+        KOKKOS_LAMBDA( int i ) {
+            double phi_out[1];
+            auto g = Kokkos::subview( d_grad, i, Kokkos::ALL, Kokkos::ALL );
+            Kernel::l2p_evaluate( L, 0, d_x( i, 0 ), d_x( i, 1 ), d_x( i, 2 ),
+                                  w_tgt, phi_out, g, true );
+
+            // phi at x + k h e_d.
+            auto phi_at = [&]( int d, double k, double h )
+            {
+                double x[3] = { d_x( i, 0 ), d_x( i, 1 ), d_x( i, 2 ) };
+                x[d] += k * h;
+                double phi[1];
+                Kernel::l2p_evaluate( L, 0, x[0], x[1], x[2], w_tgt, phi, g,
+                                      false );
+                return phi[0];
+            };
+            const double h2 = 1.0e-5 * w_tgt;
+            const double h4 = 1.0e-3 * w_tgt;
+            for ( int d = 0; d < 3; d++ )
+            {
+                d_grad_fd( i, d ) =
+                    ( phi_at( d, 1.0, h2 ) - phi_at( d, -1.0, h2 ) ) /
+                    ( 2.0 * h2 );
+                d_grad_fd4( i, d ) =
+                    ( -phi_at( d, 2.0, h4 ) + 8.0 * phi_at( d, 1.0, h4 ) -
+                      8.0 * phi_at( d, -1.0, h4 ) + phi_at( d, -2.0, h4 ) ) /
+                    ( 12.0 * h4 );
+            }
+        } );
+    Kokkos::fence();
+
+    auto h_grad =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_grad );
+    auto h_grad_fd =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_grad_fd );
+    auto h_grad_fd4 =
+        Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(), d_grad_fd4 );
+
+    // Relative errors, inf-norm of the difference over the 2-norm of the
+    // direct-sum gradient at that point.
+    const double FD4_TOL = 1.0e-8;
+    double max_an_fd = 0.0, max_an_fd4 = 0.0, max_fd_fd4 = 0.0;
+    double max_an_direct = 0.0;
+    for ( int i = 0; i < N_EVAL; i++ )
+    {
+        double g_dir[3] = { 0.0, 0.0, 0.0 };
+        for ( int s_i = 0; s_i < N_SOURCES; s_i++ )
+        {
+            const double r[3] = { tx + h_x( i, 0 ) - sx[s_i],
+                                  ty + h_x( i, 1 ) - sy[s_i],
+                                  tz + h_x( i, 2 ) - sz[s_i] };
+            const double r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+            const double inv_r3 = 1.0 / ( r2 * std::sqrt( r2 ) );
+            for ( int d = 0; d < 3; d++ )
+                g_dir[d] -= sq[s_i] * r[d] * inv_r3;
+        }
+        const double g_mag = std::sqrt( g_dir[0] * g_dir[0] +
+                                        g_dir[1] * g_dir[1] +
+                                        g_dir[2] * g_dir[2] );
+        double an_fd = 0.0, an_fd4 = 0.0, fd_fd4 = 0.0, an_dir = 0.0;
+        for ( int d = 0; d < 3; d++ )
+        {
+            const double an = h_grad( i, 0, d );
+            an_fd = std::fmax( an_fd, std::abs( an - h_grad_fd( i, d ) ) );
+            an_fd4 = std::fmax( an_fd4, std::abs( an - h_grad_fd4( i, d ) ) );
+            fd_fd4 = std::fmax(
+                fd_fd4, std::abs( h_grad_fd( i, d ) - h_grad_fd4( i, d ) ) );
+            an_dir = std::fmax( an_dir, std::abs( an - g_dir[d] ) );
+        }
+        an_fd /= g_mag;
+        an_fd4 /= g_mag;
+        fd_fd4 /= g_mag;
+        EXPECT_LT( an_fd4, FD4_TOL )
+            << "analytic vs fourth-order FD gradient, point " << i;
+        EXPECT_LE( an_fd, fd_fd4 + FD4_TOL )
+            << "analytic gradient farther from fd2 than fd2's own error, "
+               "point "
+            << i;
+        max_an_fd = std::fmax( max_an_fd, an_fd );
+        max_an_fd4 = std::fmax( max_an_fd4, an_fd4 );
+        max_fd_fd4 = std::fmax( max_fd_fd4, fd_fd4 );
+        max_an_direct = std::fmax( max_an_direct, an_dir / g_mag );
+    }
+    std::printf( "[laplace-kernel] testL2PGradientAnalyticVsFD over %d points, "
+                 "max rel: |an - fd4| = %.6e, |an - fd2| = %.6e, "
+                 "|fd2 - fd4| = %.6e, |an - direct| = %.6e\n",
+                 N_EVAL, max_an_fd4, max_an_fd, max_fd_fd4, max_an_direct );
+}
+TEST( LaplaceKernel, testL2PGradientAnalyticVsFD )
+{
+    testL2PGradientAnalyticVsFD();
+}
 
 //---------------------------------------------------------------------------//
 
