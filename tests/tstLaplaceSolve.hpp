@@ -2349,6 +2349,153 @@ void testM2LFallbackReasonBreakdown()
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// The run-time reporting switch (Canopy::Profiling::set_reporting). With it
+// off, one setup() and one solve() must print no "[Canopy Diagnostics]"
+// table and no "[Canopy diag]" line on any rank, while the timers keep
+// accumulating into timer_totals(). Same particle set as with_laplace_solve,
+// but a single solve and no time loop: the case is about output, not the
+// field. The flag is restored on every exit path, because every later case
+// in this binary expects the default (on).
+// ---------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace>
+void testReportingSwitch()
+{
+#ifndef CANOPY_ENABLE_PROFILING
+    // Without profiling the switch exists and does nothing.
+    Canopy::Profiling::set_reporting( true );
+    EXPECT_FALSE( Canopy::Profiling::reporting_enabled() );
+#else
+    constexpr int P = LS_P;
+    using Scalar = double;
+    using DataTypes = Cabana::MemberTypes<Scalar[3], Scalar[1], Scalar[3],
+                                          int>;
+    using AoSoA_t = Cabana::AoSoA<DataTypes, MemorySpace>;
+    using AoSoA_ht = Cabana::AoSoA<DataTypes, Kokkos::HostSpace>;
+    using Solver_t =
+        Canopy::Solver<MemorySpace, ExecutionSpace, Scalar, P, LS_NCOMPS>;
+
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+
+    ASSERT_TRUE( Canopy::Profiling::reporting_enabled() )
+        << "the reporting switch must default to on";
+
+    struct RestoreReporting
+    {
+        ~RestoreReporting() { Canopy::Profiling::set_reporting( true ); }
+    } restore;
+
+    const int n_total = LS_NUM_PARTICLES;
+    const int i_begin = rank * n_total / nprocs;
+    const int i_end = ( rank + 1 ) * n_total / nprocs;
+    const int n_local = i_end - i_begin;
+
+    AoSoA_ht particles_h( "particles_h", n_local );
+    {
+        std::mt19937 gen( 1234 + P );
+        std::uniform_real_distribution<double> pos_dist( 0.05, 0.95 );
+        std::uniform_real_distribution<double> q_dist( 0.5, 1.5 );
+        auto hp = Cabana::slice<Position>( particles_h );
+        auto hq = Cabana::slice<Charge>( particles_h );
+        auto hv = Cabana::slice<Velocity>( particles_h );
+        auto hid = Cabana::slice<GlobalId>( particles_h );
+        for ( int g = 0; g < n_total; g++ )
+        {
+            const double x = pos_dist( gen );
+            const double y = pos_dist( gen );
+            const double z = pos_dist( gen );
+            const double q = q_dist( gen );
+            if ( g < i_begin || g >= i_end )
+                continue;
+            const int i = g - i_begin;
+            hp( i, 0 ) = x;
+            hp( i, 1 ) = y;
+            hp( i, 2 ) = z;
+            hq( i, 0 ) = q;
+            hv( i, 0 ) = hv( i, 1 ) = hv( i, 2 ) = 0.0;
+            hid( i ) = g;
+        }
+    }
+    AoSoA_t particles( "particles", n_local );
+    Cabana::deep_copy( particles, particles_h );
+
+    Canopy::FmmConfig cfg;
+    cfg.ncrit = LS_NCRIT;
+    cfg.max_depth = LS_MAX_DEPTH;
+    cfg.xmin_tol = cfg.xmax_tol = 0.1;
+    cfg.ymin_tol = cfg.ymax_tol = 0.1;
+    cfg.zmin_tol = cfg.zmax_tol = 0.1;
+    cfg.ncrit_tol = 0.1;
+    cfg.replication_depth = 2;
+    cfg.imbalance_tolerance = 0.05;
+    cfg.mac_theta = LS_MAC_THETA;
+    cfg.softening = 0.0;
+
+    // Collective precondition: every rank turns it off before any Canopy
+    // collective runs.
+    Canopy::Profiling::set_reporting( false );
+    Canopy::Profiling::reset_timer_totals();
+
+    std::fflush( stdout );
+    std::fflush( stderr );
+    ::testing::internal::CaptureStdout();
+    ::testing::internal::CaptureStderr();
+    {
+        Solver_t solver( MPI_COMM_WORLD, cfg );
+        solver.template setup<Position, Charge>( particles, n_local );
+        solver.template solve<Position, Charge>( particles,
+                                                 /*compute_gradient=*/true );
+    }
+    std::fflush( stdout );
+    std::fflush( stderr );
+    const std::string out = ::testing::internal::GetCapturedStdout();
+    const std::string err = ::testing::internal::GetCapturedStderr();
+
+    const auto count = []( const std::string& s, const char* needle )
+    {
+        int n = 0;
+        for ( auto pos = s.find( needle ); pos != std::string::npos;
+              pos = s.find( needle, pos + 1 ) )
+            ++n;
+        return n;
+    };
+    const int n_diagnostics = count( out, "[Canopy Diagnostics]" ) +
+                              count( err, "[Canopy Diagnostics]" );
+    const int n_diag = count( out, "[Canopy diag]" ) +
+                       count( err, "[Canopy diag]" );
+
+    const auto& totals = Canopy::Profiling::timer_totals();
+    const auto it = totals.find( Canopy::Profiling::TIMER_DOWNWARD_TOTAL );
+    const bool has_downward = ( it != totals.end() );
+    const double t_downward = has_downward ? it->second : -1.0;
+
+    // Echoed after the capture ends, so ctest -V shows it.
+    std::printf( "[laplace-solve] nprocs=%d rank=%d reporting_switch "
+                 "captured_bytes=%zu canopy_diagnostics_lines=%d "
+                 "canopy_diag_lines=%d downward_total=%.6g\n",
+                 nprocs, rank, out.size() + err.size(), n_diagnostics, n_diag,
+                 t_downward );
+    std::fflush( stdout );
+
+    EXPECT_EQ( n_diagnostics, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " reporting off must print no [Canopy Diagnostics] line; captured "
+           "stdout:\n"
+        << out;
+    EXPECT_EQ( n_diag, 0 )
+        << "np=" << nprocs << " rank=" << rank
+        << " reporting off must print no [Canopy diag] line; captured "
+           "stderr:\n"
+        << err;
+    EXPECT_TRUE( has_downward )
+        << "np=" << nprocs << " rank=" << rank
+        << " timer_totals() must still gain downward_total with reporting off";
+    EXPECT_GT( t_downward, 0.0 ) << "np=" << nprocs << " rank=" << rank;
+#endif
+}
+
 } // namespace LaplaceSolveTest
 
 //---------------------------------------------------------------------------//
@@ -2416,6 +2563,13 @@ TEST( LaplaceSolve, m2lFallbackReasonBreakdown )
 {
     LaplaceSolveTest::testM2LFallbackReasonBreakdown<TEST_MEMSPACE,
                                                      TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+
+TEST( LaplaceSolve, reportingSwitch )
+{
+    LaplaceSolveTest::testReportingSwitch<TEST_MEMSPACE, TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//

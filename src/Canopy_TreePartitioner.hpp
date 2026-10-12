@@ -12,6 +12,7 @@
 #ifndef CANOPY_TREE_PARTITIONER_HPP
 #define CANOPY_TREE_PARTITIONER_HPP
 
+#include <Canopy_Profiling.hpp>
 #include <Canopy_RegisteredBufferPool.hpp>
 #include <Canopy_TreeBuilder.hpp>
 
@@ -634,7 +635,7 @@ TreePartitioner<MemorySpace, ExecutionSpace>::partition_cells(
         result[cells[vtx[m_of_gid[g]]].key] = all_parts[g];
 
 #if defined( CANOPY_ENABLE_PROFILING )
-    if ( _rank == 0 )
+    if ( _rank == 0 && Profiling::reporting_enabled() )
     {
         // Per-constraint max/mean, the non-shared parent-child cut fraction
         // against the vote rule on the same leaf assignment, and the number

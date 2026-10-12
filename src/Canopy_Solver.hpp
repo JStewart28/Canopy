@@ -458,7 +458,8 @@ class Solver
                 {
                     int _diag_rank = 0;
                     MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
-                    if ( _diag_rank == 0 )
+                    if ( _diag_rank == 0 &&
+                         Profiling::reporting_enabled() )
                         std::fprintf(
                             stderr,
                             "[Canopy diag] auto_maintain k_changed=NA "
@@ -511,7 +512,7 @@ class Solver
             {
                 int _diag_rank = 0;
                 MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
-                if ( _diag_rank == 0 )
+                if ( _diag_rank == 0 && Profiling::reporting_enabled() )
                     std::fprintf(
                         stderr,
                         "[Canopy diag] auto_maintain k_changed=%zu "
@@ -533,7 +534,7 @@ class Solver
         {
             int _diag_rank = 0;
             MPI_Comm_rank( MPI_COMM_WORLD, &_diag_rank );
-            if ( _diag_rank == 0 )
+            if ( _diag_rank == 0 && Profiling::reporting_enabled() )
                 std::fprintf(
                     stderr,
                     "[Canopy diag] auto_maintain k_changed=%zu "

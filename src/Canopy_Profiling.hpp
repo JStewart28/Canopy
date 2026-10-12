@@ -34,6 +34,43 @@
 #  endif
 #endif
 
+namespace Canopy
+{
+namespace Profiling
+{
+
+// ---------------------------------------------------------------------------
+// Run-time reporting switch. When off, every print_* table, the
+// "[Canopy diag]" maintenance and partition lines, and the per-rank M2L
+// operator-table line are suppressed; timers still accumulate into
+// timer_registry() and timer_totals(). Default on.
+//
+// PRECONDITION: set identically on every rank of every communicator Canopy
+// uses. The print_* functions are collectives (MPI_Reduce); turning them off
+// on some ranks only deadlocks the rest. A mismatch is not detected.
+//
+// Without CANOPY_ENABLE_PROFILING both functions exist and do nothing:
+// set_reporting() is ignored and reporting_enabled() is false.
+// ---------------------------------------------------------------------------
+#ifdef CANOPY_ENABLE_PROFILING
+inline bool& reporting_flag()
+{
+    static bool s_on = true;
+    return s_on;
+}
+
+inline bool reporting_enabled() { return reporting_flag(); }
+
+inline void set_reporting( bool on ) { reporting_flag() = on; }
+#else
+inline bool reporting_enabled() { return false; }
+
+inline void set_reporting( bool ) {}
+#endif
+
+} // namespace Profiling
+} // namespace Canopy
+
 #ifdef CANOPY_ENABLE_PROFILING
 
 #include <Kokkos_Core.hpp>
@@ -330,6 +367,9 @@ inline std::vector<PhaseEntry> rebalance_phase_entries()
 inline void print_solve_breakdown( MPI_Comm comm,
                                    double t_up, double t_dn, double t_p2p )
 {
+    if ( !reporting_enabled() )
+        return;
+
     int rank, nprocs;
     MPI_Comm_rank( comm, &rank );
     MPI_Comm_size( comm, &nprocs );
@@ -377,7 +417,8 @@ inline void print_solve_breakdown( MPI_Comm comm,
 //
 // Gathers per-rank timing data via three MPI_Reduce calls (MIN, MAX, SUM)
 // to rank 0. Only rank 0 prints the formatted table. Other ranks return
-// immediately after the reduce, so this is a collective call.
+// immediately after the reduce, so this is a collective call. With reporting
+// off it returns before the reduce, on every rank.
 //
 // Parameters:
 //   comm         - MPI communicator (same one used for the solve)
@@ -387,6 +428,9 @@ inline void print_solve_breakdown( MPI_Comm comm,
 inline void print_timing_table( MPI_Comm comm, const char* section_name,
                                  const std::vector<PhaseEntry>& phases )
 {
+    if ( !reporting_enabled() )
+        return;
+
     int rank, nprocs;
     MPI_Comm_rank( comm, &rank );
     MPI_Comm_size( comm, &nprocs );

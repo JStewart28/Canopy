@@ -2000,24 +2000,27 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // pairs that took the per-pair fallback, in PAIRS; they sum to
     // total_fallback_pair_count() exactly, and fb_dropped (which must be 0)
     // is the refused pairs that reached neither table.
-    std::printf( "[Canopy Diagnostics] M2L operator table: rank %d "
-                 "n_unique_ops=%d n_demanded_ops=%d demand_saturated=%d "
-                 "fb_range_guard=%lld fb_count_cap=%lld fb_dropped=%lld "
-                 "bytes_per_key=%zu table_bytes=%zu "
-                 "effective_cap=%d count_cap=%d byte_budget=%zu "
-                 "key_needs_level=%d\n",
-                 _rank, n_unique_ops, _m2l_demanded_op_count,
-                 _m2l_demand_saturated ? 1 : 0,
-                 _m2l_fallback_pairs_range_guard,
-                 _m2l_fallback_pairs_count_cap,
-                 _m2l_fallback_pairs_depth_dropped,
-                 static_cast<std::size_t>( KernelType::bytes_per_key ),
-                 static_cast<std::size_t>( n_unique_ops ) *
-                     KernelType::bytes_per_key,
-                 effective_op_cap, _m2l_op_count_cap,
-                 _m2l_op_table_byte_budget,
-                 KernelType::key_needs_level ? 1 : 0 );
-    std::fflush( stdout );
+    if ( Profiling::reporting_enabled() )
+    {
+        std::printf( "[Canopy Diagnostics] M2L operator table: rank %d "
+                     "n_unique_ops=%d n_demanded_ops=%d demand_saturated=%d "
+                     "fb_range_guard=%lld fb_count_cap=%lld fb_dropped=%lld "
+                     "bytes_per_key=%zu table_bytes=%zu "
+                     "effective_cap=%d count_cap=%d byte_budget=%zu "
+                     "key_needs_level=%d\n",
+                     _rank, n_unique_ops, _m2l_demanded_op_count,
+                     _m2l_demand_saturated ? 1 : 0,
+                     _m2l_fallback_pairs_range_guard,
+                     _m2l_fallback_pairs_count_cap,
+                     _m2l_fallback_pairs_depth_dropped,
+                     static_cast<std::size_t>( KernelType::bytes_per_key ),
+                     static_cast<std::size_t>( n_unique_ops ) *
+                         KernelType::bytes_per_key,
+                     effective_op_cap, _m2l_op_count_cap,
+                     _m2l_op_table_byte_budget,
+                     KernelType::key_needs_level ? 1 : 0 );
+        std::fflush( stdout );
+    }
 #endif
 
     // Retain the realized key list past the end of this function as a

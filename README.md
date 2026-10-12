@@ -247,6 +247,35 @@ docs provide ready-made batch wrappers, e.g.
 [`scripts/tuolumne/run_ctest_minset.flux`](scripts/tuolumne/run_ctest_minset.flux)
 and [`scripts/dane/run_ctest_minset.slurm`](scripts/dane/run_ctest_minset.slurm)).
 
+### Profiling
+
+`-DCanopy_ENABLE_PROFILING=ON` compiles the phase timers in;
+`-DCanopy_PROFILING_LEVEL` picks their detail (1 = top-level phases, the default
+when only the option is given; 2 adds the interaction-list, operator-table
+build and comm-plan sub-phases; 3 is reserved). The spack package exposes the
+same pair as `+profiling` and `profiling_level=`. Both reach consumers through
+the exported `Canopy` target, so a downstream build compiles the level Canopy
+was configured with.
+
+Timers accumulate into `Canopy::Profiling::timer_registry()`, which each sweep
+resets, and `timer_totals()`, which only `reset_timer_totals()` clears. By
+default a profiling build also prints, on every `setup()`, `solve()`,
+`migrate()` and `rebalance()`, Min/Max/Mean tables each behind an `MPI_Reduce`,
+plus the `[Canopy diag]` maintenance and partition lines and one per-rank
+`[Canopy Diagnostics] M2L operator table` line per tree build. A caller that
+reads the timers itself can turn that output off at run time:
+
+```c++
+Canopy::Profiling::set_reporting( false ); // every rank, identically
+// ... setup / solve / auto_maintain ...
+const auto& t = Canopy::Profiling::timer_totals(); // still accumulated
+```
+
+`set_reporting` must be called identically on every rank: the tables are
+collectives, and a rank that skips one while the others print deadlocks. In a
+build without profiling both `set_reporting` and `reporting_enabled` exist and
+do nothing (`reporting_enabled()` returns `false`), so callers need no `#ifdef`.
+
 ## Algorithm and Design Documentation
 
 The algorithms used in Canopy — for example the load-balancing approach, a
