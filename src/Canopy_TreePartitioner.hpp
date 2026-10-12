@@ -1198,7 +1198,7 @@ void TreePartitioner<MemorySpace, ExecutionSpace>::
     derive_internal_ownership( cells, owners );
 
 #if defined( CANOPY_ENABLE_PROFILING )
-    if ( _rank == 0 )
+    if ( _rank == 0 && Profiling::reporting_enabled() )
     {
         // Non-shared cells of the current tree that are absent from the
         // partitioned assignment and so fell back to a vote (R9).

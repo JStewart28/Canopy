@@ -1258,7 +1258,7 @@ void P2P<MemorySpace, ExecutionSpace, KernelType>::execute(
                         MPI_SUM, 0, _comm );
             int diag_rank = 0;
             MPI_Comm_rank( _comm, &diag_rank );
-            if ( diag_rank == 0 )
+            if ( diag_rank == 0 && Profiling::reporting_enabled() )
                 std::fprintf( stderr,
                               "[Canopy diag] p2p_inter_leaf_pairs=%lld\n",
                               global_pairs );
