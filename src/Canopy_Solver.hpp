@@ -125,6 +125,14 @@ struct FmmConfig
     // which can add one level at the top of the tree.
     bool quantize_root_half_width = false;
 
+    // Assemble each tree's M2L operator table on the device: keep a device
+    // copy of the operator cache, upload only newly built columns, and gather
+    // the table there by column index. Off copies every column into a host
+    // mirror and uploads the whole table at every interaction-list build.
+    // The table is bit-identical either way; this selects cost only. See
+    // DownwardSweep::set_device_op_table_assembly().
+    bool device_op_table_assembly = true;
+
     // Balance the tree at the end of every tree build: refine any leaf more
     // than this many levels shallower than a leaf it touches (by a face, an
     // edge or a corner), to a fixed point. In levels, >= 1; 1 is the 2:1
@@ -235,6 +243,9 @@ class Solver
         // Column-count cap for the same table, routed here for the same
         // reason. Throws on a negative value rather than clamping it.
         _downward.set_m2l_op_count_cap( cfg.m2l_op_count_cap );
+
+        // How the per-tree operator table is assembled; routed the same way.
+        _downward.set_device_op_table_assembly( cfg.device_op_table_assembly );
 
         // Explicit softening (including an explicit 0 for an unsoftened run):
         // apply it now. A negative value defers to the distribution-based

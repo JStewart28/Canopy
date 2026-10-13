@@ -360,6 +360,29 @@ class DownwardSweep
 
     int m2l_op_count_cap() const { return _m2l_op_count_cap; }
 
+    // -----------------------------------------------------------------------
+    // set_device_op_table_assembly()
+    //
+    // How stage 4b assembles each tree's operator table from the persistent
+    // cache. On (the default): the cache keeps a copy in memory_space, only
+    // the columns built since the last assembly are uploaded to it, and the
+    // table is gathered there by column index. Off: every column is copied
+    // into a host mirror and the whole table is uploaded, on every build.
+    //
+    // Both produce the same table bit for bit — each is a copy of the basis's
+    // own element type — so this selects cost, not answers. Changing it
+    // neither dirties the interaction list nor empties the cache.
+    //
+    // Where execution_space can read HostSpace (a host backend), "on"
+    // gathers straight from the host cache and keeps no second copy.
+    // -----------------------------------------------------------------------
+    void set_device_op_table_assembly( bool on )
+    {
+        _device_op_table_assembly = on;
+    }
+
+    bool device_op_table_assembly() const { return _device_op_table_assembly; }
+
     // The operator-column cap actually in force: the byte budget's worth of
     // columns, floored by the configured count cap (M2L_OP_COUNT_CAP unless
     // set_m2l_op_count_cap() moved it). bytes_per_key is the basis's and is
@@ -489,6 +512,11 @@ class DownwardSweep
         _m2l_op_cache_index.clear();
         _m2l_op_cache_size = 0;
         _m2l_op_cache = m2l_host_operators_type();
+        // The device copy goes with it: its columns are positions in the
+        // cache just dropped, and the refill reuses those positions for
+        // other keys.
+        _m2l_op_cache_device = m2l_operators_type();
+        _m2l_op_cache_device_size = 0;
     }
 
     // Number of times build_interaction_list_device has actually performed
@@ -692,9 +720,10 @@ class DownwardSweep
     // The same operator set in Kokkos::HostSpace. The persistent cache below
     // lives here rather than in memory_space: it is filled by
     // KernelType::build_m2l_operators, which is a host function by contract
-    // (it may call LAPACK), and the per-tree table is assembled from it into
-    // the device table's host mirror. On a host backend the two spaces
-    // coincide and the assembly is a host-to-host copy.
+    // (it may call LAPACK). The per-tree table is gathered from its copy in
+    // memory_space, or from the host cache itself on a host backend, or with
+    // set_device_op_table_assembly( false ) assembled in the table's host
+    // mirror and uploaded whole.
     using m2l_host_operators_type =
         typename KernelType::template m2l_operators_type<Kokkos::HostSpace>;
 
@@ -747,6 +776,21 @@ class DownwardSweep
     // Columns of _m2l_op_cache actually in use. Its allocated extent(2) may
     // be larger (geometric growth) and is never smaller.
     int _m2l_op_cache_size = 0;
+
+    // The cache's copy in memory_space, for set_device_op_table_assembly().
+    // Same extents as _m2l_op_cache once allocated; its first
+    // _m2l_op_cache_device_size columns equal the host cache's bit for bit.
+    // Cached columns never move or change while the cache lives, so keeping
+    // it current means uploading [_m2l_op_cache_device_size,
+    // _m2l_op_cache_size). Emptied by clear_m2l_op_cache() and grown by
+    // _grow_m2l_op_cache() with the host cache; never allocated on a backend
+    // whose execution space reads HostSpace.
+    m2l_operators_type _m2l_op_cache_device;
+    int _m2l_op_cache_device_size = 0;
+
+    // set_device_op_table_assembly(). FmmConfig::device_op_table_assembly
+    // has the same default.
+    bool _device_op_table_assembly = true;
 
     // Cumulative count of keys handed to KernelType::build_m2l_operators over
     // the life of this sweep, i.e. cache misses. Surfaced by
@@ -992,7 +1036,91 @@ class DownwardSweep
             Kokkos::deep_copy( dst, src );
         }
         _m2l_op_cache = grown;
+
+        // The device copy, if there is one, grows with it so the two keep the
+        // same extents and its uploaded prefix survives.
+        if ( _m2l_op_cache_device.extent( 2 ) > 0 )
+        {
+            m2l_operators_type grown_d(
+                Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                    "m2l_op_cache_device" ),
+                Nt, Ns, new_cap );
+            if ( _m2l_op_cache_device_size > 0 )
+            {
+                const auto prefix =
+                    Kokkos::make_pair( 0, _m2l_op_cache_device_size );
+                Kokkos::deep_copy(
+                    Kokkos::subview( grown_d, Kokkos::ALL, Kokkos::ALL,
+                                     prefix ),
+                    Kokkos::subview( _m2l_op_cache_device, Kokkos::ALL,
+                                     Kokkos::ALL, prefix ) );
+            }
+            _m2l_op_cache_device = grown_d;
+        }
     }
+
+    // Upload the host cache's columns that the device copy lacks, allocating
+    // the copy if there is none (first use, or after a clear). A copy whose
+    // extents or size disagree with the host cache missed a clear or a
+    // growth, and its columns are stale: refuse rather than re-upload, so a
+    // lifecycle slip fails loudly instead of being masked.
+    void _sync_m2l_op_cache_device()
+    {
+        if ( _m2l_op_cache_device.extent( 2 ) == 0 )
+        {
+            _m2l_op_cache_device = m2l_operators_type(
+                Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                    "m2l_op_cache_device" ),
+                _m2l_op_cache.extent( 0 ), _m2l_op_cache.extent( 1 ),
+                _m2l_op_cache.extent( 2 ) );
+            _m2l_op_cache_device_size = 0;
+        }
+        else if ( _m2l_op_cache_device.extent( 0 ) !=
+                      _m2l_op_cache.extent( 0 ) ||
+                  _m2l_op_cache_device.extent( 1 ) !=
+                      _m2l_op_cache.extent( 1 ) ||
+                  _m2l_op_cache_device.extent( 2 ) !=
+                      _m2l_op_cache.extent( 2 ) ||
+                  _m2l_op_cache_device_size > _m2l_op_cache_size )
+            throw std::logic_error(
+                "Canopy::DownwardSweep: the device copy of the M2L operator "
+                "cache is out of step with the host cache (a clear or a "
+                "growth did not reach it)" );
+        if ( _m2l_op_cache_device_size < _m2l_op_cache_size )
+        {
+            // Contiguous column ranges of two LayoutLeft views of one shape,
+            // so this is a single host-to-device copy.
+            const auto fresh = Kokkos::make_pair( _m2l_op_cache_device_size,
+                                                  _m2l_op_cache_size );
+            Kokkos::deep_copy(
+                Kokkos::subview( _m2l_op_cache_device, Kokkos::ALL,
+                                 Kokkos::ALL, fresh ),
+                Kokkos::subview( _m2l_op_cache, Kokkos::ALL, Kokkos::ALL,
+                                 fresh ) );
+            _m2l_op_cache_device_size = _m2l_op_cache_size;
+        }
+    }
+
+    // Stage 4b's gather: table(:, :, op_idx) = cache(:, :, src_col(op_idx)),
+    // one element per index with t fastest, matching LayoutLeft. A functor
+    // rather than a lambda so one definition serves the host cache and its
+    // device copy.
+    template <class CacheView>
+    struct M2LOpTableGather
+    {
+        CacheView cache;
+        m2l_operators_type table;
+        Kokkos::View<const int*, memory_space> src_col;
+        long Nt;
+        long Ns;
+
+        KOKKOS_INLINE_FUNCTION void operator()( const long i ) const
+        {
+            const long rest = i / Nt;
+            table( i % Nt, rest % Ns, rest / Ns ) =
+                cache( i % Nt, rest % Ns, src_col( rest / Ns ) );
+        }
+    };
 
   public:
     void build_interaction_list_device(
@@ -2031,7 +2159,7 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
     // -----------------------------------------------------------------------
     // Stage 4: fill the persistent operator cache with the canonical keys it
     // lacks, then assemble this tree's (Nt, Ns, n_unique_ops) table out of it
-    // and deep_copy that to device.
+    // in memory_space (see set_device_op_table_assembly).
     //
     // TWO STRUCTURES, TWO LIFETIMES, and keeping them apart is the whole of
     // this stage. The cache (_m2l_op_cache, keyed by canonical M2LKey) is
@@ -2147,9 +2275,56 @@ void DownwardSweep<MemorySpace, ExecutionSpace, KernelType>::
         m2l_operators_type op_table(
             Kokkos::view_alloc( Kokkos::WithoutInitializing, "m2l_op_table" ),
             Nt, Ns, n_unique_ops > 0 ? n_unique_ops : 1 );
-        auto h_op = Kokkos::create_mirror_view( op_table );
 
+        if ( _device_op_table_assembly )
         {
+            CANOPY_SCOPED_TIMER_DETAILED(
+                Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_COPY );
+            if ( n_unique_ops > 0 )
+            {
+                // Each column's cache position, looked up by key every build:
+                // ops[] is stage 3's hash-map merge order, which can differ
+                // between builds of the same key set.
+                Kokkos::View<int*, memory_space> src_col(
+                    Kokkos::view_alloc( Kokkos::WithoutInitializing,
+                                        "m2l_op_src_col" ),
+                    n_unique_ops );
+                auto h_src_col = Kokkos::create_mirror_view( src_col );
+                for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )
+                    h_src_col( op_idx ) =
+                        _m2l_op_cache_index.at( ops[op_idx] );
+                Kokkos::deep_copy( src_col, h_src_col );
+
+                const long n_elem = static_cast<long>( Nt ) * Ns *
+                                    static_cast<long>( n_unique_ops );
+                const Kokkos::RangePolicy<execution_space,
+                                          Kokkos::IndexType<long>>
+                    policy( 0, n_elem );
+                if constexpr ( Kokkos::SpaceAccessibility<
+                                   execution_space,
+                                   Kokkos::HostSpace>::accessible )
+                {
+                    Kokkos::parallel_for(
+                        "m2l_op_table_gather", policy,
+                        M2LOpTableGather<m2l_host_operators_type>{
+                            _m2l_op_cache, op_table, src_col, Nt, Ns } );
+                }
+                else
+                {
+                    _sync_m2l_op_cache_device();
+                    Kokkos::parallel_for(
+                        "m2l_op_table_gather", policy,
+                        M2LOpTableGather<m2l_operators_type>{
+                            _m2l_op_cache_device, op_table, src_col, Nt,
+                            Ns } );
+                }
+                execution_space().fence();
+            }
+        }
+        else
+        {
+            auto h_op = Kokkos::create_mirror_view( op_table );
+
             CANOPY_SCOPED_TIMER_DETAILED(
                 Canopy::Profiling::TIMER_ILIST_S4_OP_TABLE_COPY );
             for ( int op_idx = 0; op_idx < n_unique_ops; op_idx++ )

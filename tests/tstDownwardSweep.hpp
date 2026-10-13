@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <random>
 #include <set>
@@ -1350,6 +1351,134 @@ TEST( DownwardSweepCaching, rebuildsAfterInvalidate )
 {
     DownwardSweepTest::testRebuildsAfterInvalidate<TEST_MEMSPACE,
                                                    TEST_EXECSPACE>();
+}
+
+//---------------------------------------------------------------------------//
+// DownwardSweepCaching.deviceOpTableAssemblyBitwise: the operator table
+// assembled with set_device_op_table_assembly( true ) is bitwise equal to the
+// host-assembled one through the cache's whole lifecycle — a first fill, a
+// growth (_grow_m2l_op_cache), a rebuild that realizes no new key, an explicit
+// clear_m2l_op_cache(), and the cap-overflow clear. A device column that
+// missed a clear or a growth gives a plausible field, so the guard is this
+// comparison, not a field tolerance. On a host backend the device path
+// gathers from the host cache and holds no copy; the comparison still holds.
+//---------------------------------------------------------------------------//
+
+namespace DownwardSweepTest
+{
+// Columns of device_path's table that are not bitwise equal to host_path's
+// column for the same key, or whose key host_path lacks. Columns are matched
+// by key: each table's order is its own build's merge order.
+template <class DS>
+int countOpTableMismatches( const DS& host_path, const DS& device_path )
+{
+    const auto& keys_h = host_path.m2l_realized_keys();
+    const auto& keys_d = device_path.m2l_realized_keys();
+    EXPECT_EQ( keys_h.size(), keys_d.size() );
+
+    auto h = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                  host_path.m2l_op_table() );
+    auto d = Kokkos::create_mirror_view_and_copy( Kokkos::HostSpace(),
+                                                  device_path.m2l_op_table() );
+    EXPECT_EQ( h.extent( 0 ), d.extent( 0 ) );
+    EXPECT_EQ( h.extent( 1 ), d.extent( 1 ) );
+    EXPECT_EQ( h.extent( 2 ), d.extent( 2 ) );
+
+    std::map<std::array<int, 5>, std::size_t> col_h;
+    for ( std::size_t j = 0; j < keys_h.size(); j++ )
+    {
+        const auto& k = keys_h[j];
+        col_h[{ k.max_d, k.dd, k.ii, k.jj, k.kk }] = j;
+    }
+
+    const std::size_t col_bytes =
+        h.extent( 0 ) * h.extent( 1 ) *
+        sizeof( typename decltype( h )::value_type );
+    int bad = 0;
+    for ( std::size_t j = 0; j < keys_d.size(); j++ )
+    {
+        const auto& k = keys_d[j];
+        const auto it = col_h.find( { k.max_d, k.dd, k.ii, k.jj, k.kk } );
+        if ( it == col_h.end() ||
+             std::memcmp( &h( 0, 0, it->second ), &d( 0, 0, j ),
+                          col_bytes ) != 0 )
+            bad++;
+    }
+    return bad;
+}
+
+template <class TEST_MS, class TEST_ES>
+void testDeviceOpTableAssemblyBitwise()
+{
+    CachingFixture<TEST_MS, TEST_ES> fix;
+    using DS = DownwardSweep<TEST_MS, TEST_ES, Kernel>;
+
+    DS& device_path = fix.downward;
+    EXPECT_TRUE( device_path.device_op_table_assembly() );
+
+    DS host_path( MPI_COMM_WORLD );
+    host_path.setup( fix.upward, fix.num_local );
+    host_path.set_device_op_table_assembly( false );
+
+    auto set_cap = [&]( int cap )
+    {
+        host_path.set_m2l_op_count_cap( cap );
+        device_path.set_m2l_op_count_cap( cap );
+    };
+    auto build_and_compare = [&]( const char* stage )
+    {
+        host_path.invalidate_interaction_list();
+        device_path.invalidate_interaction_list();
+        host_path.build_interaction_list_device( fix.comm_plan );
+        device_path.build_interaction_list_device( fix.comm_plan );
+        EXPECT_GT( device_path.m2l_n_unique_ops(), 0 ) << stage;
+        EXPECT_EQ( host_path.m2l_op_cache_size(),
+                   device_path.m2l_op_cache_size() )
+            << stage;
+        EXPECT_EQ( countOpTableMismatches( host_path, device_path ), 0 )
+            << stage;
+    };
+
+    // First fill, held to one column so the next build must grow the cache.
+    const int default_cap = device_path.m2l_op_count_cap();
+    set_cap( 1 );
+    build_and_compare( "first fill" );
+    EXPECT_EQ( device_path.m2l_op_cache_size(), 1 );
+
+    // Growth: the remaining keys are appended through _grow_m2l_op_cache.
+    set_cap( default_cap );
+    build_and_compare( "growth" );
+    const int full = device_path.m2l_op_cache_size();
+    EXPECT_GT( full, 1 );
+
+    // No new key: every column comes from what earlier builds uploaded.
+    const long long built = device_path.m2l_op_keys_built_count();
+    build_and_compare( "no new key" );
+    EXPECT_EQ( device_path.m2l_op_keys_built_count(), built );
+    EXPECT_EQ( device_path.m2l_op_cache_size(), full );
+
+    // Forced clear, then a refill.
+    host_path.clear_m2l_op_cache();
+    device_path.clear_m2l_op_cache();
+    build_and_compare( "after clear_m2l_op_cache" );
+    EXPECT_EQ( device_path.m2l_op_keys_built_count(), built + full );
+
+    // A cap under the cache size empties it at the start of stage 4.
+    const int small_cap = std::max( 1, full / 2 );
+    const long long built_before_overflow =
+        device_path.m2l_op_keys_built_count();
+    set_cap( small_cap );
+    build_and_compare( "after cap-overflow clear" );
+    EXPECT_LE( device_path.m2l_op_cache_size(), small_cap );
+    EXPECT_EQ( device_path.m2l_op_keys_built_count(),
+               built_before_overflow + device_path.m2l_op_cache_size() );
+}
+} // namespace DownwardSweepTest
+
+TEST( DownwardSweepCaching, deviceOpTableAssemblyBitwise )
+{
+    DownwardSweepTest::testDeviceOpTableAssemblyBitwise<TEST_MEMSPACE,
+                                                        TEST_EXECSPACE>();
 }
 
 //---------------------------------------------------------------------------//
