@@ -195,6 +195,14 @@ class CommunicationPlan
     }
     double near_softening() const { return _near_softening; }
 
+    // Build through per-cell index arrays (children, owner, subtree
+    // relevance) rather than a hash lookup at every traversal step, and
+    // collect the traversal's emissions in flat buffers that are grouped and
+    // de-duplicated once afterwards. The plan is identical either way; this
+    // selects cost only. Off is the hash-driven build.
+    void set_indexed_build( bool on ) { _indexed_build = on; }
+    bool indexed_build() const { return _indexed_build; }
+
     // -----------------------------------------------------------------------
     // build()
     //
@@ -268,6 +276,25 @@ class CommunicationPlan
     std::set<std::pair<MortonKey, int>> _m2l_sends_set;
     std::set<MortonKey> _p2p_ghost_set;
     std::set<std::pair<MortonKey, int>> _p2p_send_set;
+
+    // Indexed build (set_indexed_build). Indices are into the `cells` vector
+    // passed to build(); a key that appears more than once maps to its last
+    // occurrence, as _cell_map does.
+    bool _indexed_build = true;
+    std::unordered_map<MortonKey, int> _key_to_idx;
+    std::vector<int> _child_idx;   // 8 per cell, -1 where absent
+    std::vector<int> _parent_idx;  // -1 for the root and unreachable cells
+    std::vector<int> _cell_owner;  // owner_of() per cell
+    std::vector<char> _relevant;   // subtree relevance per cell (nprocs > 1)
+
+    // Emission buffers for the indexed DTT, consumed by the indexed
+    // finalizers. Kept as members so their capacity survives across builds.
+    std::vector<std::pair<int, int>> _m2l_emits;           // (target, source)
+    std::vector<std::pair<MortonKey, int>> _m2l_recv_buf;  // (source, rank)
+    std::vector<std::pair<MortonKey, int>> _m2l_send_buf;  // (source, rank)
+    std::vector<std::pair<int, int>> _p2p_emits;           // (target, source)
+    std::vector<MortonKey> _p2p_ghost_buf;
+    std::vector<std::pair<MortonKey, int>> _p2p_send_buf;  // (target, rank)
 
     // -----------------------------------------------------------------------
     // Internal: look up owner of a cell, defaulting to OWNER_SHARED
@@ -386,6 +413,23 @@ class CommunicationPlan
     // Symmetric emit helpers used by the DTT pass.
     void emit_m2l_pair( const CellInfo* A, const CellInfo* B );
     void emit_p2p_pair( MortonKey a, MortonKey b );
+
+    // Sort each per-target M2L source list by source key (both builds).
+    void sort_interaction_lists();
+
+    // Indexed counterparts of the builders above (set_indexed_build). Each
+    // produces exactly what its hash-driven counterpart produces.
+    void build_index_tables( const std::vector<CellInfo>& cells );
+    void build_vertical_plans_indexed( const std::vector<CellInfo>& cells );
+    void compute_subtree_relevance_indexed( const std::vector<CellInfo>& cells );
+    void build_all_interaction_lists_indexed(
+        const std::vector<CellInfo>& cells );
+    void finalize_m2l_plan_indexed( const std::vector<CellInfo>& cells );
+    void finalize_p2p_plan_indexed( const std::vector<CellInfo>& cells );
+    void emit_m2l_pair_indexed( const std::vector<CellInfo>& cells, int a,
+                                int b );
+    void emit_p2p_pair_indexed( const std::vector<CellInfo>& cells, int a,
+                                int b );
 };
 
 // ============================================================================
@@ -859,11 +903,8 @@ inline void radix_sort_pairs_by_key(
 } // namespace impl
 
 template <class MemorySpace, class ExecutionSpace>
-void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_m2l_plan()
+void CommunicationPlan<MemorySpace, ExecutionSpace>::sort_interaction_lists()
 {
-    _m2l_plan.sends.clear();
-    _m2l_plan.receives.clear();
-
     // Sort each per-target source list for downstream determinism.
     // The sorts are independent across targets — parallelize over a
     // materialized pointer array so the host execution space (OpenMP if
@@ -917,6 +958,15 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_m2l_plan()
                 }
             } );
     }
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_m2l_plan()
+{
+    _m2l_plan.sends.clear();
+    _m2l_plan.receives.clear();
+
+    sort_interaction_lists();
 
     for ( const auto& [key, from_rank] : _m2l_receives_set )
         _m2l_plan.receives.push_back( { key, from_rank } );
@@ -950,6 +1000,390 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_p2p_plan()
 }
 
 // --------------------------------------------------------------------------
+// Indexed build (set_indexed_build)
+//
+// The same traversal, emissions and finalization as the hash-driven build
+// above, with every per-step hash lookup replaced by an array read:
+//   - children, parent and owner of every cell are resolved once, by index;
+//   - the DTT stacks index pairs and appends its emissions to flat buffers;
+//   - the finalizers group the buffers by target and sort + unique the
+//     send/receive/ghost buffers, which yields exactly the ordered contents
+//     of the std::set scratch the hash-driven build fills.
+// Each per-target list is sorted afterwards in both builds, so the order in
+// which a target's entries were emitted never reaches the plan.
+// --------------------------------------------------------------------------
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::build_index_tables(
+    const std::vector<CellInfo>& cells )
+{
+    const int n = static_cast<int>( cells.size() );
+    _key_to_idx.clear();
+    _key_to_idx.reserve( n );
+    for ( int i = 0; i < n; i++ )
+        _key_to_idx[cells[i].key] = i;
+
+    _child_idx.assign( static_cast<std::size_t>( n ) * 8, -1 );
+    _parent_idx.assign( n, -1 );
+    _cell_owner.resize( n );
+    for ( int i = 0; i < n; i++ )
+    {
+        const MortonKey k = cells[i].key;
+        _cell_owner[i] = owner_of( k );
+        // Only the occurrence the key map holds is linked into the tree, as
+        // the hash-driven build reaches each key through _cell_map.
+        if ( k <= ROOT_KEY || _key_to_idx.find( k )->second != i )
+            continue;
+        auto p_it = _key_to_idx.find( parent_key( k ) );
+        if ( p_it == _key_to_idx.end() )
+            continue;
+        _parent_idx[i] = p_it->second;
+        _child_idx[static_cast<std::size_t>( p_it->second ) * 8 +
+                   static_cast<int>( k & 7 )] = i;
+    }
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::
+    build_vertical_plans_indexed( const std::vector<CellInfo>& cells )
+{
+    _m2m_plan.sends.clear();
+    _m2m_plan.receives.clear();
+    _m2m_plan.shared_cells.clear();
+    _m2m_plan.max_depth = 0;
+
+    _l2l_plan.sends.clear();
+    _l2l_plan.receives.clear();
+    _l2l_plan.shared_cells.clear();
+    _l2l_plan.max_depth = 0;
+
+    const int n = static_cast<int>( cells.size() );
+    for ( int i = 0; i < n; i++ )
+    {
+        const CellInfo& ci = cells[i];
+        if ( ci.depth > _m2m_plan.max_depth )
+            _m2m_plan.max_depth = ci.depth;
+
+        if ( ci.depth <= _replication_depth && !ci.is_leaf )
+        {
+            _m2m_plan.shared_cells.push_back( ci.key );
+            _l2l_plan.shared_cells.push_back( ci.key );
+        }
+
+        if ( ci.is_leaf )
+            continue;
+
+        // A duplicated key resolves its children through the occurrence the
+        // key map holds, as the hash-driven build does.
+        const int pi = _key_to_idx.find( ci.key )->second;
+        const int parent_owner = _cell_owner[i];
+
+        for ( int oct = 0; oct < 8; oct++ )
+        {
+            const int c = _child_idx[static_cast<std::size_t>( pi ) * 8 + oct];
+            if ( c < 0 )
+                continue;
+            const MortonKey ck = child_key( ci.key, oct );
+            const int child_owner = _cell_owner[c];
+
+            if ( parent_owner == OWNER_SHARED && child_owner == OWNER_SHARED )
+                continue;
+            if ( parent_owner == child_owner )
+                continue;
+
+            if ( parent_owner != OWNER_SHARED )
+            {
+                if ( child_owner == _rank || child_owner == OWNER_SHARED )
+                    _m2m_plan.sends.push_back( { ck, parent_owner } );
+
+                if ( parent_owner == _rank )
+                {
+                    int source =
+                        ( child_owner == OWNER_SHARED ) ? _rank : child_owner;
+                    if ( source != _rank )
+                        _m2m_plan.receives.push_back( { ck, source } );
+                }
+            }
+
+            if ( child_owner != OWNER_SHARED )
+            {
+                if ( parent_owner == _rank && child_owner != _rank )
+                    _l2l_plan.sends.push_back( { ck, child_owner } );
+
+                if ( child_owner == _rank && parent_owner != _rank &&
+                     parent_owner != OWNER_SHARED )
+                    _l2l_plan.receives.push_back( { ck, parent_owner } );
+            }
+        }
+    }
+
+    _l2l_plan.max_depth = _m2m_plan.max_depth;
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::
+    compute_subtree_relevance_indexed( const std::vector<CellInfo>& cells )
+{
+    if ( _nprocs == 1 )
+        return;
+
+    const int n = static_cast<int>( cells.size() );
+    _relevant.assign( n, 0 );
+    int max_d = 0;
+    for ( int i = 0; i < n; i++ )
+    {
+        _relevant[i] = ( _cell_owner[i] == _rank ||
+                         _cell_owner[i] == OWNER_SHARED );
+        const int d = key_depth( cells[i].key );
+        if ( d > max_d )
+            max_d = d;
+    }
+
+    // Deepest first, so a cell's flag is final before it is OR'd upward.
+    // Only parent links exist for occurrences the key map holds.
+    std::vector<std::vector<int>> by_depth( max_d + 1 );
+    for ( int i = 0; i < n; i++ )
+        if ( _parent_idx[i] >= 0 )
+            by_depth[key_depth( cells[i].key )].push_back( i );
+    for ( int d = max_d; d >= 1; d-- )
+        for ( int i : by_depth[d] )
+            if ( _relevant[i] )
+                _relevant[_parent_idx[i]] = 1;
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_m2l_pair_indexed(
+    const std::vector<CellInfo>& cells, int a, int b )
+{
+    auto handle = [&]( int t, int s )
+    {
+        const int ot = _cell_owner[t];
+        const int os = _cell_owner[s];
+        const int compute_rank = ( ot == OWNER_SHARED ) ? 0 : ot;
+        if ( compute_rank == _rank )
+        {
+            _m2l_emits.push_back( { t, s } );
+            if ( os != OWNER_SHARED && os != _rank )
+                _m2l_recv_buf.push_back( { cells[s].key, os } );
+        }
+        else if ( os == _rank )
+        {
+            _m2l_send_buf.push_back( { cells[s].key, compute_rank } );
+        }
+    };
+    handle( a, b );
+    handle( b, a );
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_p2p_pair_indexed(
+    const std::vector<CellInfo>& cells, int a, int b )
+{
+    const int oa = _cell_owner[a];
+    const int ob = _cell_owner[b];
+
+    auto handle = [&]( int t, int s, int os, bool t_owned )
+    {
+        if ( !t_owned )
+            return;
+        _p2p_emits.push_back( { t, s } );
+        if ( t == s )
+            return;
+        if ( os != _rank && os != OWNER_SHARED )
+        {
+            _p2p_ghost_buf.push_back( cells[s].key );
+            _p2p_send_buf.push_back( { cells[t].key, os } );
+        }
+    };
+    handle( a, b, ob, oa == _rank );
+    if ( a != b )
+        handle( b, a, oa, ob == _rank );
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::
+    build_all_interaction_lists_indexed( const std::vector<CellInfo>& cells )
+{
+    _m2l_plan.interaction_lists.clear();
+    _p2p_plan.neighbor_lists.clear();
+    _m2l_emits.clear();
+    _m2l_recv_buf.clear();
+    _m2l_send_buf.clear();
+    _p2p_emits.clear();
+    _p2p_ghost_buf.clear();
+    _p2p_send_buf.clear();
+
+    auto root_it = _key_to_idx.find( ROOT_KEY );
+    if ( root_it == _key_to_idx.end() )
+        return;
+
+    std::vector<std::pair<int, int>> stack;
+    stack.reserve( 1024 );
+    stack.push_back( { root_it->second, root_it->second } );
+
+    const int* child = _child_idx.data();
+    while ( !stack.empty() )
+    {
+        const auto [t, s] = stack.back();
+        stack.pop_back();
+
+        if ( _nprocs > 1 && !_relevant[t] && !_relevant[s] )
+            continue;
+
+        const CellInfo& T = cells[t];
+        const CellInfo& S = cells[s];
+
+        if ( t == s )
+        {
+            if ( T.is_leaf )
+            {
+                emit_p2p_pair_indexed( cells, t, t );
+                continue;
+            }
+            const int* ch = child + static_cast<std::size_t>( t ) * 8;
+            for ( int i = 0; i < 8; i++ )
+            {
+                if ( ch[i] < 0 )
+                    continue;
+                for ( int j = i; j < 8; j++ )
+                {
+                    if ( ch[j] < 0 )
+                        continue;
+                    stack.push_back( { ch[i], ch[j] } );
+                }
+            }
+            continue;
+        }
+
+        if ( mac_satisfied( T, S ) )
+        {
+            emit_m2l_pair_indexed( cells, t, s );
+            continue;
+        }
+
+        if ( T.is_leaf && S.is_leaf )
+        {
+            emit_p2p_pair_indexed( cells, t, s );
+            continue;
+        }
+
+        const bool split_t =
+            S.is_leaf || ( !T.is_leaf && T.half_width >= S.half_width );
+        if ( split_t )
+        {
+            const int* ch = child + static_cast<std::size_t>( t ) * 8;
+            for ( int oct = 0; oct < 8; oct++ )
+                if ( ch[oct] >= 0 )
+                    stack.push_back( { ch[oct], s } );
+        }
+        else
+        {
+            const int* ch = child + static_cast<std::size_t>( s ) * 8;
+            for ( int oct = 0; oct < 8; oct++ )
+                if ( ch[oct] >= 0 )
+                    stack.push_back( { t, ch[oct] } );
+        }
+    }
+}
+
+namespace impl
+{
+// Group (target, payload) pairs by target with a stable counting sort and
+// call emit( target, first, last ) once per target that has entries, in
+// ascending target order. Stable, so each group keeps emission order.
+template <class Emit>
+void for_each_target_group( const std::vector<std::pair<int, int>>& pairs,
+                            int n_targets, std::vector<int>& offsets,
+                            std::vector<int>& payload, Emit&& emit )
+{
+    offsets.assign( n_targets + 1, 0 );
+    for ( const auto& p : pairs )
+        ++offsets[p.first + 1];
+    for ( int t = 0; t < n_targets; t++ )
+        offsets[t + 1] += offsets[t];
+    payload.resize( pairs.size() );
+    {
+        std::vector<int> cursor( offsets.begin(), offsets.end() - 1 );
+        for ( const auto& p : pairs )
+            payload[cursor[p.first]++] = p.second;
+    }
+    for ( int t = 0; t < n_targets; t++ )
+        if ( offsets[t + 1] > offsets[t] )
+            emit( t, payload.data() + offsets[t],
+                  payload.data() + offsets[t + 1] );
+}
+
+template <class T>
+void sort_unique( std::vector<T>& v )
+{
+    std::sort( v.begin(), v.end() );
+    v.erase( std::unique( v.begin(), v.end() ), v.end() );
+}
+} // namespace impl
+
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_m2l_plan_indexed(
+    const std::vector<CellInfo>& cells )
+{
+    _m2l_plan.sends.clear();
+    _m2l_plan.receives.clear();
+
+    std::vector<int> offsets, payload;
+    impl::for_each_target_group(
+        _m2l_emits, static_cast<int>( cells.size() ), offsets, payload,
+        [&]( int t, const int* first, const int* last )
+        {
+            auto& list = _m2l_plan.interaction_lists[cells[t].key];
+            list.reserve( list.size() + ( last - first ) );
+            for ( const int* s = first; s != last; ++s )
+                list.push_back( { cells[*s].key, *s } );
+        } );
+    sort_interaction_lists();
+
+    impl::sort_unique( _m2l_recv_buf );
+    impl::sort_unique( _m2l_send_buf );
+    _m2l_plan.receives.reserve( _m2l_recv_buf.size() );
+    for ( const auto& [key, from_rank] : _m2l_recv_buf )
+        _m2l_plan.receives.push_back( { key, from_rank } );
+    _m2l_plan.sends.reserve( _m2l_send_buf.size() );
+    for ( const auto& [key, to_rank] : _m2l_send_buf )
+        _m2l_plan.sends.push_back( { key, to_rank } );
+}
+
+template <class MemorySpace, class ExecutionSpace>
+void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_p2p_plan_indexed(
+    const std::vector<CellInfo>& cells )
+{
+    _p2p_plan.ghost_leaf_keys.clear();
+    _p2p_plan.ghost_leaf_owners.clear();
+    _p2p_plan.send_leaves.clear();
+
+    std::vector<int> offsets, payload;
+    impl::for_each_target_group(
+        _p2p_emits, static_cast<int>( cells.size() ), offsets, payload,
+        [&]( int t, const int* first, const int* last )
+        {
+            auto& list = _p2p_plan.neighbor_lists[cells[t].key];
+            list.reserve( list.size() + ( last - first ) );
+            for ( const int* s = first; s != last; ++s )
+                list.push_back( cells[*s].key );
+            std::sort( list.begin(), list.end() );
+        } );
+
+    impl::sort_unique( _p2p_ghost_buf );
+    impl::sort_unique( _p2p_send_buf );
+    _p2p_plan.ghost_leaf_keys.reserve( _p2p_ghost_buf.size() );
+    _p2p_plan.ghost_leaf_owners.reserve( _p2p_ghost_buf.size() );
+    for ( MortonKey gk : _p2p_ghost_buf )
+    {
+        _p2p_plan.ghost_leaf_keys.push_back( gk );
+        _p2p_plan.ghost_leaf_owners.push_back( owner_of( gk ) );
+    }
+    _p2p_plan.send_leaves.reserve( _p2p_send_buf.size() );
+    for ( const auto& [k, r] : _p2p_send_buf )
+        _p2p_plan.send_leaves.push_back( { k, r } );
+}
+
+// --------------------------------------------------------------------------
 // build() — main entry point
 // --------------------------------------------------------------------------
 template <class MemorySpace, class ExecutionSpace>
@@ -966,10 +1400,17 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_COMMPLAN_CELL_MAP_FILL );
-        _cell_map.clear();
-        _cell_map.reserve( cells.size() );
-        for ( const auto& c : cells )
-            _cell_map[c.key] = &c;
+        if ( _indexed_build )
+        {
+            build_index_tables( cells );
+        }
+        else
+        {
+            _cell_map.clear();
+            _cell_map.reserve( cells.size() );
+            for ( const auto& c : cells )
+                _cell_map[c.key] = &c;
+        }
     }
 
     // Vertical plans (M2M / L2L) follow the parent-child topology and are
@@ -977,7 +1418,10 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_COMMPLAN_VERTICAL_PLANS );
-        build_vertical_plans( cells );
+        if ( _indexed_build )
+            build_vertical_plans_indexed( cells );
+        else
+            build_vertical_plans( cells );
     }
 
     // Compute subtree-relevance flags before the DTT so the traversal can
@@ -985,7 +1429,10 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_COMMPLAN_SUBTREE_RELEVANCE );
-        compute_subtree_relevance( cells );
+        if ( _indexed_build )
+            compute_subtree_relevance_indexed( cells );
+        else
+            compute_subtree_relevance( cells );
     }
 
     // Single dual-tree traversal builds both the M2L interaction lists
@@ -993,7 +1440,10 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_COMMPLAN_DTT_TRAVERSAL );
-        build_all_interaction_lists( cells );
+        if ( _indexed_build )
+            build_all_interaction_lists_indexed( cells );
+        else
+            build_all_interaction_lists( cells );
     }
 
     // Materialize the scratch send/receive/ghost sets into the public plan
@@ -1001,12 +1451,18 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::build(
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_COMMPLAN_FINALIZE_M2L );
-        finalize_m2l_plan();
+        if ( _indexed_build )
+            finalize_m2l_plan_indexed( cells );
+        else
+            finalize_m2l_plan();
     }
     {
         CANOPY_SCOPED_TIMER_DETAILED(
             Canopy::Profiling::TIMER_COMMPLAN_FINALIZE_P2P );
-        finalize_p2p_plan();
+        if ( _indexed_build )
+            finalize_p2p_plan_indexed( cells );
+        else
+            finalize_p2p_plan();
     }
 
     _valid = true;

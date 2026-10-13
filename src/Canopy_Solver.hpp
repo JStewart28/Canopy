@@ -133,6 +133,13 @@ struct FmmConfig
     // DownwardSweep::set_device_op_table_assembly().
     bool device_op_table_assembly = true;
 
+    // Build the communication plan through per-cell index arrays rather than
+    // a hash lookup at every step of its dual-tree traversal, and group and
+    // de-duplicate the traversal's emissions once afterwards. The plan is
+    // identical either way; this selects cost only. Off is the hash-driven
+    // build. See CommunicationPlan::set_indexed_build().
+    bool indexed_comm_plan = true;
+
     // Balance the tree at the end of every tree build: refine any leaf more
     // than this many levels shallower than a leaf it touches (by a face, an
     // edge or a corner), to a fixed point. In levels, >= 1; 1 is the 2:1
@@ -246,6 +253,9 @@ class Solver
 
         // How the per-tree operator table is assembled; routed the same way.
         _downward.set_device_op_table_assembly( cfg.device_op_table_assembly );
+
+        // How the communication plan is built; routed the same way.
+        _comm_plan.set_indexed_build( cfg.indexed_comm_plan );
 
         // Explicit softening (including an explicit 0 for an unsoftened run):
         // apply it now. A negative value defers to the distribution-based
@@ -457,12 +467,17 @@ class Solver
         // them on the host or feed them back into the builder. On
         // unified-memory APUs (MI300A) this fence is required for
         // correctness, not just timing.
-        Kokkos::fence( "auto_maintain: pre-positions" );
+        bool escaped = false;
+        {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_MAINT_REBUILD_CHECK );
+            Kokkos::fence( "auto_maintain: pre-positions" );
+            auto positions = Cabana::slice<PositionIdx>( particles );
+            escaped = _builder.needs_rebuild( positions, _num_local );
+        }
 
         // 1) Bounding-box escape ⇒ full rebuild.
         {
-            auto positions = Cabana::slice<PositionIdx>( particles );
-            if ( _builder.needs_rebuild( positions, _num_local ) )
+            if ( escaped )
             {
                 _full_setup<PositionIdx, ChargeIdx>( particles, _num_local );
 #if defined( CANOPY_ENABLE_PROFILING )
@@ -486,11 +501,15 @@ class Solver
         // from current positions and compare. The cell list is identical on
         // every rank, so the comparison is deterministic.
         std::unordered_set<MortonKey> old_keys;
-        old_keys.reserve( _builder.cells().size() );
-        for ( const auto& c : _builder.cells() )
-            old_keys.insert( c.key );
+        {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_MAINT_KEY_SNAPSHOT );
+            old_keys.reserve( _builder.cells().size() );
+            for ( const auto& c : _builder.cells() )
+                old_keys.insert( c.key );
+        }
 
         {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_MAINT_COMPARE_BUILD );
             auto positions = Cabana::slice<PositionIdx>( particles );
             _builder.build( positions, _num_local );
         }
@@ -504,9 +523,12 @@ class Solver
         const size_t n_new = _builder.cells().size();
         const size_t n_old = old_keys.size();
         size_t k_in_new_not_old = 0;
-        for ( const auto& c : _builder.cells() )
-            if ( old_keys.find( c.key ) == old_keys.end() )
-                ++k_in_new_not_old;
+        {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_MAINT_KEY_DIFF );
+            for ( const auto& c : _builder.cells() )
+                if ( old_keys.find( c.key ) == old_keys.end() )
+                    ++k_in_new_not_old;
+        }
         const size_t matched = n_new - k_in_new_not_old;
         const size_t k_changed = ( n_new - matched ) + ( n_old - matched );
         const bool topology_changed = ( k_changed > 0 );
@@ -536,9 +558,12 @@ class Solver
 
         // 3) Topology stable ⇒ cheap migrate path (reuse comm_plan).
         //    _builder is already freshly built; redistribute uses its keys.
-        RedistributeResult rr =
-            _partitioner.redistribute( _builder, particles, _num_local );
-        (void)rr;
+        {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_REDISTRIBUTE );
+            RedistributeResult rr =
+                _partitioner.redistribute( _builder, particles, _num_local );
+            (void)rr;
+        }
         _num_local = _partitioner.num_local_particles();
         _finish_topology_stable<PositionIdx>( particles );
 #if defined( CANOPY_ENABLE_PROFILING )
@@ -700,12 +725,15 @@ class Solver
         // Tree topology and comm plan just changed; invalidate the cache.
         _downward.invalidate_interaction_list();
 
-        Kokkos::fence( "_finish_topology_change: pre-setup" );
-        _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
-                       _builder.particle_keys(), _num_local );
-        _push_root_half_width();
-        _downward.setup( _upward, _num_local );
-        _p2p.setup( _builder, _partitioner, _comm_plan );
+        {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_MAINT_SWEEP_SETUP );
+            Kokkos::fence( "_finish_topology_change: pre-setup" );
+            _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
+                           _builder.particle_keys(), _num_local );
+            _push_root_half_width();
+            _downward.setup( _upward, _num_local );
+            _p2p.setup( _builder, _partitioner, _comm_plan );
+        }
         CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
     }
 
@@ -728,12 +756,15 @@ class Solver
           _partitioner.sort_particles_by_leaf( _builder, particles ); }
 
         // Reuse existing comm_plan (topology unchanged).
-        Kokkos::fence( "_finish_topology_stable: pre-setup" );
-        _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
-                       _builder.particle_keys(), _num_local );
-        _push_root_half_width();
-        _downward.setup( _upward, _num_local );
-        _p2p.setup( _builder, _partitioner, _comm_plan );
+        {
+            CANOPY_SCOPED_TIMER( Canopy::Profiling::TIMER_MAINT_SWEEP_SETUP );
+            Kokkos::fence( "_finish_topology_stable: pre-setup" );
+            _upward.setup( _builder.cells(), _partitioner.cell_owner_map(),
+                           _builder.particle_keys(), _num_local );
+            _push_root_half_width();
+            _downward.setup( _upward, _num_local );
+            _p2p.setup( _builder, _partitioner, _comm_plan );
+        }
         CANOPY_PRINT_COMMPLAN_TIMERS( _comm );
     }
 

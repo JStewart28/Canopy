@@ -163,6 +163,16 @@ static constexpr const char* TIMER_REDISTRIBUTE     = "redistribute";
 static constexpr const char* TIMER_REBALANCE_TOTAL  = "rebalance_total";
 static constexpr const char* TIMER_REPARTITION      = "repartition";
 
+// auto_maintain() — the work around the timed children above: the
+// bounding-box escape check, the old-key snapshot, the comparison tree build
+// and key-set difference that pick the action, and the sweep setups that
+// close the Rebalance and Migrate paths.
+static constexpr const char* TIMER_MAINT_REBUILD_CHECK = "maint_rebuild_check";
+static constexpr const char* TIMER_MAINT_KEY_SNAPSHOT  = "maint_key_snapshot";
+static constexpr const char* TIMER_MAINT_COMPARE_BUILD = "maint_compare_build";
+static constexpr const char* TIMER_MAINT_KEY_DIFF      = "maint_key_diff";
+static constexpr const char* TIMER_MAINT_SWEEP_SETUP   = "maint_sweep_setup";
+
 // ---------------------------------------------------------------------------
 // Timer registry — process-local accumulator map, key -> elapsed seconds.
 // Using a function-local static so this is safe in a header-only library:

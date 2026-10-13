@@ -583,6 +583,134 @@ void testSingleRankNoTransfers( int num_particles_per_rank, int ncrit,
 }
 
 //---------------------------------------------------------------------------//
+/**
+ * Verify that the indexed build (set_indexed_build( true )) produces exactly
+ * the plan the hash-driven build produces, on one tree and one partition.
+ *
+ * Every public field is compared, in order where it is a vector: the M2M and
+ * L2L sends, receives, shared cells and max depth; every M2L interaction
+ * list (source keys and cell indices) and the M2L sends and receives; every
+ * P2P neighbor list, the ghost keys and owners, and the send leaves. The
+ * maps are compared by key. A second indexed build on the same plan object
+ * must match too, so emission buffers kept across builds leave no residue.
+ */
+void testIndexedMatchesLegacy( int num_particles_per_rank, int ncrit,
+                               int max_depth, double tolerance,
+                               int replication_depth, double mac_theta,
+                               double softening )
+{
+    using namespace CommunicationPlanTest;
+
+    int rank;
+    MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+
+    AoSoA_t particles( "particles", num_particles_per_rank );
+    TreeBuilder<TEST_MEMSPACE, TEST_EXECSPACE> builder(
+        MPI_COMM_WORLD, ncrit, max_depth, std::array<double, 6>{tolerance, tolerance, tolerance, tolerance, tolerance, tolerance}, tolerance );
+    TreePartitioner<TEST_MEMSPACE, TEST_EXECSPACE> partitioner(
+        MPI_COMM_WORLD, replication_depth );
+
+    generate_test_particles( particles, num_particles_per_rank, rank );
+    auto positions = Cabana::slice<Position>( particles );
+    builder.build( positions, num_particles_per_rank );
+    partitioner.partition( builder, particles, num_particles_per_rank );
+
+    using Plan = CommunicationPlan<TEST_MEMSPACE, TEST_EXECSPACE>;
+    auto make = [&]( bool indexed )
+    {
+        Plan p( MPI_COMM_WORLD, mac_theta );
+        p.set_near_softening( softening, 4.0 );
+        p.set_indexed_build( indexed );
+        p.build( builder.cells(), partitioner.ownership(),
+                 partitioner.cell_owner_map(),
+                 partitioner.replication_depth() );
+        return p;
+    };
+    Plan legacy = make( false );
+    Plan indexed = make( true );
+    ASSERT_TRUE( indexed.indexed_build() );
+    ASSERT_FALSE( legacy.indexed_build() );
+
+    auto same_transfers = []( const std::vector<CellTransfer>& a,
+                              const std::vector<CellTransfer>& b,
+                              const char* what )
+    {
+        ASSERT_EQ( a.size(), b.size() ) << what;
+        for ( std::size_t i = 0; i < a.size(); i++ )
+        {
+            EXPECT_EQ( a[i].cell_key, b[i].cell_key ) << what << " [" << i << "]";
+            EXPECT_EQ( a[i].remote_rank, b[i].remote_rank )
+                << what << " [" << i << "]";
+        }
+    };
+
+    auto compare = [&]( const Plan& x, const Plan& y )
+    {
+        same_transfers( x.m2m_plan().sends, y.m2m_plan().sends, "m2m sends" );
+        same_transfers( x.m2m_plan().receives, y.m2m_plan().receives,
+                        "m2m receives" );
+        EXPECT_EQ( x.m2m_plan().shared_cells, y.m2m_plan().shared_cells );
+        EXPECT_EQ( x.m2m_plan().max_depth, y.m2m_plan().max_depth );
+        same_transfers( x.l2l_plan().sends, y.l2l_plan().sends, "l2l sends" );
+        same_transfers( x.l2l_plan().receives, y.l2l_plan().receives,
+                        "l2l receives" );
+        EXPECT_EQ( x.l2l_plan().shared_cells, y.l2l_plan().shared_cells );
+        EXPECT_EQ( x.l2l_plan().max_depth, y.l2l_plan().max_depth );
+
+        const auto& xl = x.m2l_plan().interaction_lists;
+        const auto& yl = y.m2l_plan().interaction_lists;
+        EXPECT_EQ( xl.size(), yl.size() ) << "m2l target count";
+        for ( const auto& [t, sources] : xl )
+        {
+            auto it = yl.find( t );
+            ASSERT_TRUE( it != yl.end() ) << "m2l target " << t << " missing";
+            EXPECT_EQ( sources, it->second ) << "m2l list of " << t;
+        }
+        same_transfers( x.m2l_plan().sends, y.m2l_plan().sends, "m2l sends" );
+        same_transfers( x.m2l_plan().receives, y.m2l_plan().receives,
+                        "m2l receives" );
+
+        const auto& xn = x.p2p_plan().neighbor_lists;
+        const auto& yn = y.p2p_plan().neighbor_lists;
+        EXPECT_EQ( xn.size(), yn.size() ) << "p2p target count";
+        for ( const auto& [t, nbrs] : xn )
+        {
+            auto it = yn.find( t );
+            ASSERT_TRUE( it != yn.end() ) << "p2p target " << t << " missing";
+            EXPECT_EQ( nbrs, it->second ) << "p2p list of " << t;
+        }
+        EXPECT_EQ( x.p2p_plan().ghost_leaf_keys, y.p2p_plan().ghost_leaf_keys );
+        EXPECT_EQ( x.p2p_plan().ghost_leaf_owners,
+                   y.p2p_plan().ghost_leaf_owners );
+        same_transfers( x.p2p_plan().send_leaves, y.p2p_plan().send_leaves,
+                        "p2p send leaves" );
+    };
+
+    // The fixture must exercise every part of the plan being compared.
+    EXPECT_GT( legacy.m2l_plan().interaction_lists.size(), 0u );
+    EXPECT_GT( legacy.p2p_plan().neighbor_lists.size(), 0u );
+    int nprocs;
+    MPI_Comm_size( MPI_COMM_WORLD, &nprocs );
+    if ( nprocs > 1 )
+    {
+        long long local = static_cast<long long>(
+            legacy.m2l_plan().receives.size() +
+            legacy.p2p_plan().ghost_leaf_keys.size() );
+        long long global = 0;
+        MPI_Allreduce( &local, &global, 1, MPI_LONG_LONG, MPI_SUM,
+                       MPI_COMM_WORLD );
+        EXPECT_GT( global, 0 ) << "no cross-rank traffic to compare";
+    }
+
+    compare( legacy, indexed );
+
+    indexed.build( builder.cells(), partitioner.ownership(),
+                   partitioner.cell_owner_map(),
+                   partitioner.replication_depth() );
+    compare( legacy, indexed );
+}
+
+//---------------------------------------------------------------------------//
 // RUN TESTS
 //---------------------------------------------------------------------------//
 
@@ -659,6 +787,18 @@ TEST( CommunicationPlan, testP2PGhostConsistencySmall )
 TEST( CommunicationPlan, testSingleRankNoTransfers )
 {
     testSingleRankNoTransfers( 10000, 128, 15, 0.1, 3 );
+}
+
+// A deep tree at Beatnik's measurement leaf size and MAC, with the
+// near-softening floor active, and the default configuration.
+TEST( CommunicationPlan, testIndexedMatchesLegacyDeep )
+{
+    testIndexedMatchesLegacy( 4000, 8, 10, 0.1, 1, 0.3, 1.0e-3 );
+}
+
+TEST( CommunicationPlan, testIndexedMatchesLegacyBasic )
+{
+    testIndexedMatchesLegacy( 10000, 128, 15, 0.1, 3, 0.5, 0.0 );
 }
 
 //---------------------------------------------------------------------------//

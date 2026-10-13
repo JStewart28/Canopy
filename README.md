@@ -60,6 +60,7 @@ Canopy::Solver<...> solver( MPI_Comm comm, const Canopy::FmmConfig& cfg );
 | `m2l_op_table_byte_budget` | Per-rank memory budget, in bytes, for the hashed M2L operator table. Pairs beyond the cap it implies fall back to the per-pair M2L translation | `2 GB` |
 | `quantize_root_half_width` | Round the root cell's half-width up to the next power of two at every tree build, keeping its centre. A rebuild whose bounding box drifts within one octave then keeps the M2L operator cache of a level-keyed basis (`CartesianTaylorBasis`) instead of rebuilding it. Moves the cell set for every basis: the root cell is up to 2x wider than the bounding box, which can add one level at the top of the tree. | `false` |
 | `device_op_table_assembly` | Assemble each tree's M2L operator table on the device: the operator cache keeps a device copy, only newly built columns are uploaded, and the table is gathered by column index. Off copies every column into a host mirror and uploads the whole table at every interaction-list build. The table is bit-identical either way, so this selects cost only. On a host backend "on" gathers straight from the host cache. | `true` |
+| `indexed_comm_plan` | Build the communication plan through per-cell index arrays (children, owner, subtree relevance) instead of a hash lookup at every step of its dual-tree traversal, and group and de-duplicate the traversal's emissions once afterwards instead of inserting each send, receive and ghost into a `std::set`. The plan is identical either way, so this selects cost only. The plan is rebuilt at every rebalance, which `auto_maintain` chooses whenever any cell key changed. | `true` |
 | `tree_balance_max_level_delta` | Balance the tree at the end of every tree build: refine any leaf more than this many levels shallower than a leaf it touches (by a face, an edge or a corner), to a fixed point. In levels, `>= 1`; `1` is the 2:1 balance, and a value below `1` throws. Refinement creates only occupied children, so every cell stays occupied. Moves the cell set for every basis, at a cost in cells that depends on the distribution (1.10-1.28x on the two-scale test fixture at `1`). Off by default because it does not pay there: at `1` it also raises the M2L pairs refused to the per-pair fallback 1.6-3.5x (362-556 more per run), each about 12x a table pair's cost on SERIAL and 52-109x on HIP. `TreeBuilder::update()` does not balance. | `TREE_BALANCE_OFF` (off) |
 
 The multipole far-field is built from the **unsoftened** `1/r` Laplace kernel, so
@@ -257,6 +258,16 @@ build and comm-plan sub-phases; 3 is reserved). The spack package exposes the
 same pair as `+profiling` and `profiling_level=`. Both reach consumers through
 the exported `Canopy` target, so a downstream build compiles the level Canopy
 was configured with.
+
+`auto_maintain()` runs `_finish_topology_{change,stable}` directly, not
+`migrate()` or `rebalance()`, so `migrate_total` and `rebalance_total` stay 0
+under it. Its work is timed at level 1 by `builder_build`, `repartition`,
+`sort_by_leaf`, `comm_plan_build` and `redistribute` (the Migrate path), plus
+its own keys: `maint_rebuild_check` (the pre-positions fence and the
+bounding-box escape test), `maint_key_snapshot`, `maint_compare_build` and
+`maint_key_diff` (the comparison tree build that picks the action), and
+`maint_sweep_setup` (the upward, downward and P2P setups that close either
+path).
 
 Timers accumulate into `Canopy::Profiling::timer_registry()`, which each sweep
 resets, and `timer_totals()`, which only `reset_timer_totals()` clears. By
