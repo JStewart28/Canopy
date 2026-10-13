@@ -572,6 +572,24 @@ the normalization folded into the recurrence (or read from a table in
 change only in the last bits, so `tests/data/laplace_solve_P6.txt` would need
 regenerating. Not measured.
 
+### A column-wise operator-table gather on host backends
+
+With `FmmConfig::device_op_table_assembly` on (the default), stage 4b of
+`DownwardSweep::build_interaction_list_device` gathers the per-tree M2L
+operator table with `M2LOpTableGather`, one work item per element over a flat
+index, decoded with a 64-bit div/mod per element. That suits the device. On a
+host backend the same functor reads the host cache directly, and there it is
+slower than the host loop it replaced. Beatnik's canopy_profiling O8 measured
+`ilist_s4_op_table_copy` 3-5 % slower per evaluation at SERIAL np 1 (+11 %
+summed over the run with outlier windows, about 0.45 % of the step), and
+unchanged at np 4. The step wall did not move measurably.
+
+On host backends, give the gather one work item per column with nested loops
+over the column, `t` innermost to follow LayoutLeft. That removes the per-element
+division and is cache-friendlier than the old host loop, which ran `t` outermost.
+The table stays bitwise equal, so
+`DownwardSweepCaching.deviceOpTableAssemblyBitwise` remains the guard.
+
 ## Known Issues
 
 Tracked defects to be addressed in a later session. These are not introduced by
