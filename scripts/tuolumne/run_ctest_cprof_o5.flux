@@ -22,9 +22,9 @@
 #      each run at np 1 and 2 on the comparison cases only.
 #        .drop_child7    the index tables never link an octant-7 child; must
 #                        FAIL at np 1 and 2.
-#        .no_recv_dedup  the M2L receive buffer is neither sorted nor
-#                        de-duplicated; no receives exist on one rank, so it
-#                        must PASS at np 1 and FAIL at np 2.
+#        .no_recv_sort   the M2L receive buffer is left in first-emission
+#                        order instead of sorted; no receives exist on one
+#                        rank, so it must PASS at np 1 and FAIL at np 2.
 #
 # Usage (from the canopy checkout):
 #   jobid=$(flux batch scripts/tuolumne/run_ctest_cprof_o5.flux)
@@ -62,7 +62,7 @@ grep -E '^Canopy_ENABLE_PROFILING:|^Canopy_PROFILING_LEVEL:' \
     ${CANOPY_BUILD}/CMakeCache.txt
 echo "flux: $(flux version | head -1)"
 for exe in ${CANOPY_BUILD}/tests/Canopy_Test_{TreeBuilder,TreePartitioner,CommunicationPlan,MultiSolve}_MPI_{SERIAL,HIP} \
-           ${CANOPY_BUILD}/tests/Canopy_Test_CommunicationPlan_MPI_SERIAL.{drop_child7,no_recv_dedup}; do
+           ${CANOPY_BUILD}/tests/Canopy_Test_CommunicationPlan_MPI_SERIAL.{drop_child7,no_recv_sort}; do
     [ -x "${exe}" ] && echo "binary: $(basename ${exe}) $(stat -c '%y' ${exe})"
 done
 echo "=================="
@@ -97,7 +97,7 @@ for stem in TreeBuilder TreePartitioner CommunicationPlan MultiSolve; do
 done
 
 # expect: "fail" (the case must fail) or "pass"
-for spec in drop_child7:1:fail drop_child7:2:fail no_recv_dedup:1:pass no_recv_dedup:2:fail; do
+for spec in drop_child7:1:fail drop_child7:2:fail no_recv_sort:1:pass no_recv_sort:2:fail; do
     IFS=: read -r mut np expect <<< "${spec}"
     exe=${CANOPY_BUILD}/tests/Canopy_Test_CommunicationPlan_MPI_SERIAL.${mut}
     echo "### O5 broken-build check: ${mut} SERIAL np ${np} (expect ${expect}) ###"

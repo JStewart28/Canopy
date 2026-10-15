@@ -296,6 +296,16 @@ class CommunicationPlan
     std::vector<MortonKey> _p2p_ghost_buf;
     std::vector<std::pair<MortonKey, int>> _p2p_send_buf;  // (target, rank)
 
+    // First-emission marks, so each send, receive and ghost enters its buffer
+    // once: the traversal repeats the same one many times (one receive per
+    // M2L pair that names a remote source). A receive or a ghost is fixed by
+    // its cell, since the remote rank is the cell's owner; a send is keyed by
+    // (cell, rank), so those marks hold cells x nprocs bytes.
+    std::vector<char> _m2l_recv_mark;
+    std::vector<char> _m2l_send_mark;
+    std::vector<char> _p2p_ghost_mark;
+    std::vector<char> _p2p_send_mark;
+
     // -----------------------------------------------------------------------
     // Internal: look up owner of a cell, defaulting to OWNER_SHARED
     // -----------------------------------------------------------------------
@@ -1006,7 +1016,10 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::finalize_p2p_plan()
 // above, with every per-step hash lookup replaced by an array read:
 //   - children, parent and owner of every cell are resolved once, by index;
 //   - the DTT stacks index pairs and appends its emissions to flat buffers;
-//   - the finalizers group the buffers by target and sort + unique the
+//     a send, receive or ghost enters its buffer only on first emission,
+//     through a per-cell mark, where the hash-driven build re-inserts every
+//     repeat into a std::set;
+//   - the finalizers group the pair buffers by target and sort the
 //     send/receive/ghost buffers, which yields exactly the ordered contents
 //     of the std::set scratch the hash-driven build fills.
 // Each per-target list is sorted afterwards in both builds, so the order in
@@ -1162,12 +1175,21 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_m2l_pair_indexed(
         if ( compute_rank == _rank )
         {
             _m2l_emits.push_back( { t, s } );
-            if ( os != OWNER_SHARED && os != _rank )
+            if ( os != OWNER_SHARED && os != _rank && !_m2l_recv_mark[s] )
+            {
+                _m2l_recv_mark[s] = 1;
                 _m2l_recv_buf.push_back( { cells[s].key, os } );
+            }
         }
         else if ( os == _rank )
         {
-            _m2l_send_buf.push_back( { cells[s].key, compute_rank } );
+            char& mark = _m2l_send_mark[static_cast<std::size_t>( s ) * _nprocs +
+                                        compute_rank];
+            if ( !mark )
+            {
+                mark = 1;
+                _m2l_send_buf.push_back( { cells[s].key, compute_rank } );
+            }
         }
     };
     handle( a, b );
@@ -1190,8 +1212,18 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::emit_p2p_pair_indexed(
             return;
         if ( os != _rank && os != OWNER_SHARED )
         {
-            _p2p_ghost_buf.push_back( cells[s].key );
-            _p2p_send_buf.push_back( { cells[t].key, os } );
+            if ( !_p2p_ghost_mark[s] )
+            {
+                _p2p_ghost_mark[s] = 1;
+                _p2p_ghost_buf.push_back( cells[s].key );
+            }
+            char& mark =
+                _p2p_send_mark[static_cast<std::size_t>( t ) * _nprocs + os];
+            if ( !mark )
+            {
+                mark = 1;
+                _p2p_send_buf.push_back( { cells[t].key, os } );
+            }
         }
     };
     handle( a, b, ob, oa == _rank );
@@ -1211,6 +1243,11 @@ void CommunicationPlan<MemorySpace, ExecutionSpace>::
     _p2p_emits.clear();
     _p2p_ghost_buf.clear();
     _p2p_send_buf.clear();
+    const std::size_t n = cells.size();
+    _m2l_recv_mark.assign( n, 0 );
+    _m2l_send_mark.assign( n * _nprocs, 0 );
+    _p2p_ghost_mark.assign( n, 0 );
+    _p2p_send_mark.assign( n * _nprocs, 0 );
 
     auto root_it = _key_to_idx.find( ROOT_KEY );
     if ( root_it == _key_to_idx.end() )
