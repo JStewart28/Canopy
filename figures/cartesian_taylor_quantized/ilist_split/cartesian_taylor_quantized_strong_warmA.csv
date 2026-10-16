@@ -1,0 +1,73 @@
+basis,scaling,state,np,N,phase,bar_mean_ms,min_ms,max_ms,n_reps,minmax_exact
+cartesian_taylor_quantized,strong,warmA,1,500000,Ilist: classify pairs (S3),0,0,0,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,Ilist: M2L operator build (S4),0,0,0,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,Ilist: rest,9.99998e-05,9.99998e-05,9.99998e-05,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,L2P,0.068271,0.068271,0.068271,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,M2L kernel,82.5938,82.5938,82.5938,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,L2L kernel,0.715083,0.715083,0.715083,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,P2M,0.310445,0.310445,0.310445,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,M2M,0.763753,0.763753,0.763753,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,P2P,6.15619,6.15619,6.15619,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,M2L comm,0.00225,0.00225,0.00225,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,M2M Allreduce,0.00103,0.00103,0.00103,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,M2L shared-locals Allreduce,0.00051,0.00051,0.00051,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,P2P ghost comm,0.159483,0.159483,0.159483,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,Shared-locals snapshot,6.17379,6.17379,6.17379,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,L2L comm,1.57798,1.57798,1.57798,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,Shared-locals Allreduce host copies,1.80856,1.80856,1.80856,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,Upward multipole exchange (untimed),2.22817,2.22817,2.22817,3,1
+cartesian_taylor_quantized,strong,warmA,1,500000,other (total solve - plotted phases),2.63545,,,,
+cartesian_taylor_quantized,strong,warmA,16,500000,Ilist: classify pairs (S3),0,0,0,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,Ilist: M2L operator build (S4),0,0,0,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,Ilist: rest,0.00022,9e-05,0.0006,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,L2P,0.0300244,0.02738,0.0329,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,M2L kernel,5.52438,5.02458,5.98436,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,L2L kernel,0.356314,0.344902,0.373642,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,P2M,0.089887,0.07987,0.101671,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,M2M,0.309527,0.289522,0.351511,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,P2P,2.96551,2.6154,3.21284,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,M2L comm,2.1008,2.03182,2.1858,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,M2M Allreduce,4.08327,0.234101,6.20783,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,M2L shared-locals Allreduce,6.60087,0.717932,8.13032,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,P2P ghost comm,1.23338,0.961416,1.51986,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,Shared-locals snapshot,3.02025,2.56563,5.57075,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,L2L comm,1.97806,1.85123,2.1034,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,Shared-locals Allreduce host copies,1.99204,1.60205,5.88692,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,Upward multipole exchange (untimed),3.37423,2.34388,8.30665,3,1
+cartesian_taylor_quantized,strong,warmA,16,500000,other (total solve - plotted phases),1.34175,,,,
+cartesian_taylor_quantized,strong,warmA,32,500000,Ilist: classify pairs (S3),0,0,0,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,Ilist: M2L operator build (S4),0,0,0,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,Ilist: rest,0.0001825,9e-05,0.00065,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,L2P,0.0353474,0.02704,0.227351,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,M2L kernel,3.00851,2.37783,3.3127,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,L2L kernel,0.347409,0.287681,0.414442,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,P2M,0.0834762,0.067231,0.114491,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,M2M,0.295735,0.231043,0.348782,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,P2P,2.9393,2.63401,3.33985,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,M2L comm,2.36989,2.21454,2.52088,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,M2M Allreduce,8.09759,0.466461,10.2149,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,M2L shared-locals Allreduce,24.1331,9.17762,28.7914,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,P2P ghost comm,1.45003,1.15803,1.72107,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,Shared-locals snapshot,6.99117,2.5683,17.4574,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,L2L comm,2.09102,1.79503,2.48052,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,Shared-locals Allreduce host copies,3.37341,1.60542,14.0407,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,Upward multipole exchange (untimed),3.74051,2.55187,12.3912,3,1
+cartesian_taylor_quantized,strong,warmA,32,500000,other (total solve - plotted phases),-1.30991,,,,
+cartesian_taylor_quantized,strong,warmA,64,500000,Ilist: classify pairs (S3),0,0,0,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,Ilist: M2L operator build (S4),0,0,0,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,Ilist: rest,0.00019625,8.00001e-05,0.00068,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,L2P,0.0291806,0.02644,0.03257,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,M2L kernel,1.78287,1.60728,2.00338,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,L2L kernel,0.350236,0.290754,0.543275,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,P2M,0.0774278,0.060331,0.111322,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,M2M,0.297507,0.234371,0.485432,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,P2P,2.79815,2.29003,3.24323,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,M2L comm,2.98356,2.87948,3.11782,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,M2M Allreduce,13.9746,4.58752,15.4,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,M2L shared-locals Allreduce,18.9073,8.63541,20.1792,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,P2P ghost comm,1.46277,1.22293,2.00062,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,Shared-locals snapshot,3.095,2.5653,16.5336,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,L2L comm,2.27632,1.88192,2.90631,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,Shared-locals Allreduce host copies,2.25026,1.6046,12.4532,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,Upward multipole exchange (untimed),2.94666,2.32061,10.5228,3,1
+cartesian_taylor_quantized,strong,warmA,64,500000,other (total solve - plotted phases),-5.09429,,,,

@@ -1,0 +1,49 @@
+basis,scaling,state,np,N,phase,bar_mean_ms,min_ms,max_ms,n_reps,minmax_exact
+cartesian_taylor,weak,cold,1,500000,Interaction-list build,3396.51,3396.51,3396.51,3,1
+cartesian_taylor,weak,cold,1,500000,L2P,0.07778,0.07778,0.07778,3,1
+cartesian_taylor,weak,cold,1,500000,M2L kernel,84.7918,84.7918,84.7918,3,1
+cartesian_taylor,weak,cold,1,500000,L2L kernel,0.674833,0.674833,0.674833,3,1
+cartesian_taylor,weak,cold,1,500000,P2M,0.270852,0.270852,0.270852,3,1
+cartesian_taylor,weak,cold,1,500000,M2M,0.700876,0.700876,0.700876,3,1
+cartesian_taylor,weak,cold,1,500000,P2P,5.906,5.906,5.906,3,1
+cartesian_taylor,weak,cold,1,500000,M2L comm,0.01397,0.01397,0.01397,3,1
+cartesian_taylor,weak,cold,1,500000,M2M Allreduce,0.048601,0.048601,0.048601,3,1
+cartesian_taylor,weak,cold,1,500000,M2L shared-locals Allreduce,0.017311,0.017311,0.017311,3,1
+cartesian_taylor,weak,cold,1,500000,P2P ghost comm,0.246542,0.246542,0.246542,3,1
+cartesian_taylor,weak,cold,1,500000,other (total solve - plotted phases),30.0688,,,,
+cartesian_taylor,weak,cold,16,8000000,Interaction-list build,2369.4,2136.53,2748.78,3,1
+cartesian_taylor,weak,cold,16,8000000,L2P,0.0661251,0.060261,0.07195,3,1
+cartesian_taylor,weak,cold,16,8000000,M2L kernel,52.0931,48.3307,55.4641,3,1
+cartesian_taylor,weak,cold,16,8000000,L2L kernel,0.659585,0.626406,0.683282,3,1
+cartesian_taylor,weak,cold,16,8000000,P2M,0.325342,0.296812,0.371074,3,1
+cartesian_taylor,weak,cold,16,8000000,M2M,0.590125,0.529143,0.744385,3,1
+cartesian_taylor,weak,cold,16,8000000,P2P,7.11362,6.29483,7.68417,3,1
+cartesian_taylor,weak,cold,16,8000000,M2L comm,316.448,9.02474,620.583,3,1
+cartesian_taylor,weak,cold,16,8000000,M2M Allreduce,36.3263,15.6068,52.8149,3,1
+cartesian_taylor,weak,cold,16,8000000,M2L shared-locals Allreduce,96.1551,29.6616,129.117,3,1
+cartesian_taylor,weak,cold,16,8000000,P2P ghost comm,16.7999,5.28306,24.5654,3,1
+cartesian_taylor,weak,cold,16,8000000,other (total solve - plotted phases),186.998,,,,
+cartesian_taylor,weak,cold,32,16000000,Interaction-list build,1709.16,1503.75,1851.87,3,1
+cartesian_taylor,weak,cold,32,16000000,L2P,0.0651717,0.05613,0.07277,3,1
+cartesian_taylor,weak,cold,32,16000000,M2L kernel,40.3922,34.727,43.4106,3,1
+cartesian_taylor,weak,cold,32,16000000,L2L kernel,0.696834,0.656605,0.900695,3,1
+cartesian_taylor,weak,cold,32,16000000,P2M,0.32815,0.284102,0.549454,3,1
+cartesian_taylor,weak,cold,32,16000000,M2M,0.617585,0.537563,0.765604,3,1
+cartesian_taylor,weak,cold,32,16000000,P2P,7.71137,7.07475,8.20514,3,1
+cartesian_taylor,weak,cold,32,16000000,M2L comm,166.227,17.1149,374.018,3,1
+cartesian_taylor,weak,cold,32,16000000,M2M Allreduce,102.115,23.4885,160.741,3,1
+cartesian_taylor,weak,cold,32,16000000,M2L shared-locals Allreduce,238.686,115.705,283.081,3,1
+cartesian_taylor,weak,cold,32,16000000,P2P ghost comm,21.6208,10.2507,45.4376,3,1
+cartesian_taylor,weak,cold,32,16000000,other (total solve - plotted phases),246.72,,,,
+cartesian_taylor,weak,cold,64,32000000,Interaction-list build,3542.78,2889.31,3979.49,3,1
+cartesian_taylor,weak,cold,64,32000000,L2P,0.0738697,0.06043,0.102271,3,1
+cartesian_taylor,weak,cold,64,32000000,M2L kernel,95.0939,77.5383,102.264,3,1
+cartesian_taylor,weak,cold,64,32000000,L2L kernel,0.892515,0.792035,1.1056,3,1
+cartesian_taylor,weak,cold,64,32000000,P2M,0.298839,0.253172,0.474143,3,1
+cartesian_taylor,weak,cold,64,32000000,M2M,0.807762,0.694804,1.04328,3,1
+cartesian_taylor,weak,cold,64,32000000,P2P,6.8954,6.22455,7.49179,3,1
+cartesian_taylor,weak,cold,64,32000000,M2L comm,442.628,18.1549,1033.33,3,1
+cartesian_taylor,weak,cold,64,32000000,M2M Allreduce,809.573,122.476,1183.47,3,1
+cartesian_taylor,weak,cold,64,32000000,M2L shared-locals Allreduce,1033.33,372.115,1391.82,3,1
+cartesian_taylor,weak,cold,64,32000000,P2P ghost comm,639.32,14.1728,1072.31,3,1
+cartesian_taylor,weak,cold,64,32000000,other (total solve - plotted phases),1964.72,,,,

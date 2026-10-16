@@ -1,0 +1,49 @@
+basis,scaling,state,np,N,phase,bar_mean_ms,min_ms,max_ms,n_reps,minmax_exact
+cartesian_taylor_quantized,weak,warmA,1,500000,Interaction-list build,9.99999e-05,9.99999e-05,9.99999e-05,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,L2P,0.068271,0.068271,0.068271,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,M2L kernel,82.5938,82.5938,82.5938,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,L2L kernel,0.715083,0.715083,0.715083,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,P2M,0.310445,0.310445,0.310445,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,M2M,0.763753,0.763753,0.763753,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,P2P,6.15619,6.15619,6.15619,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,M2L comm,0.00225,0.00225,0.00225,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,M2M Allreduce,0.00103,0.00103,0.00103,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,M2L shared-locals Allreduce,0.00051,0.00051,0.00051,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,P2P ghost comm,0.159483,0.159483,0.159483,3,1
+cartesian_taylor_quantized,weak,warmA,1,500000,other (total solve - plotted phases),14.424,,,,
+cartesian_taylor_quantized,weak,warmA,16,8000000,Interaction-list build,0.000709375,0.00011,0.00116,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,L2P,0.0655032,0.055951,0.07111,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,M2L kernel,64.336,56.5496,68.9353,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,L2L kernel,0.72579,0.700309,0.77995,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,P2M,0.315179,0.288762,0.379515,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,M2M,0.705293,0.647618,0.789879,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,P2P,6.48079,5.13639,6.98262,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,M2L comm,8.13143,8.01347,8.28271,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,M2M Allreduce,82.7438,4.77073,126.838,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,M2L shared-locals Allreduce,91.0059,35.8448,152.964,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,P2P ghost comm,10.5482,3.74003,14.7411,3,1
+cartesian_taylor_quantized,weak,warmA,16,8000000,other (total solve - plotted phases),229.317,,,,
+cartesian_taylor_quantized,weak,warmA,32,16000000,Interaction-list build,0.000715312,0.00031,0.00122,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,L2P,0.0636064,0.052191,0.07016,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,M2L kernel,35.8714,29.2248,38.7,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,L2L kernel,0.629883,0.599711,0.829167,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,P2M,0.342555,0.294221,0.433723,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,M2M,0.568111,0.526843,0.635584,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,P2P,8.19303,6.53465,9.13586,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,M2L comm,7.06054,6.8861,7.22863,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,M2M Allreduce,53.2794,0.642014,71.7077,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,M2L shared-locals Allreduce,155.824,40.2781,199.445,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,P2P ghost comm,58.1874,4.11805,76.446,3,1
+cartesian_taylor_quantized,weak,warmA,32,16000000,other (total solve - plotted phases),178.038,,,,
+cartesian_taylor_quantized,weak,warmA,64,32000000,Interaction-list build,0.000712672,0.0003,0.00127,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,L2P,0.0744961,0.059591,0.103251,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,M2L kernel,92.7253,73.6602,99.9838,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,L2L kernel,0.964513,0.822238,1.24392,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,P2M,0.306646,0.235962,0.483094,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,M2M,0.932854,0.819656,1.20683,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,P2P,6.35296,5.48832,6.99991,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,M2L comm,58.0726,12.6492,75.6702,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,M2M Allreduce,561.161,42.0823,1264.7,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,M2L shared-locals Allreduce,713.204,223.489,1524.42,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,P2P ghost comm,578.252,6.64703,950.737,3,1
+cartesian_taylor_quantized,weak,warmA,64,32000000,other (total solve - plotted phases),3550.28,,,,

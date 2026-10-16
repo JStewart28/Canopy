@@ -1,0 +1,65 @@
+basis,scaling,state,np,N,phase,bar_mean_ms,min_ms,max_ms,n_reps,minmax_exact
+laplace,strong,cold,1,500000,Interaction-list build,3724.04,3724.04,3724.04,3,1
+laplace,strong,cold,1,500000,L2P,1.23891,1.23891,1.23891,3,1
+laplace,strong,cold,1,500000,M2L kernel,751.315,751.315,751.315,3,1
+laplace,strong,cold,1,500000,L2L kernel,68.0048,68.0048,68.0048,3,1
+laplace,strong,cold,1,500000,P2M,1.1187,1.1187,1.1187,3,1
+laplace,strong,cold,1,500000,M2M,26.404,26.404,26.404,3,1
+laplace,strong,cold,1,500000,P2P,5.43609,5.43609,5.43609,3,1
+laplace,strong,cold,1,500000,M2L comm,0.01198,0.01198,0.01198,3,1
+laplace,strong,cold,1,500000,M2M Allreduce,0.05436,0.05436,0.05436,3,1
+laplace,strong,cold,1,500000,M2L shared-locals Allreduce,0.01705,0.01705,0.01705,3,1
+laplace,strong,cold,1,500000,P2P ghost comm,0.179351,0.179351,0.179351,3,1
+laplace,strong,cold,1,500000,Shared-locals snapshot,16.4899,16.4899,16.4899,3,1
+laplace,strong,cold,1,500000,L2L comm,1.31911,1.31911,1.31911,3,1
+laplace,strong,cold,1,500000,Shared-locals Allreduce host copies,7.7652,7.7652,7.7652,3,1
+laplace,strong,cold,1,500000,Upward multipole exchange (untimed),2.27663,2.27663,2.27663,3,1
+laplace,strong,cold,1,500000,other (total solve - plotted phases),-11.223,,,,
+laplace,strong,cold,16,500000,Interaction-list build,356.502,324.915,377.793,3,1
+laplace,strong,cold,16,500000,L2P,0.170515,0.164952,0.175382,3,1
+laplace,strong,cold,16,500000,M2L kernel,51.324,43.9288,54.8368,3,1
+laplace,strong,cold,16,500000,L2L kernel,22.2527,21.6234,22.4663,3,1
+laplace,strong,cold,16,500000,P2M,0.222403,0.206833,0.248083,3,1
+laplace,strong,cold,16,500000,M2M,6.00231,5.76561,8.61192,3,1
+laplace,strong,cold,16,500000,P2P,2.89105,2.31957,3.32428,3,1
+laplace,strong,cold,16,500000,M2L comm,27.6575,6.13095,61.7959,3,1
+laplace,strong,cold,16,500000,M2M Allreduce,4.27924,2.05422,5.2054,3,1
+laplace,strong,cold,16,500000,M2L shared-locals Allreduce,92.8472,21.5194,109.262,3,1
+laplace,strong,cold,16,500000,P2P ghost comm,3.71535,2.27351,5.10652,3,1
+laplace,strong,cold,16,500000,Shared-locals snapshot,7.05243,5.36991,28.2423,3,1
+laplace,strong,cold,16,500000,L2L comm,2.64182,1.54702,4.82471,3,1
+laplace,strong,cold,16,500000,Shared-locals Allreduce host copies,16.1607,7.71764,62.0242,3,1
+laplace,strong,cold,16,500000,Upward multipole exchange (untimed),3.87083,2.85674,5.44983,3,1
+laplace,strong,cold,16,500000,other (total solve - plotted phases),-3.88909,,,,
+laplace,strong,cold,32,500000,Interaction-list build,261.252,241.169,281.772,3,1
+laplace,strong,cold,32,500000,L2P,0.164167,0.157272,0.171153,3,1
+laplace,strong,cold,32,500000,M2L kernel,27.3858,23.467,30.2039,3,1
+laplace,strong,cold,32,500000,L2L kernel,20.8923,20.6622,21.1086,3,1
+laplace,strong,cold,32,500000,P2M,0.207488,0.181002,0.238881,3,1
+laplace,strong,cold,32,500000,M2M,5.50106,5.37419,7.99891,3,1
+laplace,strong,cold,32,500000,P2P,2.78199,2.30094,3.30565,3,1
+laplace,strong,cold,32,500000,M2L comm,24.7969,6.67625,46.6592,3,1
+laplace,strong,cold,32,500000,M2M Allreduce,5.44805,2.66807,6.78505,3,1
+laplace,strong,cold,32,500000,M2L shared-locals Allreduce,43.5858,4.83738,57.5554,3,1
+laplace,strong,cold,32,500000,P2P ghost comm,2.96385,2.15935,4.064,3,1
+laplace,strong,cold,32,500000,Shared-locals snapshot,7.02302,5.35122,30.322,3,1
+laplace,strong,cold,32,500000,L2L comm,2.71926,1.64472,4.08672,3,1
+laplace,strong,cold,32,500000,Shared-locals Allreduce host copies,16.282,7.71145,54.8236,3,1
+laplace,strong,cold,32,500000,Upward multipole exchange (untimed),4.42428,3.08883,6.39927,3,1
+laplace,strong,cold,32,500000,other (total solve - plotted phases),0.698216,,,,
+laplace,strong,cold,64,500000,Interaction-list build,220.565,197.357,235.63,3,1
+laplace,strong,cold,64,500000,L2P,0.173605,0.16175,0.181332,3,1
+laplace,strong,cold,64,500000,M2L kernel,17.4445,13.676,18.8352,3,1
+laplace,strong,cold,64,500000,L2L kernel,20.8226,20.6391,21.1483,3,1
+laplace,strong,cold,64,500000,P2M,0.212626,0.176661,0.264732,3,1
+laplace,strong,cold,64,500000,M2M,5.44524,5.34722,8.03576,3,1
+laplace,strong,cold,64,500000,P2P,2.46366,1.90054,3.00212,3,1
+laplace,strong,cold,64,500000,M2L comm,20.2699,6.57825,43.4023,3,1
+laplace,strong,cold,64,500000,M2M Allreduce,5.57539,3.29843,6.861,3,1
+laplace,strong,cold,64,500000,M2L shared-locals Allreduce,38.3506,8.93277,55.3552,3,1
+laplace,strong,cold,64,500000,P2P ghost comm,3.42694,2.34197,4.1465,3,1
+laplace,strong,cold,64,500000,Shared-locals snapshot,5.95611,5.35041,19.6545,3,1
+laplace,strong,cold,64,500000,L2L comm,2.20584,1.63478,2.92415,3,1
+laplace,strong,cold,64,500000,Shared-locals Allreduce host copies,15.4217,7.70954,43.8953,3,1
+laplace,strong,cold,64,500000,Upward multipole exchange (untimed),4.37847,3.2031,6.11221,3,1
+laplace,strong,cold,64,500000,other (total solve - plotted phases),8.15774,,,,

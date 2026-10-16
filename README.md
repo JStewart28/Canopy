@@ -288,6 +288,28 @@ collectives, and a rank that skips one while the others print deadlocks. In a
 build without profiling both `set_reporting` and `reporting_enabled` exist and
 do nothing (`reporting_enabled()` returns `false`), so callers need no `#ifdef`.
 
+[examples/05_scaling_breakdown](examples/05_scaling_breakdown/scaling_breakdown.cpp)
+(built only in a profiling build) is such a caller: it runs the `tstLaplaceSolve`
+configuration at scale and prints every `timer_totals()` key, min/max/mean over
+ranks, for setup, the cold solve, a back-to-back warm solve, and each
+`auto_maintain()` + solve of a short time loop. It builds two executables from
+one source: `scaling_breakdown` (`LaplaceKernel`, P = 6) and
+`scaling_breakdown_ct` (`CartesianTaylorBasis`, p = 2, with
+`near_softening_factor = 0` because that basis expands the softened kernel).
+
+```
+scaling_breakdown[_ct] -N n_total [-l label] [-s steps=5] [-r reps=3] [-w warmups=1]
+                       [-d max_depth=12] [-e softening=-1 (auto)] [-q]
+                       [-L warmup|all|none]
+```
+
+`-q` sets `quantize_root_half_width`.
+
+`-L` picks which repetitions also print the library's own tables (default: the
+warm-ups only). Job scripts and the log parser are in
+[scripts/tuolumne/scaling/](scripts/tuolumne/scaling/); the plotting scripts and
+the phase-breakdown figures are in [figures/](figures/README.md).
+
 ## Algorithm and Design Documentation
 
 The algorithms used in Canopy — for example the load-balancing approach, a
@@ -475,11 +497,15 @@ This is not a correctness issue, and the clearing is not gratuitous — it is
 what stops a level-keyed basis from evaluating operators built at a width it no
 longer has. Any fix has to preserve that (risk **R5** in the same document) and
 has $3.9\times$ to beat, which is to say it must turn four operator
-constructions into one. Nothing has **timed** the rebuild: the counters above
-are the whole of what is measured. Whoever prices it should read
-`TIMER_ILIST_S4_OP_TABLE_BUILD` in `build-tuolumne-prof/` — the host operator
-build lies outside `run_m2l_all`'s scope, so the `M2L kernel (all depths)` row
-is the wrong number for this.
+constructions into one.
+
+**Timed since** (`ilist_s4_op_table_build`, Tuolumne HIP, p = 2,
+[figures/](figures/README.md)): a full rebuild costs 9–16 ms per solve at
+5.1k–8.8k keys, 500k–32M particles and 1–64 ranks, against 115 ms to 3 s of
+pair classification in the same interaction-list build. Turning on
+`quantize_root_half_width` drops it to about 0, but the deeper quantized tree
+cost more elsewhere: Warm B was slower than without it at 6 of 7 points. The
+cache is not where this basis's solve time goes.
 
 ### Keep the M2L operator cache across an octave crossing of the root width
 
@@ -601,6 +627,32 @@ division and is cache-friendlier than the old host loop, which ran `t` outermost
 The table stays bitwise equal, so
 `DownwardSweepCaching.deviceOpTableAssemblyBitwise` remains the guard.
 
+### Host-side pair classification dominates the interaction-list build
+
+Stage 3 of the interaction-list build (`ilist_s3_classify_pairs`, host) is the
+largest single cost of every cold solve and every solve after maintenance in
+the Tuolumne scaling runs ([figures/](figures/README.md)), for both bases:
+about 2.4 s at 500k particles on 1 rank, 115 ms at 64 ranks (strong), and
+1.3–3 s per rank at 500k particles per rank (weak, 16–64 ranks). The GPU
+kernels of the same solve take tens of ms. It is basis-independent and runs on
+every rebuild, whether or not the operator cache is warm. Moving the
+classification to the device, or updating the pair lists incrementally across
+a `rebalance` instead of reclassifying them, would hit the dominant term
+directly. Not designed yet: start from where S3 spends its time in
+`DownwardSweep::build_interaction_list*`.
+
+### A timer for the upward multipole exchange
+
+`UpwardSweep::exchange_multipoles_at_depth` (`src/Canopy_UpwardSweep.hpp`) has
+only `m2m_allreduce` around its Allreduce. Its shared-key host loops, the
+Allreduce pack/unpack and the coalesced point-to-point M2M exchange are
+untimed. In the Cartesian-Taylor scaling runs that untimed remainder was
+16–23 % of a warm solve. The figures now recover it by subtraction
+(`upward_total` − `p2m` − `m2m` − `m2m_allreduce`), which mixes host work and
+communication. Add an `m2m_comm` timer around the coalesced exchange, matching
+`m2l_comm`, so the comm and host parts can be told apart and optimized
+separately.
+
 ## Known Issues
 
 Tracked defects to be addressed in a later session. These are not introduced by
@@ -714,6 +766,21 @@ Because of (2), `SingleSolve` is kept out of the `regression` label so that
 `ctest -L regression` (`MultiSolve` only) does not deadlock. To be triaged in a separate session: fix the
 np=4 accuracy bug, and ensure a failed solve tears down its MPI/GPU state so it
 cannot poison subsequent tests in the same `ctest` run.
+
+### Multi-node HIP runs of `scaling_breakdown` segfault at exit
+
+On Tuolumne, `examples/05_scaling_breakdown` at HIP np 16, 32 and 64 (4–16
+nodes, GPU-aware Cray MPICH, `MPICH_GPU_SUPPORT_ENABLED=1`) finishes every
+measured call and prints `### CANOPY_SCALING done`, then flux reports
+`task(s) Segmentation fault` (rc 139). This happened in all 18 multi-node
+runs of 2026-10-15, for both binaries, e.g. flux jobs f3eL7uK6JYwq and
+f3eL7uT4rgsR. One-node runs at np 1 and 4 exit cleanly (f3eL6K1xHnSK,
+f3eL7EPRzEbH). The crash is in
+teardown (`Kokkos::finalize` / `MPI_Finalize`), after all output, so the timing
+data is complete; the job's exit status is not. Not triaged: one suspect is
+GPU-aware MPICH still holding IPC/registration state for device buffers that
+`Kokkos::finalize` has already freed. It was found while adding the driver; it
+is not known whether other multi-node HIP binaries do the same.
 
 ---
 

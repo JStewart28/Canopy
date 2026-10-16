@@ -46,3 +46,6 @@ data
 
 # Log files (test/run output)
 *.log
+
+# Rendered figures (regenerate with figures/make_figures.sh)
+*.png

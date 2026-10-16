@@ -1,0 +1,65 @@
+basis,scaling,state,np,N,phase,bar_mean_ms,min_ms,max_ms,n_reps,minmax_exact
+cartesian_taylor_quantized,strong,warmB,1,500000,Interaction-list build,3826.44,3826.44,3826.44,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,L2P,0.074721,0.074721,0.074721,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,M2L kernel,83.2711,83.2711,83.2711,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,L2L kernel,0.724923,0.724923,0.724923,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,P2M,0.308546,0.308546,0.308546,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,M2M,0.753944,0.753944,0.753944,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,P2P,6.1804,6.1804,6.1804,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,M2L comm,0.0117,0.0117,0.0117,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,M2M Allreduce,0.00181,0.00181,0.00181,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,M2L shared-locals Allreduce,0.0056,0.0056,0.0056,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,P2P ghost comm,0.256825,0.256825,0.256825,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,Shared-locals snapshot,8.1253,8.1253,8.1253,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,L2L comm,1.59435,1.59435,1.59435,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,Shared-locals Allreduce host copies,1.67904,1.67904,1.67904,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,Upward multipole exchange (untimed),7.12215,7.12215,7.12215,3,1
+cartesian_taylor_quantized,strong,warmB,1,500000,other (total solve - plotted phases),0.198896,,,,
+cartesian_taylor_quantized,strong,warmB,16,500000,Interaction-list build,317.278,276.732,364.178,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,L2P,0.0344365,0.03226,0.03778,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,M2L kernel,5.81944,5.31524,6.35517,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,L2L kernel,0.365211,0.352212,0.379521,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,P2M,0.108285,0.094371,0.148851,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,M2M,0.340105,0.304502,0.39384,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,P2P,3.10521,2.77588,3.47393,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,M2L comm,51.9046,5.05037,92.3117,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,M2M Allreduce,0.469145,0.262492,0.608511,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,M2L shared-locals Allreduce,5.10299,0.663712,6.01182,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,P2P ghost comm,1.66442,1.28235,1.8452,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,Shared-locals snapshot,2.7411,2.61718,3.49047,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,L2L comm,1.91504,1.78253,2.10612,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,Shared-locals Allreduce host copies,1.68275,1.61426,2.13897,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,Upward multipole exchange (untimed),2.6011,2.4376,2.78647,3,1
+cartesian_taylor_quantized,strong,warmB,16,500000,other (total solve - plotted phases),-3.89558,,,,
+cartesian_taylor_quantized,strong,warmB,32,500000,Interaction-list build,194.718,165.664,222.522,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,L2P,0.0333575,0.03041,0.03945,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,M2L kernel,3.20796,2.64756,3.62587,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,L2L kernel,0.35545,0.295941,0.401632,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,P2M,0.0975823,0.07832,0.114241,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,M2M,0.321272,0.240151,0.361843,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,P2P,3.02205,2.69526,3.35556,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,M2L comm,31.8918,5.03626,61.9937,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,M2M Allreduce,5.32702,0.30431,5.99459,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,M2L shared-locals Allreduce,17.0894,3.94065,19.5005,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,P2P ghost comm,5.24287,1.37043,6.76255,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,Shared-locals snapshot,3.68622,2.60354,15.0477,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,L2L comm,3.06004,1.77436,6.84181,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,Shared-locals Allreduce host copies,2.56191,1.61916,8.54588,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,Upward multipole exchange (untimed),3.22018,2.57123,7.86217,3,1
+cartesian_taylor_quantized,strong,warmB,32,500000,other (total solve - plotted phases),1.4997,,,,
+cartesian_taylor_quantized,strong,warmB,64,500000,Interaction-list build,134.176,104.833,159.251,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,L2P,0.0328651,0.02972,0.03624,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,M2L kernel,1.94181,1.67819,2.21834,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,L2L kernel,0.354377,0.290862,0.377013,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,P2M,0.0904565,0.07218,0.12438,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,M2M,0.318295,0.266982,0.480142,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,P2P,2.90551,2.51657,3.36908,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,M2L comm,30.5101,5.53024,60.4511,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,M2M Allreduce,20.6742,7.54442,23.4424,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,M2L shared-locals Allreduce,26.667,8.85962,29.5805,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,P2P ghost comm,5.18925,1.08205,10.3018,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,Shared-locals snapshot,5.63823,2.60353,19.6694,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,L2L comm,5.83862,1.70478,9.84075,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,Shared-locals Allreduce host copies,2.09319,1.61323,17.2221,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,Upward multipole exchange (untimed),5.23473,2.3972,18.5374,3,1
+cartesian_taylor_quantized,strong,warmB,64,500000,other (total solve - plotted phases),1.48242,,,,

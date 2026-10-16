@@ -1,0 +1,65 @@
+basis,scaling,state,np,N,phase,bar_mean_ms,min_ms,max_ms,n_reps,minmax_exact
+laplace,weak,warmB,1,500000,Interaction-list build,3539.41,3539.41,3539.41,3,1
+laplace,weak,warmB,1,500000,L2P,1.25224,1.25224,1.25224,3,1
+laplace,weak,warmB,1,500000,M2L kernel,751.08,751.08,751.08,3,1
+laplace,weak,warmB,1,500000,L2L kernel,68.624,68.624,68.624,3,1
+laplace,weak,warmB,1,500000,P2M,1.13864,1.13864,1.13864,3,1
+laplace,weak,warmB,1,500000,M2M,27.0524,27.0524,27.0524,3,1
+laplace,weak,warmB,1,500000,P2P,5.30368,5.30368,5.30368,3,1
+laplace,weak,warmB,1,500000,M2L comm,0.01145,0.01145,0.01145,3,1
+laplace,weak,warmB,1,500000,M2M Allreduce,0.055501,0.055501,0.055501,3,1
+laplace,weak,warmB,1,500000,M2L shared-locals Allreduce,0.02284,0.02284,0.02284,3,1
+laplace,weak,warmB,1,500000,P2P ghost comm,0.254212,0.254212,0.254212,3,1
+laplace,weak,warmB,1,500000,Shared-locals snapshot,5.63584,5.63584,5.63584,3,1
+laplace,weak,warmB,1,500000,L2L comm,1.31151,1.31151,1.31151,3,1
+laplace,weak,warmB,1,500000,Shared-locals Allreduce host copies,7.73226,7.73226,7.73226,3,1
+laplace,weak,warmB,1,500000,Upward multipole exchange (untimed),1.96849,1.96849,1.96849,3,1
+laplace,weak,warmB,1,500000,other (total solve - plotted phases),16.1141,,,,
+laplace,weak,warmB,16,8000000,Interaction-list build,2286.95,2103.49,2543.67,3,1
+laplace,weak,warmB,16,8000000,L2P,1.17716,1.00539,1.32128,3,1
+laplace,weak,warmB,16,8000000,M2L kernel,464.111,429.815,493.592,3,1
+laplace,weak,warmB,16,8000000,L2L kernel,55.5916,52.7775,59.5058,3,1
+laplace,weak,warmB,16,8000000,P2M,1.45145,1.30871,1.59565,3,1
+laplace,weak,warmB,16,8000000,M2M,18.7567,17.5945,21.0566,3,1
+laplace,weak,warmB,16,8000000,P2P,7.27805,6.44482,7.77277,3,1
+laplace,weak,warmB,16,8000000,M2L comm,257.94,11.9839,411.234,3,1
+laplace,weak,warmB,16,8000000,M2M Allreduce,39.1191,1.82927,45.3107,3,1
+laplace,weak,warmB,16,8000000,M2L shared-locals Allreduce,408.634,160.692,579.025,3,1
+laplace,weak,warmB,16,8000000,P2P ghost comm,69.3437,3.31126,99.202,3,1
+laplace,weak,warmB,16,8000000,Shared-locals snapshot,75.9623,48.8397,294.637,3,1
+laplace,weak,warmB,16,8000000,L2L comm,56.2394,13.7347,113.207,3,1
+laplace,weak,warmB,16,8000000,Shared-locals Allreduce host copies,239.313,68.0371,386.569,3,1
+laplace,weak,warmB,16,8000000,Upward multipole exchange (untimed),22.2075,16.3061,56.8966,3,1
+laplace,weak,warmB,16,8000000,other (total solve - plotted phases),-1.78607,,,,
+laplace,weak,warmB,32,16000000,Interaction-list build,1820.71,1579.44,1972.89,3,1
+laplace,weak,warmB,32,16000000,L2P,1.23721,1.03245,1.35277,3,1
+laplace,weak,warmB,32,16000000,M2L kernel,368.44,317.236,394.109,3,1
+laplace,weak,warmB,32,16000000,L2L kernel,55.3146,51.1423,58.553,3,1
+laplace,weak,warmB,32,16000000,P2M,1.25014,1.12167,1.46421,3,1
+laplace,weak,warmB,32,16000000,M2M,19.1231,17.5696,22.2777,3,1
+laplace,weak,warmB,32,16000000,P2P,7.71299,7.09829,8.50759,3,1
+laplace,weak,warmB,32,16000000,M2L comm,174.645,26.7787,420.69,3,1
+laplace,weak,warmB,32,16000000,M2M Allreduce,39.5027,2.73916,91.7313,3,1
+laplace,weak,warmB,32,16000000,M2L shared-locals Allreduce,883.465,70.3603,1514.11,3,1
+laplace,weak,warmB,32,16000000,P2P ghost comm,25.6169,5.53736,121.588,3,1
+laplace,weak,warmB,32,16000000,Shared-locals snapshot,268.063,101.686,804.203,3,1
+laplace,weak,warmB,32,16000000,L2L comm,125.907,28.8726,193.371,3,1
+laplace,weak,warmB,32,16000000,Shared-locals Allreduce host copies,600.18,141.867,1129.41,3,1
+laplace,weak,warmB,32,16000000,Upward multipole exchange (untimed),85.0111,33.2474,121.8,3,1
+laplace,weak,warmB,32,16000000,other (total solve - plotted phases),-22.7098,,,,
+laplace,weak,warmB,64,32000000,Interaction-list build,3873.52,3054.46,4173.54,3,1
+laplace,weak,warmB,64,32000000,L2P,1.2431,0.973678,1.34665,3,1
+laplace,weak,warmB,64,32000000,M2L kernel,849.101,648.573,908.098,3,1
+laplace,weak,warmB,64,32000000,L2L kernel,77.8664,66.604,81.8091,3,1
+laplace,weak,warmB,64,32000000,P2M,1.21234,0.949878,1.41028,3,1
+laplace,weak,warmB,64,32000000,M2M,27.6361,23.1098,30.3001,3,1
+laplace,weak,warmB,64,32000000,P2P,7.01342,6.24634,7.5587,3,1
+laplace,weak,warmB,64,32000000,M2L comm,328.282,31.1405,1154.63,3,1
+laplace,weak,warmB,64,32000000,M2M Allreduce,204.611,4.07016,283.335,3,1
+laplace,weak,warmB,64,32000000,M2L shared-locals Allreduce,1948.11,265.706,6816.7,3,1
+laplace,weak,warmB,64,32000000,P2P ghost comm,344.574,7.15151,567.851,3,1
+laplace,weak,warmB,64,32000000,Shared-locals snapshot,2206.3,363.675,3795.43,3,1
+laplace,weak,warmB,64,32000000,L2L comm,1768.31,405.619,2492.62,3,1
+laplace,weak,warmB,64,32000000,Shared-locals Allreduce host copies,2743.93,491.851,3922.86,3,1
+laplace,weak,warmB,64,32000000,Upward multipole exchange (untimed),143.579,121.445,399.976,3,1
+laplace,weak,warmB,64,32000000,other (total solve - plotted phases),-43.1654,,,,

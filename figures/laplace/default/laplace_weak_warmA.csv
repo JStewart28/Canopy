@@ -1,0 +1,49 @@
+basis,scaling,state,np,N,phase,bar_mean_ms,min_ms,max_ms,n_reps,minmax_exact
+laplace,weak,warmA,1,500000,Interaction-list build,8e-05,8e-05,8e-05,3,1
+laplace,weak,warmA,1,500000,L2P,1.24701,1.24701,1.24701,3,1
+laplace,weak,warmA,1,500000,M2L kernel,754.741,754.741,754.741,3,1
+laplace,weak,warmA,1,500000,L2L kernel,68.3945,68.3945,68.3945,3,1
+laplace,weak,warmA,1,500000,P2M,1.15405,1.15405,1.15405,3,1
+laplace,weak,warmA,1,500000,M2M,26.5606,26.5606,26.5606,3,1
+laplace,weak,warmA,1,500000,P2P,5.30211,5.30211,5.30211,3,1
+laplace,weak,warmA,1,500000,M2L comm,0.00318,0.00318,0.00318,3,1
+laplace,weak,warmA,1,500000,M2M Allreduce,0.04668,0.04668,0.04668,3,1
+laplace,weak,warmA,1,500000,M2L shared-locals Allreduce,0.00184,0.00184,0.00184,3,1
+laplace,weak,warmA,1,500000,P2P ghost comm,0.153681,0.153681,0.153681,3,1
+laplace,weak,warmA,1,500000,other (total solve - plotted phases),16.3359,,,,
+laplace,weak,warmA,16,8000000,Interaction-list build,0.00083125,0.00025,0.00181,3,1
+laplace,weak,warmA,16,8000000,L2P,1.11121,1.0104,1.2657,3,1
+laplace,weak,warmA,16,8000000,M2L kernel,465.09,429.612,494.67,3,1
+laplace,weak,warmA,16,8000000,L2L kernel,55.0931,53.2782,57.1479,3,1
+laplace,weak,warmA,16,8000000,P2M,1.45826,1.30106,1.62041,3,1
+laplace,weak,warmA,16,8000000,M2M,18.9851,17.9219,21.1761,3,1
+laplace,weak,warmA,16,8000000,P2P,7.22848,6.62482,7.68721,3,1
+laplace,weak,warmA,16,8000000,M2L comm,6.80257,6.24084,7.32126,3,1
+laplace,weak,warmA,16,8000000,M2M Allreduce,63.3282,4.54467,104.28,3,1
+laplace,weak,warmA,16,8000000,M2L shared-locals Allreduce,540.64,43.7408,792.747,3,1
+laplace,weak,warmA,16,8000000,P2P ghost comm,61.3381,3.61897,130.832,3,1
+laplace,weak,warmA,16,8000000,other (total solve - plotted phases),735.368,,,,
+laplace,weak,warmA,32,16000000,Interaction-list build,0.000601563,0.00027,0.00212,3,1
+laplace,weak,warmA,32,16000000,L2P,1.237,1.02977,1.32643,3,1
+laplace,weak,warmA,32,16000000,M2L kernel,368.056,318.3,395.285,3,1
+laplace,weak,warmA,32,16000000,L2L kernel,55.1868,50.7312,58.0371,3,1
+laplace,weak,warmA,32,16000000,P2M,1.26685,1.13587,1.37142,3,1
+laplace,weak,warmA,32,16000000,M2M,19.0039,17.5328,22.3041,3,1
+laplace,weak,warmA,32,16000000,P2P,7.65854,7.16208,8.27814,3,1
+laplace,weak,warmA,32,16000000,M2L comm,15.7187,15.1136,16.4771,3,1
+laplace,weak,warmA,32,16000000,M2M Allreduce,23.7367,4.784,27.124,3,1
+laplace,weak,warmA,32,16000000,M2L shared-locals Allreduce,974.306,70.6005,1259.47,3,1
+laplace,weak,warmA,32,16000000,P2P ghost comm,61.5092,4.7223,125.735,3,1
+laplace,weak,warmA,32,16000000,other (total solve - plotted phases),624.372,,,,
+laplace,weak,warmA,64,32000000,Interaction-list build,0.000691562,0.00024,0.00236,3,1
+laplace,weak,warmA,64,32000000,L2P,1.23126,0.948399,1.36987,3,1
+laplace,weak,warmA,64,32000000,M2L kernel,849.763,647.417,908.649,3,1
+laplace,weak,warmA,64,32000000,L2L kernel,77.7218,68.3036,81.4493,3,1
+laplace,weak,warmA,64,32000000,P2M,1.2132,0.938128,1.47166,3,1
+laplace,weak,warmA,64,32000000,M2M,28.1918,23.5181,31.6437,3,1
+laplace,weak,warmA,64,32000000,P2P,6.86043,6.11473,7.49132,3,1
+laplace,weak,warmA,64,32000000,M2L comm,53.4601,11.027,62.9077,3,1
+laplace,weak,warmA,64,32000000,M2M Allreduce,759.762,24.18,1363.68,3,1
+laplace,weak,warmA,64,32000000,M2L shared-locals Allreduce,2314.6,112.246,7355.52,3,1
+laplace,weak,warmA,64,32000000,P2P ghost comm,785.397,5.34865,1402.47,3,1
+laplace,weak,warmA,64,32000000,other (total solve - plotted phases),8161.73,,,,

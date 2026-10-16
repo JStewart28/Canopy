@@ -1,0 +1,19 @@
+[
+  ["Ilist: classify pairs (S3)", ["ilist_s3_classify_pairs"]],
+  ["Ilist: M2L operator build (S4)", ["ilist_s4_op_table_build"]],
+  ["Ilist: rest", ["dn_build_ilist"], ["ilist_s3_classify_pairs", "ilist_s4_op_table_build"]],
+  ["L2P", ["l2p"]],
+  ["M2L kernel", ["m2l_kernel"]],
+  ["L2L kernel", ["l2l_kernel"]],
+  ["P2M", ["p2m"]],
+  ["M2M", ["m2m"]],
+  ["P2P", ["p2p_intra_kernel", "p2p_inter_kernel"]],
+  ["M2L comm", ["m2l_comm"]],
+  ["M2M Allreduce", ["m2m_allreduce"]],
+  ["M2L shared-locals Allreduce", ["m2l_allreduce"]],
+  ["P2P ghost comm", ["p2p_ghost_comm"]],
+  ["Shared-locals snapshot", ["dn_pre_m2l"]],
+  ["L2L comm", ["l2l_comm"]],
+  ["Shared-locals Allreduce host copies", ["dn_post_m2l"], ["m2l_allreduce", "l2l_kernel", "l2l_comm"]],
+  ["Upward multipole exchange (untimed)", ["upward_total"], ["p2m", "m2m", "m2m_allreduce"]]
+]
